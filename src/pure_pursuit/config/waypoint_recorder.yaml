@@ -1,0 +1,7 @@
+waypoint_recorder_node:
+  ros__parameters:
+    pose_topic: /pf/viz/inferred_pose
+    # Required -- e.g.:
+    #   /home/racerbotcar-2/racerbot-ws/src/pure_pursuit/waypoints/my_track_raw.csv
+    output_file: ''
+    min_spacing_m: 0.15

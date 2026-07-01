@@ -1,0 +1,57 @@
+pure_pursuit_node:
+  ros__parameters:
+    # --- Required: set this before racing. No "real" default is provided
+    # on purpose -- an empty/missing waypoints file makes the node refuse
+    # to start rather than silently drive nothing, or an old/wrong track.
+    waypoints_file: ''
+    closed_loop: true
+
+    # --- Topics ---
+    pose_topic: /pf/viz/inferred_pose   # geometry_msgs/PoseStamped, published by particle_filter
+    scan_topic: /scan
+    drive_topic: /drive
+
+    # --- Control loop ---
+    control_rate_hz: 40.0
+    wheelbase: 0.25          # meters -- matches src/f1tenth_system/f1tenth_stack/config/vesc.yaml
+
+    # --- Pure pursuit geometry ---
+    min_lookahead: 0.6           # meters, lookahead distance at v=0
+    max_lookahead: 2.5           # meters, lookahead distance cap at high speed
+    lookahead_speed_gain: 0.35   # meters per (m/s): L_d = gain*v + min_lookahead, clipped to [min,max]
+    nearest_search_window: 40    # +/- waypoints searched around the previous tick's nearest point (0 = search all)
+
+    # --- Speed limits (safety ceiling -- the .csv profile is still clipped to this) ---
+    max_speed: 4.0
+    min_speed: 0.5
+
+    # --- Steering limit ---
+    # Derived from this car's actual servo calibration in vesc.yaml:
+    #   servo = -1.2135 * steering_angle + 0.5304, servo clamped to [0.15, 0.85]
+    # Solving both ends: +0.313 rad at servo=0.15, -0.263 rad at servo=0.85.
+    # Using the smaller magnitude (0.26) keeps every command physically
+    # achievable in both directions, with a small margin. Re-derive this
+    # if vesc.yaml's gain/offset/servo_min/servo_max ever change.
+    max_steering_angle: 0.26
+
+    # --- Safety watchdogs ---
+    pose_timeout_sec: 0.5         # stop if localization hasn't updated within this long
+    max_cross_track_error: 1.0    # stop if further than this from every waypoint (lost/kidnapped)
+
+    # --- Reactive LIDAR safety net (independent of the planned line -- for
+    # opponents, spun-out cars, or anything else not in the map) ---
+    enable_lidar_safety: true
+    safety_fov_deg: 60.0
+    emergency_stop_distance: 0.4
+    scan_timeout_sec: 0.5
+
+    # --- Deadman button (workspace policy -- see docs/architecture.md) ---
+    # Mandatory workspace-wide safety policy: the car must not move under
+    # any code, autonomous or manual, unless LB is held on the physical
+    # controller. This is checked first, ahead of every other watchdog
+    # above. Stays enabled until the team has enough confidence in the
+    # car's behavior to deliberately relax it -- don't set false otherwise.
+    enable_deadman: true
+    joy_topic: /joy
+    deadman_button: 4
+    joy_timeout_sec: 0.5

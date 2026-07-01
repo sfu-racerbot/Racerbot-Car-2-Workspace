@@ -1,0 +1,14 @@
+usb_cam_stream_node:
+  ros__parameters:
+    # --- Camera --- verify the device path with `v4l2-ctl --list-devices`,
+    # see docs/usb-camera-livestream.md
+    device: /dev/video0
+    width: 1280
+    height: 720
+    capture_fps: 30
+
+    # --- Web server ---
+    host: 0.0.0.0   # listen on every interface -- see docs/usb-camera-livestream.md's security note
+    port: 9090      # 8080 is already used by web_dashboard on this car
+    stream_fps: 15.0   # how often a connected browser is sent a new frame, independent of capture_fps
+    jpeg_quality: 80   # 0-100 -- higher = better quality, more bandwidth/CPU

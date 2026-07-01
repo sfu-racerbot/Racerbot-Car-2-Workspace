@@ -1,0 +1,18 @@
+web_dashboard_node:
+  ros__parameters:
+    # --- Topics ---
+    map_topic: /map
+    scan_topic: /scan
+    pose_topic: /pf/viz/inferred_pose
+
+    # --- Web server ---
+    host: 0.0.0.0   # listen on every interface -- see docs/web-dashboard.md's security note
+    port: 8080
+
+    # --- Bandwidth ---
+    scan_broadcast_rate_hz: 10.0   # /scan itself runs ~40Hz; no browser needs to redraw that often
+
+    # --- LIDAR mounting offset from base_link, used to place scan points
+    # correctly relative to the car's pose (see docs/hardware-reference.md) ---
+    laser_offset_x: 0.27
+    laser_offset_y: 0.0

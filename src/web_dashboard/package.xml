@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>web_dashboard</name>
+  <version>0.1.0</version>
+  <description>Live browser dashboard: streams the SLAM/localization map, the raw LIDAR scan, and the car's pose to any web browser on the network over a WebSocket, rendered on an HTML5 canvas. Read-only -- never publishes anything, carries zero risk to how the car drives.</description>
+  <maintainer email="bryanmaubc@gmail.com">racerbotcar-2</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>ament_index_python</depend>
+  <depend>python3-tornado</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

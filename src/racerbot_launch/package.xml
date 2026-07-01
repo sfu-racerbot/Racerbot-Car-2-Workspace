@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>racerbot_launch</name>
+  <version>0.1.0</version>
+  <description>Top-level launch files tying together this car's driver, mapping, and autonomy stack</description>
+  <maintainer email="bryanmaubc@gmail.com">racerbotcar-2</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>f1tenth_stack</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>particle_filter</exec_depend>
+  <exec_depend>gap_follow</exec_depend>
+  <exec_depend>pure_pursuit</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

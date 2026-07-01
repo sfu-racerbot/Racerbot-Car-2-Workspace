@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>pure_pursuit</name>
+  <version>0.1.0</version>
+  <description>Map-based race controller: pure pursuit path tracking over a curvature-aware velocity profile, with a reactive LIDAR safety net. Consumes particle_filter localization against a slam_toolbox map. Includes tools to record a racing line and turn it into a paced raceline.</description>
+  <maintainer email="bryanmaubc@gmail.com">racerbotcar-2</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>ackermann_msgs</depend>
+  <depend>python3-numpy</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

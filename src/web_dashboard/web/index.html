@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>racerbot live dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="view"></canvas>
+
+  <div id="overlay">
+    <div id="status">
+      <span id="conn-dot" class="dot dot-red"></span>
+      <span id="conn-text">connecting...</span>
+    </div>
+
+    <table id="info">
+      <tr><td>map</td><td id="info-map">no map yet</td></tr>
+      <tr><td>scan</td><td id="info-scan">no scan yet</td></tr>
+      <tr><td>pose</td><td id="info-pose">no pose yet</td></tr>
+    </table>
+
+    <div id="mode-banner"></div>
+
+    <div id="help">drag to pan &middot; scroll to zoom &middot; <button id="reset-view">reset view</button></div>
+  </div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>

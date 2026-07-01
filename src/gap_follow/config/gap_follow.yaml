@@ -1,0 +1,22 @@
+gap_follow_node:
+  ros__parameters:
+    scan_topic: /scan
+    drive_topic: /drive
+    max_range: 10.0
+    forward_fov_deg: 180.0
+    bubble_angle_deg: 20.0
+    min_gap_distance: 2.0
+    max_speed: 2.0
+    min_speed: 0.8
+    max_steering_angle: 0.4189
+    emergency_stop_distance: 0.15
+    # --- Deadman button (workspace policy -- see docs/architecture.md) ---
+    # Mandatory workspace-wide safety policy: the car must not move under
+    # any code, autonomous or manual, unless LB is held on the physical
+    # controller. Stays enabled until the team has enough confidence in
+    # the car's behavior to deliberately relax it -- don't set false
+    # otherwise.
+    enable_deadman: true
+    joy_topic: /joy
+    deadman_button: 4
+    joy_timeout_sec: 0.5

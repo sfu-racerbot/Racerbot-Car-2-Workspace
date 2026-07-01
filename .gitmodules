@@ -1,0 +1,12 @@
+[submodule "src/particle_filter"]
+	path = src/particle_filter
+	url = https://github.com/f1tenth/particle_filter.git
+	branch = humble-devel
+[submodule "src/range_libc"]
+	path = src/range_libc
+	url = https://github.com/f1tenth/range_libc.git
+	branch = humble-devel
+[submodule "src/transport_drivers"]
+	path = src/transport_drivers
+	url = https://github.com/ros-drivers/transport_drivers.git
+	branch = humble
