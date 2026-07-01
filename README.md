@@ -18,13 +18,14 @@ Start here if you're new to the car or the codebase:
 | [docs/usb-camera-livestream.md](docs/usb-camera-livestream.md) | Live MJPEG video stream from a USB webcam, viewable in any browser — camera picks, how it works, security note |
 | [docs/operations.md](docs/operations.md) | Step-by-step procedures: driving, mapping, localizing, running autonomy, shutting down |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Real issues hit during bring-up and how they were diagnosed |
+| [docs/git-setup.md](docs/git-setup.md) | How this repo is versioned: which `src/` packages are real git submodules vs. plain vendored code, cloning/updating them, and checking upstream f1tenth repos for updates |
 
 This file stays a short quick-start; the docs above are the full reference.
 
 ## Layout (`src/`)
 | Package | Source | Purpose |
 |---|---|---|
-| `f1tenth_system` (+ submodules `ackermann_mux`, `teleop_tools`, `vesc`) | git submodule, `humble-devel` | VESC driver, `urg_node` (Hokuyo), joystick teleop, command muxing |
+| `f1tenth_system` (+ `ackermann_mux`, `teleop_tools`, `vesc`) | vendored (plain tracked files, **not** a git submodule — see [docs/git-setup.md](docs/git-setup.md)) | VESC driver, `urg_node` (Hokuyo), joystick teleop, command muxing |
 | `transport_drivers` | git submodule, `humble` | serial transport dependency for `vesc` |
 | `particle_filter` (+ `range_libc`) | git submodules, `humble-devel` | Monte Carlo localization against a saved map |
 | `gap_follow` | local package | baseline reactive autonomy — follow-the-gap on `/scan` → `/drive`, no map needed. Code/algorithm detail: [src/gap_follow/README.md](src/gap_follow/README.md) |
@@ -61,6 +62,6 @@ For mapping, localization, running `gap_follow` or your own autonomy code, and e
 
 ## Notes
 - **Current safety policy:** every autonomy node in this workspace (`gap_follow`, `pure_pursuit`, and any new one) requires the driver to hold **LB** on the physical controller for the car to move, on top of the usual `ackermann_mux` arbitration — see [docs/architecture.md](docs/architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car). This stays in force until the team explicitly confirms the car's behavior is trustworthy enough to relax it — don't set any node's `enable_deadman` parameter to `false` unilaterally.
-- The official `f1tenth`/roboracer driver repos don't have a `jazzy` branch yet; everything here is the `humble-devel`/`humble` source built against ROS2 Jazzy. If a future `rosdep update`/dependency bump breaks the build, check each submodule's upstream for a newer ROS2-distro branch before patching locally.
+- The official `f1tenth`/roboracer driver repos don't have a `jazzy` branch yet; everything here is the `humble-devel`/`humble` source built against ROS2 Jazzy. If a future `rosdep update`/dependency bump breaks the build, check each package's upstream (submodule or vendored — see [docs/git-setup.md](docs/git-setup.md)) for a newer ROS2-distro branch before patching locally.
 - Simulator (`f1tenth_gym_ros`) is intentionally not installed here — sim testing happens on a separate machine.
-- `src/f1tenth_system/f1tenth_stack/config/joy_teleop.yaml`'s `human_control` profile was patched locally: upstream ships `drive-steering_angle` mapped to `axis: 2` (this F710's left trigger, not the right stick). Changed to `axis: 3`. This is an uncommitted local change inside the `f1tenth_system` submodule — don't `git submodule update --remote` without re-applying it.
+- `src/f1tenth_system/f1tenth_stack/config/joy_teleop.yaml`'s `human_control` profile was patched locally: upstream ships `drive-steering_angle` mapped to `axis: 2` (this F710's left trigger, not the right stick). Changed to `axis: 3`. `f1tenth_system` is vendored (not a submodule) specifically so this fix could be committed — see [docs/git-setup.md](docs/git-setup.md) before pulling in any upstream changes to it.
