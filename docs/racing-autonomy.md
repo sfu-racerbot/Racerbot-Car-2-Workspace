@@ -16,6 +16,40 @@ read alongside this. For a more code-adjacent, file-by-file reference with
 every formula and parameter in one place, see
 [src/pure_pursuit/README.md](../src/pure_pursuit/README.md).
 
+## Quick intuition (read this first if any of the below looks intimidating)
+
+Skip the equations for a second — here's the whole system in plain
+language, the way you'd explain it to someone who's never touched ROS:
+
+- **Mapping:** drive the track once — by hand, or let the car do it
+  *itself*, reactively, with nobody touching the steering (see Phase 1)
+  — so the car ends up with a picture of where the walls are.
+- **Localization:** the car constantly compares what its LIDAR sees right
+  now against that picture to work out "where am I, exactly." Like
+  finding your spot on a paper map by matching the shape of the room
+  around you to the shape drawn on the page.
+- **Recording a line, then pacing it:** drive one good lap, then a small
+  program looks at how sharply the track turns everywhere and works out
+  a sensible speed for every point on it — slow for tight corners, fast
+  on straights, with braking that starts *before* the corner instead of
+  right at it.
+- **Driving it (Pure Pursuit):** imagine always picking a spot a little
+  way ahead on the track and steering toward it, over and over, faster
+  or slower depending on how fast you're supposed to be going right
+  there. That's the entire control algorithm — see "Pure Pursuit, in
+  plain terms" below.
+- **Handling other cars:** notice something car-shaped in the way, work
+  out whether you're catching up to it, and if so, aim slightly toward
+  whichever side has more room until you're past it — then go straight
+  back to the normal line.
+- **Safety, always on top:** no matter what any of the above wants to do,
+  if something gets too close for comfort, the car stops or steers
+  around it first and asks questions later.
+
+Everything past this point explains *why* each piece works the way it
+does, with the actual math — useful once you want to tune it, extend it,
+or just understand it properly, but not required to get the gist.
+
 ## Why this exists alongside `gap_follow`
 
 `gap_follow` is *reactive*: it looks at the current LIDAR scan and steers at
@@ -62,12 +96,39 @@ before it (a saved map, a working localization launch, and a profiled
 
 ## Phase 1: Map the track (SLAM)
 
-Unchanged from the existing stack — see
-[operations.md](operations.md#building-a-map). You drive the car around the
-track once by hand while `slam_toolbox` builds an occupancy grid map from
-`/scan` and `/odom`, then save it with `map_saver_cli`. `pure_pursuit`
-doesn't touch this step at all; it consumes the same saved map that
-`particle_filter` already uses.
+**In plain terms:** the car needs a picture of the track before it can
+race on it, the same way you'd want to walk a new track once before
+driving it flat-out. This phase is entirely about building that picture
+— nothing here decides how fast or how well the car eventually races.
+
+Two ways to actually do this lap, either one produces the same kind of
+map:
+
+- **By hand** — see [operations.md](operations.md#building-a-map). You
+  drive the car around the track once by hand while `slam_toolbox`
+  builds an occupancy grid map from `/scan` and `/odom`, then save it
+  with `map_saver_cli`.
+- **Autonomously, with nobody steering** — see
+  [operations.md](operations.md#building-a-map-autonomously-no-steering-required).
+  `gap_follow` already drives the car with no map at all, reactively
+  steering into open space; running it *at the same time* as
+  `slam_toolbox` means the car maps the track by driving itself around
+  it, with `slam_toolbox` recording the map exactly as it would if a
+  human were driving. **A human still has to hold LB the entire time** —
+  see the note below — but nobody touches the steering stick. This needs
+  zero new code: it's the same two existing pieces, just run together.
+
+Either way, `pure_pursuit` doesn't touch this step at all; it consumes
+the same saved map that `particle_filter` already uses.
+
+**"I'm not driving it" still means someone is supervising it.** This
+workspace's [mandatory LB-deadman
+policy](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)
+applies to `gap_follow` here exactly as it does everywhere else: the car
+will not move an inch unless a human is actively holding LB on the
+physical controller, autonomous driving or not. "Not driving" means not
+touching the steering/throttle sticks — it does not mean nobody needs to
+be there. Think of it as a safety supervisor role, not a driving one.
 
 **Why SLAM at all, if the racing line is what we actually drive?** Because
 the racing line alone has no way to know *where the car currently is*. The
@@ -320,16 +381,18 @@ self-intersections is the real reason this exists.
 
 ### The safety layers
 
-Five independent checks, each capable of unilaterally forcing a stop,
-regardless of what the steering/speed logic above computed:
+Six independent checks, each capable of unilaterally forcing a stop (or a
+steering override), regardless of what the steering/speed logic above
+computed. Ordered from "must never be violated" down to "nice to have":
 
 | Check | Triggers when | Why |
 |---|---|---|
 | **LB deadman button** (checked first, ahead of everything else) | LB not held on a live `/joy` stream within `joy_timeout_sec` (default 0.5s) | **Mandatory workspace policy** — see [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car). Stays on (`enable_deadman: true`) until the team explicitly decides the car's behavior is trustworthy enough to relax it — don't set it `false` otherwise |
 | Localization watchdog | No pose received yet, or `pose_topic` has gone quiet for more than `pose_timeout_sec` (default 0.5s) | Never drive on a stale or absent position estimate |
 | Cross-track error | Nearest waypoint is farther than `max_cross_track_error` (default 1.0m) | Car is lost, kidnapped, or localization has diverged — the steering geometry would be aiming at a point unrelated to reality |
-| Reactive LIDAR safety net | Minimum range in a `safety_fov_deg`-wide forward cone (default 60°) is under `emergency_stop_distance` (default 0.4m) | Catches anything *not* in the map — an opponent's car, a spun-out car, debris |
-| LIDAR staleness (part of the check above) | No `/scan` message ever received, or `scan_topic` has gone quiet for more than `scan_timeout_sec` | A safety net that has silently gone blind is not a safety net — treated identically to "obstacle detected" |
+| Opponent detection + overtake steering | Another car detected and being closed on within `overtake_trigger_gap` (default 3.0m of *track* distance) | Not a safety check at all — a racing one. See [Racing against opponents](#racing-against-opponents-detection-tracking-and-overtaking) below. Always subordinate to the two checks after it |
+| Reactive avoidance (steer around) | Minimum range in a wider `avoidance_fov_deg` cone (default 100°) is under `avoidance_trigger_distance` (default 1.5m) but a gap still exists | Catches anything *not* in the map that there's still room to get around — an opponent's car, a spun-out car, debris |
+| Emergency hard stop (always wins) | Minimum range in a narrower `safety_fov_deg` cone (default 60°) is under `emergency_stop_distance` (default 0.4m), or `/scan` itself is stale/missing | Last resort, unconditional — a safety net that's gone blind is treated identically to "obstacle detected" |
 | Unhandled exception | Anything in the control step raises | `control_loop()` wraps the whole step in try/except; on *any* exception it publishes a stop command *before* re-raising, so an unexpected bug can't leave the last (possibly full-speed) command sitting on `/drive` forever |
 
 Because the deadman check runs first, holding LB is a precondition for the
@@ -361,6 +424,186 @@ smaller magnitude (`0.26`) so that a command in *either* direction is one
 the servo can physically achieve, with a small margin. If this car's
 `vesc.yaml` gain/offset/servo limits ever change (a different servo,
 re-calibration), re-derive this number rather than leaving it stale.
+
+---
+
+## Racing against opponents: detection, tracking, and overtaking
+
+**In plain terms:** a real racer doesn't just drive their own line and
+hope -- they notice the car ahead, work out whether they're closing the
+gap or falling behind, and if they're closing it, they look for room to
+get past instead of following forever. This section is that same
+thinking, done with LIDAR and arithmetic instead of eyes and instinct.
+Three questions, asked every control tick:
+
+1. **"Is that actually a car?"** -- look at the live scan for something
+   shaped and sized like an opponent, sitting out in the open track (not
+   a wall).
+2. **"Am I catching them?"** -- track how far along the track they are,
+   the same way the ego car's own progress is already tracked, and
+   compare how fast each is gaining ground.
+3. **"Where's the room?"** -- if catching them, find whichever side has
+   more space and steer the racing-line target over there until safely
+   past, then merge straight back onto the recorded line.
+
+None of this needs a second sensor, a neural network, or any
+communication with the other car -- it's built entirely from the same
+`/scan` and racing line every other part of this stack already uses.
+
+### 1. "Is that a car?" -- detecting an opponent from raw LIDAR points
+
+Real object detection (telling a car apart from a trash can, a cone, a
+wall) usually means a camera and a trained model. Neither is running in
+this stack, so opponent detection here is a *geometric* heuristic
+instead -- genuinely more limited than that, but cheap, fast,
+dependency-free, and good enough to race against another F1TENTH car
+specifically, which is the one thing it actually needs to do.
+
+**Step 1 -- group the scan into objects.** Walk the scan and split it into
+clusters: runs of consecutive readings that are all "something's there"
+(clearly less than the sensor's max range) and don't jump by more than a
+small threshold from one beam to the next. A big jump between neighbors
+means a *different* object, even if both readings are close -- e.g. a car
+sitting in front of a wall shows up as one cluster for the car, a jump,
+then a separate cluster for the wall behind it (`cluster_scan_ranges`).
+
+**Step 2 -- measure each cluster.** For a cluster spanning `start_idx` to
+`end_idx`, convert its first and last point to Cartesian coordinates and
+take the straight-line distance between them -- its **chord width**. This
+is a far better size estimate than angular width alone, which
+exaggerates anything close and shrinks anything far away
+(`cluster_geometry`):
+
+$$\text{width} = \sqrt{(x_{end}-x_{start})^2 + (y_{end}-y_{start})^2}$$
+
+**Step 3 -- keep only the ones shaped like a car.** A real opponent, seen
+from the side or the back, is roughly car-width: reject anything
+narrower (`opponent_min_width`, default 0.15m -- noise, a thin post) or
+wider (`opponent_max_width`, default 0.7m -- almost certainly a wall
+segment, which produces much longer or far more irregular runs). Also
+confirm there's clearly *more open space* immediately on both sides of
+the cluster than the cluster's own distance (`opponent_open_side_margin`)
+-- a car sitting in the middle of the track has open track on both sides
+of it; a bump in a curving wall usually doesn't
+(`detect_opponent_cluster`). Among everything that passes every check,
+the *closest* one wins -- the one most immediately relevant to a decision
+right now.
+
+This is a heuristic, not certainty -- see
+[Limitations](#limitations-and-how-to-go-further) for exactly what that
+means in practice.
+
+### 2. "Am I catching them?" -- tracking progress along the track, not raw position
+
+**In plain terms:** instead of asking "where is the other car in x/y
+space" (and then having to guess where the track goes from there to
+predict anything), this asks "how far around the *track* are they" -- the
+exact same question already asked about the ego car every tick.
+Comparing two of those numbers directly answers "am I ahead or behind,
+and by how much track distance."
+
+Every waypoint on the racing line already has a **cumulative arc
+length** -- the track distance from the start to that point
+(`compute_cumulative_arc_length`, computed once at startup, a running
+total of `seg_len`). Finding the opponent's *own* nearest waypoint (the
+exact same `find_nearest_index` the ego car uses on itself) and reading
+its arc length gives "how far around the track the opponent currently
+is" -- directly comparable to the ego car's own position, on the same
+scale.
+
+**Predicting where they'll be** is then just tracking how that number
+changes over time. `OpponentTracker` keeps an exponentially-smoothed
+estimate of the opponent's **progress rate** (their speed *along the
+track*, in m/s) from tick to tick:
+
+$$\text{rate} \leftarrow \alpha \cdot \frac{\Delta(\text{arc length})}{\Delta t} + (1-\alpha)\cdot\text{rate}$$
+
+This is a deliberately simple stand-in for what's sometimes called a
+*Frenet-frame* prediction in more formal autonomous-driving research:
+reasoning about another vehicle's position and speed **relative to a
+reference path**, rather than in raw x/y. Predicting "opponent's arc
+length one second from now" is then just `arc_length + rate * 1.0` -- a
+prediction that automatically follows the track's own curvature, because
+it's expressed in track distance rather than a straight line the
+opponent would otherwise have to be assumed to be driving off of.
+
+**"Ahead" wraps around the finish line.** On a closed loop, the opponent
+being "0.3 laps ahead" and "0.7 laps behind" describe the same physical
+gap looked at from two directions; `track_progress_gap` always reports
+the *ahead* distance, wrapping past the start/finish line where needed,
+so "how close am I to catching them" is always one consistent, positive
+number.
+
+### 3. Deciding, and executing, an overtake
+
+An overtake starts when **both** are true:
+- the opponent is within `overtake_trigger_gap` meters of *track
+  distance* ahead (not straight-line distance -- a hairpin apex might be
+  1m away in a straight line but 8m away along the actual track), and
+- the ego car's current profiled speed exceeds the opponent's tracked
+  progress rate by at least `overtake_closing_margin` -- i.e. actually
+  gaining ground, not just nearby.
+
+Once triggered, **which side to pass on** is decided once, from the same
+scan that found the opponent in the first place: average the range
+readings in a small window just past each end of the opponent's cluster,
+and pick whichever side is more open (`pick_pass_side`). This reuses
+exactly the reasoning `gap_follow`'s own avoidance logic already uses --
+finding open space in a scan -- just applied to "which side of this one
+object" instead of "which gap in this whole scene."
+
+**Executing the pass** doesn't touch the recorded racing line at all -- it
+nudges the *steering target* sideways instead. `lateral_offset_point`
+takes the current Pure Pursuit target waypoint, estimates the track's
+local direction of travel from it to the next waypoint, and offsets the
+target perpendicular to that direction by `overtake_lateral_offset`
+meters, toward the chosen side. Steering is then computed from *that*
+shifted point using the exact same Pure Pursuit geometry as always -- the
+overtake is really just "aim slightly to one side for a while," not a
+separate control system.
+
+**Ending the overtake** happens once the ego car's own arc length is
+`overtake_clear_margin` meters past the opponent's *last known* position
+-- deliberately not re-checked against a fresh detection every tick, since
+alongside or just past an opponent it commonly falls completely out of
+the forward LIDAR cone, and that must not look like "lost it, panic"
+rather than "passed it, done." If the tracked opponent goes stale
+(`opponent_lost_timeout_sec`, default 1s, with no update at all) with no
+overtake in progress, tracking is simply cleared -- nothing to react to.
+
+**This always sits underneath the existing reactive safety net, never
+instead of it.** If an overtake maneuver (or anything else) brings the
+car within `emergency_stop_distance` of *anything*, the hard-stop tier
+described above still wins, unconditionally, regardless of what the
+overtake logic wanted to do. Racing strategy never gets to override
+safety -- see [The safety layers](#the-safety-layers) above.
+
+### Why this design, and not something fancier
+
+A full solution to "race well against an opponent" is a genuinely hard,
+active research problem -- game-theoretic planning, learned opponent
+models, joint trajectory optimization. None of that is what's built here,
+deliberately:
+
+- **No opponent communication or shared telemetry.** This works from
+  `/scan` alone, the same sensor everything else in this stack already
+  depends on -- no assumption the other car is friendly, instrumented, or
+  running compatible software.
+- **Single-opponent, not a field.** "The closest qualifying cluster wins"
+  means this reasons about one opponent at a time. A real multi-car pack
+  would need per-object identity tracking (recognizing cluster #3 this
+  tick as the same car as cluster #3 last tick, even after a brief
+  occlusion) -- a legitimate next step, not attempted here.
+- **A geometric heuristic, not classification.** "Car-sized cluster,
+  isolated, with open space around it" will occasionally misfire -- see
+  [Limitations](#limitations-and-how-to-go-further).
+- **No blocking/defensive maneuvers.** If an opponent is closing in from
+  *behind*, this stack does nothing different -- it just keeps driving
+  its own optimized line. That's a deliberate, safety-conscious choice:
+  defensive blocking in real racing carries real contact risk, and
+  "drive your own best line consistently" is itself a legitimate,
+  effective strategy without needing to reason about another car's
+  intentions at all.
 
 ---
 
@@ -416,10 +659,27 @@ file for inline comments too):
 | `max_steering_angle` | `0.26` | rad; derived from this car's real servo limits, see above |
 | `pose_timeout_sec` | `0.5` | Localization watchdog |
 | `max_cross_track_error` | `1.0` | Lost/kidnapped watchdog, meters |
-| `enable_lidar_safety` | `true` | Master switch for the reactive safety net |
-| `safety_fov_deg` | `60.0` | Width of the forward cone checked |
-| `emergency_stop_distance` | `0.4` | Meters |
+| `enable_lidar_safety` | `true` | Master switch for the entire reactive net below (avoidance + opponent overtaking both require this too) |
+| `safety_fov_deg` | `60.0` | Width of the narrow forward cone checked for the hard emergency stop |
+| `emergency_stop_distance` | `0.4` | Meters; hard stop, always wins |
 | `scan_timeout_sec` | `0.5` | LIDAR staleness watchdog |
+| `enable_obstacle_avoidance` | `true` | Steer around something close instead of just stopping, when there's room |
+| `avoidance_fov_deg` | `100.0` | Wider cone used for avoidance steering (and opponent detection) |
+| `avoidance_trigger_distance` | `1.5` | Meters; closer than this (but outside `emergency_stop_distance`) triggers avoidance steering |
+| `avoidance_min_gap_distance` | `1.0` | Meters; minimum depth for a gap to be considered driveable during avoidance |
+| `avoidance_speed` | `1.0` | m/s; capped speed while avoidance steering is active |
+| `enable_opponent_overtake` | `true` | See [Racing against opponents](#racing-against-opponents-detection-tracking-and-overtaking). Requires `enable_lidar_safety` too |
+| `opponent_min_width` / `opponent_max_width` | `0.15` / `0.7` | Meters; car-shaped cluster width bounds |
+| `opponent_cluster_gap` | `0.3` | Meters; range jump that splits one cluster into two |
+| `opponent_engagement_range` | `5.0` | Meters; ignore detections farther than this |
+| `opponent_open_side_margin` | `0.5` | Meters; how much more open the surroundings must be to count as "isolated" |
+| `opponent_velocity_smoothing` | `0.3` | 0-1; exponential smoothing on the tracked progress-rate estimate |
+| `opponent_lost_timeout_sec` | `1.0` | Forget the tracked opponent if not re-detected within this long |
+| `overtake_trigger_gap` | `3.0` | Meters of *track distance*; start considering a pass this close |
+| `overtake_closing_margin` | `0.3` | m/s; must be closing at least this fast to attempt a pass |
+| `overtake_clear_margin` | `1.0` | Meters of track distance past the opponent before resuming the racing line |
+| `overtake_lateral_offset` | `0.5` | Meters; sideways nudge to the steering target while passing |
+| `laser_offset_x` / `laser_offset_y` | `0.27` / `0.0` | LIDAR mounting offset from `base_link`, used to place detections in the map frame |
 | `enable_deadman` | `true` | **Mandatory workspace policy** — LB deadman button, checked first. Leave `true`; see [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car) |
 | `joy_topic` | `/joy` | Deadman button input |
 | `deadman_button` | `4` | Button index (LB on the F710 in XInput mode) |
@@ -441,6 +701,9 @@ documented via `--help` and in Phase 4 above.
 | Car stops unexpectedly mid-lap | Cross-track watchdog tripped — localization drifted, bad "2D Pose Estimate" seed, or genuinely off the recorded line | Check RViz's localized pose against reality; re-seed; only loosen `max_cross_track_error` once you've confirmed localization itself is healthy |
 | Node refuses to launch | `waypoints_file` unset, missing, or still a raw (no `speed` column) recording | Point it at a *profiled* `.csv`; run `generate_velocity_profile` first |
 | Car stops the instant it starts, even in open space | `enable_lidar_safety` is on but no `/scan` has arrived yet (fails safe on purpose) | Confirm `urg_node`/the LIDAR driver is actually running and publishing `/scan` |
+| Car swerves at a wall/curve like it's an opponent | A curving wall segment briefly measured as car-width | Narrow `opponent_min_width`/`opponent_max_width`, or raise `opponent_open_side_margin` so only genuinely isolated objects qualify |
+| Car never attempts to overtake a slower car ahead | Not closing fast enough, or opponent not detected at all | Check `ros2 topic echo /scan` for a plausible cluster; lower `overtake_closing_margin`; confirm the opponent isn't outside `opponent_engagement_range` |
+| Car overtakes then swerves back too early/late | `overtake_clear_margin` mismatched to this car's actual length/handling | Raise it if the pass looks unfinished when it ends, lower it if the car lingers off-line too long after passing |
 
 ## How this wins races
 
@@ -479,9 +742,19 @@ next:
   encoder sensor fusion beyond what `particle_filter`/`vesc_to_odom`
   already do. Better odometry directly means a tighter, more trustworthy
   `max_cross_track_error`.
-- **No opponent prediction.** The reactive safety net stops for anything
-  too close; it does not attempt to plan an overtake or predict another
-  car's trajectory.
+- **Opponent detection is a geometric heuristic, not real object
+  recognition.** "Car-sized isolated cluster" has no notion of what a
+  car actually looks like beyond that — a stray cone, a dropped water
+  bottle, or a chunk cut out of a curving wall could occasionally satisfy
+  the same geometry. It also only reasons about one opponent at a time
+  (closest qualifying cluster wins) and does zero identity-tracking
+  across brief occlusions — see ["Racing against
+  opponents"](#racing-against-opponents-detection-tracking-and-overtaking)
+  for the full reasoning and what a sturdier version would need (camera +
+  learned detection, multi-object tracking, or both).
+- **No defensive/blocking driving.** If an opponent is closing from
+  behind, this stack doesn't react any differently — a deliberate,
+  safety-conscious choice, not an oversight; see the same section above.
 
 ## File map
 

@@ -43,6 +43,27 @@ ros2 topic echo /commands/servo/position   # should vary as you move the right s
    ```
    This produces `<map_name>.yaml` and `<map_name>.pgm` in your current directory.
 
+## Building a map autonomously (no steering required)
+
+Same result as above, but `gap_follow` drives the lap instead of a human — see [racing-autonomy.md](racing-autonomy.md#phase-1-map-the-track-slam) for why this needs no new code. **You still can't walk away**: the [mandatory LB-deadman policy](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car) applies here exactly like everywhere else — a human must hold LB the entire time, ready to let go. "Autonomous" here means nobody touches the steering/throttle sticks, not that nobody is supervising.
+
+1. Start the driver stack as normal:
+   ```bash
+   ros2 launch f1tenth_stack bringup_launch.py
+   ```
+2. **Prop the wheels up for the first attempt on any new track.** Once this launches, the mux's joystick override still exists, but `gap_follow` is about to start driving on its own.
+3. Launch SLAM + `gap_follow` together, at a deliberately cautious default speed:
+   ```bash
+   ros2 launch racerbot_launch autonomous_mapping_launch.py
+   ```
+   Raise `mapping_max_speed`/`mapping_min_speed` (e.g. `mapping_max_speed:=1.5`) once you trust the track and the car's behavior on it — see the launch file's own docstring.
+4. **Hold LB.** The car will not move at all otherwise — this is `gap_follow`'s own mandatory deadman check, independent of the mux. Watch it before trusting it near anything you care about; `gap_follow`'s reactive gap-following is robust but not infallible, especially at higher speeds or in tight/cluttered spaces.
+5. Optional but recommended: run [`web_dashboard`](web-dashboard.md) in another terminal and watch the map build live in a browser, so you know when the loop has closed and it's safe to stop.
+6. Once you're satisfied with the map, let go of LB (or `Ctrl+C` the launch), then save it exactly as in the manual procedure above:
+   ```bash
+   ros2 run nav2_map_server map_saver_cli -f <map_name>
+   ```
+
 ## Localizing against a saved map
 
 1. Copy your saved `<map_name>.yaml` + `<map_name>.pgm` into `src/particle_filter/maps/`.

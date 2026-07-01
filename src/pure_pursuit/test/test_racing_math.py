@@ -282,3 +282,135 @@ def test_load_profiled_csv_rejects_raw_file(tmp_path):
     racing_math.save_xy_csv(path, xy)
     with pytest.raises(ValueError):
         racing_math.load_profiled_csv(path)
+
+
+# ============================================================================
+# Opponent detection, tracking, and overtaking
+# ============================================================================
+
+def test_cluster_scan_ranges_separates_close_object_from_open_track():
+    ranges = np.full(30, 10.0)
+    ranges[10:15] = 1.5
+    clusters = racing_math.cluster_scan_ranges(ranges, max_range=10.0)
+    assert clusters == [(10, 14)]
+
+
+def test_cluster_scan_ranges_splits_on_a_big_jump_between_two_close_objects():
+    ranges = np.full(30, 10.0)
+    ranges[10:15] = 1.5
+    ranges[15:20] = 4.0  # still "close" (< 9.5) but a big jump from 1.5 -- a separate object
+    clusters = racing_math.cluster_scan_ranges(ranges, max_range=10.0, cluster_gap_threshold=0.3)
+    assert clusters == [(10, 14), (15, 19)]
+
+
+def test_cluster_geometry_matches_known_chord_length():
+    n = 20
+    angle_min, angle_increment = -0.5, 0.05
+    ranges = np.full(n, 10.0)
+    start_idx, end_idx, r = 5, 9, 2.0
+    ranges[start_idx:end_idx + 1] = r
+    width, centroid_range, centroid_angle = racing_math.cluster_geometry(
+        ranges, angle_min, angle_increment, start_idx, end_idx)
+    angular_span = (end_idx - start_idx) * angle_increment
+    expected_width = 2.0 * r * math.sin(angular_span / 2.0)
+    assert width == pytest.approx(expected_width, rel=1e-6)
+    assert centroid_range == pytest.approx(r)
+
+
+def _make_scan_with_car_cluster(n=60, angle_min=-0.6, angle_increment=0.02, open_range=10.0,
+                                 cluster_start=25, cluster_end=34, cluster_range=1.5):
+    ranges = np.full(n, open_range)
+    ranges[cluster_start:cluster_end + 1] = cluster_range
+    return ranges, angle_min, angle_increment
+
+
+def test_detect_opponent_cluster_finds_car_sized_object_in_the_open():
+    ranges, angle_min, angle_increment = _make_scan_with_car_cluster()
+    result = racing_math.detect_opponent_cluster(
+        ranges, angle_min, angle_increment, max_range=10.0,
+        min_width=0.15, max_width=0.7, max_engagement_range=5.0)
+    assert result is not None
+    start_idx, end_idx, centroid_range, centroid_angle = result
+    assert (start_idx, end_idx) == (25, 34)
+    assert centroid_range == pytest.approx(1.5)
+
+
+def test_detect_opponent_cluster_ignores_things_too_far_to_matter_yet():
+    ranges, angle_min, angle_increment = _make_scan_with_car_cluster(cluster_range=1.5)
+    result = racing_math.detect_opponent_cluster(
+        ranges, angle_min, angle_increment, max_range=10.0,
+        min_width=0.15, max_width=0.7, max_engagement_range=1.0)  # cluster is at 1.5m, beyond this
+    assert result is None
+
+
+def test_detect_opponent_cluster_rejects_wall_shaped_cluster():
+    # A "wall" directly ahead spanning the whole forward cone -- one huge
+    # cluster, far wider than any real car.
+    ranges = np.full(60, 1.5)
+    result = racing_math.detect_opponent_cluster(
+        ranges, -0.6, 0.02, max_range=10.0,
+        min_width=0.15, max_width=0.7, max_engagement_range=5.0)
+    assert result is None
+
+
+def test_detect_opponent_cluster_rejects_when_flush_against_another_object():
+    # Two close objects right next to each other with no open gap between
+    # them -- neither one reads as "an isolated car sitting in open
+    # track", so both should be rejected rather than guessed at.
+    ranges = np.full(40, 10.0)
+    ranges[15:20] = 1.4
+    ranges[20:30] = 1.0
+    result = racing_math.detect_opponent_cluster(
+        ranges, angle_min=-0.4, angle_increment=0.03, max_range=10.0,
+        min_width=0.15, max_width=0.7, max_engagement_range=5.0)
+    assert result is None
+
+
+def test_compute_cumulative_arc_length():
+    seg_len = np.array([1.0, 2.0, 1.5, 0.5])
+    cumulative = racing_math.compute_cumulative_arc_length(seg_len)
+    assert cumulative[0] == pytest.approx(0.0)
+    assert cumulative[1] == pytest.approx(1.0)
+    assert cumulative[2] == pytest.approx(3.0)
+    assert cumulative[3] == pytest.approx(4.5)
+
+
+def test_track_progress_gap_simple_case():
+    gap = racing_math.track_progress_gap(ego_arc_length=10.0, other_arc_length=13.0, total_length=100.0)
+    assert gap == pytest.approx(3.0)
+
+
+def test_track_progress_gap_wraps_around_finish_line():
+    # Ego is near the end of the lap; the other point is just past the
+    # start/finish line -- "ahead" should wrap around, not go negative.
+    gap = racing_math.track_progress_gap(ego_arc_length=95.0, other_arc_length=5.0, total_length=100.0)
+    assert gap == pytest.approx(10.0)
+
+
+def test_lateral_offset_point_moves_left_on_a_straight_segment():
+    xy = np.array([[0.0, 0.0], [1.0, 0.0]])  # heading due +X
+    x, y = racing_math.lateral_offset_point(xy, index=0, next_index=1, offset=0.5)
+    assert x == pytest.approx(0.0)
+    assert y == pytest.approx(0.5)  # +Y is left of a due-+X heading (REP-103)
+
+
+def test_lateral_offset_point_negative_offset_moves_right():
+    xy = np.array([[0.0, 0.0], [1.0, 0.0]])
+    _, y = racing_math.lateral_offset_point(xy, index=0, next_index=1, offset=-0.5)
+    assert y == pytest.approx(-0.5)
+
+
+def test_pick_pass_side_prefers_the_more_open_side_left():
+    ranges = np.full(60, 3.0)
+    ranges[25:35] = 1.0   # the detected "car" cluster
+    ranges[35:55] = 8.0   # more room to the left of it (higher indices)
+    ranges[5:25] = 1.5    # less room to the right of it (lower indices)
+    assert racing_math.pick_pass_side(ranges, start_idx=25, end_idx=34) == 1
+
+
+def test_pick_pass_side_prefers_the_more_open_side_right():
+    ranges = np.full(60, 3.0)
+    ranges[25:35] = 1.0
+    ranges[35:55] = 1.5   # less room to the left
+    ranges[5:25] = 8.0    # more room to the right
+    assert racing_math.pick_pass_side(ranges, start_idx=25, end_idx=34) == -1

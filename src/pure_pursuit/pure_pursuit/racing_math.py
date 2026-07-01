@@ -21,6 +21,8 @@ diagrams. Short version of what lives in each section below:
   3. Path indexing        -- "where am I on the line" / "where should I aim"
   4. Raceline generation  -- curvature -> cornering speed -> smoothed profile
   5. CSV I/O              -- reading/writing waypoint files
+  6. Reactive avoidance   -- gap-finding, for anything not in the map
+  7. Opponent racing      -- detect another car, track it, decide/steer an overtake
 """
 
 import csv
@@ -443,3 +445,247 @@ def save_profiled_csv(path: str, xy: np.ndarray, speed: np.ndarray) -> None:
         writer.writerow(['x', 'y', 'speed'])
         for (x, y), v in zip(xy, speed):
             writer.writerow([f'{x:.4f}', f'{y:.4f}', f'{v:.3f}'])
+
+
+# ============================================================================
+# 6. Reactive obstacle avoidance (gap-finding, reused from gap_follow)
+# ============================================================================
+#
+# pure_pursuit_node's racing line has no idea an opponent's car, a
+# spun-out car, or anything else not in the map exists. The reactive
+# LIDAR safety net catches this at runtime, in two tiers: emergency stop
+# if something is very close, or -- what this function is for -- steer
+# *around* it if there's room, instead of just stopping. This is the same
+# "find the best gap" idea gap_follow uses to drive with no map at all,
+# reused here as a temporary override on top of the racing line rather
+# than as the whole control strategy.
+
+def find_best_gap(ranges: np.ndarray, min_gap_distance: float):
+    """Find the best drivable opening in a window of range readings.
+
+    A "gap" is a contiguous run of readings all farther than
+    `min_gap_distance`. Candidates are scored by width * average_depth,
+    not width alone: a shallow dead end (e.g. a ~1m doorway alcove) can
+    subtend a *wider* angle than a genuinely open corridor that's
+    angularly narrower but far deeper. Scoring this way means a gap has
+    to actually stay open for a while, not just be wide at its mouth, to
+    win -- the same reasoning gap_follow's own gap search uses.
+
+    Returns (start_index, end_index) of the winning run within `ranges`,
+    or (None, None) if nothing in the window is farther than
+    `min_gap_distance` at all (boxed in on every side).
+    """
+    free = ranges > min_gap_distance
+    candidates = []
+    run_start = None
+    for i, is_free in enumerate(free):
+        if is_free and run_start is None:
+            run_start = i
+        elif not is_free and run_start is not None:
+            candidates.append((run_start, i - 1))
+            run_start = None
+    if run_start is not None:
+        candidates.append((run_start, len(free) - 1))
+
+    if not candidates:
+        return None, None
+
+    def score(run):
+        start, end = run
+        segment = ranges[start:end + 1]
+        width = end - start + 1
+        avg_depth = float(np.mean(segment))
+        return width * avg_depth
+
+    return max(candidates, key=score)
+
+
+# ============================================================================
+# 7. Opponent detection, tracking, and overtaking
+# ============================================================================
+#
+# "Proper racing" against another car needs more than reactive avoidance
+# -- it needs to notice the other car is *there*, work out whether it's
+# gaining or falling behind relative to it, and -- if it's gaining --
+# actually get past, not just follow at a safe distance forever. This
+# section is the math behind that, in three steps that mirror how a
+# human driver actually thinks about a car ahead:
+#
+#   1. "Is that a car?"           -- detect_opponent_cluster / cluster_scan_ranges
+#   2. "Are they pulling away, or am I catching them?" -- track progress
+#      along the racing line itself (compute_cumulative_arc_length /
+#      track_progress_gap), not raw x/y -- see the note on why below.
+#   3. "Which side has room, and how do I actually steer there?"  --
+#      pick_pass_side / lateral_offset_point
+#
+# None of this needs a second sensor, a neural network, or radio contact
+# with the other car -- just the same LIDAR scan and racing line already
+# in use everywhere else in this node.
+
+def cluster_scan_ranges(ranges: np.ndarray, max_range: float, cluster_gap_threshold: float = 0.3):
+    """Group consecutive LIDAR readings into clusters: contiguous runs of
+    "something is there" (a reading noticeably less than max_range, i.e.
+    not just open track) where consecutive readings don't jump by more
+    than `cluster_gap_threshold`. A big jump between neighbors means a
+    *different* object even if both readings are "close" -- e.g. a car
+    sitting in front of a wall shows up as one cluster for the car, a
+    jump, then a separate cluster for the wall behind it.
+
+    Returns a list of (start_index, end_index) tuples, one per cluster, in
+    scan order. Deliberately simple -- no calibration, no learned model,
+    just "is there a return here, and is it continuous with its
+    neighbor" -- see detect_opponent_cluster for how that's enough to
+    tell an isolated, car-sized object apart from a wall.
+    """
+    is_object = ranges < (max_range * 0.95)
+    clusters = []
+    start = None
+    for i in range(len(ranges)):
+        if is_object[i]:
+            if start is None:
+                start = i
+            elif abs(float(ranges[i]) - float(ranges[i - 1])) > cluster_gap_threshold:
+                clusters.append((start, i - 1))
+                start = i
+        else:
+            if start is not None:
+                clusters.append((start, i - 1))
+                start = None
+    if start is not None:
+        clusters.append((start, len(ranges) - 1))
+    return clusters
+
+
+def cluster_geometry(ranges: np.ndarray, angle_min: float, angle_increment: float,
+                      start_idx: int, end_idx: int):
+    """Physical size and centroid of a cluster (see cluster_scan_ranges),
+    relative to the LIDAR. `physical_width` is the straight-line (chord)
+    distance between the cluster's first and last point in Cartesian
+    coordinates -- a much better estimate of an object's actual size than
+    its angular width alone, which exaggerates anything close and
+    shrinks anything far away.
+
+    Returns (physical_width, centroid_range, centroid_angle).
+    """
+    angles = angle_min + np.arange(start_idx, end_idx + 1) * angle_increment
+    segment = ranges[start_idx:end_idx + 1]
+    xs = segment * np.cos(angles)
+    ys = segment * np.sin(angles)
+    physical_width = float(np.hypot(xs[-1] - xs[0], ys[-1] - ys[0]))
+    centroid_idx = (start_idx + end_idx) // 2
+    centroid_range = float(ranges[centroid_idx])
+    centroid_angle = float(angle_min + centroid_idx * angle_increment)
+    return physical_width, centroid_range, centroid_angle
+
+
+def detect_opponent_cluster(ranges: np.ndarray, angle_min: float, angle_increment: float,
+                             max_range: float, min_width: float, max_width: float,
+                             max_engagement_range: float, cluster_gap_threshold: float = 0.3,
+                             open_side_margin: float = 0.5):
+    """Look for a single object in the scan shaped and sized like another
+    race car, sitting out in the open track rather than flush against a
+    wall.
+
+    A car-sized object looks like: a cluster of readings noticeably
+    closer than its surroundings (by at least `open_side_margin`),
+    spanning a physical width between `min_width` and `max_width` --
+    narrow enough it isn't a wall segment (walls produce much longer or
+    far more irregular runs), wide enough it isn't sensor noise or a
+    thin post. Among every cluster that qualifies, the closest one wins
+    (the one most immediately relevant to a racing decision right now).
+
+    This is a geometric heuristic, not object recognition -- no map is
+    consulted, no machine learning, and nothing is tracked between calls
+    (see OpponentTracker in pure_pursuit_node.py for that part). It's
+    exactly the kind of reasoning gap_follow already does for its own gap
+    search, just aimed at *finding* an object instead of *avoiding* one.
+
+    Returns (start_idx, end_idx, centroid_range, centroid_angle) for the
+    winning cluster, or None if nothing currently in view qualifies.
+    """
+    best = None
+    for start_idx, end_idx in cluster_scan_ranges(ranges, max_range, cluster_gap_threshold):
+        width, centroid_range, centroid_angle = cluster_geometry(
+            ranges, angle_min, angle_increment, start_idx, end_idx)
+        if not (min_width <= width <= max_width):
+            continue
+        if centroid_range > max_engagement_range:
+            continue
+
+        # Confirm open space immediately on both sides -- otherwise this
+        # is plausibly just one section of a curving wall, not a
+        # discrete object sitting in the middle of the drivable track.
+        before = ranges[max(0, start_idx - 5):start_idx]
+        after = ranges[end_idx + 1:end_idx + 6]
+        if before.size and float(np.mean(before)) < centroid_range + open_side_margin:
+            continue
+        if after.size and float(np.mean(after)) < centroid_range + open_side_margin:
+            continue
+
+        if best is None or centroid_range < best[2]:
+            best = (start_idx, end_idx, centroid_range, centroid_angle)
+
+    return best
+
+
+def compute_cumulative_arc_length(seg_len: np.ndarray) -> np.ndarray:
+    """Running total of track distance up to (not including) each
+    waypoint: cumulative[i] is how far along the track waypoint i is from
+    waypoint 0. Precomputed once at startup (the racing line doesn't
+    change during a run) so "how far along the track is index i" is an
+    O(1) array read instead of re-summing seg_len from scratch -- needed
+    at least once per control tick, for both the ego car and any tracked
+    opponent.
+    """
+    cumulative = np.zeros(len(seg_len))
+    cumulative[1:] = np.cumsum(seg_len[:-1])
+    return cumulative
+
+
+def track_progress_gap(ego_arc_length: float, other_arc_length: float, total_length: float) -> float:
+    """Signed track-distance from the ego car to another point on a
+    closed-loop racing line, expressed as "how far *ahead*" the other
+    point is: always in [0, total_length), wrapping the finish line back
+    to the start -- on a loop, "ahead" always exists somewhere less than
+    one full lap away, which is exactly what predicting an opponent's
+    position needs (see OpponentTracker.predicted_arc_length).
+    """
+    if total_length <= 0.0:
+        return 0.0
+    return float((other_arc_length - ego_arc_length) % total_length)
+
+
+def lateral_offset_point(xy: np.ndarray, index: int, next_index: int, offset: float):
+    """A point `offset` meters to the *left* of waypoint `index` (negative
+    offset = right), measured perpendicular to the track's local
+    direction of travel (estimated from index -> next_index). Used to
+    nudge the Pure Pursuit steering target sideways during an overtake,
+    without needing a whole second recorded racing line -- see
+    "Overtaking" in docs/racing-autonomy.md.
+    """
+    dx = xy[next_index][0] - xy[index][0]
+    dy = xy[next_index][1] - xy[index][1]
+    length = math.hypot(dx, dy)
+    if length < 1e-6:
+        return float(xy[index][0]), float(xy[index][1])
+    # Perpendicular-left unit vector of the direction of travel (dx, dy):
+    # rotate it +90 degrees, matching pick_pass_side's left/right sense.
+    perp_x, perp_y = -dy / length, dx / length
+    return float(xy[index][0] + perp_x * offset), float(xy[index][1] + perp_y * offset)
+
+
+def pick_pass_side(ranges: np.ndarray, start_idx: int, end_idx: int, window: int = 20) -> int:
+    """Which side of a detected cluster has more open room to pass
+    through: the average range in a small window of readings just
+    outside the cluster on the left vs. the right (higher scan index is
+    further left, per REP-103 -- angle increases with index, and +angle
+    means +Y, which is left). Returns +1 (pass on the left) or -1 (pass
+    on the right); a tie breaks toward the left arbitrarily -- both
+    sides being this close to equal means neither choice is meaningfully
+    better.
+    """
+    left = ranges[end_idx + 1:end_idx + 1 + window]
+    right = ranges[max(0, start_idx - window):start_idx]
+    left_room = float(np.mean(left)) if left.size else 0.0
+    right_room = float(np.mean(right)) if right.size else 0.0
+    return 1 if left_room >= right_room else -1

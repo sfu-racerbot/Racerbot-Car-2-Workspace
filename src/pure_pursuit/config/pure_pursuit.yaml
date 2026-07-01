@@ -44,6 +44,34 @@ pure_pursuit_node:
     safety_fov_deg: 60.0
     emergency_stop_distance: 0.4
     scan_timeout_sec: 0.5
+    max_range: 10.0   # range readings beyond this (and inf/NaN) are clipped/filled before any math touches them
+
+    # --- Reactive avoidance: steer *around* something in a wider cone,
+    # instead of just stopping, whenever there's room to -- the hard-stop
+    # net above still wins if it's too close for this to be safe. ---
+    enable_obstacle_avoidance: true
+    avoidance_fov_deg: 100.0
+    avoidance_trigger_distance: 1.5
+    avoidance_min_gap_distance: 1.0
+    avoidance_speed: 1.0
+
+    # --- Opponent detection, tracking, and overtaking -- see
+    # docs/racing-autonomy.md's "Racing against opponents" for the full
+    # strategy. Requires enable_lidar_safety above to also be true. ---
+    enable_opponent_overtake: true
+    opponent_min_width: 0.15          # meters -- narrower than this is noise/a thin post, not a car
+    opponent_max_width: 0.7           # meters -- wider than this is treated as a wall, not a car
+    opponent_cluster_gap: 0.3         # meters -- a range jump bigger than this splits one cluster into two
+    opponent_engagement_range: 5.0    # meters -- ignore anything farther away for now
+    opponent_open_side_margin: 0.5    # meters -- how much more open the surroundings must be to count as "isolated"
+    opponent_velocity_smoothing: 0.3  # 0-1: higher = more responsive but noisier track-progress-rate estimate
+    opponent_lost_timeout_sec: 1.0    # forget the tracked opponent if it isn't re-detected within this long
+    overtake_trigger_gap: 3.0         # meters of *track distance* -- start considering a pass once this close
+    overtake_closing_margin: 0.3      # m/s -- must be closing at least this fast to bother attempting a pass
+    overtake_clear_margin: 1.0        # meters of track distance past the opponent before resuming the racing line
+    overtake_lateral_offset: 0.5      # meters, sideways nudge to the steering target while passing
+    laser_offset_x: 0.27              # meters -- LIDAR mounting offset from base_link, matches hardware-reference.md
+    laser_offset_y: 0.0
 
     # --- Deadman button (workspace policy -- see docs/architecture.md) ---
     # Mandatory workspace-wide safety policy: the car must not move under

@@ -6,8 +6,8 @@ Map-based race controller: given a saved (x, y, speed) racing line and a live lo
 
 | File | What it is |
 |---|---|
-| [`pure_pursuit/racing_math.py`](pure_pursuit/racing_math.py) | **All the actual math**, as plain functions with no `rclpy`/ROS imports — frame conversions, Pure Pursuit geometry, path indexing, offline velocity-profile generation, CSV I/O. Deliberately kept separate from ROS plumbing so it's readable end-to-end and unit-testable without a robot (see [`test/test_racing_math.py`](test/test_racing_math.py)). |
-| [`pure_pursuit/pure_pursuit_node.py`](pure_pursuit/pure_pursuit_node.py) | The race controller ROS node — loads a profiled CSV, wires up subscriptions/timer, calls into `racing_math` every control tick, and owns every safety watchdog. |
+| [`pure_pursuit/racing_math.py`](pure_pursuit/racing_math.py) | **All the actual math**, as plain functions with no `rclpy`/ROS imports — frame conversions, Pure Pursuit geometry, path indexing, offline velocity-profile generation, CSV I/O, gap-finding, and opponent detection/tracking geometry. Deliberately kept separate from ROS plumbing so it's readable end-to-end and unit-testable without a robot (see [`test/test_racing_math.py`](test/test_racing_math.py)). |
+| [`pure_pursuit/pure_pursuit_node.py`](pure_pursuit/pure_pursuit_node.py) | The race controller ROS node — loads a profiled CSV, wires up subscriptions/timer, calls into `racing_math` every control tick, and owns every safety watchdog plus opponent tracking/overtaking (see [`test/test_opponent_integration.py`](test/test_opponent_integration.py) for the node-level tests). |
 | [`pure_pursuit/waypoint_recorder_node.py`](pure_pursuit/waypoint_recorder_node.py) | Records localized `(x, y)` positions to a CSV while you drive a lap by hand. |
 | [`pure_pursuit/generate_velocity_profile.py`](pure_pursuit/generate_velocity_profile.py) | Offline CLI tool — turns a raw `(x, y)` recording into a paced `(x, y, speed)` racing line. |
 | [`config/pure_pursuit.yaml`](config/pure_pursuit.yaml), [`config/waypoint_recorder.yaml`](config/waypoint_recorder.yaml) | Parameters for the two nodes above. |
@@ -97,8 +97,9 @@ Two file "shapes": raw `x,y` (written by `waypoint_recorder_node`, read by `gene
 4. **Cross-track watchdog** — error beyond `max_cross_track_error` → stop (car is lost/kidnapped/localization has diverged; steering at a stale position estimate is worse than not steering at all).
 5. **Steering** — adaptive lookahead sized off the speed *at the car's current position on the line* (not the target's — lookahead should reflect how fast the car is going *right now*), then the Pure Pursuit formulas above.
 6. **Speed** — read straight from the profiled speed at the car's current nearest waypoint, clipped to `[min_speed, max_speed]` as a hard ceiling independent of whatever the CSV says.
-7. **Reactive LIDAR safety net** (if `enable_lidar_safety`) — anything inside `emergency_stop_distance` in a `safety_fov_deg`-wide forward cone of the *live* scan zeroes the speed command, regardless of the plan above; a stale/missing scan is treated identically to "obstacle detected" (a safety net that's gone blind isn't a safety net). This exists for anything **not** in the map — an opponent car, a spun-out car, debris.
-8. **Publish.**
+7. **Opponent tracking + overtake** (if `enable_opponent_overtake`) — look for another car in the scan, track its progress along the racing line, and if closing on it within `overtake_trigger_gap`, replace the steering target with one nudged sideways toward whichever side has more room, via `lateral_offset_point`. See [docs/racing-autonomy.md](../../docs/racing-autonomy.md#racing-against-opponents-detection-tracking-and-overtaking) for the full strategy, and `OpponentTracker` (in `pure_pursuit_node.py`) for the progress-rate estimator behind it.
+8. **Reactive LIDAR safety net** (if `enable_lidar_safety`) — two tiers, always the final word regardless of the racing line or any overtake in progress: steer at the best gap (`find_best_gap`) if something is inside `avoidance_trigger_distance` but there's still room (`enable_obstacle_avoidance`), or hard-stop unconditionally if something is inside `emergency_stop_distance`, or if the scan itself is stale/missing (treated identically to "obstacle detected" — a safety net that's gone blind isn't a safety net). This exists for anything **not** in the map — an opponent car, a spun-out car, debris.
+9. **Publish.**
 
 ## Parameters (`config/pure_pursuit.yaml`)
 
@@ -116,7 +117,19 @@ Two file "shapes": raw `x,y` (written by `waypoint_recorder_node`, read by `gene
 | `max_steering_angle` | `0.26` rad | Derived from this car's real servo limits — see [docs/racing-autonomy.md](../../docs/racing-autonomy.md#where-026-rad-comes-from) |
 | `pose_timeout_sec` | `0.5` s | Localization watchdog |
 | `max_cross_track_error` | `1.0` m | Lost/kidnapped watchdog |
-| `enable_lidar_safety` / `safety_fov_deg` / `emergency_stop_distance` / `scan_timeout_sec` | `true` / `60.0°` / `0.4` m / `0.5` s | Reactive LIDAR safety net |
+| `enable_lidar_safety` / `safety_fov_deg` / `emergency_stop_distance` / `scan_timeout_sec` | `true` / `60.0°` / `0.4` m / `0.5` s | Master switch + hard emergency-stop tier |
+| `enable_obstacle_avoidance` / `avoidance_fov_deg` / `avoidance_trigger_distance` / `avoidance_min_gap_distance` / `avoidance_speed` | `true` / `100.0°` / `1.5` m / `1.0` m / `1.0` m/s | Steer-around tier — requires `enable_lidar_safety` too |
+| `enable_opponent_overtake` | `true` | Master switch for opponent detection/tracking/overtaking — requires `enable_lidar_safety` too |
+| `opponent_min_width` / `opponent_max_width` | `0.15` / `0.7` m | Car-shaped cluster width bounds |
+| `opponent_cluster_gap` | `0.3` m | Range jump that splits one cluster into two |
+| `opponent_engagement_range` | `5.0` m | Ignore detections farther than this |
+| `opponent_open_side_margin` | `0.5` m | How much more open the surroundings must be to count as "isolated" |
+| `opponent_velocity_smoothing` | `0.3` | Exponential smoothing (0-1) on the tracked progress-rate estimate |
+| `opponent_lost_timeout_sec` | `1.0` s | Forget the tracked opponent if not re-detected within this long |
+| `overtake_trigger_gap` / `overtake_closing_margin` | `3.0` m / `0.3` m/s | Track-distance + closing-speed thresholds to start a pass |
+| `overtake_clear_margin` / `overtake_lateral_offset` | `1.0` m / `0.5` m | Track distance to consider a pass finished / sideways nudge while passing |
+| `laser_offset_x` / `laser_offset_y` | `0.27` / `0.0` m | LIDAR mounting offset from `base_link`, used to place opponent detections in the map frame |
+| `max_range` | `10.0` m | Range clip ceiling for every LIDAR-based check above (also fills in `inf` returns) |
 | `enable_deadman` / `joy_topic` / `deadman_button` / `joy_timeout_sec` | `true` / `/joy` / `4` / `0.5` s | **Mandatory** LB deadman button — do not disable |
 
 ## `generate_velocity_profile` CLI flags
@@ -142,5 +155,8 @@ Two file "shapes": raw `x,y` (written by `waypoint_recorder_node`, read by `gene
 | Stops unexpectedly mid-lap | Cross-track watchdog tripped (bad localization seed or genuine drift) | Re-seed "2D Pose Estimate"; only loosen `max_cross_track_error` after confirming localization is healthy |
 | Refuses to launch | `waypoints_file` unset/missing, or still a raw (no `speed` column) file | Point at a *profiled* CSV — run `generate_velocity_profile` first |
 | Won't move even with LB held | Check the other watchdogs above in order — localization first, then LIDAR staleness | `ros2 topic hz /pf/viz/inferred_pose` and `/scan` |
+| Swerves at a wall/curve like it's an opponent | A curving wall segment briefly measured as car-width | Narrow `opponent_min_width`/`opponent_max_width`, or raise `opponent_open_side_margin` |
+| Never attempts to overtake a slower car ahead | Not closing fast enough, or opponent not detected | Lower `overtake_closing_margin`; check the opponent is within `opponent_engagement_range` and roughly car-sized in the scan |
+| Overtakes then swerves back too early/late | `overtake_clear_margin` mismatched to this car | Raise it if the pass looks unfinished when it ends, lower it if the car lingers off-line too long |
 
 See [docs/racing-autonomy.md](../../docs/racing-autonomy.md) for the full pipeline write-up, `mermaid` diagrams, and the design rationale for choosing Pure Pursuit over a purely reactive or full-MPC approach.
