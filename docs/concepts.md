@@ -6,11 +6,12 @@ This doc is for questions like "what actually *is* a workspace" and "why do I ha
 
 A single node (one running program, e.g. `vesc_driver_node`) can be started directly with `ros2 run <package> <executable>`. A real driving stack needs many nodes running together with specific parameters, so instead there's a **launch file** — a Python script (e.g. [`bringup_launch.py`](../src/f1tenth_system/f1tenth_stack/launch/bringup_launch.py)) that declares a list of nodes to start, which YAML config/parameters to load for each, and any topic remappings. `ros2 launch <package> <file>.py` runs that script and starts everything it declares, in one shot, and a single `Ctrl+C` cleanly shuts all of it down together.
 
-What you actually launch depends on what you're doing — see the table in [operations.md](operations.md):
-- `ros2 launch f1tenth_stack bringup_launch.py` — the core stack (joystick, VESC, LiDAR, mux). Nearly everything else assumes this is already running.
+What you actually launch depends on what you're doing — see [architecture.md](architecture.md#the-node-graph) for the full foundation-vs-control-layer explanation, and the table in [operations.md](operations.md):
+- `ros2 launch f1tenth_stack bringup_launch.py` — the shared foundation (joystick input, VESC, LiDAR, mux). Never a control layer by itself — nothing publishes to `/teleop` or `/drive` until something else is launched on top of it. Nearly everything else assumes this is already running, in its own terminal.
+- `ros2 launch f1tenth_stack teleop_launch.py` — the manual-driving control layer (just `joy_teleop`), launched on top of the bringup, in a second terminal.
 - `ros2 launch racerbot_launch slam_launch.py` — mapping.
 - `ros2 launch particle_filter localize_launch.py` — localizing against a saved map.
-- `ros2 launch gap_follow gap_follow_launch.py` / `ros2 launch pure_pursuit pure_pursuit_launch.py` — autonomy, on top of the bringup.
+- `ros2 launch gap_follow gap_follow_launch.py` / `ros2 launch pure_pursuit pure_pursuit_launch.py` — other control layers (autonomy), on top of the bringup. Run at most one control layer at a time — see [architecture.md](architecture.md#control-layers-exactly-one-at-a-time-in-a-second-terminal).
 
 ## What `colcon build` actually does
 

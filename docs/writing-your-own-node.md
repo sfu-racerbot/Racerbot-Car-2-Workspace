@@ -39,17 +39,12 @@ drive.speed            # m/s, positive = forward
 
 ## Getting your code to actually drive the car
 
-Because of the always-on joystick override described in [architecture.md](architecture.md#the-safety-model-read-this-before-writing-autonomy-code), `/drive` is masked and does nothing while `joy_teleop` is running. To actually let your node drive:
+Because of the always-on joystick override described in [architecture.md](architecture.md#the-safety-model-read-this-before-writing-autonomy-code), `/drive` is masked and does nothing while `teleop_launch.py` is running. Your node is a **control layer**, same as `teleop_launch.py`, `gap_follow_launch.py`, and `pure_pursuit_launch.py` — see [architecture.md](architecture.md#control-layers-exactly-one-at-a-time-in-a-second-terminal) — so getting it to drive is just: don't run a different control layer at the same time.
 
-1. Launch the driver stack as normal: `ros2 launch f1tenth_stack bringup_launch.py`
-2. In another terminal, stop **only** `joy_teleop` — **leave `joy_node` running**, since your node's own deadman check (mandatory, see above) needs a live `/joy` stream to ever engage:
-   ```bash
-   pkill -f joy_teleop
-   ```
-   Once `/teleop` stops receiving messages, it times out after 0.2s and `ackermann_mux` falls through to `/drive`.
-3. Launch your node.
-4. **Hold LB, and wheels off the ground for the first run, every time.** With `joy_teleop` gone, the mux's override is gone — your node's own deadman check (which you implemented per the contract above) is now the only thing standing between a bug and an unsupervised, moving car. Watch `/drive` with `ros2 topic echo /drive` before you trust it near the ground; it should read `0.0 / 0.0` the instant you let go of LB.
-5. When you're done, kill your node and restart `joy_teleop` (or just re-run `bringup_launch.py`) before doing anything else — don't leave the car without the mux's manual override active either.
+1. Launch the driver stack as normal, in its own terminal: `ros2 launch f1tenth_stack bringup_launch.py`. It never starts `teleop_launch.py` itself, so `/drive` is never masked to begin with — there's nothing to stop.
+2. In a second terminal, launch your node. Since your node's own deadman check (mandatory, see above) needs a live `/joy` stream to ever engage, and `joy_node` lives in `bringup_launch.py` (not `teleop_launch.py`), it's already up.
+3. **Hold LB, and wheels off the ground for the first run, every time.** With no `teleop_launch.py` running, the mux's override doesn't exist in this session — your node's own deadman check (which you implemented per the contract above) is now the only thing standing between a bug and an unsupervised, moving car. Watch `/drive` with `ros2 topic echo /drive` before you trust it near the ground; it should read `0.0 / 0.0` the instant you let go of LB.
+4. When you're done, `Ctrl+C` your node's terminal. The bringup terminal can stay up — launch `teleop_launch.py` in its place to switch back to manual driving, or kill everything and start fresh.
 
 See [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node) for the exact commands — this is the same procedure used for both `gap_follow` and `pure_pursuit`, since both implement the mandatory deadman check.
 
@@ -84,7 +79,7 @@ Concretely, from `gap_follow`:
 - **`launch/gap_follow_launch.py`** ([src/gap_follow/launch/gap_follow_launch.py](../src/gap_follow/launch/gap_follow_launch.py)) — loads the YAML above and starts the node. This is the minimum viable launch file pattern for a single-node package.
 - **`resource/gap_follow`** — an empty marker file, not code. `ament_python`'s package index (`ament_index`) uses its mere presence to know the package exists; every `ament_python` package needs one named after itself.
 
-`gap_follow_node.py`'s `joy_callback`/`_deadman_engaged` is the reference implementation of the **mandatory** deadman check from the interface contract above — it only publishes non-zero drive commands while LB is held on a live `/joy` stream, publishing `0.0/0.0` otherwise. Copy this pattern into `your_node.py`, not just `gap_follow`'s scan/drive plumbing — see [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node) for how this changes which processes need to stay running (`joy_node` must stay up; only `joy_teleop` gets stopped) once your node is driving hands-off.
+`gap_follow_node.py`'s `joy_callback`/`_deadman_engaged` is the reference implementation of the **mandatory** deadman check from the interface contract above — it only publishes non-zero drive commands while LB is held on a live `/joy` stream, publishing `0.0/0.0` otherwise. Copy this pattern into `your_node.py`, not just `gap_follow`'s scan/drive plumbing — see [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node) for the exact launch procedure once your node is driving hands-off (short version: `bringup_launch.py` first, your node's launch file on top, and simply don't launch `teleop_launch.py` in the same session).
 
 ## Build and run workflow
 
@@ -105,7 +100,7 @@ ros2 launch your_package your_node_launch.py
 In order of increasing risk, all before you trust a new node near the ground:
 
 1. **Static topic check** — launch your node with the rest of the driver stack *not* running at all. `ros2 topic echo /drive` and sanity-check the values against what you'd expect from known LaserScan inputs (you can play a recorded bag, or just watch it react to you waving a hand in front of the LiDAR).
-2. **Wheels off the ground** — full stack up, joystick stopped per the procedure above, car propped up so wheels spin freely. Confirm steering and speed behave sensibly before anything touches the floor.
+2. **Wheels off the ground** — bringup up, your node launched per the procedure above (no `teleop_launch.py` running), car propped up so wheels spin freely. Confirm steering and speed behave sensibly before anything touches the floor.
 3. **Floor, low speed, open space** — only after 1 and 2 look right. Keep a hand near the power switch.
 
 Don't skip straight to the floor — the whole point of `gap_follow` existing as a template is that it was built and tested this way first.

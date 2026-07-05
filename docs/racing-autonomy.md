@@ -398,7 +398,9 @@ computed. Ordered from "must never be violated" down to "nice to have":
 Because the deadman check runs first, holding LB is a precondition for the
 car moving at all — releasing it stops the car immediately regardless of
 what every other watchdog says. Concretely, this means **`joy_node` must be
-left running** (only `joy_teleop` stopped) while racing — see
+up** while racing — it lives in `bringup_launch.py` (the shared foundation
+every control layer needs), not `teleop_launch.py` (the manual-driving
+control layer, which you simply don't launch during a race) — see
 [operations.md](operations.md#racing-with-the-pure-pursuit-stack).
 
 All of this sits *underneath* the same arbitration the rest of this repo

@@ -16,12 +16,26 @@ Every new terminal needs both lines, in that order, before any `ros2`/`colcon` c
 - [ ] You know where the VESC's power switch / battery disconnect is and can reach it
 - [ ] If running autonomy (not just teleop): confirmed a human is ready to physically cut power — the joystick override is *not* active in that mode (see below)
 
+## The two-layer pattern used in every procedure below
+
+See [architecture.md](architecture.md#the-node-graph) for the full explanation; the short version:
+
+1. **`ros2 launch f1tenth_stack bringup_launch.py`** — the shared foundation layer. Joystick input (`joy_node`), the VESC chain, the LiDAR, and the arbitration mux. It never moves the car by itself — nothing publishes to `/teleop` or `/drive` until you launch something on top of it. Always goes first, **in its own terminal**.
+2. **Exactly one control layer, in a second, separate terminal** — `teleop_launch.py` (manual driving), `gap_follow_launch.py`, `pure_pursuit_launch.py`, or your own node. This is the thing that actually decides what the car does.
+
+The bringup terminal stays up for as long as you're using the car at all. To switch between manual driving and autonomy, `Ctrl+C` the control-layer terminal and launch a different one — the bringup terminal (and the VESC/LiDAR connections it holds) never needs to be touched.
+
 ## Manual driving (teleop)
 
+Terminal 1 — the foundation:
 ```bash
 ros2 launch f1tenth_stack bringup_launch.py
 ```
-Hold **LB**, left stick = speed, right stick = steering. The car does not move on its own from this command alone — `joy_teleop`'s default state is neutral.
+Terminal 2 — the control layer:
+```bash
+ros2 launch f1tenth_stack teleop_launch.py
+```
+Hold **LB**, left stick = speed, right stick = steering. The car does not move on its own from these two commands alone — `joy_teleop`'s default state is neutral.
 
 Sanity-check before trusting it near the ground:
 ```bash
@@ -31,8 +45,8 @@ ros2 topic echo /commands/servo/position   # should vary as you move the right s
 
 ## Building a map
 
-1. Start the driver stack (above).
-2. In a second terminal:
+1. Start the driver stack and manual control (above): `bringup_launch.py`, then `teleop_launch.py`, each in its own terminal.
+2. In a third terminal:
    ```bash
    ros2 launch racerbot_launch slam_launch.py
    ```
@@ -47,12 +61,12 @@ ros2 topic echo /commands/servo/position   # should vary as you move the right s
 
 Same result as above, but `gap_follow` drives the lap instead of a human — see [racing-autonomy.md](racing-autonomy.md#phase-1-map-the-track-slam) for why this needs no new code. **You still can't walk away**: the [mandatory LB-deadman policy](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car) applies here exactly like everywhere else — a human must hold LB the entire time, ready to let go. "Autonomous" here means nobody touches the steering/throttle sticks, not that nobody is supervising.
 
-1. Start the driver stack as normal:
+1. Start the driver stack as normal, in its own terminal:
    ```bash
    ros2 launch f1tenth_stack bringup_launch.py
    ```
-2. **Prop the wheels up for the first attempt on any new track.** Once this launches, the mux's joystick override still exists, but `gap_follow` is about to start driving on its own.
-3. Launch SLAM + `gap_follow` together, at a deliberately cautious default speed:
+2. **Prop the wheels up for the first attempt on any new track.** `gap_follow` is about to start driving on its own the moment the next command launches — do **not** also launch `teleop_launch.py` here, since its always-on neutral `/teleop` would mask `gap_follow`'s `/drive` entirely regardless of LB (see [architecture.md](architecture.md#the-safety-model-read-this-before-writing-autonomy-code)).
+3. In a second terminal, launch SLAM + `gap_follow` together, at a deliberately cautious default speed:
    ```bash
    ros2 launch racerbot_launch autonomous_mapping_launch.py
    ```
@@ -81,35 +95,23 @@ Same result as above, but `gap_follow` drives the lap instead of a human — see
 
 ## Running autonomy (`gap_follow`, `pure_pursuit`, or your own node)
 
-This is the one place the standard bringup isn't enough by itself — see [architecture.md](architecture.md#the-safety-model-read-this-before-writing-autonomy-code) for why. **Current workspace policy (see [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)): every autonomy node — `gap_follow`, `pure_pursuit`, and any new one — requires LB held to move the car, on top of the mux arbitration below. That means you only ever stop `joy_teleop`, never `joy_node`.**
+**Current workspace policy (see [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)): every autonomy node — `gap_follow`, `pure_pursuit`, and any new one — requires LB held to move the car, on top of the mux arbitration below.**
 
-1. Start the driver stack as normal:
+1. Start the driver stack as normal, in its own terminal:
    ```bash
    ros2 launch f1tenth_stack bringup_launch.py
    ```
-2. **Prop the wheels up.** From here on the joystick's *mux* override is being removed — the deadman button is your only remaining safety net, so this still matters.
-3. Stop **only** `joy_teleop`, leaving `joy_node`, the VESC, LiDAR, and mux running:
-   ```bash
-   pkill -f joy_teleop
-   ```
-4. Confirm `/teleop` has actually gone quiet (should time out within 0.2s):
-   ```bash
-   ros2 topic hz /teleop   # should report nothing / "no new messages"
-   ```
-5. Launch your autonomy node, e.g.:
+2. **Prop the wheels up.** `bringup_launch.py` never starts `teleop_launch.py`, so there's no mux override sitting between your node and the VESC — the deadman button is your only safety net here, so this still matters.
+3. In a second terminal, launch your autonomy node directly — no need to stop anything first:
    ```bash
    ros2 launch gap_follow gap_follow_launch.py
    # or:
    ros2 launch pure_pursuit pure_pursuit_launch.py waypoints_file:=...
    ```
-6. **Hold LB** on the controller — no autonomy node in this workspace will publish a non-zero drive command without it (`enable_deadman: true` is the default and required policy for every node's config). Watch it before trusting it: `ros2 topic echo /drive` should show sensible values reacting to `/scan` only while LB is held, and drop to `0.0 / 0.0` the instant you release it.
-7. **When you're done, restore `joy_teleop` before doing anything else:**
-   ```bash
-   ros2 run joy_teleop joy_teleop --ros-args -r __node:=joy_teleop --params-file install/f1tenth_stack/share/f1tenth_stack/config/joy_teleop.yaml &
-   ```
-   or just kill everything and re-run `bringup_launch.py` fresh.
+4. **Hold LB** on the controller — no autonomy node in this workspace will publish a non-zero drive command without it (`enable_deadman: true` is the default and required policy for every node's config). Watch it before trusting it: `ros2 topic echo /drive` should show sensible values reacting to `/scan` only while LB is held, and drop to `0.0 / 0.0` the instant you release it.
+5. **When you're done**, `Ctrl+C` your autonomy node's terminal. The bringup terminal can keep running — switch to manual driving by launching `teleop_launch.py` in its place, or kill everything and start fresh.
 
-If you're writing your own node, this deadman behavior is **required, not optional** — see [writing-your-own-node.md](writing-your-own-node.md#the-interface-contract) for the pattern to copy from `gap_follow_node.py`. If you ever see an autonomy node stuck at `0.0/0.0` even with LB held, first check `enable_deadman`/`joy_topic`/`deadman_button` in its config YAML, then confirm `joy_node` is actually still running (`ros2 node list | grep joy`) and publishing (`ros2 topic echo /joy`).
+If you're writing your own node, this deadman behavior is **required, not optional** — see [writing-your-own-node.md](writing-your-own-node.md#the-interface-contract) for the pattern to copy from `gap_follow_node.py`. If you ever see an autonomy node stuck at `0.0/0.0` even with LB held, first check `enable_deadman`/`joy_topic`/`deadman_button` in its config YAML, then confirm `joy_node` is actually still running (`ros2 node list | grep joy`) and publishing (`ros2 topic echo /joy`) — and confirm you don't also have `teleop_launch.py` running in another terminal, which would mask `/drive` at the mux regardless of what your node publishes (see [architecture.md](architecture.md#the-safety-model-read-this-before-writing-autonomy-code)).
 
 `gap_follow`'s tuning parameters (speed limits, steering limits, safety bubble radius, emergency stop distance, `deadman_button`, `joy_timeout_sec`, `enable_deadman`) live in `src/gap_follow/config/gap_follow.yaml`. Defaults are conservative (`max_speed: 2.0` m/s) — increase gradually, not all at once, and re-test wheels-off-ground after any change.
 
@@ -121,9 +123,11 @@ The map-based race controller — see [racing-autonomy.md](racing-autonomy.md) f
 
 Requires a saved map and working localization (both sections above) already set up for this track.
 
-1. Start the driver stack, then localization:
+1. Start the driver stack, manual control, and localization — each in its own terminal:
    ```bash
    ros2 launch f1tenth_stack bringup_launch.py
+   # in another terminal:
+   ros2 launch f1tenth_stack teleop_launch.py
    # in another terminal:
    ros2 launch particle_filter localize_launch.py
    ```
@@ -150,24 +154,19 @@ A small synthetic example track is also checked in at `src/pure_pursuit/waypoint
 
 ### 3. Every race run: drive it
 
-1. Start the driver stack as normal:
+1. Start the driver stack as normal, in its own terminal:
    ```bash
    ros2 launch f1tenth_stack bringup_launch.py
    ```
-2. **Prop the wheels up** for the first run of any new racing line or after any parameter change — same rule as every other autonomy node.
-3. Stop **only** `joy_teleop`, leaving `joy_node` running — `pure_pursuit_node` has its own LB deadman check too (mandatory workspace policy, see [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)), so `joy_node` must stay up:
-   ```bash
-   pkill -f joy_teleop
-   ros2 topic hz /teleop   # should report nothing
-   ```
-4. Launch localization + the race controller together:
+2. **Prop the wheels up** for the first run of any new racing line or after any parameter change — same rule as every other autonomy node. `pure_pursuit_node` has its own LB deadman check too (mandatory workspace policy, see [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)).
+3. In a second terminal, launch localization + the race controller together — no need to stop anything first, since `bringup_launch.py` never started `teleop_launch.py` to begin with:
    ```bash
    ros2 launch racerbot_launch race_launch.py \
        waypoints_file:=/home/racerbotcar-2/racerbot-ws/src/pure_pursuit/waypoints/my_track_profiled.csv
    ```
-5. Give it a "2D Pose Estimate" seed in RViz — same as any other time you start localization.
-6. **Hold LB** — `pure_pursuit_node` won't drive without it. Watch it before trusting it: `ros2 topic echo /drive` should show sensible, smoothly varying values once the pose seed is in and LB is held, and drop to `0.0 / 0.0` the instant you release it.
-7. **When you're done, restore `joy_teleop`** — same as step 7 above, or just kill everything and re-run `bringup_launch.py` fresh.
+4. Give it a "2D Pose Estimate" seed in RViz — same as any other time you start localization.
+5. **Hold LB** — `pure_pursuit_node` won't drive without it. Watch it before trusting it: `ros2 topic echo /drive` should show sensible, smoothly varying values once the pose seed is in and LB is held, and drop to `0.0 / 0.0` the instant you release it.
+6. **When you're done**, `Ctrl+C` the `race_launch.py` terminal. Switch back to manual driving by launching `teleop_launch.py` on top of the still-running bringup, or kill everything and re-run `bringup_launch.py` fresh.
 
 `pure_pursuit`'s tuning parameters (lookahead, speed limits, steering limits, safety watchdogs, `enable_deadman`) live in `src/pure_pursuit/config/pure_pursuit.yaml` — see [racing-autonomy.md](racing-autonomy.md#parameter-reference) for what each one does.
 
@@ -183,4 +182,4 @@ Power down the VESC/battery last, after ROS nodes have stopped cleanly (avoids t
 
 - **New terminal, permission denied on `/dev/sensors/vesc` or `/dev/input/js0`**: group membership (`dialout`, `input`) only applies to sessions started *after* the group was added. Open a fresh terminal, or `newgrp dialout && newgrp input` in the current one.
 - **Servo position shows `0.5304` and nothing seems to be happening**: that's neutral (center), not zero-as-in-broken. See the formula in [hardware-reference.md](hardware-reference.md#vesc-motor--steering-controller).
-- **You published to `/drive` and nothing happened**: teleop is still running and masking it. This is the safety model working as designed — see above.
+- **You published to `/drive` and nothing happened**: check whether `teleop_launch.py` is running in another terminal — if so, its always-on neutral `/teleop` is masking your `/drive` command at the mux. This is the safety model working as designed — see above. Following [Running autonomy](#running-autonomy-gap_follow-pure_pursuit-or-your-own-node) as documented, you won't have `teleop_launch.py` running at all, so this should only come up if you started it deliberately alongside an autonomy node.

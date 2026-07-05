@@ -50,8 +50,10 @@ On the Orin Nano's 8GB RAM, prefer `colcon build --symlink-install --parallel-wo
 Drive it:
 ```bash
 ros2 launch f1tenth_stack bringup_launch.py
+# in another terminal:
+ros2 launch f1tenth_stack teleop_launch.py
 ```
-Hold **LB** on the F710 (must be in **XInput mode**), left stick = speed, right stick = steering. The car will not move on its own from this command alone.
+Hold **LB** on the F710 (must be in **XInput mode**), left stick = speed, right stick = steering. The car will not move on its own from the first command alone — see [docs/architecture.md](docs/architecture.md#the-node-graph) for why driving needs a second control-layer launch on top of the shared bringup.
 
 For mapping, localization, running `gap_follow` or your own autonomy code, and every other workflow: see [docs/operations.md](docs/operations.md).
 

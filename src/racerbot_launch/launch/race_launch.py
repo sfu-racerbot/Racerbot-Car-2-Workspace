@@ -12,12 +12,14 @@ def generate_launch_description():
     """Race-day launch: localization (particle filter against a saved map)
     plus the pure-pursuit race controller, together.
 
-    Run this *after* f1tenth_stack's bringup_launch.py is already up
-    (VESC/LiDAR/mux) -- see docs/operations.md and
+    This is a control layer, same as teleop_launch.py or gap_follow_launch.py
+    -- run it in its own terminal, on top of f1tenth_stack's bringup_launch.py
+    (already up: VESC/LiDAR/mux), and don't also launch teleop_launch.py at
+    the same time or its always-on /teleop will mask /drive at the mux
+    (docs/architecture.md's safety model). See docs/operations.md and
     docs/racing-autonomy.md for the full procedure, including giving the
     particle filter its "2D Pose Estimate" seed in RViz before the car
-    will go anywhere, and stopping joy_node/joy_teleop so /drive actually
-    reaches the VESC (docs/architecture.md's safety model).
+    will go anywhere.
 
         ros2 launch racerbot_launch race_launch.py \
             waypoints_file:=/path/to/track_profiled.csv

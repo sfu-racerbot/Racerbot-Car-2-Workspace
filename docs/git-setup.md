@@ -17,11 +17,12 @@ How this workspace is versioned, what's a real git submodule vs. a plain vendore
 | `transport_drivers` | **real git submodule** | `ros-drivers/transport_drivers` | `humble` |
 | `f1tenth_system` | **vendored (plain tracked files, NOT a submodule)** | was `f1tenth/f1tenth_system` | was `humble-devel` |
 
-`f1tenth_system` used to be a submodule too. It was **deliberately disconnected from upstream** and converted to a normal tracked directory (its `.git` gitlink and `.gitmodules`/`.git/config` entries were removed; the files themselves were kept and `git add`-ed like any other package) because it carries a local hardware-calibration fix that has to be committed to this repo:
+`f1tenth_system` used to be a submodule too. It was **deliberately disconnected from upstream** and converted to a normal tracked directory (its `.git` gitlink and `.gitmodules`/`.git/config` entries were removed; the files themselves were kept and `git add`-ed like any other package) because it carries local fixes/modifications that have to be committed to this repo:
 
 - `src/f1tenth_system/f1tenth_stack/config/joy_teleop.yaml` — the `human_control` profile's `drive-steering_angle` axis was changed from upstream's `axis: 2` to `axis: 3` (this F710's right stick in XInput mode; axis 2 is the left trigger — see [hardware-reference.md](hardware-reference.md#joystick--logitech-f710)).
+- `src/f1tenth_system/f1tenth_stack/launch/bringup_launch.py` / `launch/teleop_launch.py` — upstream bundles `joy_teleop` into `bringup_launch.py` itself; here it's split out into its own `teleop_launch.py` so manual driving and autonomy are independent control layers you switch between with `Ctrl+C`, not a `pkill` dance (see [architecture.md](architecture.md#the-node-graph)). `bringup_launch.py` still starts `joy_node` (every control layer's deadman check needs it), just not `joy_teleop` anymore.
 
-A git submodule can only ever point at a commit in *someone else's* repo — there's no way to carry an uncommitted local edit through it into this repo's history. Vendoring was the simplest way to keep the fix without also standing up a fork. **Practical effect: `f1tenth_system` will never move on its own.** There's no `git submodule update --remote` for it anymore — updating it means manually pulling upstream changes and re-applying/re-checking the axis fix (see below).
+A git submodule can only ever point at a commit in *someone else's* repo — there's no way to carry an uncommitted local edit through it into this repo's history. Vendoring was the simplest way to keep these changes without also standing up a fork. **Practical effect: `f1tenth_system` will never move on its own.** There's no `git submodule update --remote` for it anymore — updating it means manually pulling upstream changes and re-applying/re-checking the local modifications (see below).
 
 ## Cloning this repo fresh
 
@@ -56,7 +57,7 @@ Rebuild just that package afterwards (`colcon build --symlink-install --packages
 **"Updating" `f1tenth_system`** (no submodule machinery to help you — do this manually):
 1. Diff your vendored copy against a fresh clone/checkout of upstream `f1tenth/f1tenth_system` (whatever branch/commit you want to pull in) to see what actually changed upstream.
 2. Apply the parts you want into `src/f1tenth_system/` by hand (copy files over, or `git diff`/`git apply` between the two trees).
-3. **Before committing, re-check `f1tenth_stack/config/joy_teleop.yaml`** — confirm `drive-steering_angle` under `human_control` is still `axis: 3`, not reverted to upstream's `axis: 2`. This is the one thing guaranteed to get silently clobbered by a naive overwrite.
+3. **Before committing, re-check both local modifications** — `f1tenth_stack/config/joy_teleop.yaml`'s `drive-steering_angle` under `human_control` should still be `axis: 3`, not reverted to upstream's `axis: 2`; and `f1tenth_stack/launch/bringup_launch.py` should still *not* start a `joy_teleop` node, with `teleop_launch.py` still present as the separate control layer (upstream will have them bundled back together). Both are guaranteed to get silently clobbered by a naive overwrite.
 4. `git add src/f1tenth_system && git commit` as normal — there's no submodule pointer to bump, the files themselves are the commit.
 
 ## Other repo docs

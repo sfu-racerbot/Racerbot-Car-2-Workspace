@@ -79,7 +79,7 @@ ros2 launch your_package_name your_node_launch.py
 - `--symlink-install` means editing your `.py` files takes effect on the next launch with no rebuild — only rebuild after changing `package.xml`, `setup.py`, or adding/removing files (see [concepts.md](concepts.md#what-colcon-build-actually-does)).
 - `--packages-select your_package_name` keeps the build fast while iterating; drop it to rebuild everything.
 - If your node has a standalone test file with no ROS dependency (per Step 3), run it directly without even sourcing ROS: `python3 -m pytest src/your_package_name/test/ -v`.
-- **Driving code only:** running it for real also means following the procedure in [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node) — start the bringup, stop only `joy_teleop` (never `joy_node`), hold LB, wheels off the ground first.
+- **Driving code only:** running it for real also means following the procedure in [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node) — start the bringup, launch your node as the control layer on top in a second terminal (don't also launch `teleop_launch.py`), hold LB, wheels off the ground first.
 - **Support code:** just launch it — `ros2 launch web_dashboard web_dashboard_launch.py` is the entire procedure, on top of anything else already running.
 
 ## Quick reference: existing packages as examples

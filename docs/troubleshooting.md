@@ -50,7 +50,7 @@ This happened on first bring-up. Full diagnostic trail:
 
 ## Testing `/commands/servo/position` (or `/commands/motor/speed`) directly and seeing weird "twitching"
 
-If you inject a raw `ros2 topic pub` command into `/commands/servo/position` while the **full bringup is still running**, you'll likely see inconsistent, twitchy behavior that looks like a hardware fault but isn't.
+If you inject a raw `ros2 topic pub` command into `/commands/servo/position` while **`bringup_launch.py` and `teleop_launch.py` are both still running**, you'll likely see inconsistent, twitchy behavior that looks like a hardware fault but isn't.
 
 Cause: `joy_teleop`'s `default` profile has no deadman-button restriction and continuously republishes a neutral command as a safety fail-safe, flowing through `ackermann_mux` → `ackermann_to_vesc_node` → the exact same `/commands/servo/position` topic you're injecting into. Two publishers end up racing on one topic, and whichever message arrived most recently wins — that interleaving is the "twitching," not a real fault.
 
@@ -60,21 +60,25 @@ This was diagnosed by systematically eliminating variables: single commands vs. 
 
 ## Autonomy node publishes to `/drive`, car doesn't move, no errors anywhere
 
-This is expected behavior, not a bug — see [architecture.md](architecture.md#the-safety-model-read-this-before-writing-autonomy-code). `/teleop` (joystick, priority 100) permanently masks `/drive` (navigation, priority 10) in `ackermann_mux` as long as `joy_node` + `joy_teleop` are both running, because the joystick's neutral output never times out. Confirm with:
+This is expected behavior, not a bug — see [architecture.md](architecture.md#the-safety-model-read-this-before-writing-autonomy-code). `/teleop` (joystick, priority 100) permanently masks `/drive` (navigation, priority 10) in `ackermann_mux` as long as `teleop_launch.py` is running, because the joystick's neutral output never times out. Confirm with:
 ```bash
 ros2 topic echo /ackermann_cmd
 ```
-If it's stuck at `0.0 / 0.0` regardless of what your node publishes to `/drive`, this is why. Fix: follow the procedure in [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node) — stop `joy_teleop` before launching autonomy (leave `joy_node` running — see the next entry), and restart `joy_teleop` afterward.
+If it's stuck at `0.0 / 0.0` regardless of what your node publishes to `/drive`, this is why. Fix: check whether `teleop_launch.py` is running in another terminal and `Ctrl+C` it. If you're following [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node) as documented, you won't have it running at all — `bringup_launch.py` no longer starts `joy_teleop` automatically, so this shouldn't come up unless you launched `teleop_launch.py` deliberately.
 
-## Autonomy node publishes to `/drive`, `/ackermann_cmd` looks fine, but it's always `0.0 / 0.0` even with `joy_teleop` stopped
+## Autonomy node publishes to `/drive`, `/ackermann_cmd` looks fine, but it's always `0.0 / 0.0` even with no `teleop_launch.py` running
 
 Different root cause from the one above, easy to conflate. First, are you holding LB? Every autonomy node in this workspace requires it — this is current, mandatory workspace policy (see [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)), not a bug. If you are holding it and it's still stuck at zero, check whether `joy_node` is even still running:
 ```bash
 ros2 node list | grep joy
 ```
-If it isn't, this is why: `gap_follow_node` and `pure_pursuit_node` both have their **own** deadman-button check, separate from `ackermann_mux` — each subscribes to `/joy` directly and only publishes a non-zero command while LB is held on a *live* `/joy` stream (see `gap_follow_node.py`'s or `pure_pursuit_node.py`'s `joy_callback`/`_deadman_engaged`). Killing `joy_node` along with `joy_teleop` removes `/joy` entirely, so the node's own deadman check can never engage — it silently publishes `0.0/0.0` forever, with no error anywhere. A custom node should have the same check per [writing-your-own-node.md](writing-your-own-node.md#the-interface-contract) — if it doesn't, that's a bug in that node, not expected behavior.
+If it isn't, this is why: `gap_follow_node` and `pure_pursuit_node` both have their **own** deadman-button check, separate from `ackermann_mux` — each subscribes to `/joy` directly and only publishes a non-zero command while LB is held on a *live* `/joy` stream (see `gap_follow_node.py`'s or `pure_pursuit_node.py`'s `joy_callback`/`_deadman_engaged`). `joy_node` lives in `bringup_launch.py`, so it should normally always be up while autonomy runs — if it isn't, something killed it (see the `pkill -f` gotcha below), or `bringup_launch.py`'s terminal itself died. Either way, no `/joy` means the node's own deadman check can never engage — it silently publishes `0.0/0.0` forever, with no error anywhere. A custom node should have the same check per [writing-your-own-node.md](writing-your-own-node.md#the-interface-contract) — if it doesn't, that's a bug in that node, not expected behavior.
 
-**Fix:** only stop `joy_teleop`, leave `joy_node` running, and hold LB while your autonomy node is active. See [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node).
+**Fix:** restart `bringup_launch.py` so `joy_node` comes back, and hold LB while your autonomy node is active. See [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node).
+
+## `pkill -f joy_teleop` takes down `joy_node` too (and cascades into killing the whole bringup)
+
+You shouldn't need to `pkill` anything to switch between manual driving and autonomy anymore — `Ctrl+C` whichever control-layer terminal (`teleop_launch.py`, `gap_follow_launch.py`, `pure_pursuit_launch.py`) is running instead (see [operations.md](operations.md#the-two-layer-pattern-used-in-every-procedure-below)). But if you ever do reach for `pkill -f joy_teleop` out of habit (from before `teleop_launch.py` existed as its own file), know that it's still a trap: `joy_node` (started by `bringup_launch.py`) is launched with `--params-file .../joy_teleop.yaml` — the same config file `joy_teleop` uses, just a different top-level key inside it — so `joy_node`'s own command line contains the literal substring `joy_teleop` too. `pkill -f` matches against the whole command line, so it kills **both** processes, not just the one you meant to stop. Losing `joy_node` kills every autonomy node's deadman input (see the entry above) and, since `ros2 launch` treats any process it manages dying as fatal, tears down the *entire* bringup (VESC and LiDAR included) a few seconds later. If you ever do need to kill one specific node by pattern instead of `Ctrl+C`-ing its terminal, match something only that process's command line contains — e.g. `pkill -f "__node:=joy_teleop"` — or kill it by exact PID.
 
 ## New terminal, permission denied on `/dev/sensors/vesc` or `/dev/input/js0`
 
