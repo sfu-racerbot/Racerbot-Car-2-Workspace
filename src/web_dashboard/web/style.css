@@ -20,17 +20,23 @@ html, body {
   cursor: grabbing;
 }
 
+/* ------------------------------------------------------------------ */
+/* Left sidebar -- height is intentionally unconstrained (no max-height)
+   so it simply grows to fit however many rows/sections it has; on a
+   short viewport it's fine for it to run off the bottom rather than
+   cramming rows together. */
+/* ------------------------------------------------------------------ */
 #overlay {
   position: fixed;
   top: 12px;
   left: 12px;
-  background: rgba(13, 18, 25, 0.85);
+  max-width: min(300px, calc(100vw - 24px));
+  background: rgba(13, 18, 25, 0.88);
   border: 1px solid #263140;
-  border-radius: 8px;
-  padding: 10px 14px;
+  border-radius: 10px;
+  padding: 14px 16px;
   font-size: 13px;
   line-height: 1.5;
-  min-width: 240px;
   pointer-events: none;
 }
 
@@ -43,45 +49,101 @@ html, body {
   align-items: center;
   gap: 8px;
   font-weight: 600;
-  margin-bottom: 6px;
+  font-size: 14px;
+  margin-bottom: 4px;
 }
 
 .dot {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   display: inline-block;
+  flex: none;
 }
 
 .dot-green { background: #3fb950; box-shadow: 0 0 6px #3fb95088; }
 .dot-red { background: #f85149; box-shadow: 0 0 6px #f8514988; }
+.dot-gray { background: #4b5560; }
 
-#info {
-  border-collapse: collapse;
+.section {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #263140;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8b949e;
+  margin-bottom: 6px;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 12px;
 }
 
-#info td {
-  padding: 1px 0;
-  vertical-align: top;
+.row-label {
+  flex: none;
+  width: 42px;
+  color: #8b949e;
 }
 
-#info td:first-child {
-  color: #8b949e;
-  padding-right: 10px;
-  white-space: nowrap;
+.row-value {
+  flex: 1;
+  min-width: 0;
+  color: #e6edf3;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
 }
+
+.wifi-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 9px;
+}
+
+.wifi-bar {
+  width: 3px;
+  background: #30363d;
+  display: inline-block;
+}
+
+.wifi-bar:nth-child(1) { height: 25%; }
+.wifi-bar:nth-child(2) { height: 50%; }
+.wifi-bar:nth-child(3) { height: 75%; }
+.wifi-bar:nth-child(4) { height: 100%; }
+
+.wifi-bar.active { background: #58a6ff; }
+.wifi-bar.active.weak { background: #d29922; }
+.wifi-bar.active.bad { background: #f85149; }
 
 #mode-banner {
-  margin-top: 8px;
+  margin-top: 10px;
   font-size: 12px;
   color: #d29922;
-  max-width: 260px;
+}
+
+#mode-banner:empty {
+  margin-top: 0;
 }
 
 #help {
-  margin-top: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #263140;
   font-size: 11px;
   color: #8b949e;
   pointer-events: auto;
@@ -99,4 +161,75 @@ html, body {
 
 #help button:hover {
   background: #30363d;
+}
+
+/* ------------------------------------------------------------------ */
+/* Corner insets: a small always-on overview map (top-right) and the
+   live camera feed (bottom-right), both independent of the main
+   canvas's own pan/zoom. */
+/* ------------------------------------------------------------------ */
+#minimap-panel,
+#camera-panel {
+  position: fixed;
+  right: 12px;
+  width: clamp(150px, 22vw, 220px);
+  height: clamp(150px, 22vw, 220px);
+  background: rgba(13, 18, 25, 0.88);
+  border: 1px solid #263140;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+#minimap-panel {
+  top: 12px;
+}
+
+#camera-panel {
+  bottom: 12px;
+  height: clamp(110px, 16vw, 165px); /* 4:3-ish, camera feeds are usually wider than tall */
+}
+
+.panel-label {
+  position: absolute;
+  top: 6px;
+  left: 9px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8b949e;
+  z-index: 1;
+  pointer-events: none;
+}
+
+#minimap {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+#camera-feed {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.panel-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: #8b949e;
+  text-align: center;
+  padding: 8px;
+}
+
+/* JS toggles this once the corresponding feed is actually showing
+   something, so the placeholder text is the default/fallback state. */
+#minimap-panel.has-map .panel-placeholder,
+#camera-panel.has-feed .panel-placeholder {
+  display: none;
 }

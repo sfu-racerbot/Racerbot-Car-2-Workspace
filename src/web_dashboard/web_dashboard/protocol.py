@@ -113,3 +113,30 @@ def pose_message(x: float, y: float, yaw: float) -> dict:
         'yaw': float(yaw),
         'stamp': time.time(),
     }
+
+
+def drive_message(speed: float, steering_angle: float) -> dict:
+    """The currently-arbitrated drive command (whatever /drive carries),
+    small enough to just be JSON like pose_message."""
+    return {
+        'type': 'drive',
+        'speed': float(speed),
+        'steering_angle': float(steering_angle),
+        'stamp': time.time(),
+    }
+
+
+def stats_message(cpu_percent: float, mem_percent: float, cpu_temp_c, uptime_s: float,
+                   wifi_dbm=None) -> dict:
+    """Coarse system health, sampled on a timer rather than per-message --
+    cpu_temp_c/wifi_dbm are None if no readable thermal zone / wireless
+    interface was found (not every machine this could run on has one)."""
+    return {
+        'type': 'stats',
+        'cpu_percent': float(cpu_percent),
+        'mem_percent': float(mem_percent),
+        'cpu_temp_c': None if cpu_temp_c is None else float(cpu_temp_c),
+        'uptime_s': float(uptime_s),
+        'wifi_dbm': None if wifi_dbm is None else float(wifi_dbm),
+        'stamp': time.time(),
+    }

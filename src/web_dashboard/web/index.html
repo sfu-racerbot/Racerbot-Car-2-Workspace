@@ -15,15 +15,65 @@
       <span id="conn-text">connecting...</span>
     </div>
 
-    <table id="info">
-      <tr><td>map</td><td id="info-map">no map yet</td></tr>
-      <tr><td>scan</td><td id="info-scan">no scan yet</td></tr>
-      <tr><td>pose</td><td id="info-pose">no pose yet</td></tr>
-    </table>
+    <div class="section">
+      <div class="section-title">feeds</div>
+      <div class="row">
+        <span id="dot-map" class="dot dot-gray"></span>
+        <span class="row-label">map</span>
+        <span class="row-value" id="info-map">no map yet</span>
+      </div>
+      <div class="row">
+        <span id="dot-scan" class="dot dot-gray"></span>
+        <span class="row-label">scan</span>
+        <span class="row-value" id="info-scan">no scan yet</span>
+      </div>
+      <div class="row">
+        <span id="dot-pose" class="dot dot-gray"></span>
+        <span class="row-label">pose</span>
+        <span class="row-value" id="info-pose">no pose yet</span>
+      </div>
+      <div class="row">
+        <span id="dot-drive" class="dot dot-gray"></span>
+        <span class="row-label">drive</span>
+        <span class="row-value" id="info-drive">no drive yet</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">
+        <span id="dot-stats" class="dot dot-gray"></span>
+        system
+      </div>
+      <div class="row"><span class="row-label">cpu</span><span class="row-value" id="info-cpu">--</span></div>
+      <div class="row"><span class="row-label">mem</span><span class="row-value" id="info-mem">--</span></div>
+      <div class="row"><span class="row-label">temp</span><span class="row-value" id="info-temp">--</span></div>
+      <div class="row">
+        <span class="row-label">wifi</span>
+        <span class="row-value" id="info-wifi">
+          <span id="info-wifi-text">--</span>
+          <span id="wifi-bars" class="wifi-bars">
+            <span class="wifi-bar"></span><span class="wifi-bar"></span><span class="wifi-bar"></span><span class="wifi-bar"></span>
+          </span>
+        </span>
+      </div>
+      <div class="row"><span class="row-label">up</span><span class="row-value" id="info-uptime">--</span></div>
+    </div>
 
     <div id="mode-banner"></div>
 
     <div id="help">drag to pan &middot; scroll to zoom &middot; <button id="reset-view">reset view</button></div>
+  </div>
+
+  <div id="minimap-panel">
+    <div class="panel-label">map</div>
+    <canvas id="minimap"></canvas>
+    <div id="minimap-placeholder" class="panel-placeholder">no map yet</div>
+  </div>
+
+  <div id="camera-panel">
+    <div class="panel-label">camera</div>
+    <img id="camera-feed" alt="camera feed" />
+    <div id="camera-placeholder" class="panel-placeholder">camera offline</div>
   </div>
 
   <script src="dashboard.js"></script>

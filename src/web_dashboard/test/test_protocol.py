@@ -97,3 +97,28 @@ def test_pose_message_shape():
     assert msg['y'] == pytest.approx(-2.5)
     assert msg['yaw'] == pytest.approx(math.pi / 4)
     assert 'stamp' in msg
+
+
+def test_drive_message_shape():
+    msg = protocol.drive_message(speed=3.5, steering_angle=-0.2)
+    assert msg['type'] == 'drive'
+    assert msg['speed'] == pytest.approx(3.5)
+    assert msg['steering_angle'] == pytest.approx(-0.2)
+    assert 'stamp' in msg
+
+
+def test_stats_message_shape_with_temp_and_wifi():
+    msg = protocol.stats_message(
+        cpu_percent=42.0, mem_percent=63.5, cpu_temp_c=51.2, uptime_s=1234.0, wifi_dbm=-49.0)
+    assert msg['type'] == 'stats'
+    assert msg['cpu_percent'] == pytest.approx(42.0)
+    assert msg['mem_percent'] == pytest.approx(63.5)
+    assert msg['cpu_temp_c'] == pytest.approx(51.2)
+    assert msg['uptime_s'] == pytest.approx(1234.0)
+    assert msg['wifi_dbm'] == pytest.approx(-49.0)
+
+
+def test_stats_message_allows_missing_temp_and_wifi():
+    msg = protocol.stats_message(cpu_percent=10.0, mem_percent=20.0, cpu_temp_c=None, uptime_s=0.0)
+    assert msg['cpu_temp_c'] is None
+    assert msg['wifi_dbm'] is None

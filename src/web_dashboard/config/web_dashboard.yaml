@@ -4,6 +4,7 @@ web_dashboard_node:
     map_topic: /map
     scan_topic: /scan
     pose_topic: /pf/viz/inferred_pose
+    drive_topic: /drive
 
     # --- Web server ---
     host: 0.0.0.0   # listen on every interface -- see docs/web-dashboard.md's security note
@@ -11,6 +12,7 @@ web_dashboard_node:
 
     # --- Bandwidth ---
     scan_broadcast_rate_hz: 10.0   # /scan itself runs ~40Hz; no browser needs to redraw that often
+    stats_interval_sec: 1.0        # how often CPU/mem/temp/uptime are sampled and broadcast
 
     # --- LIDAR mounting offset from base_link, used to place scan points
     # correctly relative to the car's pose (see docs/hardware-reference.md) ---

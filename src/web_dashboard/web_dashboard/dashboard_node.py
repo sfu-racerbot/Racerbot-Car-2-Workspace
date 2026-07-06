@@ -26,11 +26,13 @@ thread-safe, specifically for this purpose) instead of ever calling
 """
 
 import functools
+import glob
 import json
 import os
 import threading
 import time
 
+import psutil
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (
@@ -39,6 +41,7 @@ from rclpy.qos import (
     QoSReliabilityPolicy,
     qos_profile_sensor_data,
 )
+from ackermann_msgs.msg import AckermannDriveStamped
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid
@@ -49,6 +52,49 @@ import tornado.websocket
 from ament_index_python.packages import get_package_share_directory
 
 from web_dashboard import protocol
+
+
+def _read_cpu_temp_c():
+    """Best-effort CPU temperature from the kernel's thermal framework.
+    Returns None rather than raising if this machine has no readable
+    'cpu-thermal' zone (e.g. developing on a laptop, not the Jetson) --
+    system stats should degrade gracefully, not crash the node."""
+    for type_path in glob.glob('/sys/class/thermal/thermal_zone*/type'):
+        try:
+            with open(type_path) as f:
+                if f.read().strip() != 'cpu-thermal':
+                    continue
+            with open(type_path.replace('/type', '/temp')) as f:
+                return int(f.read().strip()) / 1000.0
+        except OSError:
+            continue
+    return None
+
+
+def _read_wifi_signal_dbm():
+    """Best-effort WiFi signal level in dBm, from the kernel's own
+    /proc/net/wireless (the same source `iwconfig`/`nmcli` read) --
+    returns None on anything wired-only (no wireless interface at all, e.g.
+    developing off a laptop docked to Ethernet) rather than raising, same
+    as _read_cpu_temp_c. Picks the first interface listed rather than
+    hardcoding one by name, since that's stable across which physical NIC
+    a given machine happens to use for WiFi."""
+    try:
+        with open('/proc/net/wireless') as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    for line in lines[2:]:  # first two lines are a fixed two-line header
+        if ':' not in line:
+            continue
+        fields = line.split(':', 1)[1].split()
+        if len(fields) < 3:
+            continue
+        try:
+            return float(fields[2])  # signal level, dBm (fields[1] is link quality)
+        except ValueError:
+            continue
+    return None
 
 
 class DashboardWebSocket(tornado.websocket.WebSocketHandler):
@@ -88,18 +134,22 @@ class DashboardNode(Node):
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('pose_topic', '/pf/viz/inferred_pose')
+        self.declare_parameter('drive_topic', '/drive')
         self.declare_parameter('host', '0.0.0.0')
         self.declare_parameter('port', 8080)
         self.declare_parameter('scan_broadcast_rate_hz', 10.0)
+        self.declare_parameter('stats_interval_sec', 1.0)
         self.declare_parameter('laser_offset_x', 0.27)
         self.declare_parameter('laser_offset_y', 0.0)
 
         self.map_topic = self.get_parameter('map_topic').value
         self.scan_topic = self.get_parameter('scan_topic').value
         self.pose_topic = self.get_parameter('pose_topic').value
+        self.drive_topic = self.get_parameter('drive_topic').value
         self.host = self.get_parameter('host').value
         self.port = int(self.get_parameter('port').value)
         self.scan_broadcast_rate_hz = float(self.get_parameter('scan_broadcast_rate_hz').value)
+        self.stats_interval_sec = float(self.get_parameter('stats_interval_sec').value)
         self.laser_offset_x = float(self.get_parameter('laser_offset_x').value)
         self.laser_offset_y = float(self.get_parameter('laser_offset_y').value)
 
@@ -113,6 +163,8 @@ class DashboardNode(Node):
         self._last_map_msg = None
         self._last_scan_msg = None
         self._last_pose = None  # (x, y, yaw)
+        self._last_drive = None  # (speed, steering_angle)
+        self._last_stats = None  # (cpu_percent, mem_percent, cpu_temp_c, uptime_s)
         self._last_scan_broadcast_time = 0.0
 
         # NOTE: named ws_clients, not clients -- rclpy.node.Node already
@@ -140,9 +192,20 @@ class DashboardNode(Node):
         self.scan_sub = self.create_subscription(
             LaserScan, self.scan_topic, self.scan_callback, qos_profile_sensor_data)
         self.pose_sub = self.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 10)
+        self.drive_sub = self.create_subscription(
+            AckermannDriveStamped, self.drive_topic, self.drive_callback, 10)
+
+        # Priming call: psutil.cpu_percent(interval=None) reports usage
+        # *since the previous call*, so the very first call has nothing to
+        # compare against and would otherwise report a meaningless 0.0 (or
+        # a misleadingly huge number averaged since boot) the moment the
+        # stats timer's first tick actually gets broadcast.
+        psutil.cpu_percent(interval=None)
+        self.stats_timer = self.create_timer(self.stats_interval_sec, self.stats_callback)
 
         self.get_logger().info(
-            f"web_dashboard_node ready: map={self.map_topic} scan={self.scan_topic} pose={self.pose_topic}. "
+            f"web_dashboard_node ready: map={self.map_topic} scan={self.scan_topic} "
+            f"pose={self.pose_topic} drive={self.drive_topic}. "
             f"Once the web server starts, open http://<this car's IP>:{self.port}/ in a browser."
         )
 
@@ -175,6 +238,25 @@ class DashboardNode(Node):
         yaw = protocol.quaternion_to_yaw(q.x, q.y, q.z, q.w)
         self._last_pose = (msg.pose.position.x, msg.pose.position.y, yaw)
         self._broadcast(protocol.pose_message(*self._last_pose))
+
+    def drive_callback(self, msg: AckermannDriveStamped):
+        self._last_drive = (msg.drive.speed, msg.drive.steering_angle)
+        self._broadcast(protocol.drive_message(*self._last_drive))
+
+    def stats_callback(self):
+        """Runs on a timer (rclpy spin thread, not per-message) -- cheap
+        enough to sample every tick but adds no value redrawing faster
+        than a human reads it. Uptime is the machine's, via psutil's own
+        boot_time(), not this node's -- restarting the dashboard shouldn't
+        reset what's meant to be a "how long has the car been on" readout."""
+        self._last_stats = (
+            psutil.cpu_percent(interval=None),
+            psutil.virtual_memory().percent,
+            _read_cpu_temp_c(),
+            time.time() - psutil.boot_time(),
+            _read_wifi_signal_dbm(),
+        )
+        self._broadcast(protocol.stats_message(*self._last_stats))
 
     # ------------------------------------------------------------------------
     # Bridging ROS callbacks (rclpy thread) -> the Tornado IOLoop thread.
@@ -212,6 +294,10 @@ class DashboardNode(Node):
             client.write_message(protocol.scan_ranges(self._last_scan_msg), binary=True)
         if self._last_pose is not None:
             client.write_message(json.dumps(protocol.pose_message(*self._last_pose)))
+        if self._last_drive is not None:
+            client.write_message(json.dumps(protocol.drive_message(*self._last_drive)))
+        if self._last_stats is not None:
+            client.write_message(json.dumps(protocol.stats_message(*self._last_stats)))
 
     # ------------------------------------------------------------------------
     # Web server
