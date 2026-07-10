@@ -10,3 +10,7 @@
 	path = src/transport_drivers
 	url = https://github.com/ros-drivers/transport_drivers.git
 	branch = humble
+[submodule "src/realsense-ros"]
+	path = src/realsense-ros
+	url = https://github.com/realsenseai/realsense-ros.git
+	branch = ros2-master
