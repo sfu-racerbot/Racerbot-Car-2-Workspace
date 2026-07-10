@@ -15,6 +15,7 @@ How this workspace is versioned, what's a real git submodule vs. a plain vendore
 | `particle_filter` | **real git submodule** | `f1tenth/particle_filter` | `humble-devel` |
 | `range_libc` | **real git submodule** | `f1tenth/range_libc` | `humble-devel` |
 | `transport_drivers` | **real git submodule** | `ros-drivers/transport_drivers` | `humble` |
+| `realsense-ros` | **real git submodule** | `realsenseai/realsense-ros` | `ros2-master` |
 | `f1tenth_system` | **vendored (plain tracked files, NOT a submodule)** | was `f1tenth/f1tenth_system` | was `humble-devel` |
 
 `f1tenth_system` used to be a submodule too. It was **deliberately disconnected from upstream** and converted to a normal tracked directory (its `.git` gitlink and `.gitmodules`/`.git/config` entries were removed; the files themselves were kept and `git add`-ed like any other package) because it carries local fixes/modifications that have to be committed to this repo:
@@ -42,8 +43,9 @@ None of the official `f1tenth`/roboracer/ros-drivers repos below have a `jazzy` 
 - `particle_filter` / `range_libc` — https://github.com/f1tenth/particle_filter, https://github.com/f1tenth/range_libc
 - `transport_drivers` — https://github.com/ros-drivers/transport_drivers
 - `f1tenth_system` (now vendored, no longer linked) — https://github.com/f1tenth/f1tenth_system
+- `realsense-ros` — https://github.com/realsenseai/realsense-ros — **the one exception to the paragraph above**: its `ros2-master` branch already supports Jazzy natively (along with Humble/Iron/Kilted/Rolling from the same branch), so there's no "no jazzy branch yet" caveat here, and no need to hunt for a different branch on a bump.
 
-**Updating an actual submodule** (`particle_filter`, `range_libc`, `transport_drivers`):
+**Updating an actual submodule** (`particle_filter`, `range_libc`, `transport_drivers`, `realsense-ros`):
 ```bash
 cd src/<package>
 git fetch origin

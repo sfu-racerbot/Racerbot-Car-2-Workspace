@@ -52,8 +52,10 @@ import sys
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 from sensor_msgs.msg import LaserScan, Joy
 from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import OccupancyGrid
 from ackermann_msgs.msg import AckermannDriveStamped
 
 from pure_pursuit import racing_math
@@ -104,6 +106,26 @@ class OpponentTracker:
     def is_fresh(self, now_sec: float) -> bool:
         return (self.last_update_time is not None
                 and (now_sec - self.last_update_time) < self.lost_timeout_sec)
+
+    def seconds_since_seen(self, now_sec: float) -> float:
+        if self.last_update_time is None:
+            return math.inf
+        return now_sec - self.last_update_time
+
+    def predicted_arc_length(self, now_sec: float, total_length: float):
+        """Dead-reckoned arc length: last seen position advanced along the
+        track at the smoothed progress rate. This is what makes finishing
+        an overtake robust: alongside or just past the ego car, the
+        opponent is *guaranteed* to leave the forward LIDAR cone, so "was
+        it detected this tick" is precisely the wrong question -- "where
+        must it be by now, given how it was moving" is the right one.
+        """
+        if self.arc_length is None or self.last_update_time is None:
+            return None
+        predicted = self.arc_length + self.progress_rate * (now_sec - self.last_update_time)
+        if total_length > 0.0:
+            predicted %= total_length
+        return predicted
 
 
 class PurePursuitNode(Node):
@@ -169,8 +191,17 @@ class PurePursuitNode(Node):
         self.declare_parameter('overtake_closing_margin', 0.3)
         self.declare_parameter('overtake_clear_margin', 1.0)
         self.declare_parameter('overtake_lateral_offset', 0.5)
+        self.declare_parameter('overtake_max_blind_sec', 3.0)
         self.declare_parameter('laser_offset_x', 0.27)
         self.declare_parameter('laser_offset_y', 0.0)
+
+        # --- Opponent detection mode: 'heuristic' (shape-based, no map
+        # needed) or 'map' (ray-cast map subtraction via range_libc --
+        # see map_subtraction.py). ---
+        self.declare_parameter('opponent_detection_mode', 'heuristic')
+        self.declare_parameter('map_topic', '/map')
+        self.declare_parameter('map_beam_step', 4)
+        self.declare_parameter('map_subtraction_margin', 0.4)
 
         waypoints_file = self.get_parameter('waypoints_file').value
         self.closed_loop = bool(self.get_parameter('closed_loop').value)
@@ -216,8 +247,19 @@ class PurePursuitNode(Node):
         self.overtake_closing_margin = float(self.get_parameter('overtake_closing_margin').value)
         self.overtake_clear_margin = float(self.get_parameter('overtake_clear_margin').value)
         self.overtake_lateral_offset = float(self.get_parameter('overtake_lateral_offset').value)
+        self.overtake_max_blind_sec = float(self.get_parameter('overtake_max_blind_sec').value)
         self.laser_offset_x = float(self.get_parameter('laser_offset_x').value)
         self.laser_offset_y = float(self.get_parameter('laser_offset_y').value)
+
+        self.opponent_detection_mode = str(self.get_parameter('opponent_detection_mode').value)
+        self.map_topic = str(self.get_parameter('map_topic').value)
+        self.map_beam_step = max(1, int(self.get_parameter('map_beam_step').value))
+        self.map_subtraction_margin = float(self.get_parameter('map_subtraction_margin').value)
+        if self.opponent_detection_mode not in ('heuristic', 'map'):
+            raise RuntimeError(
+                f"pure_pursuit_node: opponent_detection_mode must be 'heuristic' or 'map', "
+                f"got '{self.opponent_detection_mode}'."
+            )
 
         # ------------------------------------------------------------------
         # Load the racing line. Fail loudly and refuse to start rather than
@@ -289,12 +331,26 @@ class PurePursuitNode(Node):
         self.overtake_active = False
         self.overtake_side = 1  # +1 = pass on the left, -1 = pass on the right
 
+        # Map-subtraction detection state: stays None until a map arrives
+        # (map_callback). Until then 'map' mode falls back to the
+        # heuristic detector rather than racing blind.
+        self.map_ray_caster = None
+
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
         self.pose_sub = self.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 10)
         if self.enable_lidar_safety:
             self.scan_sub = self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 10)
         if self.enable_deadman:
             self.joy_sub = self.create_subscription(Joy, self.joy_topic, self.joy_callback, 10)
+        if self.opponent_detection_mode == 'map':
+            # The map server publishes /map latched (transient local): a
+            # matching durability here delivers the map even though this
+            # node starts long after it was published once.
+            map_qos = QoSProfile(depth=1,
+                                 reliability=QoSReliabilityPolicy.RELIABLE,
+                                 durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+            self.map_sub = self.create_subscription(
+                OccupancyGrid, self.map_topic, self.map_callback, map_qos)
 
         control_period_sec = 1.0 / self.control_rate_hz
         self.control_timer = self.create_timer(control_period_sec, self.control_loop)
@@ -323,6 +379,22 @@ class PurePursuitNode(Node):
     def scan_callback(self, msg: LaserScan):
         self.last_scan = msg
         self.last_scan_time = self.get_clock().now()
+
+    def map_callback(self, msg: OccupancyGrid):
+        # Import here, not at module top: range_libc is only needed in
+        # 'map' mode, and the heuristic mode must keep working on a
+        # machine where it isn't built.
+        try:
+            from pure_pursuit.map_subtraction import MapRayCaster
+            self.map_ray_caster = MapRayCaster(msg, self.max_range)
+        except Exception as exc:
+            self.get_logger().error(
+                f"Could not build the map ray caster ({exc}) -- opponent detection "
+                f"stays on the heuristic fallback.")
+            return
+        self.get_logger().info(
+            f"Map received ({msg.info.width}x{msg.info.height} @ "
+            f"{msg.info.resolution:.3f}m/px) -- map-subtraction opponent detection active.")
 
     def joy_callback(self, msg: Joy):
         self.last_joy_time = self.get_clock().now()
@@ -381,7 +453,16 @@ class PurePursuitNode(Node):
             self.xy, car_xy, closed=self.closed_loop,
             prev_index=self.prev_nearest_index, search_window=self.nearest_search_window,
         )
-        self.prev_nearest_index = nearest_idx
+        if cross_track_error > self.max_cross_track_error:
+            # The windowed search only looks near last tick's position, so
+            # after a legitimate localization jump (the particle filter
+            # re-converging, the car re-placed after a stop) it can keep
+            # returning a far-away waypoint forever. Before declaring the
+            # car lost, re-search the whole line once -- if the new pose
+            # is actually near the track somewhere else, lock onto that
+            # and keep driving instead of stopping until a node restart.
+            nearest_idx, cross_track_error = racing_math.find_nearest_index(
+                self.xy, car_xy, closed=self.closed_loop, prev_index=None)
 
         # --- Watchdog 2: are we still actually near the racing line? ---
         # A large cross-track error means the car is lost, kidnapped, or
@@ -391,11 +472,15 @@ class PurePursuitNode(Node):
         if cross_track_error > self.max_cross_track_error:
             self.get_logger().warn(
                 f"cross-track error {cross_track_error:.2f}m > max_cross_track_error "
-                f"({self.max_cross_track_error:.2f}m) -- stopping.",
+                f"({self.max_cross_track_error:.2f}m) even on a full-line search -- stopping.",
                 throttle_duration_sec=1.0,
             )
+            # Stay un-anchored while lost so recovery next tick starts
+            # from a clean global search, not this bad index.
+            self.prev_nearest_index = None
             self._publish_drive(0.0, 0.0)
             return
+        self.prev_nearest_index = nearest_idx
 
         # --- Steering: adaptive lookahead + pure pursuit geometry. ---
         # Use the speed *at the car's current position on the line* (not

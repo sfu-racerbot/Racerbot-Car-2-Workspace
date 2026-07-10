@@ -12,9 +12,11 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', [
             'launch/usb_cam_stream_launch.py',
+            'launch/realsense_stream_launch.py',
         ]),
         ('share/' + package_name + '/config', [
             'config/usb_cam_stream.yaml',
+            'config/realsense_stream.yaml',
         ]),
         ('share/' + package_name + '/web', [
             'web/index.html',

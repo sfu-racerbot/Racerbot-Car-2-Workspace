@@ -1,0 +1,17 @@
+usb_cam_stream_node:
+  ros__parameters:
+    # --- Source: the RealSense's color topic, NOT a V4L2 device ---
+    # realsense2_camera_node holds the D435i's /dev/videoN open exclusively,
+    # so this instance subscribes to the frames it already publishes instead
+    # (see docs/realsense-camera.md). Requires
+    # `ros2 launch racerbot_launch realsense_camera_launch.py` to be running.
+    image_topic: /camera/camera/color/image_raw
+
+    # --- Web server ---
+    # Port 9090 is the MJPEG port web_dashboard's camera panel looks for
+    # (see dashboard.js) -- don't also run usb_cam_stream_launch.py (the
+    # UVC-webcam variant) at the same time, both default to this port.
+    host: 0.0.0.0   # listen on every interface -- see docs/usb-camera-livestream.md's security note
+    port: 9090
+    stream_fps: 15.0   # how often a connected browser is sent a new frame
+    jpeg_quality: 80   # 0-100 -- higher = better quality, more bandwidth/CPU

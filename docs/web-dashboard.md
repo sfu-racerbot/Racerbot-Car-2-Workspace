@@ -178,23 +178,103 @@ the bottom-left corner shows the current zoom level in meters/cm.
   stream is a plain, never-ending HTTP response; no WebSocket, no JSON
   frame). If that node isn't running, the inset shows a "camera offline"
   placeholder and retries the connection every 3 seconds — no need to
-  reload the dashboard page once the camera node starts.
+  reload the dashboard page once the camera node starts. Either variant of
+  that node fills this panel: `usb_cam_stream_launch.py` (a UVC webcam) or
+  `realsense_stream_launch.py` (the RealSense D435i's color feed, via its
+  ROS topic — see [realsense-camera.md](realsense-camera.md)); they share
+  port 9090, so run one at a time.
 
 ## Running it
 
+Dashboard by itself — map/scan/pose, no camera:
 ```bash
 source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
 ros2 launch web_dashboard web_dashboard_launch.py
 ```
-Then open `http://<car-ip>:8080/`. That's the entire procedure — this
-node reads `/drive` only to display it and never publishes anything to
-it (or any other topic), so none of the joystick-override or
-wheels-off-ground precautions in [operations.md](operations.md) apply to
-it; it's safe to start and stop at any time, on top of anything else.
+Then open `http://<car-ip>:8080/` (see
+[Finding the car's address](#finding-the-cars-address-and-viewing-through-a-forwarded-port)
+below if you're not sure what to put there). That's the entire procedure
+for the dashboard alone — this node reads `/drive` only to display it and
+never publishes anything to it (or any other topic), so none of the
+joystick-override or wheels-off-ground precautions in
+[operations.md](operations.md) apply to it; it's safe to start and stop at
+any time, on top of anything else.
 
 To point it at different topics (e.g. testing against a bag file) or a
 different port, edit `src/web_dashboard/config/web_dashboard.yaml` — see
 the [parameter reference](#parameter-reference) below.
+
+### With the camera panel filled in too
+
+Three terminals, each sourced the same way as above
+(`source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash`).
+Order doesn't matter — all three are support/tooling nodes (see
+[adding-your-own-code.md](adding-your-own-code.md)), none of them touch
+`/drive`, so there's no bringup sequencing or LB-deadman precaution to
+follow here, unlike the driving-code procedures in
+[operations.md](operations.md):
+
+```bash
+# Terminal 1 — the RealSense camera itself (publishes color/depth topics)
+ros2 launch racerbot_launch realsense_camera_launch.py
+
+# Terminal 2 — bridges the color topic to the MJPEG port the dashboard's
+# camera panel looks for (see docs/realsense-camera.md)
+ros2 launch usb_cam_stream realsense_stream_launch.py
+
+# Terminal 3 — the dashboard
+ros2 launch web_dashboard web_dashboard_launch.py
+```
+
+Then open `http://<car-ip>:8080/`. If the camera panel still says "camera
+offline" after a few seconds, it's almost always the forwarded-port issue
+below, not a launch-order problem — the panel retries its connection every
+3 seconds on its own, so a blank/offline panel that never fills in (rather
+than one that briefly says offline before connecting) is the tell.
+
+### Finding the car's address, and viewing through a forwarded port
+
+**Use the car's real network address, not `localhost`, whenever you can.**
+On the car:
+```bash
+hostname -I
+```
+lists every address the car currently has — the LAN one (e.g. `192.168.x.x`,
+see [hardware-reference.md#network](hardware-reference.md#network)) works
+from any device on the same network; the Tailscale one (`100.x.x.x`, same
+section) works from anywhere Tailscale is set up, including off-network.
+Either one, browsed directly, is the normal/intended way to use this
+dashboard — from a laptop or phone, no code editor involved.
+
+**If you're instead viewing through an editor's port-forwarding feature**
+(e.g. VS Code's Ports panel showing `localhost:8080` in your browser's
+address bar because it tunneled port 8080 from the car to your machine):
+the dashboard's map/scan/pose/system stats all still work fine, because
+they travel over the one WebSocket connection to that same forwarded
+origin. **The camera panel is the exception** — `dashboard.js` makes your
+*browser* open a second, independent HTTP connection straight to
+`<the address in your address bar>:9090` (see `CAMERA_PORT` in
+`dashboard.js`), substituting whatever hostname is currently in the URL.
+If that hostname is `localhost` because of a tunnel, your browser tries
+`localhost:9090` on *your own laptop* — which is nothing, since only port
+8080 was forwarded — and the panel shows "camera offline" even though
+everything on the car is running correctly.
+
+Two ways to fix it:
+1. **Browse the car's real address instead** (`hostname -I` above) — the
+   camera panel then resolves `9090` against that same real address and
+   just works. This is the simplest fix and matches how the dashboard is
+   meant to be used.
+2. **Or forward port `9090` too**, in addition to `8080`, using the same
+   mechanism (e.g. VS Code's Ports panel → "Forward a Port" → `9090`). The
+   panel's own 3-second retry picks it up automatically — no page reload
+   needed.
+
+This isn't specific to the camera panel or this dashboard — any tool here
+that has a browser make a *second* connection to a *different* port than
+the one you loaded the page from will hit the same issue under
+port-forwarding. The camera panel is just the one place in this workspace
+that currently does that.
 
 ## Parameter reference
 

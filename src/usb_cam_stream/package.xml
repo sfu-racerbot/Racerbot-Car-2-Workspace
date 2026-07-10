@@ -3,7 +3,7 @@
 <package format="3">
   <name>usb_cam_stream</name>
   <version>0.1.0</version>
-  <description>Live MJPEG video stream from a USB webcam, served over plain HTTP so it can be viewed in any browser -- no ROS install, no plugins, no login needed on the viewing device. See docs/usb-camera-livestream.md.</description>
+  <description>Live MJPEG video stream from a USB webcam, served over plain HTTP so it can be viewed in any browser. Read-only: captures via V4L2 or subscribes to a sensor_msgs/Image topic (image_topic mode, used for the RealSense), never publishes anything -- no ROS install, no plugins, no login needed on the viewing device. See docs/usb-camera-livestream.md.</description>
   <maintainer email="bryanmaubc@gmail.com">racerbotcar-2</maintainer>
   <license>MIT</license>
 
@@ -11,6 +11,8 @@
   <depend>ament_index_python</depend>
   <depend>python3-tornado</depend>
   <depend>python3-opencv</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
 
   <test_depend>python3-pytest</test_depend>
 

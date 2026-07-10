@@ -7,6 +7,16 @@ as a live MJPEG video stream over plain HTTP: open http://<car-ip>:9090/
 in any browser and watch, no plugins, no WebRTC signaling, no ROS install
 needed on the viewing device.
 
+Alternate source mode: set the `image_topic` parameter to a
+sensor_msgs/Image topic (e.g. the RealSense's
+/camera/camera/color/image_raw) and the node subscribes to that instead of
+opening a V4L2 device. This exists because a camera whose device is
+already held open by its own ROS driver node (realsense2_camera_node holds
+the D435i's /dev/videoN exclusively) can't be captured a second time via
+V4L2 -- but its frames are right there on a topic. Everything downstream
+(the MJPEG endpoint, the web_dashboard camera panel that points at it) is
+identical in both modes. See docs/realsense-camera.md.
+
 Three concurrency models share this one process (an extra one compared to
 web_dashboard_node -- see that file's docstring for the base pattern this
 extends):
@@ -36,6 +46,8 @@ import threading
 import cv2
 import rclpy
 from rclpy.node import Node
+from cv_bridge import CvBridge
+from sensor_msgs.msg import Image
 
 import tornado.ioloop
 import tornado.iostream
@@ -80,15 +92,17 @@ class MJPEGStreamHandler(tornado.web.RequestHandler):
 
 
 class CameraStreamNode(Node):
-    """Owns the camera capture thread and builds the Tornado app; carries
-    no ROS subscriptions or publishers -- it never touches any other
-    node's topics, so it's safe to run alongside anything else in this
-    workspace, at any time, including during a race."""
+    """Owns the frame source (camera capture thread, or an image-topic
+    subscription in image_topic mode) and builds the Tornado app. It never
+    publishes anything -- read-only in both modes -- so it's safe to run
+    alongside anything else in this workspace, at any time, including
+    during a race."""
 
     def __init__(self):
         super().__init__('usb_cam_stream_node')
 
         self.declare_parameter('device', '/dev/video0')
+        self.declare_parameter('image_topic', '')   # non-empty switches source: ROS topic instead of V4L2
         self.declare_parameter('width', 1280)
         self.declare_parameter('height', 720)
         self.declare_parameter('capture_fps', 30)
@@ -98,6 +112,7 @@ class CameraStreamNode(Node):
         self.declare_parameter('port', 9090)
 
         self.device = self.get_parameter('device').value
+        self.image_topic = self.get_parameter('image_topic').value
         self.width = int(self.get_parameter('width').value)
         self.height = int(self.get_parameter('height').value)
         self.capture_fps = int(self.get_parameter('capture_fps').value)
@@ -106,19 +121,46 @@ class CameraStreamNode(Node):
         self.host = self.get_parameter('host').value
         self.port = int(self.get_parameter('port').value)
 
-        # Written only by capture_loop() (capture thread), read only by
-        # MJPEGStreamHandler (IOLoop thread) -- see module docstring.
+        # Written only by the frame source (capture thread, or the rclpy
+        # executor thread in image_topic mode -- exactly one of the two
+        # exists per instance), read only by MJPEGStreamHandler (IOLoop
+        # thread) -- see module docstring.
         self.latest_jpeg = None
         self.latest_seq = 0
 
         self._stop_event = threading.Event()
         self._cap = None
+        self._encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
 
-        self.get_logger().info(
-            f"usb_cam_stream_node ready: device={self.device} {self.width}x{self.height}"
-            f"@{self.capture_fps}fps. Once the web server starts, open "
-            f"http://<this car's IP>:{self.port}/ in a browser."
-        )
+        if self.image_topic:
+            # Topic source: frames arrive via subscription callbacks on the
+            # rclpy executor thread; no capture thread, and the device/
+            # width/height/capture_fps parameters are unused (the publisher
+            # of the topic owns those).
+            self._cv_bridge = CvBridge()
+            self.create_subscription(Image, self.image_topic, self._image_callback, 10)
+            self.get_logger().info(
+                f"usb_cam_stream_node ready: source topic={self.image_topic}. "
+                f"Once the web server starts, open "
+                f"http://<this car's IP>:{self.port}/ in a browser."
+            )
+        else:
+            self.get_logger().info(
+                f"usb_cam_stream_node ready: device={self.device} {self.width}x{self.height}"
+                f"@{self.capture_fps}fps. Once the web server starts, open "
+                f"http://<this car's IP>:{self.port}/ in a browser."
+            )
+
+    # ------------------------------------------------------------------------
+    # Topic source -- runs on the rclpy executor thread (image_topic mode only).
+    # ------------------------------------------------------------------------
+
+    def _image_callback(self, msg: Image):
+        frame = self._cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        ok, buf = cv2.imencode('.jpg', frame, self._encode_params)
+        if ok:
+            self.latest_jpeg = buf.tobytes()
+            self.latest_seq += 1
 
     # ------------------------------------------------------------------------
     # Capture thread -- the only thread that ever touches cv2.VideoCapture.
@@ -156,7 +198,6 @@ class CameraStreamNode(Node):
         unplugged mid-stream, rather than crashing the node -- a USB
         webcam is far more likely to get bumped loose on a moving car than
         the LiDAR/VESC's more permanent connectors."""
-        encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
         retry_period_sec = 3.0
 
         while not self._stop_event.is_set():
@@ -176,7 +217,7 @@ class CameraStreamNode(Node):
                 self._cap = None
                 continue
 
-            ok, buf = cv2.imencode('.jpg', frame, encode_params)
+            ok, buf = cv2.imencode('.jpg', frame, self._encode_params)
             if ok:
                 self.latest_jpeg = buf.tobytes()
                 self.latest_seq += 1
@@ -207,8 +248,9 @@ def main(args=None):
     ros_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     ros_thread.start()
 
-    capture_thread = threading.Thread(target=node.capture_loop, daemon=True)
-    capture_thread.start()
+    if not node.image_topic:
+        capture_thread = threading.Thread(target=node.capture_loop, daemon=True)
+        capture_thread.start()
 
     app = node.make_app()
     app.listen(node.port, address=node.host)

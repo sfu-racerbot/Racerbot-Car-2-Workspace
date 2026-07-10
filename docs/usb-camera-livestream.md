@@ -13,10 +13,12 @@ then open `http://<car-ip>:9090/` in any browser on the same network
 address — see [Security note](#security-note) below). **Port `9090`, not
 `8080`** — `web_dashboard` already listens on `8080` on this car.
 
-This node has **no ROS subscriptions or publishers of its own** — it
-talks directly to the camera over V4L2 and never touches `/drive` or any
-other topic, so it carries zero risk to how the car drives and can be
-left running at all times alongside anything else in this workspace.
+This node **never publishes anything** — by default it talks directly to
+the camera over V4L2 with no ROS subscriptions at all, and in
+[`image_topic` mode](#image_topic-mode-streaming-a-ros-image-topic-instead)
+it only *subscribes* — so either way it never touches `/drive` or any
+topic another node reads, carries zero risk to how the car drives, and can
+be left running at all times alongside anything else in this workspace.
 
 ## Picking a camera
 
@@ -104,6 +106,32 @@ If the camera isn't found or gets unplugged, the capture thread logs an
 error and keeps retrying every few seconds rather than crashing the node
 — check `v4l2-ctl --list-devices` to confirm the device path.
 
+## `image_topic` mode: streaming a ROS image topic instead
+
+Setting the `image_topic` parameter to a `sensor_msgs/Image` topic makes
+the node subscribe to that topic instead of opening a V4L2 device — same
+MJPEG endpoint, same browser side, different frame source. This exists for
+cameras whose V4L2 device is already held open exclusively by their own
+ROS driver: the RealSense D435i's `/dev/videoN` belongs to
+`realsense2_camera_node` (see [realsense-camera.md](realsense-camera.md)),
+so a second `cv2.VideoCapture` on it fails — but its frames are already on
+a topic.
+
+The shipped variant of this is the RealSense stream that fills
+[web_dashboard's camera panel](web-dashboard.md#what-youll-actually-see):
+
+```bash
+ros2 launch usb_cam_stream realsense_stream_launch.py   # needs realsense_camera_launch.py running
+```
+
+(`config/realsense_stream.yaml`: `image_topic: /camera/camera/color/image_raw`,
+port `9090` — the port `dashboard.js` looks for. Don't run this and
+`usb_cam_stream_launch.py` at the same time; both default to 9090.)
+
+In this mode `device`/`width`/`height`/`capture_fps` are unused — the
+publishing node owns the capture settings; `stream_fps`/`jpeg_quality`/
+`host`/`port` still apply as normal.
+
 ## Parameter reference
 
 All in `src/usb_cam_stream/config/usb_cam_stream.yaml`:
@@ -111,6 +139,7 @@ All in `src/usb_cam_stream/config/usb_cam_stream.yaml`:
 | Parameter | Default | Meaning |
 |---|---|---|
 | `device` | `/dev/video0` | V4L2 device path (or a bare index like `0`) — verify with `v4l2-ctl --list-devices`, especially if more than one video device is ever plugged in |
+| `image_topic` | `''` (off) | Non-empty switches the frame source to a `sensor_msgs/Image` topic and ignores `device`/`width`/`height`/`capture_fps` — see [`image_topic` mode](#image_topic-mode-streaming-a-ros-image-topic-instead) |
 | `width` / `height` | `1280` / `720` | Requested capture resolution — actual resolution falls back to the camera's nearest supported mode if this exact one isn't available |
 | `capture_fps` | `30` | Requested camera capture rate |
 | `host` | `0.0.0.0` | Listen on every network interface — see [security note](#security-note) |
@@ -145,9 +174,11 @@ address instead of exposing the port publicly.
 ```
 src/usb_cam_stream/
 ├── usb_cam_stream/
-│   └── camera_stream_node.py   # capture thread + Tornado MJPEG server
+│   └── camera_stream_node.py   # frame source (V4L2 capture thread, or image-topic subscription) + Tornado MJPEG server
 ├── web/
 │   └── index.html              # entire browser side: one <img> tag
-├── config/usb_cam_stream.yaml
-└── launch/usb_cam_stream_launch.py
+├── config/usb_cam_stream.yaml      # V4L2/UVC-webcam variant
+├── config/realsense_stream.yaml    # RealSense topic-mode variant (dashboard's camera panel)
+├── launch/usb_cam_stream_launch.py
+└── launch/realsense_stream_launch.py
 ```

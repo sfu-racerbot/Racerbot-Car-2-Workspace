@@ -233,6 +233,46 @@ def find_lookahead_index(seg_len: np.ndarray, nearest_index: int, lookahead_dist
 # 4. Offline raceline generation
 # ============================================================================
 
+def smooth_path(xy: np.ndarray, half_window: int, closed: bool = True) -> np.ndarray:
+    """Moving-average smoothing of a waypoint path: each point becomes the
+    mean of itself and `half_window` neighbors on each side.
+
+    The recorded waypoints come from particle-filter poses sampled every
+    ~0.15m, and localization jitter of even a couple of centimeters at
+    that spacing reads as *curvature* to estimate_path_curvature -- three
+    nearly-colinear points wiggled slightly produce a spuriously tight
+    circumcircle. That fake curvature then flows straight into
+    compute_velocity_profile as phantom braking zones in the middle of
+    straights. Averaging out the jitter before estimating curvature is
+    the single highest-leverage cleanup on profile quality.
+
+    For a closed loop the window wraps around the start/finish seam; for
+    an open path the ends are averaged over whatever neighbors actually
+    exist (the window shrinks at the boundaries rather than wrapping).
+    `half_window <= 0` returns the input unchanged. Smoothing pulls
+    corners slightly inward (toward the chord), which shortens and
+    *tightens* the line a little -- a conservative direction for the
+    velocity profile to err in.
+    """
+    n = len(xy)
+    if half_window <= 0 or n < 3:
+        return np.asarray(xy, dtype=np.float64).copy()
+    half_window = min(half_window, (n - 1) // 2)
+
+    kernel_size = 2 * half_window + 1
+    if closed:
+        padded = np.vstack([xy[-half_window:], xy, xy[:half_window]])
+        cumsum = np.cumsum(np.vstack([[[0.0, 0.0]], padded]), axis=0)
+        return (cumsum[kernel_size:] - cumsum[:-kernel_size]) / kernel_size
+
+    smoothed = np.empty_like(xy, dtype=np.float64)
+    for i in range(n):
+        lo = max(0, i - half_window)
+        hi = min(n, i + half_window + 1)
+        smoothed[i] = xy[lo:hi].mean(axis=0)
+    return smoothed
+
+
 def estimate_path_curvature(xy: np.ndarray, closed: bool = True) -> np.ndarray:
     """Per-waypoint path curvature via the Menger curvature of each point
     and its immediate neighbors -- no calculus or spline-fitting needed.
@@ -287,7 +327,8 @@ def estimate_path_curvature(xy: np.ndarray, closed: bool = True) -> np.ndarray:
 def compute_velocity_profile(seg_len: np.ndarray, curvature: np.ndarray,
                               v_max: float, v_min: float,
                               a_lat_max: float, a_accel_max: float, a_brake_max: float,
-                              closed: bool = True, smoothing_passes: int = 3) -> np.ndarray:
+                              closed: bool = True, smoothing_passes: int = 3,
+                              friction_ellipse: bool = True) -> np.ndarray:
     """Turn per-waypoint path curvature into a per-waypoint target speed.
     This is the core of "how fast should the car go here" -- three passes,
     each a standard, well-established piece of racing-line theory:
@@ -325,6 +366,22 @@ def compute_velocity_profile(seg_len: np.ndarray, curvature: np.ndarray,
     repeating them on an already-converged open path is a harmless no-op
     -- there is no need to special-case open vs. closed here.
 
+    With `friction_ellipse` (default on), passes (2)/(3) don't get the
+    tire's *full* longitudinal budget while the car is also cornering:
+    grip is one shared resource, and lateral acceleration spends it too.
+    The available longitudinal fraction follows the standard friction
+    ellipse -- (a_long/a_long_max)^2 + (a_lat/a_lat_max)^2 <= 1, so
+
+        a_long_available = a_long_max * sqrt(1 - (v^2*kappa / a_lat_max)^2)
+
+    evaluated at the neighbor whose speed is already known in each sweep.
+    On a straight (kappa ~ 0) this is the full budget; at a corner already
+    at the cornering limit it's zero (all grip is lateral). The effect is
+    strictly-lower (more conservative) speeds around corner entry/exit --
+    honest about physics the uncoupled version quietly ignores. Pass
+    `friction_ellipse=False` for the old lateral/longitudinal-independent
+    behavior (useful for comparing profiles).
+
     This is *not* a time-optimal racing line -- true time-optimality needs
     a nonlinear optimizer over both the path geometry and the speed
     simultaneously (e.g. minimum-curvature QP solvers like TUM's
@@ -340,12 +397,23 @@ def compute_velocity_profile(seg_len: np.ndarray, curvature: np.ndarray,
     v_corner = np.sqrt(a_lat_max / np.maximum(curvature, eps))
     v = np.minimum(v_corner, v_max).astype(float)
 
+    def long_fraction(speed: float, kappa: float) -> float:
+        # Fraction of the longitudinal budget left after cornering at
+        # `speed` through curvature `kappa` (friction ellipse). v_corner
+        # already caps a_lat at a_lat_max, so the sqrt argument only goes
+        # negative through float round-off -- clamp at 0.
+        if not friction_ellipse:
+            return 1.0
+        lat_fraction = (speed * speed * kappa) / a_lat_max
+        return math.sqrt(max(0.0, 1.0 - lat_fraction * lat_fraction))
+
     for _ in range(max(1, smoothing_passes)):
         # Forward / acceleration-limited sweep.
         fwd_order = range(n) if closed else range(1, n)
         for i in fwd_order:
             prev_i = (i - 1) % n
-            v_cap = math.sqrt(v[prev_i] ** 2 + 2.0 * a_accel_max * seg_len[prev_i])
+            a_avail = a_accel_max * long_fraction(v[prev_i], curvature[prev_i])
+            v_cap = math.sqrt(v[prev_i] ** 2 + 2.0 * a_avail * seg_len[prev_i])
             if v_cap < v[i]:
                 v[i] = v_cap
 
@@ -353,7 +421,8 @@ def compute_velocity_profile(seg_len: np.ndarray, curvature: np.ndarray,
         bwd_order = range(n - 1, -1, -1) if closed else range(n - 2, -1, -1)
         for i in bwd_order:
             next_i = (i + 1) % n
-            v_cap = math.sqrt(v[next_i] ** 2 + 2.0 * a_brake_max * seg_len[i])
+            a_avail = a_brake_max * long_fraction(v[next_i], curvature[next_i])
+            v_cap = math.sqrt(v[next_i] ** 2 + 2.0 * a_avail * seg_len[i])
             if v_cap < v[i]:
                 v[i] = v_cap
 
@@ -689,3 +758,80 @@ def pick_pass_side(ranges: np.ndarray, start_idx: int, end_idx: int, window: int
     left_room = float(np.mean(left)) if left.size else 0.0
     right_room = float(np.mean(right)) if right.size else 0.0
     return 1 if left_room >= right_room else -1
+
+
+# ----------------------------------------------------------------------------
+# Map-subtraction opponent detection
+# ----------------------------------------------------------------------------
+#
+# detect_opponent_cluster above has to *guess* "car vs. wall" from cluster
+# shape alone, which is exactly what fools it on curving walls and clipped
+# clusters. When a map and a localized pose are available (they are,
+# whenever pure_pursuit is racing), there's a categorically better signal:
+# ray-cast the scan the LIDAR *should* see from the current pose given
+# only the map (see map_subtraction.py for the range_libc wrapper), and
+# compare it with the scan it *actually* sees. Any beam that comes back
+# meaningfully shorter than the map predicts is, by definition, hitting
+# something that is not in the map -- an opponent, wherever it is and
+# whatever the wall behind it looks like. The comparison/clustering here
+# is kept free of range_libc so it stays unit-testable like everything
+# else in this file.
+
+def dynamic_beam_mask(measured: np.ndarray, expected: np.ndarray,
+                       margin: float, range_min: float = 0.0) -> np.ndarray:
+    """Boolean mask of beams whose measured range is at least `margin`
+    shorter than the map-predicted range -- i.e. beams hitting something
+    that is not in the map. Non-finite or sub-`range_min` measurements are
+    never flagged (an invalid beam is *unknown*, not evidence of an
+    object), and neither is anything the map already explains.
+    """
+    measured = np.asarray(measured, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    valid = np.isfinite(measured) & (measured >= range_min)
+    return valid & (measured < (expected - margin))
+
+
+def detect_dynamic_cluster(measured: np.ndarray, expected: np.ndarray,
+                            angle_min: float, angle_increment: float,
+                            margin: float, min_width: float, max_width: float,
+                            max_engagement_range: float, range_min: float = 0.0,
+                            cluster_gap_threshold: float = 0.3):
+    """Find the closest car-plausible cluster of *dynamic* beams -- beams
+    the map fails to explain (see dynamic_beam_mask). Contiguous flagged
+    beams form a cluster, split where consecutive measured ranges jump by
+    more than `cluster_gap_threshold` (two unmapped objects at different
+    depths must not merge into one). Width and engagement-range gating
+    reuse the same limits as the heuristic detector, but note the width
+    check here is only guarding against garbage (a flock of noise beams,
+    two cars merged), not doing the car-vs-wall discrimination -- the map
+    subtraction itself already did that.
+
+    Returns (start_idx, end_idx, centroid_range, centroid_angle) in the
+    same shape detect_opponent_cluster returns, or None. Indices are into
+    `measured`/`expected` -- if the caller downsampled the scan, it owns
+    mapping them back (and must pass the *downsampled* angle_increment).
+    """
+    mask = dynamic_beam_mask(measured, expected, margin, range_min)
+
+    best = None
+    start = None
+    n = len(measured)
+    for i in range(n + 1):
+        in_cluster = i < n and mask[i]
+        split = (in_cluster and start is not None
+                 and abs(float(measured[i]) - float(measured[i - 1])) > cluster_gap_threshold)
+        if in_cluster and start is None:
+            start = i
+            continue
+        if in_cluster and not split:
+            continue
+        if start is not None:
+            end = i - 1
+            width, centroid_range, centroid_angle = cluster_geometry(
+                measured, angle_min, angle_increment, start, end)
+            if (min_width <= width <= max_width
+                    and centroid_range <= max_engagement_range
+                    and (best is None or centroid_range < best[2])):
+                best = (start, end, centroid_range, centroid_angle)
+            start = i if split else None
+    return best
