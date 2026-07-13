@@ -70,8 +70,33 @@ pure_pursuit_node:
     overtake_closing_margin: 0.3      # m/s -- must be closing at least this fast to bother attempting a pass
     overtake_clear_margin: 1.0        # meters of track distance past the opponent before resuming the racing line
     overtake_lateral_offset: 0.5      # meters, sideways nudge to the steering target while passing
+    # Mid-pass the opponent is *expected* to leave the forward LIDAR cone
+    # (it's alongside), so opponent_lost_timeout_sec deliberately does NOT
+    # cancel an active overtake -- the pass completes on ego progress past
+    # the opponent's dead-reckoned position instead. This is the hard cap:
+    # blind for longer than this and the dead-reckoned position is no
+    # longer trustworthy, so the pass is abandoned.
+    overtake_max_blind_sec: 3.0
     laser_offset_x: 0.27              # meters -- LIDAR mounting offset from base_link, matches hardware-reference.md
     laser_offset_y: 0.0
+
+    # --- How opponents are recognized in the scan ---
+    # 'heuristic': cluster shape alone (car-sized, isolated) -- works with
+    #     no map, but can be fooled by wall corners and clipped clusters.
+    # 'map': ray-cast the scan the LIDAR *should* see from the current
+    #     pose using the saved map (same range_libc library the particle
+    #     filter uses), and flag whatever is meaningfully closer than the
+    #     map predicts -- an opponent by definition, no shape guessing.
+    #     Requires the map server running (it already is whenever the
+    #     particle filter is); falls back to 'heuristic' with a warning
+    #     until a map arrives. Still gated to car-plausible widths within
+    #     opponent_engagement_range.
+    # Shipping default stays 'heuristic' until 'map' has been validated
+    # on-car (wheels-off-ground first, as always).
+    opponent_detection_mode: heuristic
+    map_topic: /map
+    map_beam_step: 4              # ray-cast every Nth beam -- plenty for a car-sized object, keeps the per-tick cost tiny
+    map_subtraction_margin: 0.4   # meters -- measured must be this much shorter than the map predicts to count as dynamic
 
     # --- Deadman button (workspace policy -- see docs/architecture.md) ---
     # Mandatory workspace-wide safety policy: the car must not move under

@@ -546,16 +546,19 @@ class PurePursuitNode(Node):
         return max(0, min(lo_idx, n - 1)), max(0, min(hi_idx, n - 1))
 
     def _closest_in_cone(self, scan: LaserScan, fov_deg: float) -> float:
-        """Closest *valid* (finite, positive) reading within a forward
-        cone, or +inf if the cone is empty or nothing valid was seen.
-        Used for yes/no distance checks (hard-stop, avoidance trigger)
-        that only need to know *how close*, not *which beam*.
+        """Closest *valid* (finite, positive, >= the sensor's own
+        range_min) reading within a forward cone, or +inf if the cone is
+        empty or nothing valid was seen. Readings below range_min are the
+        sensor's "invalid" encoding, not a real 4cm obstacle -- counting
+        them would emergency-stop the car on scan noise. Used for yes/no
+        distance checks (hard-stop, avoidance trigger) that only need to
+        know *how close*, not *which beam*.
         """
         lo_idx, hi_idx = self._fov_indices(scan, fov_deg)
         if hi_idx <= lo_idx:
             return math.inf
         window = np.array(scan.ranges[lo_idx:hi_idx + 1], dtype=np.float64)
-        window = window[np.isfinite(window) & (window > 0.0)]
+        window = window[np.isfinite(window) & (window > 0.0) & (window >= scan.range_min)]
         if window.size == 0:
             return math.inf
         return float(np.min(window))
@@ -620,6 +623,56 @@ class PurePursuitNode(Node):
         angle = float(np.clip(angle, -self.max_steering_angle, self.max_steering_angle))
         return angle, self.avoidance_speed
 
+    def _detect_opponent(self, scan: LaserScan, ranges: np.ndarray,
+                         laser_world_x: float, laser_world_y: float):
+        """One opponent detection, by whichever detector is configured
+        and available: map subtraction (ray-cast what the LIDAR *should*
+        see from the current pose, anything meaningfully shorter is not
+        in the map -- see map_subtraction.py / racing_math's
+        detect_dynamic_cluster) when mode is 'map' and a map has arrived,
+        else the shape-based heuristic. Returns
+        (start_idx, end_idx, centroid_range, centroid_angle) with indices
+        into the *full* scan either way, or None. Both paths share the
+        same forward-FOV gate: a car far off to the side is not one we
+        are racing against right now.
+        """
+        if self.opponent_detection_mode == 'map' and self.map_ray_caster is not None:
+            # Every map_beam_step-th beam is plenty of resolution for a
+            # car-sized object, and keeps the per-tick ray-cast cost tiny.
+            # The *raw* ranges go in (not the sanitized copy) -- the
+            # dynamic-beam mask treats NaN/inf/sub-range_min as unknown,
+            # and a sanitized NaN->0.0 would look like a phantom object
+            # closer than the map predicts.
+            step = self.map_beam_step
+            measured = np.array(scan.ranges, dtype=np.float64)[::step]
+            beam_angles = scan.angle_min + np.arange(len(scan.ranges))[::step] * scan.angle_increment
+            expected = self.map_ray_caster.expected_ranges(
+                laser_world_x, laser_world_y, self.car_yaw, beam_angles)
+            candidate = racing_math.detect_dynamic_cluster(
+                measured, expected, scan.angle_min, scan.angle_increment * step,
+                self.map_subtraction_margin,
+                self.opponent_min_width, self.opponent_max_width,
+                self.opponent_engagement_range, range_min=scan.range_min,
+                cluster_gap_threshold=self.opponent_cluster_gap)
+            if candidate is not None:
+                # Indices come back in downsampled space -- map them onto
+                # the full scan for pick_pass_side and friends.
+                candidate = (candidate[0] * step, candidate[1] * step,
+                             candidate[2], candidate[3])
+        else:
+            candidate = racing_math.detect_opponent_cluster(
+                ranges, scan.angle_min, scan.angle_increment, self.max_range,
+                self.opponent_min_width, self.opponent_max_width,
+                self.opponent_engagement_range, self.opponent_cluster_gap,
+                self.opponent_open_side_margin)
+
+        if candidate is None:
+            return None
+        half_fov = math.radians(self.avoidance_fov_deg) / 2.0
+        if not (-half_fov <= candidate[3] <= half_fov):
+            return None
+        return candidate
+
     def _update_opponent_and_overtake(self, nearest_idx: int, target_idx: int):
         """Look for another car in the live scan, track its progress along
         the racing line, and decide whether to start, continue, or end an
@@ -630,6 +683,13 @@ class PurePursuitNode(Node):
         """
         now_sec = self.get_clock().now().nanoseconds / 1e9
 
+        # The LIDAR's own map-frame position -- needed both as the origin
+        # for map-subtraction ray casting and to place a detected cluster
+        # in the map frame below, so computed once up front.
+        cos_yaw, sin_yaw = math.cos(self.car_yaw), math.sin(self.car_yaw)
+        laser_world_x = self.car_x + self.laser_offset_x * cos_yaw - self.laser_offset_y * sin_yaw
+        laser_world_y = self.car_y + self.laser_offset_x * sin_yaw + self.laser_offset_y * cos_yaw
+
         detection = None
         ranges = None
         if self.last_scan is not None and self._seconds_since(self.last_scan_time) <= self.scan_timeout_sec:
@@ -637,15 +697,7 @@ class PurePursuitNode(Node):
             ranges = np.nan_to_num(np.array(scan.ranges, dtype=np.float64),
                                     nan=0.0, posinf=self.max_range, neginf=0.0)
             ranges = np.clip(ranges, 0.0, self.max_range)
-            candidate = racing_math.detect_opponent_cluster(
-                ranges, scan.angle_min, scan.angle_increment, self.max_range,
-                self.opponent_min_width, self.opponent_max_width,
-                self.opponent_engagement_range, self.opponent_cluster_gap,
-                self.opponent_open_side_margin)
-            if candidate is not None:
-                half_fov = math.radians(self.avoidance_fov_deg) / 2.0
-                if -half_fov <= candidate[3] <= half_fov:
-                    detection = candidate
+            detection = self._detect_opponent(scan, ranges, laser_world_x, laser_world_y)
 
         start_idx = end_idx = None
         if detection is not None:
@@ -654,9 +706,6 @@ class PurePursuitNode(Node):
             # Where that cluster actually is in the map frame, so its
             # progress along the racing line can be measured the same way
             # the ego car's own position is.
-            cos_yaw, sin_yaw = math.cos(self.car_yaw), math.sin(self.car_yaw)
-            laser_world_x = self.car_x + self.laser_offset_x * cos_yaw - self.laser_offset_y * sin_yaw
-            laser_world_y = self.car_y + self.laser_offset_x * sin_yaw + self.laser_offset_y * cos_yaw
             world_angle = self.car_yaw + centroid_angle
             opponent_x = laser_world_x + centroid_range * math.cos(world_angle)
             opponent_y = laser_world_y + centroid_range * math.sin(world_angle)
@@ -667,32 +716,21 @@ class PurePursuitNode(Node):
             self.opponent.prev_nearest_index = opp_idx
             self.opponent.update(float(self.cumulative_arc_length[opp_idx]), now_sec)
 
-        if self.opponent.arc_length is None or not self.opponent.is_fresh(now_sec):
-            # Never seen one yet, or haven't seen one recently enough to
-            # trust its last known position -- nothing to react to, or
-            # nothing left to finish reacting to.
-            self.overtake_active = False
-            return None
-
         ego_arc_length = float(self.cumulative_arc_length[nearest_idx])
-        gap_ahead = racing_math.track_progress_gap(
-            ego_arc_length, self.opponent.arc_length, self.total_track_length)
-        ego_speed = float(self.speed_profile[nearest_idx])
-        closing_fast_enough = (ego_speed - self.opponent.progress_rate) > self.overtake_closing_margin
 
-        if self.overtake_active:
-            # Already committed -- keep going until safely past. This is
-            # *not* re-gated on a fresh detection this exact tick: once
-            # alongside or just past an opponent, it commonly drops clean
-            # out of the forward LIDAR cone, and that must not look like
-            # "lost it, cancel" -- the last tracked position (still
-            # "fresh" per the check above) is enough to tell whether the
-            # pass is actually complete yet.
-            if gap_ahead > self.total_track_length - self.overtake_clear_margin:
-                self.overtake_active = False
-        elif detection is not None and gap_ahead <= self.overtake_trigger_gap and closing_fast_enough:
-            # Starting a *new* overtake does need this tick's actual scan
-            # -- picking which side to pass on reads directly from it.
+        if not self.overtake_active:
+            # Not committed to anything yet: only a *recent* sighting is
+            # worth reacting to, and starting a new overtake additionally
+            # needs this tick's actual scan -- picking which side to pass
+            # on reads directly from it.
+            if self.opponent.arc_length is None or not self.opponent.is_fresh(now_sec):
+                return None
+            gap_ahead = racing_math.track_progress_gap(
+                ego_arc_length, self.opponent.arc_length, self.total_track_length)
+            ego_speed = float(self.speed_profile[nearest_idx])
+            closing_fast_enough = (ego_speed - self.opponent.progress_rate) > self.overtake_closing_margin
+            if detection is None or gap_ahead > self.overtake_trigger_gap or not closing_fast_enough:
+                return None
             self.overtake_active = True
             self.overtake_side = racing_math.pick_pass_side(ranges, start_idx, end_idx)
             self.get_logger().info(
@@ -701,9 +739,35 @@ class PurePursuitNode(Node):
                 f"{'left' if self.overtake_side > 0 else 'right'}.",
                 throttle_duration_sec=1.0,
             )
-
-        if not self.overtake_active:
-            return None
+        else:
+            # Mid-pass. Alongside or just past the opponent it is
+            # *guaranteed* to leave the forward LIDAR cone, so "no fresh
+            # detection" must not cancel the pass and snap the steering
+            # back onto a racing line the opponent may still be occupying.
+            # Instead, dead-reckon where the opponent must be by now
+            # (last seen position advanced at its tracked progress rate)
+            # and finish the pass on *ego progress*: it's over only once
+            # the ego car is far enough past that predicted position.
+            blind_sec = self.opponent.seconds_since_seen(now_sec)
+            if blind_sec > self.overtake_max_blind_sec:
+                # Blind for so long the dead-reckoned position is no
+                # longer trustworthy -- give up the offset line rather
+                # than keep driving it on a stale guess. (The reactive
+                # safety net still covers whatever is actually out there.)
+                self.get_logger().warn(
+                    f"overtake: opponent unseen for {blind_sec:.1f}s -- abandoning the pass.",
+                    throttle_duration_sec=1.0,
+                )
+                self.overtake_active = False
+                return None
+            predicted_arc = self.opponent.predicted_arc_length(now_sec, self.total_track_length)
+            gap_ahead = racing_math.track_progress_gap(
+                ego_arc_length, predicted_arc, self.total_track_length)
+            if gap_ahead > self.total_track_length - self.overtake_clear_margin:
+                self.get_logger().info("overtake: clear of the opponent -- back to the racing line.",
+                                       throttle_duration_sec=1.0)
+                self.overtake_active = False
+                return None
 
         next_idx = (target_idx + 1) % self.num_waypoints if self.closed_loop \
             else min(target_idx + 1, self.num_waypoints - 1)

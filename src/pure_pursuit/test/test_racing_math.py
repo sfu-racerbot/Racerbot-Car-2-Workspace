@@ -414,3 +414,209 @@ def test_pick_pass_side_prefers_the_more_open_side_right():
     ranges[35:55] = 1.5   # less room to the left
     ranges[5:25] = 8.0    # more room to the right
     assert racing_math.pick_pass_side(ranges, start_idx=25, end_idx=34) == -1
+
+
+# ============================================================================
+# Waypoint smoothing (smooth_path)
+# ============================================================================
+
+def test_smooth_path_zero_window_returns_input_unchanged():
+    xy = _circle_points(radius=3.0, n=50)
+    out = racing_math.smooth_path(xy, half_window=0, closed=True)
+    assert np.allclose(out, xy)
+    assert out is not xy  # a copy, so callers can't mutate the original
+
+
+def test_smooth_path_removes_jitter_curvature_from_a_circle():
+    # Localization jitter on recorded waypoints reads as *curvature* to
+    # the Menger estimator -- phantom braking zones. Smoothing must knock
+    # that noise down while keeping the underlying geometry (mean
+    # curvature ~ 1/R) intact. Geometry matches a real recording:
+    # ~0.15m waypoint spacing (n=126 on a 3m-radius circle) with ~1cm of
+    # particle-filter jitter, and the generator's default half_window=3.
+    radius, n = 3.0, 126
+    rng = np.random.default_rng(42)
+    xy = _circle_points(radius, n=n) + rng.normal(scale=0.01, size=(n, 2))
+
+    kappa_raw = racing_math.estimate_path_curvature(xy, closed=True)
+    smoothed = racing_math.smooth_path(xy, half_window=3, closed=True)
+    kappa_smooth = racing_math.estimate_path_curvature(smoothed, closed=True)
+
+    assert np.var(kappa_smooth) < np.var(kappa_raw) / 10.0
+    assert float(np.mean(kappa_smooth)) == pytest.approx(1.0 / radius, rel=0.1)
+    # And the point of it all: the raw jittered line reads dramatically
+    # *tighter* than the real geometry (phantom braking zones); the
+    # smoothed one doesn't.
+    assert float(np.mean(kappa_raw)) > 2.0 / radius
+
+
+def test_smooth_path_closed_loop_has_no_seam():
+    # The whole point of closed=True: index 0 must be averaged with its
+    # *wrapped* neighbors, not treated as a path end. On a symmetric
+    # circle every smoothed point then sits at the same radius -- any
+    # seam artifact shows up as an outlier radius at the start/finish.
+    xy = _circle_points(radius=3.0, n=100)
+    smoothed = racing_math.smooth_path(xy, half_window=4, closed=True)
+    radii = np.hypot(smoothed[:, 0], smoothed[:, 1])
+    assert float(radii.max() - radii.min()) < 1e-9
+
+
+def test_smooth_path_open_path_keeps_a_straight_line_straight():
+    # Open-path boundary handling (the shrinking window) must not bend
+    # the ends of a straight line.
+    xy = np.column_stack([np.linspace(0.0, 10.0, 50), np.zeros(50)])
+    smoothed = racing_math.smooth_path(xy, half_window=3, closed=False)
+    assert np.allclose(smoothed[:, 1], 0.0)
+    kappa = racing_math.estimate_path_curvature(smoothed, closed=False)
+    assert np.max(np.abs(kappa)) < 1e-9
+
+
+# ============================================================================
+# Friction-ellipse coupling in the velocity profile
+# ============================================================================
+
+def test_friction_ellipse_profile_is_never_faster_than_uncoupled():
+    # Coupling only ever *removes* longitudinal budget (sqrt(1-x^2) <= 1),
+    # so the coupled profile must be <= the uncoupled one at every point.
+    xy, _, _ = _stadium_points()
+    seg_len = racing_math.compute_segment_lengths(xy, closed=True)
+    kappa = racing_math.estimate_path_curvature(xy, closed=True)
+    common = dict(v_max=6.0, v_min=0.5, a_lat_max=8.0,
+                  a_accel_max=3.0, a_brake_max=8.0, closed=True)
+    coupled = racing_math.compute_velocity_profile(seg_len, kappa, friction_ellipse=True, **common)
+    uncoupled = racing_math.compute_velocity_profile(seg_len, kappa, friction_ellipse=False, **common)
+    assert np.all(coupled <= uncoupled + 1e-9)
+    # ...and it genuinely bites somewhere around the hairpin entry/exit,
+    # not just degenerates to an equal profile.
+    assert np.any(coupled < uncoupled - 1e-3)
+
+
+def test_friction_ellipse_profile_still_respects_braking_capability():
+    # The coupled profile brakes with *at most* a_brake_max available
+    # (less mid-corner), so the plain uncoupled braking bound must still
+    # hold everywhere.
+    xy, _, _ = _stadium_points()
+    seg_len = racing_math.compute_segment_lengths(xy, closed=True)
+    kappa = racing_math.estimate_path_curvature(xy, closed=True)
+    a_brake_max = 8.0
+    speed = racing_math.compute_velocity_profile(
+        seg_len, kappa, v_max=6.0, v_min=0.5,
+        a_lat_max=8.0, a_accel_max=3.0, a_brake_max=a_brake_max,
+        closed=True, friction_ellipse=True)
+    n = len(speed)
+    for i in range(n):
+        j = (i + 1) % n
+        if speed[i] > speed[j] + 1e-9:
+            allowed = math.sqrt(speed[j] ** 2 + 2.0 * a_brake_max * seg_len[i]) + 1e-6
+            assert speed[i] <= allowed
+
+
+def test_friction_ellipse_changes_nothing_on_a_constant_curvature_loop():
+    # On a pure circle the profile is the uniform cornering limit
+    # everywhere; there is no accel/brake activity for the coupling to
+    # scale, so both variants must agree.
+    xy = _circle_points(radius=3.0, n=200)
+    seg_len = racing_math.compute_segment_lengths(xy, closed=True)
+    kappa = racing_math.estimate_path_curvature(xy, closed=True)
+    common = dict(v_max=100.0, v_min=0.1, a_lat_max=8.0,
+                  a_accel_max=3.0, a_brake_max=8.0, closed=True)
+    coupled = racing_math.compute_velocity_profile(seg_len, kappa, friction_ellipse=True, **common)
+    uncoupled = racing_math.compute_velocity_profile(seg_len, kappa, friction_ellipse=False, **common)
+    assert coupled == pytest.approx(uncoupled, rel=1e-6)
+
+
+# ============================================================================
+# Map-subtraction opponent detection (dynamic_beam_mask / detect_dynamic_cluster)
+# ============================================================================
+
+def test_dynamic_beam_mask_wall_present_in_map_is_not_flagged():
+    # A wall the map already explains -- measured matches expected -- is
+    # not a dynamic obstacle, no matter how close it is. This is exactly
+    # the false positive the shape heuristic can't rule out.
+    expected = np.full(50, 2.0)
+    measured = expected + np.random.default_rng(0).normal(scale=0.05, size=50)
+    mask = racing_math.dynamic_beam_mask(measured, expected, margin=0.4)
+    assert not np.any(mask)
+
+
+def test_dynamic_beam_mask_flags_only_beams_shorter_than_the_map_predicts():
+    expected = np.full(50, 5.0)
+    measured = expected.copy()
+    measured[10:15] = 2.0   # something not in the map
+    measured[30:35] = 4.8   # shorter, but within the margin -- noise, not an object
+    mask = racing_math.dynamic_beam_mask(measured, expected, margin=0.4)
+    assert np.array_equal(np.nonzero(mask)[0], np.arange(10, 15))
+
+
+def test_dynamic_beam_mask_never_flags_invalid_beams():
+    # NaN, inf, and sub-range_min readings are *unknown*, not evidence of
+    # an object closer than the map predicts.
+    expected = np.full(6, 5.0)
+    measured = np.array([np.nan, np.inf, -np.inf, 0.02, 2.0, 5.0])
+    mask = racing_math.dynamic_beam_mask(measured, expected, margin=0.4, range_min=0.05)
+    assert np.array_equal(mask, [False, False, False, False, True, False])
+
+
+def _map_scan(n=100, angle_min=-0.5, angle_increment=0.01, wall_range=5.0):
+    expected = np.full(n, wall_range)
+    return expected.copy(), expected
+
+
+def test_detect_dynamic_cluster_finds_a_car_in_front_of_a_wall():
+    # The scenario the heuristic detector is explicitly blind to: an
+    # opponent close to a wall behind it. The map explains the wall, so
+    # the residual *is* the car.
+    measured, expected = _map_scan()
+    measured[40:56] = 2.0  # chord ~ 2.0 * 15 * 0.01 = 0.30m -- car-sized
+    result = racing_math.detect_dynamic_cluster(
+        measured, expected, angle_min=-0.5, angle_increment=0.01,
+        margin=0.4, min_width=0.15, max_width=0.7, max_engagement_range=5.0)
+    assert result is not None
+    start, end, centroid_range, centroid_angle = result
+    assert (start, end) == (40, 55)
+    assert centroid_range == pytest.approx(2.0)
+    assert centroid_angle == pytest.approx(-0.5 + 47 * 0.01)
+
+
+def test_detect_dynamic_cluster_ignores_a_scene_the_map_fully_explains():
+    measured, expected = _map_scan()
+    result = racing_math.detect_dynamic_cluster(
+        measured, expected, angle_min=-0.5, angle_increment=0.01,
+        margin=0.4, min_width=0.15, max_width=0.7, max_engagement_range=5.0)
+    assert result is None
+
+
+def test_detect_dynamic_cluster_ignores_objects_beyond_engagement_range():
+    measured, expected = _map_scan(wall_range=9.0)
+    measured[40:56] = 7.0  # dynamic, but too far to matter yet
+    result = racing_math.detect_dynamic_cluster(
+        measured, expected, angle_min=-0.5, angle_increment=0.01,
+        margin=0.4, min_width=0.15, max_width=0.7, max_engagement_range=5.0)
+    assert result is None
+
+
+def test_detect_dynamic_cluster_rejects_wall_sized_residuals():
+    # A huge unmapped region (someone moved a whole wall, or the map is
+    # stale) must not be "an opponent" -- width gating still applies.
+    measured, expected = _map_scan()
+    measured[10:90] = 2.0  # chord ~ 2.0 * 79 * 0.01 = 1.58m -- way too wide
+    result = racing_math.detect_dynamic_cluster(
+        measured, expected, angle_min=-0.5, angle_increment=0.01,
+        margin=0.4, min_width=0.15, max_width=0.7, max_engagement_range=5.0)
+    assert result is None
+
+
+def test_detect_dynamic_cluster_returns_the_closest_of_two_and_splits_on_depth():
+    # Two unmapped objects at clearly different depths, angularly
+    # adjacent: the depth jump must split them into two clusters (not one
+    # too-wide blob), and the closer one must win.
+    measured, expected = _map_scan()
+    measured[40:48] = 3.0   # farther object (chord ~ 3.0*7*0.01 = 0.21m)
+    measured[48:59] = 1.5   # closer object (chord ~ 1.5*10*0.01 = 0.15m)
+    result = racing_math.detect_dynamic_cluster(
+        measured, expected, angle_min=-0.5, angle_increment=0.01,
+        margin=0.4, min_width=0.10, max_width=0.7, max_engagement_range=5.0)
+    assert result is not None
+    start, end, centroid_range, _ = result
+    assert (start, end) == (48, 58)
+    assert centroid_range == pytest.approx(1.5)

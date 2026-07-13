@@ -19,6 +19,7 @@ already-covered deadman gate itself.
 import math
 import os
 
+import numpy as np
 import pytest
 import rclpy
 from geometry_msgs.msg import PoseStamped
@@ -171,3 +172,177 @@ def test_overtake_resolves_once_ego_is_past_the_opponent(node):
     for _ in range(3):
         node.control_loop()
     assert node.overtake_active is False
+
+
+def test_recovers_after_a_localization_jump(node):
+    # The nearest-waypoint search is windowed (+/-40) around last tick's
+    # index. A particle-filter re-convergence can legally teleport the
+    # pose to a completely different part of the track -- outside that
+    # window -- and the node must re-lock with a global search and keep
+    # driving, not stop until someone restarts it.
+    published = _capture_published(node)
+    node.scan_callback(_clear_scan())
+    _set_pose(node, -1.5, -1.2, 0.0)   # bottom straight, near waypoint ~3
+    node.control_loop()
+    assert published[-1].drive.speed > 0.0  # sanity: driving normally
+
+    # Localization jumps to the *top* straight (~50 waypoints away,
+    # outside the +/-40 window), heading along the track there.
+    _set_pose(node, 2.0, 1.2, math.pi)
+    node.control_loop()
+    assert published[-1].drive.speed > 0.0, \
+        "a clean pose elsewhere on the track must re-lock via global search, not stop forever"
+
+
+def test_stays_stopped_when_genuinely_lost(node):
+    # The recovery above must not weaken the actual watchdog: a pose far
+    # from the track everywhere is still "lost", still a stop.
+    published = _capture_published(node)
+    node.scan_callback(_clear_scan())
+    _set_pose(node, 20.0, 20.0, 0.0)
+    node.control_loop()
+    assert published[-1].drive.speed == 0.0
+
+
+def test_overtake_survives_losing_sight_of_the_opponent_mid_pass(node):
+    # Mid-pass, alongside the opponent, it is *guaranteed* to be outside
+    # the forward detection cone -- typically for longer than
+    # opponent_lost_timeout_sec (1.0s). The old logic canceled the
+    # overtake right then and snapped the steering target back onto the
+    # racing line the opponent was still occupying.
+    scan, _center = _car_ahead_scan()
+    node.scan_callback(scan)
+    for step in range(4):
+        _set_pose(node, -1.5 + step * 0.2, -1.2, 0.0)
+        node.control_loop()
+    assert node.overtake_active is True
+
+    node.scan_callback(_clear_scan())          # opponent out of the cone
+    node.opponent.last_update_time -= 2.0      # ...and for 2s already (> lost timeout, < blind cap)
+    _set_pose(node, -0.7, -1.2, 0.0)           # ego still clearly *behind* the opponent
+    node.control_loop()
+    assert node.overtake_active is True, \
+        "losing sight mid-pass must not cancel the pass while still behind the opponent"
+
+
+def test_overtake_aborts_after_too_long_blind(node):
+    # The counterpart cap: blind for longer than overtake_max_blind_sec
+    # and the dead-reckoned opponent position can't be trusted anymore --
+    # holding the offset line on a stale guess is worse than giving up.
+    scan, _center = _car_ahead_scan()
+    node.scan_callback(scan)
+    for step in range(4):
+        _set_pose(node, -1.5 + step * 0.2, -1.2, 0.0)
+        node.control_loop()
+    assert node.overtake_active is True
+
+    node.scan_callback(_clear_scan())
+    node.opponent.last_update_time -= 5.0      # well past overtake_max_blind_sec (3.0)
+    _set_pose(node, -0.7, -1.2, 0.0)
+    node.control_loop()
+    assert node.overtake_active is False
+
+
+# ============================================================================
+# Map-subtraction detection mode
+# ============================================================================
+
+@pytest.fixture
+def map_mode_node(profiled_csv):
+    """Same as `node`, but with opponent_detection_mode:=map."""
+    rclpy.init(args=['--ros-args',
+                     '-p', f'waypoints_file:={profiled_csv}',
+                     '-p', 'enable_deadman:=false',
+                     '-p', 'opponent_detection_mode:=map'])
+    n = PurePursuitNode()
+    yield n
+    n.destroy_node()
+    rclpy.shutdown()
+
+
+def _synthetic_map(size_px=400, resolution=0.05, origin=-10.0):
+    """A 20x20m free arena with 2-cell walls on the border -- big enough
+    that the whole example stadium track sits in mapped-free space."""
+    from nav_msgs.msg import OccupancyGrid
+    grid = np.zeros((size_px, size_px), dtype=np.int8)
+    grid[:2, :] = 100
+    grid[-2:, :] = 100
+    grid[:, :2] = 100
+    grid[:, -2:] = 100
+    msg = OccupancyGrid()
+    msg.header.frame_id = 'map'
+    msg.info.resolution = resolution
+    msg.info.width = size_px
+    msg.info.height = size_px
+    msg.info.origin.position.x = origin
+    msg.info.origin.position.y = origin
+    msg.info.origin.orientation.w = 1.0
+    msg.data = grid.flatten().tolist()
+    return msg
+
+
+def test_map_mode_falls_back_to_heuristic_until_a_map_arrives(map_mode_node):
+    # 'map' mode with no map yet must not race blind: the heuristic
+    # detector keeps working, so this behaves exactly like the plain
+    # overtake test above.
+    node = map_mode_node
+    assert node.map_ray_caster is None
+    scan, _center = _car_ahead_scan()
+    node.scan_callback(scan)
+    for step in range(4):
+        _set_pose(node, -1.5 + step * 0.2, -1.2, 0.0)
+        node.control_loop()
+    assert node.overtake_active is True
+
+
+def test_map_mode_overtakes_using_map_subtraction(map_mode_node):
+    # Full pipeline with a real ray caster over a synthetic map: the
+    # walls are in the map (never "an opponent"), the car-sized cluster
+    # is not (always one) -- and the overtake triggers off it end to end.
+    pytest.importorskip('range_libc')
+    node = map_mode_node
+    node.map_callback(_synthetic_map())
+    assert node.map_ray_caster is not None, "map_callback must build the ray caster"
+
+    scan, _center = _car_ahead_scan(left_room=9.9, right_room=9.6)
+    node.scan_callback(scan)
+    for step in range(4):
+        _set_pose(node, -1.5 + step * 0.2, -1.2, 0.0)
+        node.control_loop()
+    assert node.overtake_active is True
+    assert node.overtake_side == 1
+
+
+def test_map_subtraction_ignores_what_the_map_explains(map_mode_node):
+    # A clear scan of the mapped arena leaves no residual -- nothing to
+    # detect, no matter how the walls curve. (This is the wall
+    # false-positive immunity the heuristic can't offer.)
+    pytest.importorskip('range_libc')
+    node = map_mode_node
+    node.map_callback(_synthetic_map())
+    _set_pose(node, -1.5, -1.2, 0.0)
+
+    scan = _clear_scan()
+    ranges = np.clip(np.nan_to_num(np.array(scan.ranges), nan=0.0, posinf=node.max_range),
+                     0.0, node.max_range)
+    detection = node._detect_opponent(scan, ranges, node.car_x + 0.27, node.car_y)
+    assert detection is None
+
+
+def test_map_subtraction_detects_an_unmapped_car_directly(map_mode_node):
+    pytest.importorskip('range_libc')
+    node = map_mode_node
+    node.map_callback(_synthetic_map())
+    _set_pose(node, -1.5, -1.2, 0.0)
+
+    scan, center = _car_ahead_scan(car_range=2.0)
+    ranges = np.clip(np.nan_to_num(np.array(scan.ranges), nan=0.0, posinf=node.max_range),
+                     0.0, node.max_range)
+    detection = node._detect_opponent(scan, ranges, node.car_x + 0.27, node.car_y)
+    assert detection is not None
+    start_idx, end_idx, centroid_range, centroid_angle = detection
+    assert centroid_range == pytest.approx(2.0, abs=0.05)
+    assert abs(centroid_angle) < 0.15
+    # Indices must come back in *full-scan* space (downsampling mapped back).
+    assert center - 12 <= start_idx <= center
+    assert center <= end_idx <= center + 12

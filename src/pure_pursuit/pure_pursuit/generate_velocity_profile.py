@@ -60,6 +60,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               'starting speed to seed the sweep from, so it takes more than one pass '
                               'for the start/finish seam to converge; see docs/racing-autonomy.md '
                               '(default: %(default)s).')
+    parser.add_argument('--smoothing-window', type=int, default=3,
+                         help='Half-window (in waypoints, each side) of the moving-average smoothing '
+                              'applied to the recorded line *before* estimating curvature. Recorded '
+                              'waypoints carry localization jitter, and at ~0.15m spacing even a '
+                              'couple of centimeters of wiggle reads as curvature -- i.e. phantom '
+                              'braking zones mid-straight. The smoothed line is also what gets '
+                              'written to the output (the profile must describe the line the car '
+                              'will actually drive). 0 disables (default: %(default)s).')
+    parser.add_argument('--no-friction-ellipse', action='store_true',
+                         help='Give the accel/brake sweeps the full longitudinal budget even '
+                              'mid-corner, instead of the friction-ellipse-coupled (shared-grip) '
+                              'budget. Less physically honest -- only useful for comparing against '
+                              'previously generated profiles.')
     return parser
 
 
@@ -72,6 +85,8 @@ def main(argv=None) -> int:
         print(f"error: '{args.input}' has only {len(xy)} point(s), need at least 3", file=sys.stderr)
         return 1
 
+    xy = racing_math.smooth_path(xy, args.smoothing_window, closed=closed)
+
     seg_len = racing_math.compute_segment_lengths(xy, closed=closed)
     curvature = racing_math.estimate_path_curvature(xy, closed=closed)
     speed = racing_math.compute_velocity_profile(
@@ -79,6 +94,7 @@ def main(argv=None) -> int:
         v_max=args.v_max, v_min=args.v_min,
         a_lat_max=args.a_lat_max, a_accel_max=args.a_accel_max, a_brake_max=args.a_brake_max,
         closed=closed, smoothing_passes=args.smoothing_passes,
+        friction_ellipse=not args.no_friction_ellipse,
     )
 
     racing_math.save_profiled_csv(args.output, xy, speed)

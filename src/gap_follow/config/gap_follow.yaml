@@ -4,12 +4,23 @@ gap_follow_node:
     drive_topic: /drive
     max_range: 10.0
     forward_fov_deg: 180.0
-    bubble_angle_deg: 20.0
+    # Deliberately higher than the code default (1.0): with this car's top
+    # speed and this room's clutter, an opening has to be at least this
+    # deep before it's worth steering into.
     min_gap_distance: 2.0
     max_speed: 2.0
     min_speed: 0.8
     max_steering_angle: 0.4189
     emergency_stop_distance: 0.15
+    # --- Physical clearance model (replaces the old fixed-angle
+    # bubble_angle_deg: a fixed 20 degrees was far too little clearance up
+    # close and wastefully much far away). Every obstacle edge (disparity)
+    # is extended, and the closest-obstacle bubble sized, by whatever
+    # (car_width/2 + safety_margin) subtends at that obstacle's actual
+    # distance -- see gap_logic.disparity_extend / safety_bubble. ---
+    car_width: 0.30            # meters -- chassis width, see docs/hardware-reference.md
+    safety_margin: 0.10        # meters -- extra clearance on top of the half-width, each side
+    disparity_threshold: 0.4   # meters -- a range jump bigger than this is an obstacle edge to extend
     # --- Deadman button (workspace policy -- see docs/architecture.md) ---
     # Mandatory workspace-wide safety policy: the car must not move under
     # any code, autonomous or manual, unless LB is held on the physical

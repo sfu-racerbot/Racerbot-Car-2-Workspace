@@ -2,6 +2,8 @@
 
 ROS2 Jazzy workspace for the team's roboracer/F1TENTH car (Jetson Orin Nano Super, JetPack 7.2, Ubuntu 24.04).
 
+Recent changes to the team's own packages are logged in [CHANGELOG.md](CHANGELOG.md) — check it after pulling to see what changed and whether anything still needs on-car validation.
+
 ## Documentation
 
 Start here if you're new to the car or the codebase:
