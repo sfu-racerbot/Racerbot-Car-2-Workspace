@@ -232,6 +232,25 @@ below, not a launch-order problem — the panel retries its connection every
 3 seconds on its own, so a blank/offline panel that never fills in (rather
 than one that briefly says offline before connecting) is the tell.
 
+### One-shot bundle for testing: LiDAR + camera + dashboard, no driving
+
+`racerbot_launch/launch/dashboard_test_launch.py` bundles the above three
+nodes *and* a standalone `urg_node` (LiDAR, so the `/scan` panel fills in
+too) into one launch — everything the dashboard can show, minus the
+VESC/joy/`ackermann_mux` driving stack from `bringup_launch.py`. Same
+support/tooling category as the three nodes above, so no LB-deadman check
+and no bringup ordering to worry about:
+
+```bash
+ros2 launch racerbot_launch dashboard_test_launch.py
+```
+
+Then open `http://<car-ip>:8080/`. This is for bench-testing the
+dashboard/sensors only — for actual driving, use `bringup_launch.py` plus
+a control layer as usual, and `web_dashboard_launch.py` on its own if you
+also want the dashboard up alongside them (see
+[operations.md](operations.md)).
+
 ### Finding the car's address, and viewing through a forwarded port
 
 **Use the car's real network address, not `localhost`, whenever you can.**
