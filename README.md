@@ -14,6 +14,7 @@ Start here if you're new to the car or the codebase:
 | [docs/adding-your-own-code.md](docs/adding-your-own-code.md) | **Adding your own code? Start here.** Where new packages go, what they're required to have (depends on whether it can move the car), and how to build/run them |
 | [docs/architecture.md](docs/architecture.md) | The full node/topic graph, what talks to what, and the safety/priority model — **read this before writing any driving code** |
 | [docs/racing-autonomy.md](docs/racing-autonomy.md) | The map-based race stack (SLAM → localization → recorded racing line → curvature-paced velocity profile → pure pursuit control) — the algorithm, the math, and how to tune it |
+| [docs/simulator.md](docs/simulator.md) | Reproducible F1TENTH Gym setup, headless solo/multi-car validation commands, current results, and simulation limitations |
 | [docs/writing-your-own-node.md](docs/writing-your-own-node.md) | The full contract for driving code specifically, using `gap_follow` as a worked template |
 | [docs/web-dashboard.md](docs/web-dashboard.md) | Live browser dashboard of the car's map/scan/pose — read-only, safe to run alongside anything |
 | [docs/hardware-reference.md](docs/hardware-reference.md) | VESC, LiDAR, joystick — exact addresses, ports, config values, and gotchas for this specific car |
@@ -35,7 +36,7 @@ This file stays a short quick-start; the docs above are the full reference.
 | `gap_follow` | local package | baseline reactive autonomy — follow-the-gap on `/scan` → `/drive`, no map needed. Code/algorithm detail: [src/gap_follow/README.md](src/gap_follow/README.md) |
 | `pure_pursuit` | local package | map-based race controller — pure pursuit over a curvature-paced recorded racing line, plus the tools to record and pace one. Pipeline/workflow: [docs/racing-autonomy.md](docs/racing-autonomy.md); code/math detail: [src/pure_pursuit/README.md](src/pure_pursuit/README.md) |
 | `web_dashboard` | local package | live browser dashboard of the map/LIDAR/pose, streamed over a WebSocket — read-only, not an autonomy node, safe to run alongside anything else. Workflow: [docs/web-dashboard.md](docs/web-dashboard.md); code detail: [src/web_dashboard/README.md](src/web_dashboard/README.md) |
-| `racerbot_launch` | local package | launch glue not owned by any single driver repo (currently: SLAM, race-day localization+pure_pursuit, and the RealSense camera) |
+| `racerbot_launch` | local package | launch glue not owned by any single driver repo (SLAM, one-command autonomous map→race, saved-map race-day localization, and cameras) |
 | `usb_cam_stream` | local package | live MJPEG video stream from a USB webcam, served over plain HTTP for viewing in any browser. Detail: [docs/usb-camera-livestream.md](docs/usb-camera-livestream.md), [src/usb_cam_stream/README.md](src/usb_cam_stream/README.md) |
 
 `slam_toolbox` is installed system-wide via apt (`ros-jazzy-slam-toolbox`), not vendored in `src/`.
@@ -69,5 +70,5 @@ For mapping, localization, running `gap_follow` or your own autonomy code, and e
 ## Notes
 - **Current safety policy:** every autonomy node in this workspace (`gap_follow`, `pure_pursuit`, and any new one) requires the driver to hold **LB** on the physical controller for the car to move, on top of the usual `ackermann_mux` arbitration — see [docs/architecture.md](docs/architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car). This stays in force until the team explicitly confirms the car's behavior is trustworthy enough to relax it — don't set any node's `enable_deadman` parameter to `false` unilaterally.
 - The official `f1tenth`/roboracer driver repos don't have a `jazzy` branch yet; everything here is the `humble-devel`/`humble` source built against ROS2 Jazzy. If a future `rosdep update`/dependency bump breaks the build, check each package's upstream (submodule or vendored — see [docs/git-setup.md](docs/git-setup.md)) for a newer ROS2-distro branch before patching locally.
-- Simulator (`f1tenth_gym_ros`) is intentionally not installed here — sim testing happens on a separate machine.
+- F1TENTH Gym is installed reproducibly under the ignored `.sim/` directory by `tools/f1tenth_sim/setup.sh`; see [docs/simulator.md](docs/simulator.md). It does not modify the system Python environment.
 - `src/f1tenth_system/f1tenth_stack/config/joy_teleop.yaml`'s `human_control` profile was patched locally: upstream ships `drive-steering_angle` mapped to `axis: 2` (this F710's left trigger, not the right stick). Changed to `axis: 3`. `f1tenth_system` is vendored (not a submodule) specifically so this fix could be committed — see [docs/git-setup.md](docs/git-setup.md) before pulling in any upstream changes to it.

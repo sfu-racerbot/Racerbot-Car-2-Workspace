@@ -6,7 +6,8 @@ Reactive "follow-the-gap" autonomy: no map, no localization, no memory of the tr
 
 | File | What it is |
 |---|---|
-| [`gap_follow/gap_follow_node.py`](gap_follow/gap_follow_node.py) | The node: all of the algorithm and ROS plumbing live in one file (small enough that splitting it up, unlike `pure_pursuit`, would just add indirection). |
+| [`gap_follow/gap_follow_node.py`](gap_follow/gap_follow_node.py) | The ROS node and pipeline orchestration, including the deadman gate. |
+| [`gap_follow/gap_logic.py`](gap_follow/gap_logic.py) | Importable, unit-tested scan-processing math, including disparity extension, the safety bubble, and gap scoring. |
 | [`config/gap_follow.yaml`](config/gap_follow.yaml) | Every tunable parameter, loaded at launch. Change behavior here, not in the code. |
 | [`launch/gap_follow_launch.py`](launch/gap_follow_launch.py) | Starts the node with the YAML above as its parameters. |
 | `resource/gap_follow` | Empty marker file required by `ament_python` — not code. |
@@ -66,16 +67,28 @@ if closest_dist < self.emergency_stop_distance:
 
 A hard, unconditional floor (`emergency_stop_distance`, default `0.15m`) — no gap-finding logic runs at all if something is this close; the car simply stops.
 
-### 3. Carve a "safety bubble" around the closest obstacle
+### 3. Extend obstacle edges by the car's physical clearance (disparity extender)
+
+Yes — this implementation includes the standard follow-the-gap **disparity extender**. It finds every sharp range jump between adjacent beams whose size exceeds `disparity_threshold` (default `0.4m`). At each jump, it identifies the nearer side and copies that nearer distance onto the far side for as many beams as `car_width / 2 + safety_margin` subtends at the obstacle's distance:
 
 ```python
-bubble_radius_idx = max(1, int(self.bubble_angle / scan.angle_increment))
-window[bubble_lo:bubble_hi] = 0.0
+half_width = car_width / 2.0 + safety_margin
+window = gap_logic.disparity_extend(
+    window, scan.angle_increment, disparity_threshold, half_width)
 ```
 
-Converts an angular radius (`bubble_angle_deg`, default `20°`) around the closest point into an index radius, and zeroes out every range reading in that arc. This prevents the gap-finding step below from picking a "gap" that grazes right past the nearest obstacle — the car needs clearance on both sides of wherever it points, not just at the exact bearing of the obstacle itself.
+This models the car's width rather than treating it as a point. The closer the obstacle edge, the more angular beams are extended. The operation only lowers range values (`np.minimum`), so it cannot invent free space.
 
-### 4. Find every candidate gap, score them, pick the best one
+### 4. Carve a distance-aware "safety bubble" around the closest obstacle
+
+```python
+window = gap_logic.safety_bubble(
+    window, closest_idx, closest_dist, scan.angle_increment, half_width)
+```
+
+The same `car_width / 2 + safety_margin` clearance is converted to an angle using the closest obstacle's actual distance (`atan2(clearance, distance)`) and zeroed. Unlike a fixed-angle bubble, this demands more angular clearance close to the car and less at a distance. Together with disparity extension, it prevents the selected gap from grazing obstacle edges.
+
+### 5. Find every candidate gap, score them, pick the best one
 
 ```python
 free = window > min_gap_distance
@@ -96,7 +109,7 @@ $$\text{score} = \text{width} \times \overline{\text{depth}}$$
 
 **Why not just pick the widest gap?** A shallow dead end — say a doorway-sized alcove only 1m deep — can subtend a *wider* angle than a genuinely open corridor or track section that's angularly narrower but far deeper. Scoring by `width × average_depth` means a gap has to actually stay open for a while, not just be wide at its mouth, to win. This is the single biggest behavioral difference between this implementation and a textbook "pick the widest gap" follow-the-gap.
 
-### 5. Steer at the middle of the winning gap
+### 6. Steer at the middle of the winning gap
 
 ```python
 target_idx_in_window = (gap_start + gap_end) // 2
@@ -107,7 +120,7 @@ steering_angle = float(np.clip(steering_angle, -self.max_steering_angle, self.ma
 
 The steering angle is simply the LIDAR bearing of the midpoint of the chosen gap, converted from an array index back into radians via the scan's own `angle_min`/`angle_increment` — the inverse of the conversion in step 1 — then clipped to what the servo can physically achieve (`max_steering_angle`, default `0.4189 rad` ≈ 24°; see [docs/racing-autonomy.md](../../docs/racing-autonomy.md#where-026-rad-comes-from) for how this car's actual servo limits were derived, though `gap_follow`'s default here is less conservative than `pure_pursuit`'s).
 
-### 6. Speed: slow down proportionally to how hard you're turning
+### 7. Speed: slow down proportionally to how hard you're turning
 
 ```python
 speed_scale = 1.0 - (abs(steering_angle) / self.max_steering_angle)
@@ -125,7 +138,9 @@ Straight ahead ($\delta = 0$) drives at `max_speed`; steering at the full clamp 
 | `scan_topic` / `drive_topic` | `/scan` / `/drive` | Topics |
 | `max_range` | `10.0` m | Range clip ceiling (also fills in `inf` returns) |
 | `forward_fov_deg` | `180.0°` | Total forward field of view considered |
-| `bubble_angle_deg` | `20.0°` | Angular radius zeroed out around the closest obstacle |
+| `car_width` | `0.30` m | Chassis width used by the physical-clearance model |
+| `safety_margin` | `0.10` m | Extra clearance added to each side of the half-width |
+| `disparity_threshold` | `0.4` m | Minimum adjacent-range jump treated as an obstacle edge |
 | `min_gap_distance` | `2.0` m | Minimum depth for a run of scan points to count as a "gap" |
 | `max_speed` / `min_speed` | `2.0` / `0.8` m/s | Speed range, scaled by steering angle |
 | `max_steering_angle` | `0.4189` rad (~24°) | Hard clamp on commanded steering |
@@ -135,10 +150,20 @@ Straight ahead ($\delta = 0$) drives at `max_speed`; steering at the full clamp 
 | `joy_timeout_sec` | `0.5` s | Deadman button staleness watchdog |
 | `enable_deadman` | `true` | **Do not disable** — see the workspace policy link above |
 
+## Simulator validation
+
+The exact `gap_logic` pipeline above is exercised in the official F1TENTH Gym,
+including the disparity extender, width-aware bubble, noisy LiDAR, vehicle
+dynamics, and collision model. On the current deterministic matrix it completed
+Spielberg, Silverstone, and Brands Hatch without a collision. The full setup,
+commands, metrics, and checked-in JSON report are in
+[docs/simulator.md](../../docs/simulator.md).
+
 ## Tuning notes
 
 - **Car cuts into shallow pockets it shouldn't:** raise `min_gap_distance` so shallower alcoves stop qualifying as candidate gaps at all.
-- **Car won't take an opening it should be able to fit through:** lower `bubble_angle_deg` (less clearance demanded around obstacles) or `min_gap_distance` (accepts shallower gaps).
+- **Car won't take an opening it should be able to fit through:** lower `safety_margin` cautiously (less clearance demanded around obstacle edges), reduce `car_width` only if the configured chassis width is wrong, or lower `min_gap_distance` to accept shallower gaps. `car_width + safety_margin` is also the minimum physical gap width used during candidate filtering.
+- **Disparity extension is too aggressive or misses obstacle edges:** lower `disparity_threshold` to detect smaller range jumps, or raise it to ignore more scan noise.
 - **Car oscillates rapidly between two nearby gaps:** this implementation has no gap "memory"/hysteresis between scans — each `LaserScan` is scored completely independently. If this becomes a real problem, the fix is adding a bias term favoring the previous tick's chosen gap, which doesn't exist here today.
 - **Speed always feels too conservative/too aggressive:** the `speed_scale` formula is linear and only looks at the *chosen* steering angle, not any measure of how open the track actually is — retune `max_speed`/`min_speed` directly rather than expecting curvature-aware pacing like `pure_pursuit` has.
-- Change one parameter at a time and re-test wheels-off-ground (see [docs/writing-your-own-node.md](../../docs/writing-your-own-node.md#testing-before-its-on-wheels)) — the interactions between `bubble_angle_deg`, `min_gap_distance`, and `forward_fov_deg` are not always intuitive.
+- Change one parameter at a time and re-test wheels-off-ground (see [docs/writing-your-own-node.md](../../docs/writing-your-own-node.md#testing-before-its-on-wheels)) — the interactions between the physical-clearance parameters, `min_gap_distance`, and `forward_fov_deg` are not always intuitive.

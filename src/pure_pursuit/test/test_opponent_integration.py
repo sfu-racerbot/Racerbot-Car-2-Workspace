@@ -24,8 +24,9 @@ import pytest
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import LaserScan
+from rclpy.parameter import Parameter
 
-from pure_pursuit.pure_pursuit_node import PurePursuitNode
+from pure_pursuit.pure_pursuit_node import OpponentTracker, PurePursuitNode
 from pure_pursuit import racing_math
 
 @pytest.fixture(scope='module')
@@ -346,3 +347,31 @@ def test_map_subtraction_detects_an_unmapped_car_directly(map_mode_node):
     # Indices must come back in *full-scan* space (downsampling mapped back).
     assert center - 12 <= start_idx <= center
     assert center <= end_idx <= center + 12
+
+
+def test_opponent_progress_rate_wraps_cleanly_at_start_finish():
+    tracker = OpponentTracker(smoothing_alpha=1.0, lost_timeout_sec=1.0)
+    tracker.update(99.5, now_sec=10.0, total_length=100.0)
+    tracker.update(0.5, now_sec=10.5, total_length=100.0)
+    assert tracker.progress_rate == pytest.approx(2.0)
+
+
+def test_waiting_node_loads_generated_profile_at_runtime(profiled_csv):
+    rclpy.init(args=['--ros-args',
+                     '-p', 'wait_for_waypoints:=true',
+                     '-p', 'enable_deadman:=false'])
+    waiting = PurePursuitNode()
+    try:
+        published = _capture_published(waiting)
+        waiting.control_loop()
+        assert published[-1].drive.speed == 0.0
+        assert waiting.profile_ready is False
+
+        result = waiting._parameter_callback([
+            Parameter('waypoints_file', Parameter.Type.STRING, profiled_csv)])
+        assert result.successful, result.reason
+        assert waiting.profile_ready is True
+        assert waiting.num_waypoints >= 3
+    finally:
+        waiting.destroy_node()
+        rclpy.shutdown()

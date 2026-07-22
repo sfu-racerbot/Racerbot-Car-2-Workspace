@@ -15,6 +15,7 @@ setup(
             'launch/waypoint_recorder_launch.py',
         ]),
         ('share/' + package_name + '/config', [
+            'config/auto_map_race.yaml',
             'config/pure_pursuit.yaml',
             'config/waypoint_recorder.yaml',
         ]),
@@ -35,6 +36,7 @@ setup(
             'pure_pursuit_node = pure_pursuit.pure_pursuit_node:main',
             'waypoint_recorder_node = pure_pursuit.waypoint_recorder_node:main',
             'generate_velocity_profile = pure_pursuit.generate_velocity_profile:main',
+            'auto_map_race_node = pure_pursuit.auto_map_race_node:main',
         ],
     },
 )

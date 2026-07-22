@@ -4,6 +4,9 @@ pure_pursuit_node:
     # on purpose -- an empty/missing waypoints file makes the node refuse
     # to start rather than silently drive nothing, or an old/wrong track.
     waypoints_file: ''
+    # Only auto_map_race_launch.py overrides this to true. In normal modes,
+    # retaining false preserves fail-fast behavior for a missing raceline.
+    wait_for_waypoints: false
     closed_loop: true
 
     # --- Topics ---
@@ -16,9 +19,11 @@ pure_pursuit_node:
     wheelbase: 0.25          # meters -- matches src/f1tenth_system/f1tenth_stack/config/vesc.yaml
 
     # --- Pure pursuit geometry ---
+    # Validated headlessly on Spielberg, Silverstone, and Brands Hatch in
+    # F1TENTH Gym; see docs/simulator.md for scenarios and limitations.
     min_lookahead: 0.6           # meters, lookahead distance at v=0
-    max_lookahead: 2.5           # meters, lookahead distance cap at high speed
-    lookahead_speed_gain: 0.35   # meters per (m/s): L_d = gain*v + min_lookahead, clipped to [min,max]
+    max_lookahead: 1.5           # meters, lookahead distance cap at high speed
+    lookahead_speed_gain: 0.15   # meters per (m/s): L_d = gain*v + min_lookahead, clipped to [min,max]
     nearest_search_window: 40    # +/- waypoints searched around the previous tick's nearest point (0 = search all)
 
     # --- Speed limits (safety ceiling -- the .csv profile is still clipped to this) ---
@@ -50,8 +55,13 @@ pure_pursuit_node:
     # instead of just stopping, whenever there's room to -- the hard-stop
     # net above still wins if it's too close for this to be safe. ---
     enable_obstacle_avoidance: true
-    avoidance_fov_deg: 100.0
+    avoidance_fov_deg: 60.0
+    # With map subtraction, this longer threshold applies only to an object
+    # absent from the static map (such as another car), not track walls.
     avoidance_trigger_distance: 1.5
+    # Before a map is available, raw scans cannot distinguish walls from
+    # traffic. This shorter simulator-validated threshold limits false turns.
+    avoidance_fallback_trigger_distance: 0.7
     avoidance_min_gap_distance: 1.0
     avoidance_speed: 1.0
 
@@ -69,7 +79,7 @@ pure_pursuit_node:
     overtake_trigger_gap: 3.0         # meters of *track distance* -- start considering a pass once this close
     overtake_closing_margin: 0.3      # m/s -- must be closing at least this fast to bother attempting a pass
     overtake_clear_margin: 1.0        # meters of track distance past the opponent before resuming the racing line
-    overtake_lateral_offset: 0.5      # meters, sideways nudge to the steering target while passing
+    overtake_lateral_offset: 0.35      # meters, sideways nudge to the steering target while passing
     # Mid-pass the opponent is *expected* to leave the forward LIDAR cone
     # (it's alongside), so opponent_lost_timeout_sec deliberately does NOT
     # cancel an active overtake -- the pass completes on ego progress past
@@ -91,9 +101,9 @@ pure_pursuit_node:
     #     particle filter is); falls back to 'heuristic' with a warning
     #     until a map arrives. Still gated to car-plausible widths within
     #     opponent_engagement_range.
-    # Shipping default stays 'heuristic' until 'map' has been validated
-    # on-car (wheels-off-ground first, as always).
-    opponent_detection_mode: heuristic
+    # Map mode is the default after simulator validation; still validate it
+    # wheels-off-ground and at low speed before relying on it physically.
+    opponent_detection_mode: map
     map_topic: /map
     map_beam_step: 4              # ray-cast every Nth beam -- plenty for a car-sized object, keeps the per-tick cost tiny
     map_subtraction_margin: 0.4   # meters -- measured must be this much shorter than the map predicts to count as dynamic

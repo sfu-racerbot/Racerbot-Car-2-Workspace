@@ -327,7 +327,7 @@ def estimate_path_curvature(xy: np.ndarray, closed: bool = True) -> np.ndarray:
 def compute_velocity_profile(seg_len: np.ndarray, curvature: np.ndarray,
                               v_max: float, v_min: float,
                               a_lat_max: float, a_accel_max: float, a_brake_max: float,
-                              closed: bool = True, smoothing_passes: int = 3,
+                              closed: bool = True, smoothing_passes: int = 5,
                               friction_ellipse: bool = True) -> np.ndarray:
     """Turn per-waypoint path curvature into a per-waypoint target speed.
     This is the core of "how fast should the car go here" -- three passes,
@@ -361,7 +361,7 @@ def compute_velocity_profile(seg_len: np.ndarray, curvature: np.ndarray,
     A closed loop has no single first point to seed sweep (1)/(2) from --
     index 0's "previous" point is the *last* index, whose value hasn't
     been finalized yet on the first sweep. Repeating the forward+backward
-    pair (`smoothing_passes` times, default 3) lets that start/finish seam
+    pair (`smoothing_passes` times, default 5) lets that start/finish seam
     converge. Both passes only ever lower values (never raise them), so
     repeating them on an already-converged open path is a harmless no-op
     -- there is no need to special-case open vs. closed here.

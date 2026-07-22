@@ -17,7 +17,7 @@ Usage:
     ros2 run pure_pursuit generate_velocity_profile \\
         --input  src/pure_pursuit/waypoints/my_track_raw.csv \\
         --output src/pure_pursuit/waypoints/my_track_profiled.csv \\
-        --v-max 6.0 --a-lat-max 8.0 --a-accel-max 3.0 --a-brake-max 8.0
+        --v-max 4.0 --a-lat-max 2.5 --a-accel-max 3.0 --a-brake-max 8.0
 
 Run with --help for the full list of tunable physical limits, and see
 docs/racing-autonomy.md for how to choose them safely (start
@@ -41,12 +41,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--open-path', action='store_true',
                          help='Treat the recording as a single start-to-finish pass instead of '
                               'a closed loop (default: closed loop -- correct for a normal lap track).')
-    parser.add_argument('--v-max', type=float, default=6.0,
+    parser.add_argument('--v-max', type=float, default=4.0,
                          help='Absolute top speed cap, m/s (default: %(default)s).')
     parser.add_argument('--v-min', type=float, default=0.5,
                          help='Absolute minimum speed -- the car never fully stops mid-track, m/s '
                               '(default: %(default)s).')
-    parser.add_argument('--a-lat-max', type=float, default=8.0,
+    parser.add_argument('--a-lat-max', type=float, default=2.5,
                          help='Max lateral (cornering) acceleration the tires/chassis can hold, m/s^2. '
                               'Start conservative; raise it only after confirming the car does not '
                               'slide at the speeds this already produces (default: %(default)s).')
@@ -55,7 +55,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               '(default: %(default)s).')
     parser.add_argument('--a-brake-max', type=float, default=8.0,
                          help='Max braking deceleration, m/s^2 (default: %(default)s).')
-    parser.add_argument('--smoothing-passes', type=int, default=3,
+    parser.add_argument('--smoothing-passes', type=int, default=5,
                          help='Forward+backward smoothing iterations. A closed loop has no single '
                               'starting speed to seed the sweep from, so it takes more than one pass '
                               'for the start/finish seam to converge; see docs/racing-autonomy.md '

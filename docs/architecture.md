@@ -70,9 +70,12 @@ How the car's software is put together: every node, every topic, and how they co
 | Manual driving | `ros2 launch f1tenth_stack teleop_launch.py` | `/teleop` |
 | Reactive autonomy | `ros2 launch gap_follow gap_follow_launch.py` | `/drive` |
 | Map-based race controller | `ros2 launch pure_pursuit pure_pursuit_launch.py` | `/drive` |
+| Automatic map → race composition | `ros2 launch racerbot_launch auto_map_race_launch.py` | `/drive` (supervisor only) |
 | Your own node | see [writing-your-own-node.md](writing-your-own-node.md) | `/drive` |
 
 Run **exactly one** of these at a time — `Ctrl+C` whichever is currently running before starting a different one, rather than stacking them in additional terminals. Nothing stops you from running two at once, but that isn't "blending" them: per the priority table just below, `/teleop` always beats `/drive` while it's live, so a second control layer just gets silently masked, not mixed in.
+
+The automatic composition is the deliberate exception *inside one launch*: gap follow publishes only to `/auto_map/drive`, pure pursuit only to `/auto_race/drive`, and `auto_map_race_node` forwards exactly one of those to the real `/drive`. Both child controllers can run without competing at the mux.
 
 Everything below `/scan` and `/odom` is a separate kind of optional layer — not a control layer competing for the mux, but sensor processing (mapping, localization) that a control layer like `pure_pursuit` depends on:
 
@@ -85,12 +88,16 @@ Everything below `/scan` and `/odom` is a separate kind of optional layer — no
               needs a saved map + /odom)          (your planner would consume these)
 ```
 
-Race day layers one more node on top of `particle_filter`'s output — see [racing-autonomy.md](racing-autonomy.md) for the full pipeline (map once, localize, record a lap, pace it into a racing line, then race it):
+The reusable saved-map race layers one more node on top of `particle_filter`'s output — see [racing-autonomy.md](racing-autonomy.md) for the full pipeline:
 
 ```
-/pf/viz/inferred_pose ──┬──► pure_pursuit_node ──► /drive   (needs a saved map, a working
-/scan ───────────────────┘    localization launch, and a recorded + paced racing line .csv —
-                               see docs/racing-autonomy.md)
+/pf/viz/inferred_pose ──┬──► pure_pursuit_node ──► /drive   (saved-map mode)
+/scan ───────────────────┘
+
+/scan ──► gap_follow ──► /auto_map/drive ──┐
+                                            ├──► auto_map_race_node ──► /drive
+/map + tf ──► /slam_pose ──► pure_pursuit ─► /auto_race/drive ────────┘
+                         (automatic map→race mode; one branch selected at a time)
 ```
 
 `web_dashboard` is passive and layers on top of whatever's already running — it never publishes, so it isn't part of the driving path at all, just a viewer for it (see [web-dashboard.md](web-dashboard.md)):
@@ -109,7 +116,9 @@ All topics as they actually appear on the bus with `bringup_launch.py` plus a co
 |---|---|---|---|
 | `/joy` | `sensor_msgs/Joy` | `joy_node` | `joy_teleop` (if `teleop_launch.py` is running), every autonomy node's own deadman check |
 | `/teleop` | `ackermann_msgs/AckermannDriveStamped` | `joy_teleop` (`teleop_launch.py`) | `ackermann_mux` |
-| `/drive` | `ackermann_msgs/AckermannDriveStamped` | your autonomy node (e.g. `gap_follow`, `pure_pursuit`) | `ackermann_mux` |
+| `/drive` | `ackermann_msgs/AckermannDriveStamped` | your autonomy node, or `auto_map_race_node` in automatic mode | `ackermann_mux` |
+| `/auto_map/drive` / `/auto_race/drive` | `ackermann_msgs/AckermannDriveStamped` | gap follow / pure pursuit in automatic mode | `auto_map_race_node` only |
+| `/slam_pose` | `geometry_msgs/PoseStamped` | `auto_map_race_node` from SLAM TF | pure pursuit in automatic mode |
 | `/ackermann_cmd` | `ackermann_msgs/AckermannDriveStamped` | `ackermann_mux` | `ackermann_to_vesc_node` |
 | `/commands/motor/speed` | `std_msgs/Float64` | `ackermann_to_vesc_node` | `vesc_driver_node` |
 | `/commands/servo/position` | `std_msgs/Float64` | `ackermann_to_vesc_node` | `vesc_driver_node` |
@@ -133,11 +142,11 @@ All topics as they actually appear on the bus with `bringup_launch.py` plus a co
 | `joy`, `joy_teleop`, `teleop_tools` | apt / submodule | Gamepad input and teleop mapping |
 | `ackermann_mux` (in `f1tenth_system`) | git submodule, `humble-devel` | Arbitrates between teleop and autonomy commands — see safety model below |
 | `particle_filter`, `range_libc` | git submodules, `humble-devel` | Monte Carlo localization against a saved map |
-| `slam_toolbox` | apt (`ros-jazzy-slam-toolbox`) | Builds a map by driving the car around manually |
+| `slam_toolbox` | apt (`ros-jazzy-slam-toolbox`) | Builds a map during manual or autonomous course discovery; remains online for the automatic race |
 | `gap_follow` | local, `src/gap_follow` | Baseline reactive autonomy (follow-the-gap) — see [writing-your-own-node.md](writing-your-own-node.md), this package *is* the worked example |
-| `pure_pursuit` | local, `src/pure_pursuit` | Map-based race controller (pure pursuit over a curvature-paced recorded racing line) plus the tools to record and pace one — see [racing-autonomy.md](racing-autonomy.md) |
+| `pure_pursuit` | local, `src/pure_pursuit` | Race controller, record/profile tools, and automatic map-to-race supervisor — see [racing-autonomy.md](racing-autonomy.md) |
 | `web_dashboard` | local, `src/web_dashboard` | Read-only live browser dashboard of the map/scan/pose over a WebSocket — never publishes anything, not subject to the deadman policy below — see [web-dashboard.md](web-dashboard.md) |
-| `racerbot_launch` | local, `src/racerbot_launch` | Launch files that don't belong to any single driver package (currently: SLAM, and race-day localization+pure_pursuit) |
+| `racerbot_launch` | local, `src/racerbot_launch` | Top-level SLAM, automatic map-to-race, and saved-map race launches |
 
 ## The safety model (read this before writing autonomy code)
 
@@ -160,9 +169,9 @@ This was directly confirmed by test: with `bringup_launch.py` and `teleop_launch
 
 **Current, standing policy — read this before running or writing any driving code.** Regardless of the `ackermann_mux` arbitration above, no code in this workspace — autonomous or not — is allowed to move the car unless the driver is actively holding **LB** on the physical controller. Manual teleop already works this way (`joy_teleop`'s `human_control` profile is deadman-gated). **This policy stays in force, unrelaxed, until the team has explicitly confirmed the car's behavior is trustworthy enough to change it.**
 
-Both autonomy nodes currently in this workspace enforce this in code, not just by convention: `gap_follow_node` and `pure_pursuit_node` each subscribe to `/joy` directly and refuse to publish a non-zero drive command unless button index `deadman_button` (default `4`, i.e. LB) is currently held on a live `/joy` stream (`joy_timeout_sec`, default `0.5s`) — checked *first*, ahead of every other watchdog either node has. This is a **second, independent safety layer on top of** the mux arbitration above: even when no control layer is publishing to `/teleop` at all (because `teleop_launch.py` was simply never started — see [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node)), the autonomy node itself still won't drive without LB held. Concretely, this means **`joy_node` must always be up** for any autonomy node to drive at all — with LB held — which is exactly why it lives in `bringup_launch.py` (the shared foundation) rather than `teleop_launch.py` (the manual-driving control layer).
+All three moving/command-selecting nodes enforce this in code: `gap_follow_node`, `pure_pursuit_node`, and `auto_map_race_node` each subscribe to `/joy` directly and refuse to publish a non-zero drive command unless button index `deadman_button` (default `4`, i.e. LB) is currently held on a live `/joy` stream (`joy_timeout_sec`, default `0.5s`) — checked *first*, ahead of every other watchdog that node has. This is a **second, independent safety layer on top of** the mux arbitration above: even when no control layer is publishing to `/teleop` at all (because `teleop_launch.py` was simply never started — see [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node)), the autonomy node itself still won't drive without LB held. Concretely, this means **`joy_node` must always be up** for any autonomy node to drive at all — with LB held — which is exactly why it lives in `bringup_launch.py` (the shared foundation) rather than `teleop_launch.py` (the manual-driving control layer).
 
-Each node exposes this as an `enable_deadman` parameter (default `true` in both `gap_follow.yaml` and `pure_pursuit.yaml`). **Do not set it to `false` on either node** — that would be a unilateral decision to bypass the current policy, not just a tuning change. **Any new autonomy node added to this workspace must implement the same check before it's allowed to drive the car** — see [writing-your-own-node.md](writing-your-own-node.md#the-interface-contract) for the required pattern.
+Each node exposes this as an `enable_deadman` parameter (default `true` in all three configs). **Do not set it to `false` on any node** — that would be a unilateral decision to bypass the current policy, not just a tuning change. **Any new autonomy node added to this workspace must implement the same check before it's allowed to drive the car** — see [writing-your-own-node.md](writing-your-own-node.md#the-interface-contract) for the required pattern.
 
 ## Frame conventions
 

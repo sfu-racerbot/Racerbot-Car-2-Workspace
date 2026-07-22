@@ -6,6 +6,46 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-07-21 — F1TENTH Gym validation and automatic map-to-race launch
+
+**Simulator validation complete; physical validation still required.** The
+workspace now has a pinned, local F1TENTH Gym setup and deterministic headless
+runner. Gap follow and pure pursuit completed Spielberg, Silverstone, and
+Brands Hatch without collisions; a two-car Spielberg run completed one pass
+and a full independently measured lap with neither car colliding. See
+`docs/simulator.md` and `docs/f1tenth-sim-results.json`.
+
+### pure_pursuit
+
+- Simulator-tuned lookahead is now `0.6 + 0.15*v`, capped at `1.5m`; the old
+  2.0m lookahead at 4m/s cut corners and collided in the dynamics model.
+- Velocity-profile defaults are now `v_max=4.0m/s`, `a_lat_max=2.5m/s²`, and
+  five smoothing passes.
+- Map subtraction is the default opponent detector and now gates general
+  reactive avoidance too. Added `avoidance_fallback_trigger_distance: 0.7m`
+  for operation before a map arrives; the map-aware trigger remains `1.5m`.
+- Active overtakes no longer get overwritten by the generic 1m/s avoidance
+  command. Emergency stopping and stale-scan stopping still always win.
+- Opponent progress-rate tracking now wraps correctly at start/finish, and the
+  simulator-validated lateral pass offset is `0.35m`.
+- `pure_pursuit_node` can opt into a stopped waiting state and atomically load a
+  generated `waypoints_file` at runtime. Normal launches retain fail-fast
+  behavior for a missing profile.
+- New `auto_map_race_node`, config, and top-level
+  `auto_map_race_launch.py`: one command starts cautious autonomous mapping,
+  detects/records closed laps, generates and loads the profile, saves the map
+  and pose graph, then transitions to pure-pursuit racing while SLAM remains
+  online. Existing mapping, recorder, profiler, and saved-map race modes remain.
+
+### gap_follow and tooling
+
+- Gap follow's disparity-extender pipeline is now documented explicitly and
+  validated for collision-free laps on all three simulator tracks.
+- Added `tools/f1tenth_sim/setup.sh`, the deterministic validation runner,
+  pinned dependencies, simulator documentation, and a checked-in JSON report.
+- The LB deadman requirement is unchanged and is enforced again by the new
+  command-selector supervisor.
+
 ## 2026-07-09 — Algorithm review follow-up: safety fixes, profile quality, map-based opponent detection
 
 Full review + implementation session over the driving algorithms

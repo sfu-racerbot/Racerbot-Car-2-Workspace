@@ -1,0 +1,38 @@
+auto_map_race_node:
+  ros__parameters:
+    mapping_drive_topic: /auto_map/drive
+    racing_drive_topic: /auto_race/drive
+    drive_topic: /drive
+    pose_topic: /slam_pose
+    map_frame: map
+    base_frame: base_link
+    control_rate_hz: 40.0
+    command_timeout_sec: 0.5
+
+    # Two laps are intentional: lap 1 discovers the course and closes the
+    # SLAM loop; lap 2 records a cleaner map-frame raceline after closure.
+    mapping_laps: 2
+    waypoint_spacing: 0.15
+    minimum_lap_distance: 20.0
+    minimum_lap_duration_sec: 15.0
+    departure_distance: 2.0
+    closure_distance: 0.75
+    closure_heading_deg: 30.0
+    transition_stop_sec: 2.0
+    output_directory: ~/.ros/racerbot_auto
+
+    # Conservative simulator-validated profile. Raise physical limits only
+    # after wheels-off and low-speed validation on the real car.
+    profile_max_speed: 4.0
+    profile_min_speed: 0.5
+    profile_max_lateral_accel: 2.5
+    profile_max_accel: 3.0
+    profile_max_brake: 8.0
+    profile_smoothing_window: 3
+    profile_smoothing_passes: 5
+    pure_pursuit_node_name: pure_pursuit_node
+
+    enable_deadman: true
+    joy_topic: /joy
+    deadman_button: 4
+    joy_timeout_sec: 0.5

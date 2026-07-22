@@ -49,14 +49,16 @@ every autonomy node in this repo follows):
 import math
 import sys
 
-import numpy as np
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
-from sensor_msgs.msg import LaserScan, Joy
+from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid
-from ackermann_msgs.msg import AckermannDriveStamped
+import numpy as np
+import rclpy
+from rcl_interfaces.msg import SetParametersResult
+from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from sensor_msgs.msg import Joy, LaserScan
 
 from pure_pursuit import racing_math
 
@@ -88,11 +90,14 @@ class OpponentTracker:
         self.last_update_time = None
         self.prev_nearest_index = None
 
-    def update(self, arc_length: float, now_sec: float):
+    def update(self, arc_length: float, now_sec: float, total_length: float = 0.0):
         if self.arc_length is not None and self.last_update_time is not None:
             dt = now_sec - self.last_update_time
             if dt > 1e-3:
-                raw_rate = (arc_length - self.arc_length) / dt
+                delta = arc_length - self.arc_length
+                if total_length > 0.0:
+                    delta = (delta + total_length / 2.0) % total_length - total_length / 2.0
+                raw_rate = delta / dt
                 # Guard against a single bogus jump (a bad cluster match,
                 # or the arc-length wrapping across the finish line)
                 # corrupting the smoothed estimate for several seconds
@@ -143,6 +148,7 @@ class PurePursuitNode(Node):
         # docs/writing-your-own-node.md).
         # ------------------------------------------------------------------
         self.declare_parameter('waypoints_file', '')
+        self.declare_parameter('wait_for_waypoints', False)
         self.declare_parameter('closed_loop', True)
         self.declare_parameter('pose_topic', '/pf/viz/inferred_pose')
         self.declare_parameter('scan_topic', '/scan')
@@ -150,8 +156,8 @@ class PurePursuitNode(Node):
         self.declare_parameter('control_rate_hz', 40.0)
         self.declare_parameter('wheelbase', 0.25)
         self.declare_parameter('min_lookahead', 0.6)
-        self.declare_parameter('max_lookahead', 2.5)
-        self.declare_parameter('lookahead_speed_gain', 0.35)
+        self.declare_parameter('max_lookahead', 1.5)
+        self.declare_parameter('lookahead_speed_gain', 0.15)
         self.declare_parameter('nearest_search_window', 40)
         self.declare_parameter('max_speed', 4.0)
         self.declare_parameter('min_speed', 0.5)
@@ -171,8 +177,9 @@ class PurePursuitNode(Node):
         # --- Reactive avoidance (steer around something close, not just
         # stop, when there's room) ---
         self.declare_parameter('max_range', 10.0)
+        self.declare_parameter('avoidance_fallback_trigger_distance', 0.7)
         self.declare_parameter('enable_obstacle_avoidance', True)
-        self.declare_parameter('avoidance_fov_deg', 100.0)
+        self.declare_parameter('avoidance_fov_deg', 60.0)
         self.declare_parameter('avoidance_trigger_distance', 1.5)
         self.declare_parameter('avoidance_min_gap_distance', 1.0)
         self.declare_parameter('avoidance_speed', 1.0)
@@ -190,7 +197,7 @@ class PurePursuitNode(Node):
         self.declare_parameter('overtake_trigger_gap', 3.0)
         self.declare_parameter('overtake_closing_margin', 0.3)
         self.declare_parameter('overtake_clear_margin', 1.0)
-        self.declare_parameter('overtake_lateral_offset', 0.5)
+        self.declare_parameter('overtake_lateral_offset', 0.35)
         self.declare_parameter('overtake_max_blind_sec', 3.0)
         self.declare_parameter('laser_offset_x', 0.27)
         self.declare_parameter('laser_offset_y', 0.0)
@@ -198,12 +205,13 @@ class PurePursuitNode(Node):
         # --- Opponent detection mode: 'heuristic' (shape-based, no map
         # needed) or 'map' (ray-cast map subtraction via range_libc --
         # see map_subtraction.py). ---
-        self.declare_parameter('opponent_detection_mode', 'heuristic')
+        self.declare_parameter('opponent_detection_mode', 'map')
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('map_beam_step', 4)
         self.declare_parameter('map_subtraction_margin', 0.4)
 
-        waypoints_file = self.get_parameter('waypoints_file').value
+        waypoints_file = str(self.get_parameter('waypoints_file').value)
+        self.wait_for_waypoints = bool(self.get_parameter('wait_for_waypoints').value)
         self.closed_loop = bool(self.get_parameter('closed_loop').value)
         self.pose_topic = self.get_parameter('pose_topic').value
         self.scan_topic = self.get_parameter('scan_topic').value
@@ -229,6 +237,8 @@ class PurePursuitNode(Node):
         self.joy_timeout_sec = float(self.get_parameter('joy_timeout_sec').value)
 
         self.max_range = float(self.get_parameter('max_range').value)
+        self.avoidance_fallback_trigger_distance = float(
+            self.get_parameter('avoidance_fallback_trigger_distance').value)
         self.enable_obstacle_avoidance = bool(self.get_parameter('enable_obstacle_avoidance').value)
         self.avoidance_fov_deg = float(self.get_parameter('avoidance_fov_deg').value)
         self.avoidance_trigger_distance = float(self.get_parameter('avoidance_trigger_distance').value)
@@ -262,41 +272,26 @@ class PurePursuitNode(Node):
             )
 
         # ------------------------------------------------------------------
-        # Load the racing line. Fail loudly and refuse to start rather than
-        # silently spinning with no line (or a garbage one) -- a race car
-        # with a bad racing line is more dangerous than a race car that
-        # refuses to launch at all.
+        # Racing-line state. Normal launches still fail loudly if no file is
+        # configured. The auto-map launch opts into wait_for_waypoints so it
+        # can start this node stopped, generate a profile, and load it through
+        # the runtime parameter callback without restarting the controller.
         # ------------------------------------------------------------------
-        if not waypoints_file:
+        self.xy = np.empty((0, 2), dtype=np.float64)
+        self.speed_profile = np.empty(0, dtype=np.float64)
+        self.num_waypoints = 0
+        self.seg_len = np.empty(0, dtype=np.float64)
+        self.cumulative_arc_length = np.empty(0, dtype=np.float64)
+        self.total_track_length = 0.0
+        self.profile_ready = False
+        if waypoints_file:
+            self._activate_profile(waypoints_file)
+        elif not self.wait_for_waypoints:
             raise RuntimeError(
                 "pure_pursuit_node: the 'waypoints_file' parameter is not set. "
                 "Point it at a profiled (x,y,speed) .csv produced by "
                 "generate_velocity_profile -- see docs/racing-autonomy.md."
             )
-        try:
-            self.xy, self.speed_profile = racing_math.load_profiled_csv(waypoints_file)
-        except (OSError, ValueError) as exc:
-            raise RuntimeError(
-                f"pure_pursuit_node: could not load waypoints_file '{waypoints_file}': {exc}"
-            ) from exc
-        if len(self.xy) < 3:
-            raise RuntimeError(
-                f"pure_pursuit_node: '{waypoints_file}' only has {len(self.xy)} waypoint(s), need at least 3."
-            )
-
-        self.num_waypoints = len(self.xy)
-        # Distance from each waypoint to the next, precomputed once here at
-        # startup -- not every control tick -- since the racing line is
-        # fixed for the whole run.
-        self.seg_len = racing_math.compute_segment_lengths(self.xy, closed=self.closed_loop)
-        # Arc-length (track distance from waypoint 0) at every waypoint,
-        # and the total lap distance -- also precomputed once. Used to
-        # compare *where along the track* the ego car and any tracked
-        # opponent are, a far more meaningful notion of "ahead"/"behind"
-        # on a lap than raw straight-line distance -- see
-        # docs/racing-autonomy.md's "Racing against opponents".
-        self.cumulative_arc_length = racing_math.compute_cumulative_arc_length(self.seg_len)
-        self.total_track_length = float(np.sum(self.seg_len))
 
         # ------------------------------------------------------------------
         # Runtime state. The subscription callbacks below only ever *cache*
@@ -336,6 +331,10 @@ class PurePursuitNode(Node):
         # heuristic detector rather than racing blind.
         self.map_ray_caster = None
 
+        # Accept a newly generated profile at runtime. This is registered
+        # only after every state object it resets has been initialized.
+        self.add_on_set_parameters_callback(self._parameter_callback)
+
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
         self.pose_sub = self.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 10)
         if self.enable_lidar_safety:
@@ -355,15 +354,71 @@ class PurePursuitNode(Node):
         control_period_sec = 1.0 / self.control_rate_hz
         self.control_timer = self.create_timer(control_period_sec, self.control_loop)
 
+        if self.profile_ready:
+            self._log_profile_ready(waypoints_file)
+        else:
+            self.get_logger().info(
+                "pure_pursuit_node ready and stopped: waiting for an auto-generated "
+                "waypoints_file profile.")
+
+    def _activate_profile(self, path: str):
+        """Load and atomically activate a profiled racing-line CSV."""
+        try:
+            xy, speed_profile = racing_math.load_profiled_csv(path)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"pure_pursuit_node: could not load waypoints_file '{path}': {exc}") from exc
+        if len(xy) < 3:
+            raise RuntimeError(
+                f"pure_pursuit_node: '{path}' only has {len(xy)} waypoint(s), need at least 3.")
+
+        seg_len = racing_math.compute_segment_lengths(xy, closed=self.closed_loop)
+        cumulative = racing_math.compute_cumulative_arc_length(seg_len)
+        total_length = float(np.sum(seg_len))
+        if not np.isfinite(total_length) or total_length <= 0.0:
+            raise RuntimeError(
+                f"pure_pursuit_node: '{path}' has zero or invalid total path length.")
+
+        # Assign only after all validation and derived values succeed, so a
+        # bad runtime update cannot damage a previously active profile.
+        self.xy = xy
+        self.speed_profile = speed_profile
+        self.num_waypoints = len(xy)
+        self.seg_len = seg_len
+        self.cumulative_arc_length = cumulative
+        self.total_track_length = total_length
+        self.prev_nearest_index = None
+        if hasattr(self, 'opponent'):
+            self.opponent = OpponentTracker(
+                self.opponent_velocity_smoothing, self.opponent_lost_timeout_sec)
+            self.overtake_active = False
+        self.profile_ready = True
+
+    def _log_profile_ready(self, path: str):
         self.get_logger().info(
-            f"pure_pursuit_node ready: {self.num_waypoints} waypoints from '{waypoints_file}' "
+            f"pure_pursuit_node ready: {self.num_waypoints} waypoints from '{path}' "
             f"({'closed loop' if self.closed_loop else 'open path'}), "
-            f"speed profile {float(self.speed_profile.min()):.2f}-{float(self.speed_profile.max()):.2f} m/s, "
-            f"control @ {self.control_rate_hz:.0f}Hz, "
-            f"deadman button {'ENABLED (LB must be held)' if self.enable_deadman else 'DISABLED'}, "
+            f"speed profile {float(self.speed_profile.min()):.2f}-"
+            f"{float(self.speed_profile.max()):.2f} m/s, control @ "
+            f"{self.control_rate_hz:.0f}Hz, deadman button "
+            f"{'ENABLED (LB must be held)' if self.enable_deadman else 'DISABLED'}, "
             f"obstacle avoidance {'ON' if self.enable_obstacle_avoidance else 'OFF'}, "
-            f"opponent overtaking {'ON' if self.enable_opponent_overtake else 'OFF'}."
-        )
+            f"opponent overtaking {'ON' if self.enable_opponent_overtake else 'OFF'}.")
+
+    def _parameter_callback(self, parameters):
+        for parameter in parameters:
+            if parameter.name != 'waypoints_file':
+                continue
+            if parameter.type_ != Parameter.Type.STRING or not parameter.value:
+                return SetParametersResult(
+                    successful=False,
+                    reason="waypoints_file must be a non-empty profiled CSV path")
+            try:
+                self._activate_profile(str(parameter.value))
+            except RuntimeError as exc:
+                return SetParametersResult(successful=False, reason=str(exc))
+            self._log_profile_ready(str(parameter.value))
+        return SetParametersResult(successful=True)
 
     # ------------------------------------------------------------------------
     # Sensor callbacks -- cache-only, see the comment in __init__ above.
@@ -438,6 +493,12 @@ class PurePursuitNode(Node):
         # watchdog: no held button means no drive command, full stop,
         # regardless of how healthy localization/LIDAR/the racing line are. ---
         if not self._deadman_engaged():
+            self._publish_drive(0.0, 0.0)
+            return
+
+        # Auto-map mode intentionally starts without a line. It remains at
+        # a hard stop until the supervisor loads the generated profile.
+        if not self.profile_ready:
             self._publish_drive(0.0, 0.0)
             return
 
@@ -523,7 +584,11 @@ class PurePursuitNode(Node):
         # always gets the final say regardless of the racing line or any
         # overtake in progress. ---
         if self.enable_lidar_safety:
-            steering_override, speed_override = self._reactive_override()
+            # Emergency stopping always remains active. During a committed
+            # pass, however, generic gap avoidance must not cap us below the
+            # opponent's speed and make the pass mathematically impossible.
+            steering_override, speed_override = self._reactive_override(
+                allow_avoidance=not self.overtake_active)
             if steering_override is not None:
                 steering_angle = steering_override
             if speed_override is not None:
@@ -563,6 +628,35 @@ class PurePursuitNode(Node):
             return math.inf
         return float(np.min(window))
 
+    def _dynamic_closest_in_cone(self, scan: LaserScan, fov_deg: float):
+        """Closest scan return not explained by the static map.
+
+        Returns None while map subtraction is unavailable, allowing the
+        caller to use the conservative raw-scan fallback threshold.
+        """
+        if (self.opponent_detection_mode != 'map' or self.map_ray_caster is None
+                or self.car_x is None or self.car_y is None or self.car_yaw is None):
+            return None
+
+        step = self.map_beam_step
+        all_ranges = np.asarray(scan.ranges, dtype=np.float64)
+        sample_indices = np.arange(len(all_ranges))[::step]
+        measured = all_ranges[::step]
+        beam_angles = scan.angle_min + sample_indices * scan.angle_increment
+
+        cos_yaw, sin_yaw = math.cos(self.car_yaw), math.sin(self.car_yaw)
+        laser_x = self.car_x + self.laser_offset_x * cos_yaw - self.laser_offset_y * sin_yaw
+        laser_y = self.car_y + self.laser_offset_x * sin_yaw + self.laser_offset_y * cos_yaw
+        expected = self.map_ray_caster.expected_ranges(
+            laser_x, laser_y, self.car_yaw, beam_angles)
+        dynamic = racing_math.dynamic_beam_mask(
+            measured, expected, self.map_subtraction_margin, scan.range_min)
+        in_cone = np.abs(beam_angles) <= math.radians(fov_deg) / 2.0
+        candidates = measured[dynamic & in_cone]
+        if candidates.size == 0:
+            return math.inf
+        return float(np.min(candidates))
+
     def _sanitized_window(self, scan: LaserScan, lo_idx: int, hi_idx: int) -> np.ndarray:
         """Ranges in [lo_idx, hi_idx], NaN/inf *replaced* (not removed) so
         the array's length and index positions still line up with the
@@ -576,7 +670,7 @@ class PurePursuitNode(Node):
         window = np.nan_to_num(window, nan=0.0, posinf=self.max_range, neginf=0.0)
         return np.clip(window, 0.0, self.max_range)
 
-    def _reactive_override(self):
+    def _reactive_override(self, allow_avoidance: bool = True):
         """The reactive LIDAR safety net -- independent of the racing
         line and the overtake logic above, and always has the final say.
         Returns (steering_override, speed_override); either is None where
@@ -603,10 +697,20 @@ class PurePursuitNode(Node):
         if self._closest_in_cone(scan, self.safety_fov_deg) < self.emergency_stop_distance:
             return None, 0.0
 
-        if not self.enable_obstacle_avoidance:
+        if not self.enable_obstacle_avoidance or not allow_avoidance:
             return None, None
 
-        if self._closest_in_cone(scan, self.avoidance_fov_deg) >= self.avoidance_trigger_distance:
+        dynamic_closest = self._dynamic_closest_in_cone(scan, self.avoidance_fov_deg)
+        if dynamic_closest is None:
+            # Before a map arrives (or in heuristic mode), track walls are
+            # indistinguishable from obstacles. The validated shorter
+            # fallback threshold avoids constantly reacting to normal walls.
+            closest = self._closest_in_cone(scan, self.avoidance_fov_deg)
+            trigger_distance = self.avoidance_fallback_trigger_distance
+        else:
+            closest = dynamic_closest
+            trigger_distance = self.avoidance_trigger_distance
+        if closest >= trigger_distance:
             return None, None
 
         lo_idx, hi_idx = self._fov_indices(scan, self.avoidance_fov_deg)
@@ -714,7 +818,8 @@ class PurePursuitNode(Node):
                 self.xy, (opponent_x, opponent_y), closed=self.closed_loop,
                 prev_index=self.opponent.prev_nearest_index, search_window=self.nearest_search_window)
             self.opponent.prev_nearest_index = opp_idx
-            self.opponent.update(float(self.cumulative_arc_length[opp_idx]), now_sec)
+            self.opponent.update(
+                float(self.cumulative_arc_length[opp_idx]), now_sec, self.total_track_length)
 
         ego_arc_length = float(self.cumulative_arc_length[nearest_idx])
 
@@ -803,7 +908,9 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        # The default SIGINT handler may already have shut the context down.
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0
 
 

@@ -117,9 +117,55 @@ If you're writing your own node, this deadman behavior is **required, not option
 
 ## Racing with the pure-pursuit stack
 
+### Automatic map → raceline → race (recommended for a new course)
+
+This is the no-manual-setup path. One launch starts hardware, online SLAM,
+`gap_follow`, `pure_pursuit`, and the supervisor that selects which controller
+can reach `/drive`:
+
+```bash
+ros2 launch racerbot_launch auto_map_race_launch.py
+```
+
+Do **not** separately start bringup, teleop, localization, or either controller.
+Hold LB continuously: the car immediately begins a cautious `gap_follow`
+mapping lap. By default it drives two autonomous laps — the first discovers the
+course and closes the SLAM loop, and the second records a cleaner map-frame
+raceline after closure. It then stops, creates the speed profile, saves the map
+and pose graph, loads the profile into the already-running pure-pursuit node,
+waits two seconds, and switches to racing. SLAM stays online as localization, so
+there is no RViz pose seed and no process restart.
+
+Generated artifacts are written under
+`~/.ros/racerbot_auto/<YYYYMMDD-HHMMSS>/`:
+
+- `raceline_raw.csv` and `raceline_profiled.csv`;
+- `map.yaml` and `map.pgm`; and
+- `posegraph.posegraph` plus its data file.
+
+Useful overrides:
+
+```bash
+# Faster mapping only after a cautious physical test
+ros2 launch racerbot_launch auto_map_race_launch.py mapping_max_speed:=1.5
+
+# Use one mapping/recording lap instead of the cleaner two-lap default
+ros2 launch racerbot_launch auto_map_race_launch.py mapping_laps:=1
+
+# Hardware stack is already running in another terminal
+ros2 launch racerbot_launch auto_map_race_launch.py include_bringup:=false
+```
+
+Releasing LB stops the selected controller immediately but does not erase the
+map or recorded progress. The first real run still follows the wheels-off-ground
+and low-speed ladder; simulator validation does not sign off physical grip or
+SLAM quality. See [simulator.md](simulator.md) for the validation evidence.
+
+### Manual/reusable saved-map workflow
+
 The map-based race controller — see [racing-autonomy.md](racing-autonomy.md) for how the algorithm works and how to tune it in depth. Same joystick-override consideration as the section above; folded into the procedure here.
 
-### 1. One-time per track: record a racing line
+#### 1. One-time per track: record a racing line
 
 Requires a saved map and working localization (both sections above) already set up for this track.
 
@@ -140,19 +186,19 @@ Requires a saved map and working localization (both sections above) already set 
 4. Hold LB and drive one clean lap by hand, back to roughly your starting point.
 5. `Ctrl+C` the recorder — it prints how many waypoints it recorded.
 
-### 2. One-time per track: generate the velocity profile
+#### 2. One-time per track: generate the velocity profile
 
 ```bash
 ros2 run pure_pursuit generate_velocity_profile \
     --input src/pure_pursuit/waypoints/my_track_raw.csv \
     --output src/pure_pursuit/waypoints/my_track_profiled.csv \
-    --v-max 4.0 --a-lat-max 6.0 --a-accel-max 2.5 --a-brake-max 6.0
+    --v-max 4.0 --a-lat-max 2.5 --a-accel-max 3.0 --a-brake-max 8.0
 ```
-Start conservative on these limits (the values above are already more cautious than the tool's own defaults) — see [racing-autonomy.md](racing-autonomy.md#choosing-a_lat_max--a_accel_max--a_brake_max--v_max) for how to raise them safely. The tool prints the resulting speed range and an estimated lap time when it's done.
+These are the simulator-validated defaults; start even lower on untested physical surfaces if needed — see [racing-autonomy.md](racing-autonomy.md#choosing-a_lat_max--a_accel_max--a_brake_max--v_max) for how to raise them safely. The tool prints the resulting speed range and an estimated lap time when it's done.
 
 A small synthetic example track is also checked in at `src/pure_pursuit/waypoints/example_stadium_raw.csv`, if you want to try the tool (and `pure_pursuit_node`, wheels off the ground) before you have a real recorded lap.
 
-### 3. Every race run: drive it
+#### 3. Every race run: drive it
 
 1. Start the driver stack as normal, in its own terminal:
    ```bash

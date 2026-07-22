@@ -70,6 +70,31 @@ reactive safety net (borrowed from the same idea as `gap_follow`) is still
 layered underneath it, for anything the map doesn't know about (an
 opponent's car, a spun-out car, debris).
 
+## Automatic path: map and race from one launch
+
+The five phases below remain available individually and are still the best way
+to understand or reuse a saved course. For a new course, the supported automatic
+composition is:
+
+```bash
+ros2 launch racerbot_launch auto_map_race_launch.py
+```
+
+`auto_map_race_node` is a safety-gated command selector and state machine. It
+forwards cautious `gap_follow` commands while `slam_toolbox` maps, detects a
+closed lap from the `map -> base_link` transform, records a second lap by
+default after loop closure, writes and profiles that path, loads it into an
+already-running `pure_pursuit_node`, then switches command authority after a
+stop interval. It also republishes the SLAM transform as `/slam_pose`, so SLAM
+continues to localize during racing. This removes manual map saving, offline
+profiling, process restarts, particle-filter configuration, and the RViz pose
+seed from a first visit to a course.
+
+The supervisor, gap follow, and pure pursuit each retain their LB deadman gate;
+only the supervisor publishes to the real `/drive`. The generated map, pose
+graph, raw path, and profiled path are saved under
+`~/.ros/racerbot_auto/<timestamp>/`. See [operations](operations.md#automatic-map--raceline--race-recommended-for-a-new-course) for usage and overrides.
+
 ## The five-phase pipeline
 
 ```mermaid
@@ -237,7 +262,7 @@ make the corner, instead of "discovering" the corner's speed limit only
 once it's already there. A closed-loop track has no single starting point
 to seed these sweeps from cleanly (index 0's "previous" waypoint is the
 *last* waypoint, whose value isn't finalized on the first sweep) — so both
-passes are repeated `smoothing_passes` times (default 3) to let that
+passes are repeated `smoothing_passes` times (default 5) to let that
 start/finish seam converge. Both passes only ever *lower* a speed, never
 raise one, so extra passes past convergence are harmless no-ops — this is
 why the same code path is used for open paths too, without a special case.
@@ -259,8 +284,9 @@ Exactly like every other speed parameter on this car: **start
 conservative, raise gradually, re-test wheels-off-ground after every
 change.**
 
-1. Start with the tool's defaults (`a_lat_max=8.0`, `a_accel_max=3.0`,
-   `a_brake_max=8.0`, `v_max=6.0` — all in SI units, m/s and m/s²).
+1. Start with the simulator-validated defaults (`a_lat_max=2.5`, `a_accel_max=3.0`,
+   `a_brake_max=8.0`, `v_max=4.0` — all in SI units, m/s and m/s²). These are
+   still starting points for physical testing, not measured tire limits.
 2. Race a lap. If the car slides/understeers off the racing line in a
    corner, `a_lat_max` is set higher than the car's actual grip — lower it
    and regenerate the profile.
@@ -308,11 +334,10 @@ actually catch.
    speed; long enough to be smooth at race speed and it cuts corners at
    low speed. Scaling lookahead with the current speed (`speed_here`, read
    from the racing line's own profile at the nearest waypoint) fixes both
-   at once. Defaults: $L_{min}=0.6m$, $L_{max}=2.5m$, $k=0.35$ — at
-   `max_speed`'s default of 4.0 m/s that's $0.35 \times 4 + 0.6 = 2.0m$,
-   leaving a little headroom under the 2.5m cap for when you raise
-   `max_speed` later (raise `max_lookahead` too if you push speed much
-   higher).
+   at once. Simulator-validated defaults are $L_{min}=0.6m$,
+   $L_{max}=1.5m$, $k=0.15$ — at the 4.0 m/s speed cap that is a 1.2m
+   lookahead. The old 2.0m-at-4m/s setting cut corners and collided in the
+   dynamics model; see [simulator.md](simulator.md).
 
 3. **Walk forward from the nearest waypoint** along the recorded path,
    accumulating segment distances, until $L_d$ has been covered — that
@@ -381,7 +406,7 @@ self-intersections is the real reason this exists.
 
 ### The safety layers
 
-Six independent checks, each capable of unilaterally forcing a stop (or a
+Seven independent checks, each capable of unilaterally forcing a stop (or a
 steering override), regardless of what the steering/speed logic above
 computed. Ordered from "must never be violated" down to "nice to have":
 
@@ -391,7 +416,7 @@ computed. Ordered from "must never be violated" down to "nice to have":
 | Localization watchdog | No pose received yet, or `pose_topic` has gone quiet for more than `pose_timeout_sec` (default 0.5s) | Never drive on a stale or absent position estimate |
 | Cross-track error | Nearest waypoint is farther than `max_cross_track_error` (default 1.0m) | Car is lost, kidnapped, or localization has diverged — the steering geometry would be aiming at a point unrelated to reality |
 | Opponent detection + overtake steering | Another car detected and being closed on within `overtake_trigger_gap` (default 3.0m of *track* distance) | Not a safety check at all — a racing one. See [Racing against opponents](#racing-against-opponents-detection-tracking-and-overtaking) below. Always subordinate to the two checks after it |
-| Reactive avoidance (steer around) | Minimum range in a wider `avoidance_fov_deg` cone (default 100°) is under `avoidance_trigger_distance` (default 1.5m) but a gap still exists | Catches anything *not* in the map that there's still room to get around — an opponent's car, a spun-out car, debris |
+| Reactive avoidance (steer around) | An unmapped return in the 60° cone is under 1.5m; before a map is ready, raw range is under the 0.7m fallback | Map subtraction prevents ordinary walls from continuously triggering the traffic layer. A committed pass bypasses the generic 1m/s cap, while the emergency tier remains active |
 | Emergency hard stop (always wins) | Minimum range in a narrower `safety_fov_deg` cone (default 60°) is under `emergency_stop_distance` (default 0.4m), or `/scan` itself is stale/missing | Last resort, unconditional — a safety net that's gone blind is treated identically to "obstacle detected" |
 | Unhandled exception | Anything in the control step raises | `control_loop()` wraps the whole step in try/except; on *any* exception it publishes a stop command *before* re-raising, so an unexpected bug can't leave the last (possibly full-speed) command sitting on `/drive` forever |
 
@@ -452,14 +477,20 @@ None of this needs a second sensor, a neural network, or any
 communication with the other car -- it's built entirely from the same
 `/scan` and racing line every other part of this stack already uses.
 
-### 1. "Is that a car?" -- detecting an opponent from raw LIDAR points
+### 1. "Is that a car?" -- map subtraction, then geometric filtering
 
-Real object detection (telling a car apart from a trash can, a cone, a
-wall) usually means a camera and a trained model. Neither is running in
-this stack, so opponent detection here is a *geometric* heuristic
-instead -- genuinely more limited than that, but cheap, fast,
-dependency-free, and good enough to race against another F1TENTH car
-specifically, which is the one thing it actually needs to do.
+The default `map` detector ray-casts what every LiDAR beam should hit in the
+static occupancy map. A measured return at least `map_subtraction_margin`
+(default 0.4m) shorter than that prediction is dynamic: something exists there
+that the map does not explain. This directly removes walls and corners before
+clustering, including an opponent backed against a wall. Every
+`map_beam_step`-th beam is cast to control CPU cost.
+
+The remaining dynamic returns still pass the width/range checks below; map
+subtraction distinguishes static from dynamic, not race car from debris. Until
+`/map` arrives, or when `opponent_detection_mode: heuristic` is selected, the
+controller falls back to the raw geometric detector described next rather than
+racing blind.
 
 **Step 1 -- group the scan into objects.** Walk the scan and split it into
 clusters: runs of consecutive readings that are all "something's there"
@@ -491,9 +522,9 @@ of it; a bump in a curving wall usually doesn't
 the *closest* one wins -- the one most immediately relevant to a decision
 right now.
 
-This is a heuristic, not certainty -- see
-[Limitations](#limitations-and-how-to-go-further) for exactly what that
-means in practice.
+The geometric fallback is a heuristic, not certainty. Map mode removes the
+most common wall false positives but is only as accurate as the map/pose
+alignment; see [Limitations](#limitations-and-how-to-go-further).
 
 ### 2. "Am I catching them?" -- tracking progress along the track, not raw position
 
@@ -596,9 +627,9 @@ deliberately:
   would need per-object identity tracking (recognizing cluster #3 this
   tick as the same car as cluster #3 last tick, even after a brief
   occlusion) -- a legitimate next step, not attempted here.
-- **A geometric heuristic, not classification.** "Car-sized cluster,
-  isolated, with open space around it" will occasionally misfire -- see
-  [Limitations](#limitations-and-how-to-go-further).
+- **Map subtraction, not semantic classification.** It reliably excludes
+  mapped walls when localization is aligned, but an unmapped car-sized object
+  can still qualify. The geometric fallback is less selective.
 - **No blocking/defensive maneuvers.** If an opponent is closing in from
   *behind*, this stack does nothing different -- it just keeps driving
   its own optimized line. That's a deliberate, safety-conscious choice:
@@ -648,14 +679,15 @@ file for inline comments too):
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `waypoints_file` | *(required)* | Profiled `(x,y,speed)` `.csv` from `generate_velocity_profile` |
+| `waypoints_file` | *(required normally)* | Profiled `(x,y,speed)` `.csv`; auto-map mode loads it at runtime |
+| `wait_for_waypoints` | `false` | Start stopped awaiting a runtime profile; only the automatic launch sets this |
 | `closed_loop` | `true` | Whether the racing line wraps around (a normal lap track) |
 | `pose_topic` | `/pf/viz/inferred_pose` | Localization input |
 | `scan_topic` | `/scan` | LIDAR input for the reactive safety net |
 | `drive_topic` | `/drive` | Output, arbitrated by `ackermann_mux` like every other autonomy node |
 | `control_rate_hz` | `40.0` | Control loop frequency |
 | `wheelbase` | `0.25` | Meters; must match `vesc.yaml` |
-| `min_lookahead` / `max_lookahead` / `lookahead_speed_gain` | `0.6` / `2.5` / `0.35` | Adaptive lookahead formula, see above |
+| `min_lookahead` / `max_lookahead` / `lookahead_speed_gain` | `0.6` / `1.5` / `0.15` | Adaptive lookahead formula, see above |
 | `nearest_search_window` | `40` | +/- waypoints searched around last tick's nearest point (`0` = search all) |
 | `max_speed` / `min_speed` | `4.0` / `0.5` | Hard safety ceiling/floor, independent of the `.csv` |
 | `max_steering_angle` | `0.26` | rad; derived from this car's real servo limits, see above |
@@ -666,8 +698,9 @@ file for inline comments too):
 | `emergency_stop_distance` | `0.4` | Meters; hard stop, always wins |
 | `scan_timeout_sec` | `0.5` | LIDAR staleness watchdog |
 | `enable_obstacle_avoidance` | `true` | Steer around something close instead of just stopping, when there's room |
-| `avoidance_fov_deg` | `100.0` | Wider cone used for avoidance steering (and opponent detection) |
-| `avoidance_trigger_distance` | `1.5` | Meters; closer than this (but outside `emergency_stop_distance`) triggers avoidance steering |
+| `avoidance_fov_deg` | `60.0` | Forward cone used for avoidance steering and opponent gating |
+| `avoidance_trigger_distance` | `1.5` | Meters; map-filtered dynamic-object trigger |
+| `avoidance_fallback_trigger_distance` | `0.7` | Meters; shorter raw-scan trigger before map subtraction is available |
 | `avoidance_min_gap_distance` | `1.0` | Meters; minimum depth for a gap to be considered driveable during avoidance |
 | `avoidance_speed` | `1.0` | m/s; capped speed while avoidance steering is active |
 | `enable_opponent_overtake` | `true` | See [Racing against opponents](#racing-against-opponents-detection-tracking-and-overtaking). Requires `enable_lidar_safety` too |
@@ -680,7 +713,9 @@ file for inline comments too):
 | `overtake_trigger_gap` | `3.0` | Meters of *track distance*; start considering a pass this close |
 | `overtake_closing_margin` | `0.3` | m/s; must be closing at least this fast to attempt a pass |
 | `overtake_clear_margin` | `1.0` | Meters of track distance past the opponent before resuming the racing line |
-| `overtake_lateral_offset` | `0.5` | Meters; sideways nudge to the steering target while passing |
+| `overtake_lateral_offset` | `0.35` | Meters; sideways nudge to the steering target while passing |
+| `opponent_detection_mode` | `map` | Map subtraction by default; `heuristic` is the no-map fallback |
+| `map_topic` / `map_beam_step` / `map_subtraction_margin` | `/map` / `4` / `0.4` | Occupancy map, ray-cast downsampling, and residual margin |
 | `laser_offset_x` / `laser_offset_y` | `0.27` / `0.0` | LIDAR mounting offset from `base_link`, used to place detections in the map frame |
 | `enable_deadman` | `true` | **Mandatory workspace policy** — LB deadman button, checked first. Leave `true`; see [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car) |
 | `joy_topic` | `/joy` | Deadman button input |
@@ -744,11 +779,10 @@ next:
   encoder sensor fusion beyond what `particle_filter`/`vesc_to_odom`
   already do. Better odometry directly means a tighter, more trustworthy
   `max_cross_track_error`.
-- **Opponent detection is a geometric heuristic, not real object
-  recognition.** "Car-sized isolated cluster" has no notion of what a
-  car actually looks like beyond that — a stray cone, a dropped water
-  bottle, or a chunk cut out of a curving wall could occasionally satisfy
-  the same geometry. It also only reasons about one opponent at a time
+- **Opponent detection is map subtraction plus geometry, not semantic
+  recognition.** Mapped walls are excluded, but an unmapped car-sized object
+  can still qualify, and map/pose misalignment can create residuals. The
+  fallback has only cluster geometry. It also reasons about one opponent at a time
   (closest qualifying cluster wins) and does zero identity-tracking
   across brief occlusions — see ["Racing against
   opponents"](#racing-against-opponents-detection-tracking-and-overtaking)
