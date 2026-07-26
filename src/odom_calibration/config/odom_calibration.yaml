@@ -1,0 +1,21 @@
+odom_calibration_node:
+  ros__parameters:
+    odom_topic: /odom
+    vesc_state_topic: /sensors/core
+    servo_topic: /sensors/servo_position_command
+    drive_topic: /ackermann_cmd
+    joy_topic: /joy
+    deadman_button: 4
+    host: 0.0.0.0
+    port: 8090
+    telemetry_rate_hz: 5.0
+    topic_stale_sec: 0.75
+    max_capture_sec: 300.0
+    max_samples_per_topic: 30000
+    report_directory: "~/.ros/odom_calibration"
+    # Used until live values can be read from vesc_to_odom_node.
+    speed_to_erpm_gain: 4614.0
+    speed_to_erpm_offset: 0.0
+    steering_angle_to_servo_gain: -1.2135
+    steering_angle_to_servo_offset: 0.5304
+    wheelbase: 0.324

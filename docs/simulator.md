@@ -79,7 +79,8 @@ small seeded noise.
 
 `gap_solo` validates:
 
-- scan sanitization, rectangular-body clearance, and TTC braking;
+- scan sanitization, all-direction body clearance, the odometry-independent
+  forward-cone brake, and conservative command-backed TTC braking;
 - disparity extension without double-padding and the width-aware safety bubble;
 - preferred gap scoring plus the slow tight-corner fallback; and
 - one complete lap with no Gym collision.

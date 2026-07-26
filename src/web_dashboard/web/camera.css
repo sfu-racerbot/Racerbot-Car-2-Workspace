@@ -196,3 +196,183 @@ html, body {
   #secondary-metrics { flex-wrap: wrap; gap: 6px 14px; }
   #telemetry-status { margin-left: 0; }
 }
+
+/* Compact recording overlay. These focused overrides intentionally keep
+   every telemetry field while giving the camera image almost the entire
+   screen. */
+#camera-stage::before,
+#camera-stage::after {
+  display: none;
+}
+
+#telemetry-overlay {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  box-sizing: border-box;
+  width: min(410px, calc(100vw - 20px));
+  padding: 8px 10px;
+  background: rgba(3, 5, 7, 0.62);
+  border: 1px solid rgba(201, 209, 217, 0.22);
+  border-radius: 4px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  text-shadow: 0 1px 2px #000;
+}
+
+#recording-header,
+.clock-line,
+#primary-metrics,
+#secondary-metrics,
+.secondary-item {
+  display: flex;
+  align-items: center;
+}
+
+#recording-header {
+  position: static;
+  justify-content: space-between;
+  gap: 14px;
+  text-shadow: none;
+}
+
+.brand-line {
+  gap: 6px;
+  color: #c9d1d9;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+
+#camera-status {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.live-dot {
+  width: 6px;
+  height: 6px;
+  box-shadow: none;
+}
+
+#camera-stage.has-feed .live-dot {
+  box-shadow: none;
+}
+
+.clock-line {
+  gap: 7px;
+  white-space: nowrap;
+}
+
+#current-time {
+  display: inline;
+  margin: 0;
+  font: 700 13px "SFMono-Regular", Consolas, monospace;
+  letter-spacing: 0;
+}
+
+#current-date {
+  margin: 0;
+  color: #8b949e;
+  font: 600 8px "SFMono-Regular", Consolas, monospace;
+  letter-spacing: 0;
+}
+
+#primary-metrics {
+  position: static;
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(201, 209, 217, 0.16);
+}
+
+.metric-card {
+  padding: 0;
+  background: none;
+  border-top: 0;
+  backdrop-filter: none;
+}
+
+.metric-label,
+.metric-detail {
+  color: #8b949e;
+  font-size: 7px;
+  letter-spacing: 0.08em;
+}
+
+.metric-number,
+.timer-number {
+  font: 700 17px "SFMono-Regular", Consolas, monospace;
+  letter-spacing: -0.04em;
+  line-height: 1.2;
+}
+
+.metric-unit {
+  margin-left: 4px;
+  font: 600 8px "SFMono-Regular", Consolas, monospace;
+}
+
+.timer-number.running {
+  text-shadow: none;
+}
+
+.metric-detail {
+  margin-top: 1px;
+}
+
+#secondary-metrics {
+  position: static;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(201, 209, 217, 0.16);
+  color: #8b949e;
+  font: 700 7px "SFMono-Regular", Consolas, monospace;
+  letter-spacing: 0;
+}
+
+.secondary-item {
+  gap: 4px;
+}
+
+.status-pill {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+#telemetry-status {
+  margin-left: auto;
+}
+
+@media (max-width: 520px) {
+  #telemetry-overlay {
+    top: 6px;
+    left: 6px;
+    width: calc(100vw - 12px);
+    padding: 7px 8px;
+  }
+
+  #recording-header {
+    align-items: flex-start;
+  }
+
+  .clock-line {
+    align-items: flex-end;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  #primary-metrics {
+    gap: 12px;
+  }
+
+  .metric-number,
+  .timer-number {
+    font-size: 15px;
+  }
+}

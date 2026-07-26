@@ -75,13 +75,13 @@ This exists so the car never steers toward a "gap" that's actually behind or bes
 
 The collision model is a rectangle around `base_link` (rear axle). The [Traxxas 74276-4 specifications](https://traxxas.com/74276-4-ford-fiesta-st-rally-vxl) are 0.281m wide, 0.535m long, and 0.324m wheelbase; the configured rectangle deliberately remains inflated to 0.31m × 0.58m. `vehicle_boundary_distances()` ray-casts from the estimated LiDAR origin (+0.33m forward, about 0.10m behind the physical nose) to that padded rectangle. Subtracting this per-beam distance from the scan produces clearance from the body rather than from the sensor.
 
-A hard contact layer stops at `emergency_stop_clearance` (0.02m from the body). The independent speed-aware layer then evaluates every approaching beam:
+Collision detection has three layers. The all-direction contact floor stops at `emergency_stop_clearance` (0.02m from the body). A separate odometry-independent fallback stops at `forward_stop_clearance` (0.25m) within the narrow `forward_stop_fov_deg` cone (60°, or ±30°); close side walls outside that cone do not trigger it. The speed-aware layer then evaluates every approaching beam:
 
 ```text
 iTTC = max(0, range - body_boundary) / (v_x * cos(beam_angle))
 ```
 
-Beams with no positive closing speed have infinite TTC, so a close wall exactly beside the car does not create the old closest-range corner false positive. If minimum TTC is at or below `ttc_threshold_sec` (0.5s), the node publishes zero speed and logs `STOP [ttc_brake]`. Invalid LiDAR beams are excluded from both checks.
+Beams with no positive closing speed have infinite TTC, so a close wall exactly beside the car does not create the old closest-range corner false positive. When fresh odometry is effectively zero (at or below `ttc_command_fallback_max_odom_speed`, 0.10m/s), TTC uses the larger of odometry and the latest drive command when that command is positive and no older than `ttc_command_speed_timeout_sec` (0.5s). Once odometry reports meaningful motion, TTC uses measured speed. This catches a stuck-zero/lagging reading without treating full requested speed as instantaneous in a healthy tight corner. A zero brake command supersedes the prior positive command, preventing stale intent from latching the stop. If minimum TTC is at or below `ttc_threshold_sec` (0.5s), the node publishes zero speed and logs `STOP [ttc_brake]`. Invalid LiDAR beams are excluded from all three checks.
 
 ### 4. Extend obstacle edges by the car's physical clearance (disparity extender)
 
@@ -165,9 +165,12 @@ Straight ahead ($\delta = 0$) drives at `max_speed`; steering at the full clamp 
 | `min_gap_distance` / `fallback_min_gap_distance` | `2.0` / `0.8` m | Preferred depth and tight-corner fallback depth |
 | `max_speed` / `min_speed` / `corner_speed` | `2.0` / `0.8` / `0.5` m/s | Normal speed range and fallback cap |
 | `max_steering_angle` | `0.4189` rad (~24°) | Hard command clamp |
-| `emergency_stop_clearance` | `0.02` m | Hard floor measured from the vehicle body |
+| `emergency_stop_clearance` | `0.02` m | All-direction final contact floor measured from the padded body |
+| `forward_stop_clearance` / `forward_stop_fov_deg` | `0.25m` / `60°` | Odom-independent forward-cone braking fallback |
 | `enable_ttc` / `ttc_threshold_sec` | `true` / `0.5s` | Enable iTTC braking and set its trigger |
 | `ttc_min_closing_speed` / `odom_timeout_sec` | `0.05m/s` / `0.5s` | Ignore negligible closing rates; fail closed on stale odometry |
+| `ttc_command_speed_timeout_sec` | `0.5s` | Freshness limit for a latest positive command used as TTC backup |
+| `ttc_command_fallback_max_odom_speed` | `0.10m/s` | Use command backup only while fresh odometry is effectively zero |
 | `joy_topic` / `deadman_button` / `joy_timeout_sec` | `/joy` / `4` / `0.5s` | Mandatory LB deadman input |
 | `enable_deadman` | `true` | **Do not disable** — see the workspace policy link above |
 | `decision_log_period_sec` / `scan_timeout_sec` | `1.0` / `0.5s` | Decision-log repeat and scan-staleness diagnostics |
@@ -186,7 +189,8 @@ commands, metrics, and checked-in JSON report are in
 
 - **Fallback enters an alcove it should reject:** raise `fallback_min_gap_distance` or lower `corner_speed`; keep the preferred 2.0m threshold for normal selection.
 - **Car still refuses a real tight corner:** inspect the logged `STOP` reason first. For `no_safe_gap`, cautiously lower `fallback_min_gap_distance` or `min_centerline_gap_width`. Never reduce `car_width` below the measured body width.
-- **TTC brakes too early/late:** validate odometry speed and the footprint/LiDAR offsets before tuning `ttc_threshold_sec`. Do not compensate for wrong geometry by lowering the threshold.
+- **`forward_clearance` brakes at a corner:** verify the LiDAR transform first, then cautiously narrow `forward_stop_fov_deg`; do not reduce the padded vehicle dimensions.
+- **TTC brakes too early/late:** compare logged odometry and recent-command speeds, then validate odometry scale and the footprint/LiDAR offsets before tuning `ttc_threshold_sec`. Do not compensate for wrong geometry by lowering the threshold.
 - **Disparity extension is too aggressive or misses obstacle edges:** lower `disparity_threshold` to detect smaller range jumps, or raise it to ignore more scan noise.
 - **Car oscillates rapidly between two nearby gaps:** this implementation has no gap "memory"/hysteresis between scans — each `LaserScan` is scored completely independently. If this becomes a real problem, the fix is adding a bias term favoring the previous tick's chosen gap, which doesn't exist here today.
 - **Speed always feels too conservative/too aggressive:** the `speed_scale` formula is linear and only looks at the *chosen* steering angle, not any measure of how open the track actually is — retune `max_speed`/`min_speed` directly rather than expecting curvature-aware pacing like `pure_pursuit` has.

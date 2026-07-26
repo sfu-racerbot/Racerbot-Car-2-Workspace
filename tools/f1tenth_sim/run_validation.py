@@ -65,6 +65,10 @@ CAR_WIDTH = 0.31
 CAR_LENGTH = 0.58
 STEERING_LIMIT = 0.26
 LIDAR_OFFSET_X = 0.33
+FORWARD_STOP_CLEARANCE = 0.25
+FORWARD_STOP_FOV = math.radians(60.0)
+TTC_COMMAND_SPEED_TIMEOUT = 0.5
+TTC_COMMAND_FALLBACK_MAX_ODOM_SPEED = 0.10
 
 LIDAR = LiDARConfig(
     enabled=True,
@@ -254,7 +258,12 @@ class OpponentProgress:
         ) % total_length
 
 
-def gap_command(scan: np.ndarray, current_speed: float) -> tuple[float, float, float, bool]:
+def gap_command(
+    scan: np.ndarray,
+    current_speed: float,
+    last_commanded_speed: float = 0.0,
+    command_age_sec: float = math.inf,
+) -> tuple[float, float, float, bool]:
     clean, valid = gap_logic.sanitize_ranges(
         scan, max_range=10.0, range_min=0.05)
     lo, hi = cone_indices(math.pi / 2.0)
@@ -274,15 +283,33 @@ def gap_command(scan: np.ndarray, current_speed: float) -> tuple[float, float, f
 
     clearance = gap_logic.minimum_footprint_clearance(
         window, window_valid, boundaries)
+    forward_clearance = gap_logic.minimum_footprint_clearance_in_cone(
+        window,
+        window_valid,
+        beam_angles,
+        boundaries,
+        FORWARD_STOP_FOV,
+    )
+    effective_speed = gap_logic.conservative_ttc_speed(
+        current_speed,
+        last_commanded_speed,
+        command_age_sec,
+        TTC_COMMAND_SPEED_TIMEOUT,
+        TTC_COMMAND_FALLBACK_MAX_ODOM_SPEED,
+    )
     min_ttc = gap_logic.minimum_ttc(
         window,
         window_valid,
         beam_angles,
-        current_speed,
+        effective_speed,
         boundaries,
         min_closing_speed=0.05,
     )
-    if clearance <= 0.02 or min_ttc <= 0.5:
+    if (
+        clearance <= 0.02
+        or forward_clearance <= FORWARD_STOP_CLEARANCE
+        or min_ttc <= 0.5
+    ):
         return 0.0, 0.0, float(closest_distance), True
 
     half_width = CAR_WIDTH / 2.0 + 0.10
@@ -346,6 +373,8 @@ def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
     max_cross_track = 0.0
     min_scan = math.inf
     stop_steps = 0
+    last_commanded_speed = 0.0
+    last_command_step = None
     started = time.monotonic()
     max_steps = math.ceil(timeout_s / CONTROL_DT)
 
@@ -353,8 +382,19 @@ def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
         for step in range(max_steps):
             ego = obs["agent_0"]
             state = np.asarray(ego["std_state"], dtype=float)
+            command_age_sec = (
+                math.inf
+                if last_command_step is None
+                else (step - last_command_step) * CONTROL_DT
+            )
             steering, speed, nearest_scan, stopped = gap_command(
-                ego["scan"], float(state[3]))
+                ego["scan"],
+                float(state[3]),
+                last_commanded_speed,
+                command_age_sec,
+            )
+            last_commanded_speed = speed
+            last_command_step = step
             min_scan = min(min_scan, nearest_scan)
             stop_steps += int(stopped)
 

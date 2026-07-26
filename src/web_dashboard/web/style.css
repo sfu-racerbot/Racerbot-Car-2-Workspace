@@ -185,7 +185,7 @@ html, body {
 }
 
 #camera-panel {
-  bottom: 12px;
+  bottom: 47px;
   height: clamp(110px, 16vw, 165px); /* 4:3-ish, camera feeds are usually wider than tall */
 }
 
@@ -344,4 +344,38 @@ html, body {
 #camera-panel:hover .camera-open-hint,
 #camera-panel:focus-within .camera-open-hint {
   opacity: 1;
+}
+
+/* Zoom-aware map ruler, kept in the right rail below the camera so the
+   information sidebar can never cover it. */
+#scale-panel {
+  position: fixed;
+  right: 12px;
+  bottom: 10px;
+  width: clamp(150px, 22vw, 220px);
+  height: 26px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  pointer-events: none;
+}
+
+#scale-ruler {
+  position: relative;
+  box-sizing: border-box;
+  height: 8px;
+  border-right: 2px solid #e6edf3;
+  border-bottom: 2px solid #e6edf3;
+  border-left: 2px solid #e6edf3;
+}
+
+#scale-label {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  color: #c9d1d9;
+  font: 10px "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  line-height: 1;
+  white-space: nowrap;
+  transform: translateX(-50%);
 }

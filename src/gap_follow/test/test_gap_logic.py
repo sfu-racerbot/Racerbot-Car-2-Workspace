@@ -282,6 +282,76 @@ def test_ttc_ignores_invalid_beams_and_stationary_vehicle():
         ranges, validity, angles, 1.0, boundaries) > 1.9
 
 
+def test_forward_clearance_cone_ignores_close_side_obstacles():
+    angles = np.array([-math.radians(45.0), 0.0, math.radians(45.0)])
+    boundaries = _body_boundaries(angles)
+    ranges = boundaries + np.array([0.01, 0.30, 0.01])
+    clearance = gap_logic.minimum_footprint_clearance_in_cone(
+        ranges,
+        np.ones(3, dtype=bool),
+        angles,
+        boundaries,
+        cone_width_rad=math.radians(60.0),
+    )
+    assert clearance == pytest.approx(0.30)
+
+
+def test_forward_clearance_cone_reports_frontal_obstacle():
+    angles = np.array([-0.20, 0.0, 0.20])
+    boundaries = _body_boundaries(angles)
+    ranges = boundaries + np.array([0.40, 0.12, 0.35])
+    clearance = gap_logic.minimum_footprint_clearance_in_cone(
+        ranges,
+        np.ones(3, dtype=bool),
+        angles,
+        boundaries,
+        cone_width_rad=math.radians(60.0),
+    )
+    assert clearance == pytest.approx(0.12)
+
+
+def test_conservative_ttc_speed_uses_recent_positive_command():
+    assert gap_logic.conservative_ttc_speed(
+        measured_speed=0.0,
+        commanded_speed=1.4,
+        command_age_sec=0.1,
+        command_timeout_sec=0.5,
+    ) == pytest.approx(1.4)
+
+
+def test_conservative_ttc_speed_keeps_higher_measured_speed():
+    assert gap_logic.conservative_ttc_speed(
+        measured_speed=1.8,
+        commanded_speed=1.0,
+        command_age_sec=0.1,
+        command_timeout_sec=0.5,
+    ) == pytest.approx(1.8)
+
+
+def test_conservative_ttc_speed_trusts_meaningful_fresh_odom():
+    assert gap_logic.conservative_ttc_speed(
+        measured_speed=0.5,
+        commanded_speed=1.8,
+        command_age_sec=0.1,
+        command_timeout_sec=0.5,
+        fallback_max_measured_speed=0.1,
+    ) == pytest.approx(0.5)
+
+
+def test_conservative_ttc_speed_ignores_stale_command_and_reverse_motion():
+    assert gap_logic.conservative_ttc_speed(
+        measured_speed=-0.2,
+        commanded_speed=1.5,
+        command_age_sec=0.51,
+        command_timeout_sec=0.5,
+    ) == 0.0
+
+
+def test_conservative_ttc_speed_rejects_invalid_age():
+    with pytest.raises(ValueError, match='command_age_sec'):
+        gap_logic.conservative_ttc_speed(0.0, 1.0, float('nan'), 0.5)
+
+
 # ============================================================================
 # Tight-corner fallback after obstacle inflation
 # ============================================================================

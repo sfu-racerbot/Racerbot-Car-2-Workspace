@@ -14,7 +14,9 @@ The processing pipeline, in the order the node applies it:
 
   sanitize_ranges     -> which beams are trustworthy, and a gap-safe copy
   vehicle_boundary... -> LiDAR-to-body clearance for each scan direction
-  minimum_ttc         -> footprint-aware odometry/LiDAR collision timing
+  minimum_...         -> footprint clearance plus forward clearance floor
+  conservative_...    -> safest recent odometry/command speed for TTC
+  minimum_ttc         -> footprint-aware LiDAR collision timing
   closest_valid       -> safety-bubble anchor (valid beams only)
   disparity_extend    -> widen every obstacle *edge* by half a car width
   safety_bubble       -> zero out a car-width bubble around the closest hit
@@ -138,6 +140,53 @@ def minimum_footprint_clearance(clean: np.ndarray, valid: np.ndarray,
     if not np.any(usable):
         return math.inf
     return float(np.min(ranges[usable] - boundaries[usable]))
+
+
+def minimum_footprint_clearance_in_cone(
+        clean: np.ndarray, valid: np.ndarray, angles: np.ndarray,
+        boundary_distances: np.ndarray, cone_width_rad: float) -> float:
+    """Smallest body clearance inside a forward-centred angular cone."""
+    ranges = np.asarray(clean, dtype=np.float64)
+    validity = np.asarray(valid, dtype=bool)
+    beam_angles = np.asarray(angles, dtype=np.float64)
+    boundaries = np.asarray(boundary_distances, dtype=np.float64)
+    if not (ranges.shape == validity.shape == beam_angles.shape == boundaries.shape):
+        raise ValueError('all forward-clearance inputs must have matching shapes')
+    if not math.isfinite(cone_width_rad) or not (
+            0.0 < cone_width_rad <= 2.0 * math.pi):
+        raise ValueError('cone_width_rad must be finite and in (0, 2*pi]')
+
+    inside_cone = np.abs(beam_angles) <= cone_width_rad / 2.0
+    return minimum_footprint_clearance(
+        ranges[inside_cone], validity[inside_cone], boundaries[inside_cone])
+
+
+def conservative_ttc_speed(measured_speed: float,
+                           commanded_speed: float = 0.0,
+                           command_age_sec: float = math.inf,
+                           command_timeout_sec: float = 0.5,
+                           fallback_max_measured_speed: float = 0.1) -> float:
+    """Safest speed when fresh odometry is absent or effectively zero."""
+    if not math.isfinite(measured_speed):
+        raise ValueError('measured_speed must be finite')
+    if not math.isfinite(commanded_speed):
+        raise ValueError('commanded_speed must be finite')
+    if math.isnan(command_age_sec) or command_age_sec < 0.0:
+        raise ValueError('command_age_sec must be non-negative')
+    if not math.isfinite(command_age_sec) and command_age_sec != math.inf:
+        raise ValueError('command_age_sec must be finite or positive infinity')
+    if not math.isfinite(command_timeout_sec) or command_timeout_sec < 0.0:
+        raise ValueError('command_timeout_sec must be finite and non-negative')
+    if (not math.isfinite(fallback_max_measured_speed)
+            or fallback_max_measured_speed < 0.0):
+        raise ValueError(
+            'fallback_max_measured_speed must be finite and non-negative')
+
+    speed = max(0.0, measured_speed)
+    if (measured_speed <= fallback_max_measured_speed
+            and command_age_sec <= command_timeout_sec):
+        speed = max(speed, commanded_speed)
+    return max(0.0, speed)
 
 
 def time_to_collision(clean: np.ndarray, valid: np.ndarray,

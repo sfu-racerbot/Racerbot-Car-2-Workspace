@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#13231f">
+  <title>RacerBot Odom Lab</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="RacerBot Odom Lab">
+      <span class="brand-mark">RB</span>
+      <span>
+        <strong>Odom Lab</strong>
+        <small>guided calibration</small>
+      </span>
+    </a>
+    <div class="top-status">
+      <span id="connection-pill" class="pill pill-warn">Connecting…</span>
+      <span class="pill pill-safe"><span class="dot"></span> Read-only ROS</span>
+      <button id="new-session-button" class="button button-ghost button-small"
+              type="button" hidden>New session</button>
+    </div>
+  </header>
+
+  <div class="safety-banner">
+    <strong>This wizard cannot move the car.</strong>
+    You drive with the physical remote and LB. Keep a clear lane and a spotter.
+  </div>
+
+  <div class="app-shell">
+    <aside class="step-rail" aria-label="Calibration steps">
+      <div class="rail-heading">Session</div>
+      <nav id="step-nav"></nav>
+      <div class="rail-note">
+        <span class="rail-note-icon">i</span>
+        Every accepted trial is saved on the car. Closing this tab is safe.
+      </div>
+    </aside>
+
+    <main id="wizard-view" class="wizard-view" aria-live="polite">
+      <section class="hero-card loading-card">
+        <div class="spinner"></div>
+        <h1>Connecting to the car</h1>
+        <p>Waiting for the local calibration service.</p>
+      </section>
+    </main>
+
+    <aside class="telemetry-panel">
+      <div class="panel-heading">
+        <span>Live car</span>
+        <span id="telemetry-age" class="muted">—</span>
+      </div>
+      <div id="telemetry-values" class="telemetry-values"></div>
+      <div class="panel-heading health-heading">
+        <span>Topic health</span>
+      </div>
+      <div id="topic-health" class="topic-health"></div>
+    </aside>
+  </div>
+
+  <div id="toast-region" class="toast-region" aria-live="assertive"></div>
+  <script src="/wizard.js"></script>
+</body>
+</html>

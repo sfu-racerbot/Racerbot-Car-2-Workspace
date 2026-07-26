@@ -30,13 +30,24 @@ gap_follow_node:
     # Obstacles are already inflated by half-width + margin on both sides.
     # Requiring another car width here was double-padding tight openings.
     min_centerline_gap_width: 0.10
-    # Physical body clearance, not raw range from the offset LiDAR.
+    # All-direction final contact floor, measured from the padded body.
     emergency_stop_clearance: 0.02
+    # Odom-independent fallback ahead of the car. Keeping this to a narrow
+    # cone avoids treating a close side wall in a corner as a frontal hazard.
+    forward_stop_clearance: 0.25
+    forward_stop_fov_deg: 60.0
 
     # --- Time-to-collision automatic emergency braking ---
     enable_ttc: true
     ttc_threshold_sec: 0.5
     ttc_min_closing_speed: 0.05
+    # TTC uses max(fresh odom speed, latest command when it is positive),
+    # so brief odom under-reporting cannot suppress braking. A zero brake
+    # command supersedes the previous positive command instead of latching it.
+    ttc_command_speed_timeout_sec: 0.5
+    # Once fresh odom reports meaningful motion, use it rather than the much
+    # higher requested speed; this prevents stop/restart latching in corners.
+    ttc_command_fallback_max_odom_speed: 0.10
     odom_timeout_sec: 0.5
     # --- Deadman button (workspace policy -- see docs/architecture.md) ---
     # Mandatory workspace-wide safety policy: the car must not move under

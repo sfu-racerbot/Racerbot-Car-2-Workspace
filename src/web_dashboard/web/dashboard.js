@@ -52,6 +52,8 @@
   const minimapCtx = minimapCanvas.getContext('2d');
   const cameraPanel = document.getElementById('camera-panel');
   const cameraFeed = document.getElementById('camera-feed');
+  const scaleRuler = document.getElementById('scale-ruler');
+  const scaleLabel = document.getElementById('scale-label');
 
   // ---------------------------------------------------------------------
   // State. Each of map/scan/pose carries `receivedAt`, stamped with this
@@ -305,7 +307,7 @@
       drawCarRobotCentric();
     }
 
-    drawScaleBar();
+    updateScaleBar();
     drawMinimap();
 
     updateStatusText();
@@ -389,40 +391,21 @@
   }
 
   // A classic map "ruler": picks a round length (in meters) that renders
-  // between 80-160px at the current zoom, so it stays readable whether
-  // you're zoomed into a corner or fitted to the whole map.
-  const SCALE_BAR_STEPS_M = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200];
+  // at least 60 CSS pixels at the current zoom. It is an HTML element in
+  // the right rail rather than canvas paint, so no floating panel can
+  // cover it.
+  const SCALE_BAR_STEPS_M = [0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200];
 
-  function drawScaleBar() {
+  function updateScaleBar() {
+    const dpr = window.devicePixelRatio || 1;
+    const cssPixelsPerMeter = view.scale / dpr;
     let meters = SCALE_BAR_STEPS_M[0];
     for (const step of SCALE_BAR_STEPS_M) {
       meters = step;
-      if (step * view.scale >= 80) break;
+      if (step * cssPixelsPerMeter >= 60) break;
     }
-    const px = meters * view.scale;
-    const dpr = window.devicePixelRatio || 1;
-    const x0 = 20 * dpr;
-    const y0 = canvas.height - 26 * dpr;
-
-    ctx.save();
-    ctx.strokeStyle = '#e6edf3';
-    ctx.lineWidth = 2 * dpr;
-    ctx.beginPath();
-    ctx.moveTo(x0, y0);
-    ctx.lineTo(x0 + px, y0);
-    ctx.moveTo(x0, y0 - 5 * dpr);
-    ctx.lineTo(x0, y0 + 5 * dpr);
-    ctx.moveTo(x0 + px, y0 - 5 * dpr);
-    ctx.lineTo(x0 + px, y0 + 5 * dpr);
-    ctx.stroke();
-
-    ctx.fillStyle = '#e6edf3';
-    ctx.font = `${12 * dpr}px sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-    const label = meters >= 1 ? `${meters} m` : `${Math.round(meters * 100)} cm`;
-    ctx.fillText(label, x0 + px / 2, y0 - 8 * dpr);
-    ctx.restore();
+    scaleRuler.style.width = `${meters * cssPixelsPerMeter}px`;
+    scaleLabel.textContent = meters >= 1 ? `${meters} m` : `${Math.round(meters * 100)} cm`;
   }
 
   function resizeCanvasIfNeeded() {

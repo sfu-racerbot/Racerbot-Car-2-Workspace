@@ -47,11 +47,15 @@ class GapFollowNode(Node):
         # threshold is only the remaining centerline corridor after inflation.
         self.declare_parameter('min_centerline_gap_width', 0.10)
         self.declare_parameter('emergency_stop_clearance', 0.02)
+        self.declare_parameter('forward_stop_clearance', 0.25)
+        self.declare_parameter('forward_stop_fov_deg', 60.0)
 
-        # F1TENTH instantaneous TTC, based on measured odometry speed.
+        # F1TENTH instantaneous TTC, using the safest recent speed estimate.
         self.declare_parameter('enable_ttc', True)
         self.declare_parameter('ttc_threshold_sec', 0.5)
         self.declare_parameter('ttc_min_closing_speed', 0.05)
+        self.declare_parameter('ttc_command_speed_timeout_sec', 0.5)
+        self.declare_parameter('ttc_command_fallback_max_odom_speed', 0.10)
         self.declare_parameter('odom_timeout_sec', 0.5)
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('deadman_button', 4)
@@ -98,11 +102,19 @@ class GapFollowNode(Node):
             self.get_parameter('min_centerline_gap_width').value)
         self.emergency_stop_clearance = float(
             self.get_parameter('emergency_stop_clearance').value)
+        self.forward_stop_clearance = float(
+            self.get_parameter('forward_stop_clearance').value)
+        self.forward_stop_fov = math.radians(float(
+            self.get_parameter('forward_stop_fov_deg').value))
         self.enable_ttc = bool(self.get_parameter('enable_ttc').value)
         self.ttc_threshold_sec = float(
             self.get_parameter('ttc_threshold_sec').value)
         self.ttc_min_closing_speed = float(
             self.get_parameter('ttc_min_closing_speed').value)
+        self.ttc_command_speed_timeout_sec = float(
+            self.get_parameter('ttc_command_speed_timeout_sec').value)
+        self.ttc_command_fallback_max_odom_speed = float(self.get_parameter(
+            'ttc_command_fallback_max_odom_speed').value)
         self.odom_timeout_sec = float(
             self.get_parameter('odom_timeout_sec').value)
         self.joy_topic = self.get_parameter('joy_topic').value
@@ -123,6 +135,25 @@ class GapFollowNode(Node):
             self.laser_offset_x,
             self.laser_offset_y,
         )
+        if not math.isfinite(self.forward_stop_clearance) or (
+                self.forward_stop_clearance < self.emergency_stop_clearance):
+            raise ValueError(
+                'forward_stop_clearance must be finite and no smaller than '
+                'emergency_stop_clearance')
+        if not math.isfinite(self.forward_stop_fov) or not (
+                0.0 < self.forward_stop_fov <= self.forward_fov):
+            raise ValueError(
+                'forward_stop_fov_deg must be positive and no wider than '
+                'forward_fov_deg')
+        if not math.isfinite(self.ttc_command_speed_timeout_sec) or (
+                self.ttc_command_speed_timeout_sec < 0.0):
+            raise ValueError(
+                'ttc_command_speed_timeout_sec must be finite and non-negative')
+        if not math.isfinite(self.ttc_command_fallback_max_odom_speed) or (
+                self.ttc_command_fallback_max_odom_speed < 0.0):
+            raise ValueError(
+                'ttc_command_fallback_max_odom_speed must be finite and '
+                'non-negative')
 
         # Deadman state: gap_follow only drives while this button is held on
         # a live /joy stream. Defaults to "not engaged" so the car never
@@ -132,6 +163,8 @@ class GapFollowNode(Node):
         self.joy_button_available = False
         self.current_speed = 0.0
         self.last_odom_time = None
+        self.last_commanded_speed = 0.0
+        self.last_command_time = None
 
         # Runtime diagnostics. The scan watchdog is informational: when a
         # callback-driven controller stops receiving scans it publishes no
@@ -175,6 +208,28 @@ class GapFollowNode(Node):
         age_sec = (
             self.get_clock().now() - self.last_odom_time).nanoseconds / 1e9
         return age_sec < self.odom_timeout_sec
+
+    def _effective_ttc_speed(self):
+        command_age_sec = math.inf
+        if self.last_command_time is not None:
+            command_age_sec = (
+                self.get_clock().now() - self.last_command_time
+            ).nanoseconds / 1e9
+
+        recent_command_speed = 0.0
+        if (
+            self.last_commanded_speed > 0.0
+            and 0.0 <= command_age_sec <= self.ttc_command_speed_timeout_sec
+        ):
+            recent_command_speed = self.last_commanded_speed
+        effective_speed = gap_logic.conservative_ttc_speed(
+            self.current_speed,
+            self.last_commanded_speed,
+            command_age_sec,
+            self.ttc_command_speed_timeout_sec,
+            self.ttc_command_fallback_max_odom_speed,
+        )
+        return effective_speed, recent_command_speed
 
     def _deadman_engaged(self) -> bool:
         return self._deadman_status()[0]
@@ -273,14 +328,32 @@ class GapFollowNode(Node):
             )
             return
 
-        # Independent speed-aware layer from F1TENTH Lab 2:
-        # iTTC = body clearance / (longitudinal speed * cos(beam angle)).
+        # Odom-independent fallback: only the forward cone gets the larger
+        # fixed threshold, so a close side wall during a turn does not brake.
+        forward_clearance = gap_logic.minimum_footprint_clearance_in_cone(
+            window,
+            window_valid,
+            beam_angles,
+            body_boundaries,
+            self.forward_stop_fov,
+        )
+        if forward_clearance <= self.forward_stop_clearance:
+            self._stop(
+                'forward_clearance',
+                f"minimum forward body clearance {forward_clearance:.3f}m is "
+                f"at or below the {self.forward_stop_clearance:.3f}m threshold",
+            )
+            return
+
+        # Independent speed-aware layer from F1TENTH Lab 2. A recent positive
+        # command backs up fresh odometry only if it is effectively near zero.
         if self.enable_ttc:
+            effective_speed, recent_command_speed = self._effective_ttc_speed()
             min_ttc = gap_logic.minimum_ttc(
                 window,
                 window_valid,
                 beam_angles,
-                self.current_speed,
+                effective_speed,
                 body_boundaries,
                 self.ttc_min_closing_speed,
             )
@@ -289,7 +362,9 @@ class GapFollowNode(Node):
                     'ttc_brake',
                     f"minimum footprint-aware TTC {min_ttc:.3f}s is at or "
                     f"below the {self.ttc_threshold_sec:.3f}s threshold at "
-                    f"{self.current_speed:.2f}m/s",
+                    f"effective speed {effective_speed:.2f}m/s "
+                    f"(odom {self.current_speed:.2f}m/s, recent command "
+                    f"{recent_command_speed:.2f}m/s)",
                 )
                 return
 
@@ -415,8 +490,15 @@ class GapFollowNode(Node):
         return lo_idx, hi_idx
 
     def _publish_drive(self, steering_angle: float, speed: float):
+        now = self.get_clock().now()
+        if math.isfinite(speed):
+            # Every command supersedes the previous one. In particular, an
+            # emergency zero must not leave an older positive command latched.
+            self.last_commanded_speed = float(speed)
+            self.last_command_time = now
+
         msg = AckermannDriveStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = now.to_msg()
         msg.header.frame_id = 'base_link'
         msg.drive.steering_angle = steering_angle
         msg.drive.speed = speed

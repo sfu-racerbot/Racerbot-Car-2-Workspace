@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd"?>
+<package format="3">
+  <name>odom_calibration</name>
+  <version>0.1.0</version>
+  <description>Read-only guided Web wizard for VESC odometry and steering calibration.</description>
+  <maintainer email="bryanmaubc@gmail.com">racerbotcar-2</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>ackermann_msgs</depend>
+  <depend>vesc_msgs</depend>
+  <depend>ament_index_python</depend>
+  <depend>python3-tornado</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
