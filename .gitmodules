@@ -14,3 +14,11 @@
 	path = src/realsense-ros
 	url = https://github.com/realsenseai/realsense-ros.git
 	branch = ros2-master
+[submodule "src/racerbot_a"]
+	path = src/racerbot_a
+	url = https://github.com/sfu-racerbot/racerbot_a.git
+	branch = main
+[submodule "src/racerbot_b"]
+	path = src/racerbot_b
+	url = https://github.com/sfu-racerbot/racerbot_b.git
+	branch = main

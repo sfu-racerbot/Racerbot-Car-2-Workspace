@@ -4,6 +4,10 @@ ROS2 Jazzy workspace for the team's roboracer/F1TENTH car (Jetson Orin Nano Supe
 
 Recent changes to the team's own packages are logged in [CHANGELOG.md](CHANGELOG.md) — check it after pulling to see what changed and whether anything still needs on-car validation.
 
+## Code provenance
+
+The team's actively developed codebases live in the [`racerbot_a`](src/racerbot_a) and [`racerbot_b`](src/racerbot_b) git submodules. The workspace-specific integration code and documentation outside those two team repositories were produced through vibe coding (AI-assisted development). Third-party dependencies are separately identified as upstream submodules or vendored upstream code below.
+
 ## Documentation
 
 Start here if you're new to the car or the codebase:
@@ -29,6 +33,8 @@ This file stays a short quick-start; the docs above are the full reference.
 ## Layout (`src/`)
 | Package | Source | Purpose |
 |---|---|---|
+| `racerbot_a` | [team git submodule](https://github.com/sfu-racerbot/racerbot_a), `main` | Racerbot Team A's actively developed codebase; its ROS2 packages are under `racerbot_a/src/` |
+| `racerbot_b` | [team git submodule](https://github.com/sfu-racerbot/racerbot_b), `main` | Racerbot Team B's actively developed codebase, currently containing `gap_follow_node` |
 | `f1tenth_system` (+ `ackermann_mux`, `teleop_tools`, `vesc`) | vendored (plain tracked files, **not** a git submodule — see [docs/git-setup.md](docs/git-setup.md)) | VESC driver, `urg_node` (Hokuyo), joystick teleop, command muxing |
 | `transport_drivers` | git submodule, `humble` | serial transport dependency for `vesc` |
 | `particle_filter` (+ `range_libc`) | git submodules, `humble-devel` | Monte Carlo localization against a saved map |

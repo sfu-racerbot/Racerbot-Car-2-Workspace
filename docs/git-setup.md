@@ -1,6 +1,6 @@
 # Git setup / version control
 
-How this workspace is versioned, what's a real git submodule vs. a plain vendored copy, and what to check before pulling upstream updates. Read this before touching `.gitmodules`, running any `git submodule` command, or updating `f1tenth_system`/`particle_filter`/`range_libc`/`transport_drivers` from upstream.
+How this workspace is versioned, what's a real git submodule vs. a plain vendored copy, and what to check before pulling upstream updates. Read this before touching `.gitmodules`, running any `git submodule` command, or updating any package listed below.
 
 ## Remote
 
@@ -12,11 +12,17 @@ How this workspace is versioned, what's a real git submodule vs. a plain vendore
 
 | `src/` package | Tracking | Upstream | Branch |
 |---|---|---|---|
+| `racerbot_a` | **team-developed git submodule** | `sfu-racerbot/racerbot_a` | `main` |
+| `racerbot_b` | **team-developed git submodule** | `sfu-racerbot/racerbot_b` | `main` |
 | `particle_filter` | **real git submodule** | `f1tenth/particle_filter` | `humble-devel` |
 | `range_libc` | **real git submodule** | `f1tenth/range_libc` | `humble-devel` |
 | `transport_drivers` | **real git submodule** | `ros-drivers/transport_drivers` | `humble` |
 | `realsense-ros` | **real git submodule** | `realsenseai/realsense-ros` | `ros2-master` |
 | `f1tenth_system` | **vendored (plain tracked files, NOT a submodule)** | was `f1tenth/f1tenth_system` | was `humble-devel` |
+
+### Team-developed code vs. vibe-coded workspace code
+
+`racerbot_a` and `racerbot_b` are the codebases the Racerbot teams are actively developing. The workspace-specific integration code and documentation outside those two repositories were produced through vibe coding (AI-assisted development). The remaining submodules and vendored packages are third-party upstream code, not team-authored workspace code.
 
 `f1tenth_system` used to be a submodule too. It was **deliberately disconnected from upstream** and converted to a normal tracked directory (its `.git` gitlink and `.gitmodules`/`.git/config` entries were removed; the files themselves were kept and `git add`-ed like any other package) because it carries local fixes/modifications that have to be committed to this repo:
 
@@ -30,11 +36,29 @@ A git submodule can only ever point at a commit in *someone else's* repo — the
 ```bash
 git clone --recurse-submodules https://github.com/sfu-racerbot/Racerbot-Car-2-Workspace.git
 ```
-Forgot `--recurse-submodules`, or the clone predates a submodule being added? `particle_filter/`, `range_libc/`, `transport_drivers/` will exist but be empty:
+Forgot `--recurse-submodules`, or the clone predates a submodule being added? The submodule paths—including `racerbot_a/`, `racerbot_b/`, `particle_filter/`, `range_libc/`, `transport_drivers/`, and `realsense-ros/`—will exist but be empty:
 ```bash
 git submodule update --init --recursive
 ```
 `f1tenth_system` needs no such step — it's a plain part of the repo and comes with a normal clone.
+
+## Working on Racerbot A or Racerbot B
+
+Changes to the team code must be committed and pushed from inside the appropriate submodule first. Then commit the updated submodule pointer in this workspace:
+
+```bash
+cd src/racerbot_b                 # or src/racerbot_a
+git add .
+git commit -m "Describe the team code change"
+git push origin main
+
+cd ../..
+git add src/racerbot_b            # or src/racerbot_a
+git commit -m "Bump Racerbot B submodule"
+git push origin main
+```
+
+The workspace repository records only the referenced commit ID, not the submodule's files. Never leave a team-code commit only on one machine: push the submodule commit before pushing the workspace pointer.
 
 ## Checking for upstream updates — do this periodically, not just on breakage
 
