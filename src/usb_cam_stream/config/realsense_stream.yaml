@@ -15,3 +15,7 @@ usb_cam_stream_node:
     port: 9090
     stream_fps: 15.0   # how often a connected browser is sent a new frame
     jpeg_quality: 80   # 0-100 -- higher = better quality, more bandwidth/CPU
+
+    # --- Terminal diagnostics ---
+    frame_timeout_sec: 2.0      # warn if the image topic stops producing frames
+    status_log_period_sec: 5.0  # repeat healthy/fault state (0 = state changes only)

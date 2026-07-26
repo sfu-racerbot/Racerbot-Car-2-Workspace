@@ -1,8 +1,8 @@
 # `web_dashboard`
 
-Live browser dashboard: streams the SLAM/localization map, the raw LIDAR
-scan, and the car's pose to any web browser on the network over a
-WebSocket, rendered on an HTML5 canvas. This file documents the code in
+Live browser dashboard: streams the SLAM/localization map, proximity-colored
+LIDAR, pose, measured speed, selected steering command, LB state, and a shared
+stopwatch to any web browser over a WebSocket. This file documents the code in
 detail; for the workflow (what you'll see at each stage, quick start,
 security note) see [docs/web-dashboard.md](../../docs/web-dashboard.md).
 
@@ -17,16 +17,18 @@ apply to it; both are scoped to nodes that can move the car (see
 | File | What it is |
 |---|---|
 | [`web_dashboard/protocol.py`](web_dashboard/protocol.py) | Wire-format conversion — turns ROS messages into JSON headers + binary payloads. No `rclpy`/Tornado/network imports, so it's unit-testable in isolation (see [`test/test_protocol.py`](test/test_protocol.py)). |
-| [`web_dashboard/dashboard_node.py`](web_dashboard/dashboard_node.py) | The ROS2 node: subscribes to map/scan/pose, runs a [Tornado](https://www.tornadoweb.org/) web + WebSocket server, bridges rclpy's executor thread to Tornado's IOLoop thread. |
-| [`web/index.html`](web/index.html), [`web/dashboard.js`](web/dashboard.js), [`web/style.css`](web/style.css) | The browser side — plain HTML/JS/CSS, no build step, no framework. |
+| [`web_dashboard/stopwatch.py`](web_dashboard/stopwatch.py) | ROS-free deadman-gated stopwatch state machine, including joystick timeout handling. |
+| [`web_dashboard/dashboard_node.py`](web_dashboard/dashboard_node.py) | The ROS2 node: subscribes to map/scan/pose/command/odom/joy, runs a [Tornado](https://www.tornadoweb.org/) web + WebSocket server, and bridges its two threads. |
+| [`web/index.html`](web/index.html), [`web/dashboard.js`](web/dashboard.js), [`web/style.css`](web/style.css) | The main browser dashboard — plain HTML/JS/CSS, no build step. |
+| [`web/camera.html`](web/camera.html), [`web/camera.js`](web/camera.js), [`web/camera.css`](web/camera.css) | Full-window camera recording view with clock and telemetry overlays. |
 | [`config/web_dashboard.yaml`](config/web_dashboard.yaml) | Every parameter, loaded at launch. |
 | [`launch/web_dashboard_launch.py`](launch/web_dashboard_launch.py) | Starts the node with the YAML above. |
 
 ## Interface
 
-- **Subscribes:** `<map_topic>` (`nav_msgs/OccupancyGrid`, default `/map`, transient-local QoS), `<scan_topic>` (`sensor_msgs/LaserScan`, default `/scan`, sensor QoS), `<pose_topic>` (`geometry_msgs/PoseStamped`, default `/pf/viz/inferred_pose`), `<drive_topic>` (`ackermann_msgs/AckermannDriveStamped`, default `/drive`, read-only — for display only)
-- Also samples CPU%/mem%/CPU temp/WiFi signal/uptime on a timer (`psutil` + `/sys/class/thermal` + `/proc/net/wireless`), not from a topic.
-- **Publishes:** nothing, to `/drive` or anywhere else. No `/joy` subscription, no deadman check — there is nothing this node could do to move the car even by accident; reading `/drive` only feeds the browser's `drive` readout.
+- **Subscribes:** map (`/map`), scan (`/scan`), pose (`/pf/viz/inferred_pose`), selected command (`/ackermann_cmd`), measured odometry (`/odom`), and joystick state (`/joy`). Every subscription is display/timer input only.
+- Also samples CPU%/mem%/CPU temp/WiFi signal/uptime on a timer (`psutil` + `/sys/class/thermal` + `/proc/net/wireless`).
+- **Publishes:** nothing to ROS or anywhere in the driving path. Browser input can only enable/reset the dashboard-local stopwatch; it never leaves this process.
 
 ## Two concurrency models, one process
 
@@ -83,7 +85,9 @@ payload), laid out to match a JavaScript `TypedArray` byte-for-byte:
 | `map` | `width`, `height`, `resolution`, `origin_x`, `origin_y`, `origin_yaw` | `Int8Array` — one signed byte per cell, matching `OccupancyGrid.data` exactly (`-1` unknown, `0` free, `100` occupied) |
 | `scan` | `angle_min`, `angle_increment`, `range_min`, `range_max`, `count`, `laser_offset_x`, `laser_offset_y` | `Float32Array` — one little-endian float per beam, matching `LaserScan.ranges` |
 | `pose` | `x`, `y`, `yaw` | *(none — small enough to just be JSON)* |
-| `drive` | `speed`, `steering_angle` | *(none)* |
+| `drive` | selected-command `speed`, `steering_angle` | *(none)* |
+| `speed` | measured odometry `speed` | *(none)* |
+| `stopwatch` | `elapsed_s`, enabled/running flags, LB/freshness flags | *(none)* |
 | `stats` | `cpu_percent`, `mem_percent`, `cpu_temp_c` (nullable), `uptime_s`, `wifi_dbm` (nullable) | *(none)* |
 
 ```python
@@ -100,8 +104,10 @@ it with zero parsing beyond `new Int8Array(arrayBuffer)`.
 `dashboard_node.py` throttles `scan` broadcasts to `scan_broadcast_rate_hz`
 (default `10Hz`) regardless of how fast `/scan` itself publishes (~40Hz) —
 no browser needs to redraw that often, and it keeps WiFi/CPU load down.
-`map`, `pose`, and `drive` updates are broadcast immediately, with no
-throttling (maps update rarely; poses and drive commands are tiny).
+`map`, `pose`, `drive`, and `speed` updates are broadcast immediately.
+LB/stopwatch state emits at `stopwatch_update_rate_hz` so every open tab stays
+synchronized and sees the same reset/elapsed value without redrawing the map for
+every joystick message.
 `stats` isn't event-driven at all — it's sampled on its own timer
 (`stats_interval_sec`, default 1Hz) since there's no ROS topic to hang it
 off of. Both `_read_cpu_temp_c()` and `_read_wifi_signal_dbm()` read
@@ -174,7 +180,7 @@ slow for a large grid. `OccupancyGrid.data` has row 0 at the map's
 file can treat "top of the image" as "largest world Y" without
 re-deriving that.
 
-Every one of map/scan/pose/drive/stats carries its own `receivedAt` (this
+Every one of map/scan/pose/drive/speed/stopwatch/stats carries its own `receivedAt` (this
 browser's own clock via `performance.now()`, not the server's), and a
 250ms timer recomputes "updated Xs ago" and turns the relevant readout red
 past a staleness threshold even if nothing new ever arrives again — so a
@@ -190,9 +196,9 @@ vs. stale, same threshold logic).
 ### Layout: sidebar + two corner insets
 
 The left sidebar (`#overlay`) has no fixed or max height in CSS — it's a
-`position: fixed` box sized by its content, split into a `feeds` section
-(map/scan/pose/drive, each with a status dot) and a `system` section
-(cpu/mem/temp/wifi/uptime, one row each). WiFi gets a small 4-bar icon
+`position: fixed` box sized by its content, split into `feeds`, `vehicle`
+(measured speed, selected steering, LB), `LB stopwatch` (enable/reset), and
+`system` sections. WiFi gets a small 4-bar icon
 (`updateWifiBars()`) alongside the raw dBm reading, using the same
 dBm-band thresholds phones use for their own signal icons.
 
@@ -214,18 +220,22 @@ via CSS (`#minimap-panel` top-right, `#camera-panel` bottom-right):
   (with a cache-busting query param) as long as the `<img>`'s `error`
   event has fired more recently than its `load` event, so a camera node
   started after the dashboard page loads still gets picked up without a
-  page reload.
+  page reload. Clicking the inset opens a full-window recording tab with
+  clock, speed, steering, LB, stopwatch, CPU, and WiFi overlays.
 
 ## Parameters (`config/web_dashboard.yaml`)
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `map_topic` / `scan_topic` / `pose_topic` / `drive_topic` | `/map` / `/scan` / `/pf/viz/inferred_pose` / `/drive` | Input topics |
+| `map_topic` / `scan_topic` / `pose_topic` | `/map` / `/scan` / `/pf/viz/inferred_pose` | Map/LIDAR/localization inputs |
+| `drive_topic` / `odom_topic` | `/ackermann_cmd` / `/odom` | Selected steering command / measured speed |
+| `joy_topic` / `deadman_button` / `joy_timeout_sec` | `/joy` / `4` / `0.5` | Read-only LB input and freshness timeout for the stopwatch |
+| `stopwatch_update_rate_hz` | `10.0` | Shared stopwatch broadcast rate |
 | `host` | `0.0.0.0` | Listen on every interface — see the security note in [docs/web-dashboard.md](../../docs/web-dashboard.md#security-note) |
 | `port` | `8080` | Web server port |
 | `scan_broadcast_rate_hz` | `10.0` | Throttle for `/scan` broadcasts (input itself runs ~40Hz) |
 | `stats_interval_sec` | `1.0` | How often CPU%/mem%/temp/WiFi/uptime are sampled and broadcast |
-| `laser_offset_x` / `laser_offset_y` | `0.27` / `0.0` | LIDAR mounting offset from `base_link` (matches [hardware-reference.md](../../docs/hardware-reference.md)) |
+| `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` | Estimated LIDAR mounting offset from `base_link` (matches [hardware-reference.md](../../docs/hardware-reference.md)) |
 
 ## Troubleshooting
 

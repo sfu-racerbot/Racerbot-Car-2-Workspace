@@ -24,6 +24,13 @@
   const infoScan = document.getElementById('info-scan');
   const infoPose = document.getElementById('info-pose');
   const infoDrive = document.getElementById('info-drive');
+  const vehicleSpeed = document.getElementById('vehicle-speed');
+  const vehicleSteering = document.getElementById('vehicle-steering');
+  const vehicleLb = document.getElementById('vehicle-lb');
+  const stopwatchDisplay = document.getElementById('stopwatch-display');
+  const stopwatchState = document.getElementById('stopwatch-state');
+  const stopwatchToggle = document.getElementById('stopwatch-toggle');
+  const stopwatchReset = document.getElementById('stopwatch-reset');
   const infoCpu = document.getElementById('info-cpu');
   const infoMem = document.getElementById('info-mem');
   const infoTemp = document.getElementById('info-temp');
@@ -56,7 +63,9 @@
     map: null,   // { width, height, resolution, originX, originY, canvas: <offscreen canvas>, receivedAt }
     scan: null,  // { angleMin, angleIncrement, rangeMin, rangeMax, laserOffsetX, laserOffsetY, ranges: Float32Array, receivedAt }
     pose: null,  // { x, y, yaw, receivedAt }
-    drive: null, // { speed, steeringAngle, receivedAt } -- whatever /drive currently carries
+    drive: null, // { speed, steeringAngle, receivedAt } -- selected /ackermann_cmd
+    speed: null, // { speed, receivedAt } -- measured /odom longitudinal speed
+    stopwatch: null, // { elapsedS, enabled, running, lbHeld, joyFresh, buttonAvailable, receivedAt }
     stats: null, // { cpuPercent, memPercent, cpuTempC, uptimeS, wifiDbm, receivedAt }
   };
 
@@ -145,7 +154,21 @@
       render();
     } else if (header.type === 'drive') {
       state.drive = { speed: header.speed, steeringAngle: header.steering_angle, receivedAt: performance.now() };
-      render();
+      updateStatusText();
+    } else if (header.type === 'speed') {
+      state.speed = { speed: header.speed, receivedAt: performance.now() };
+      updateStatusText();
+    } else if (header.type === 'stopwatch') {
+      state.stopwatch = {
+        elapsedS: header.elapsed_s,
+        enabled: header.enabled,
+        running: header.running,
+        lbHeld: header.lb_held,
+        joyFresh: header.joy_fresh,
+        buttonAvailable: header.button_available,
+        receivedAt: performance.now(),
+      };
+      updateStatusText();
     } else if (header.type === 'stats') {
       state.stats = {
         cpuPercent: header.cpu_percent,
@@ -155,7 +178,7 @@
         wifiDbm: header.wifi_dbm,
         receivedAt: performance.now(),
       };
-      render();
+      updateStatusText();
     }
   }
 
@@ -424,6 +447,19 @@
     ctx.drawImage(mapCanvas, x0, y0, x1 - x0, y1 - y0);
   }
 
+  const LIDAR_NEAR_M = 0.3;
+  const LIDAR_FAR_M = 5.0;
+  const LIDAR_COLORS = Array.from({ length: 17 }, (_, i) => {
+    const hue = Math.round((i / 16) * 120); // red (near) -> yellow -> green (far)
+    return `hsl(${hue} 85% 50%)`;
+  });
+
+  function lidarColor(range) {
+    const normalized = Math.min(1, Math.max(0,
+      (range - LIDAR_NEAR_M) / (LIDAR_FAR_M - LIDAR_NEAR_M)));
+    return LIDAR_COLORS[Math.round(normalized * (LIDAR_COLORS.length - 1))];
+  }
+
   function drawScanMapRelative() {
     const { pose } = state;
     const { angleMin, angleIncrement, rangeMin, rangeMax, laserOffsetX, laserOffsetY, ranges } = state.scan;
@@ -434,10 +470,10 @@
     const laserWorldX = pose.x + laserOffsetX * cosYaw - laserOffsetY * sinYaw;
     const laserWorldY = pose.y + laserOffsetX * sinYaw + laserOffsetY * cosYaw;
 
-    ctx.fillStyle = '#58a6ff';
     for (let i = 0; i < ranges.length; i++) {
       const r = ranges[i];
       if (!Number.isFinite(r) || r < rangeMin || r > rangeMax) continue;
+      ctx.fillStyle = lidarColor(r);
       const angle = pose.yaw + angleMin + i * angleIncrement;
       const wx = laserWorldX + r * Math.cos(angle);
       const wy = laserWorldY + r * Math.sin(angle);
@@ -448,10 +484,10 @@
 
   function drawScanRobotCentric() {
     const { angleMin, angleIncrement, rangeMin, rangeMax, ranges } = state.scan;
-    ctx.fillStyle = '#58a6ff';
     for (let i = 0; i < ranges.length; i++) {
       const r = ranges[i];
       if (!Number.isFinite(r) || r < rangeMin || r > rangeMax) continue;
+      ctx.fillStyle = lidarColor(r);
       const angle = angleMin + i * angleIncrement;
       const bx = r * Math.cos(angle);
       const by = r * Math.sin(angle);
@@ -625,6 +661,61 @@
     return `${h}h${String(m).padStart(2, '0')}m`;
   }
 
+  function stopwatchElapsed() {
+    if (!state.stopwatch) return 0;
+    const interpolation = state.stopwatch.running
+      ? Math.min((performance.now() - state.stopwatch.receivedAt) / 1000, 0.5)
+      : 0;
+    return state.stopwatch.elapsedS + interpolation;
+  }
+
+  function formatStopwatch(totalSeconds) {
+    const centiseconds = Math.floor(Math.max(0, totalSeconds) * 100);
+    const hours = Math.floor(centiseconds / 360000);
+    const minutes = Math.floor((centiseconds % 360000) / 6000);
+    const seconds = Math.floor((centiseconds % 6000) / 100);
+    const fraction = centiseconds % 100;
+    const body = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(fraction).padStart(2, '0')}`;
+    return hours > 0 ? `${hours}:${body}` : body;
+  }
+
+  function updateVehicleAndStopwatch() {
+    vehicleSpeed.textContent = state.speed && !isStale(state.speed)
+      ? `${state.speed.speed.toFixed(2)} m/s`
+      : '-- m/s';
+    vehicleSteering.textContent = state.drive && !isStale(state.drive)
+      ? `${(state.drive.steeringAngle * 180 / Math.PI).toFixed(1)} deg`
+      : '-- deg';
+
+    const timer = state.stopwatch;
+    stopwatchDisplay.textContent = formatStopwatch(stopwatchElapsed());
+    stopwatchDisplay.classList.toggle('running', !!(timer && timer.running));
+    stopwatchToggle.textContent = timer && timer.enabled ? 'disable' : 'enable';
+    stopwatchToggle.classList.toggle('enabled', !!(timer && timer.enabled));
+
+    vehicleLb.className = 'row-value';
+    stopwatchState.className = '';
+    if (!timer || isStale(timer) || !timer.joyFresh) {
+      vehicleLb.textContent = 'joystick stale / offline';
+      stopwatchState.textContent = timer && timer.enabled
+        ? 'paused · waiting for live joystick'
+        : 'off · enable, then hold LB to run';
+      stopwatchState.classList.add('error');
+    } else if (!timer.buttonAvailable) {
+      vehicleLb.textContent = 'LB button unavailable';
+      stopwatchState.textContent = 'paused · LB input unavailable';
+      stopwatchState.classList.add('error');
+    } else if (timer.lbHeld) {
+      vehicleLb.textContent = 'HELD · deadman active';
+      stopwatchState.textContent = timer.enabled ? 'running · release LB to pause' : 'ready · stopwatch disabled';
+      stopwatchState.classList.add('ready');
+    } else {
+      vehicleLb.textContent = 'released';
+      stopwatchState.textContent = timer.enabled ? 'paused · hold LB to run' : 'off · enable, then hold LB to run';
+      if (timer.enabled) stopwatchState.classList.add('warning');
+    }
+  }
+
   // Each feed's status dot: gray (nothing ever received), green (fresh),
   // or red (stale) -- a glance at four dots is faster to read than four
   // separate "updated Xs ago" strings.
@@ -660,7 +751,8 @@
       : 'no pose yet';
     infoDrive.textContent = state.drive
       ? `${state.drive.speed.toFixed(2)}m/s @ ${(state.drive.steeringAngle * 180 / Math.PI).toFixed(1)}deg, ${ageText(state.drive)}`
-      : 'no drive yet';
+      : 'no command yet';
+    updateVehicleAndStopwatch();
 
     if (state.stats) {
       infoCpu.textContent = `${state.stats.cpuPercent.toFixed(0)}%`;
@@ -760,6 +852,16 @@
     maybeAutoFit();
     render();
   });
+
+  function sendStopwatchControl(action, enabled) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'stopwatch_control', action, enabled }));
+  }
+
+  stopwatchToggle.addEventListener('click', () => {
+    sendStopwatchControl('set_enabled', !(state.stopwatch && state.stopwatch.enabled));
+  });
+  stopwatchReset.addEventListener('click', () => sendStopwatchControl('reset'));
 
   window.addEventListener('resize', render);
 

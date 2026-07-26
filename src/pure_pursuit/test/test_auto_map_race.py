@@ -4,6 +4,9 @@ import math
 import os
 import sys
 
+from ackermann_msgs.msg import AckermannDriveStamped
+import rclpy
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from pure_pursuit.auto_map_race_node import angle_difference, LapRecorder  # noqa: E402
 import pytest  # noqa: E402
@@ -87,3 +90,45 @@ def test_profile_parameter_response_enables_racing_transition():
     AutoMapRaceNode._profile_loaded_callback(supervisor, Future())
     assert supervisor.state == 'transition'
     assert supervisor.race_enable_time == pytest.approx(12.0)
+
+
+def test_supervisor_reports_missing_then_forwards_fresh_mapping_command():
+    rclpy.init(args=['--ros-args',
+                     '-p', 'enable_deadman:=false',
+                     '-p', 'decision_log_period_sec:=0.0'])
+    from pure_pursuit.auto_map_race_node import AutoMapRaceNode
+    node = AutoMapRaceNode()
+    try:
+        # This test targets command selection; a missing SLAM transform is
+        # represented directly so no live TF graph is required.
+        node._lookup_and_publish_pose = lambda: None
+        published = []
+
+        class CapturePublisher:
+            def publish(self, msg):
+                published.append(msg)
+
+        node.drive_pub = CapturePublisher()
+
+        node._control_step()
+        assert node.last_decision_state == 'gap_follow_command_missing'
+        assert published[-1].drive.speed == 0.0
+
+        command = AckermannDriveStamped()
+        command.drive.steering_angle = 0.12
+        command.drive.speed = 0.8
+        node.mapping_cmd = command
+        node.mapping_cmd_time = (
+            node._now_sec() - node.command_timeout_sec - 0.1)
+        node._control_step()
+        assert node.last_decision_state == 'gap_follow_command_stale'
+        assert published[-1].drive.speed == 0.0
+
+        node._mapping_drive_callback(command)
+        node._control_step()
+        assert node.last_decision_state == 'forwarding_mapping'
+        assert published[-1].drive.steering_angle == pytest.approx(0.12)
+        assert published[-1].drive.speed == pytest.approx(0.8)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

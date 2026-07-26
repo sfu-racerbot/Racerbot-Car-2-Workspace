@@ -102,9 +102,11 @@ To point it at a different camera, resolution, or port, edit
 `src/usb_cam_stream/config/usb_cam_stream.yaml` — see the
 [parameter reference](#parameter-reference) below.
 
-If the camera isn't found or gets unplugged, the capture thread logs an
-error and keeps retrying every few seconds rather than crashing the node
-— check `v4l2-ctl --list-devices` to confirm the device path.
+The launch terminal reports whether the node is waiting for a device/topic or
+first frame, the V4L2 mode actually negotiated, live frame count/age/JPEG size,
+stale input, conversion/encoding errors, and camera loss/recovery. A missing or
+unplugged camera is retried every few seconds rather than crashing the node —
+check `v4l2-ctl --list-devices` to confirm the device path.
 
 ## `image_topic` mode: streaming a ROS image topic instead
 
@@ -121,8 +123,11 @@ The shipped variant of this is the RealSense stream that fills
 [web_dashboard's camera panel](web-dashboard.md#what-youll-actually-see):
 
 ```bash
-ros2 launch usb_cam_stream realsense_stream_launch.py   # needs realsense_camera_launch.py running
+ros2 launch racerbot_launch realsense_camera_launch.py  # driver + MJPEG bridge
 ```
+
+For bridge-only diagnostics, `ros2 launch usb_cam_stream realsense_stream_launch.py`
+still works when the RealSense driver is already publishing.
 
 (`config/realsense_stream.yaml`: `image_topic: /camera/camera/color/image_raw`,
 port `9090` — the port `dashboard.js` looks for. Don't run this and
@@ -146,6 +151,8 @@ All in `src/usb_cam_stream/config/usb_cam_stream.yaml`:
 | `port` | `9090` | Web server port — **not** `8080`, which `web_dashboard` already uses on this car |
 | `stream_fps` | `15.0` | How often each connected browser is sent a new frame — independent of `capture_fps`, keeps WiFi/CPU load down since a browser doesn't need every captured frame |
 | `jpeg_quality` | `80` | `0`–`100` JPEG re-encode quality — higher costs more bandwidth/CPU per frame |
+| `frame_timeout_sec` | `2.0` s | Warn when the selected source has not produced a newly encoded frame for this long |
+| `status_log_period_sec` | `5.0` s | Repeat the unchanged stream state in the launch terminal (`0.0` = transitions only) |
 
 ## Security note
 

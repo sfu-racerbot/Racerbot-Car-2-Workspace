@@ -10,15 +10,15 @@ browser, or web server.
 Wire format: everything travels over one WebSocket connection as pairs of
 messages -- one JSON *text* message describing "what is this and how do I
 read the bytes that follow", immediately followed by one *binary* message
-with the raw payload (skipped entirely for pose updates, which are small
-enough to just be JSON):
+with the raw payload (skipped for all compact telemetry updates, which fit
+comfortably in JSON):
 
   MAP:   {"type": "map",  ...metadata...} -> binary: int8 occupancy values,
          row-major, matching nav_msgs/OccupancyGrid.data exactly (-1
          unknown, 0 free, 100 occupied), one byte per cell.
   SCAN:  {"type": "scan", ...metadata...} -> binary: float32 ranges,
          little-endian, one 4-byte value per LaserScan.ranges entry.
-  POSE:  {"type": "pose", "x":.., "y":.., "yaw":.., "stamp":..}  (no binary)
+  POSE/DRIVE/SPEED/STOPWATCH/STATS: compact JSON only (no binary payload).
 
 Both binary payloads are laid out to match a JavaScript TypedArray
 byte-for-byte (Int8Array for the map, Float32Array for the scan), so the
@@ -116,12 +116,36 @@ def pose_message(x: float, y: float, yaw: float) -> dict:
 
 
 def drive_message(speed: float, steering_angle: float) -> dict:
-    """The currently-arbitrated drive command (whatever /drive carries),
-    small enough to just be JSON like pose_message."""
+    """The selected drive command from the mux output, as compact JSON."""
     return {
         'type': 'drive',
         'speed': float(speed),
         'steering_angle': float(steering_angle),
+        'stamp': time.time(),
+    }
+
+
+def speed_message(speed: float) -> dict:
+    """Measured longitudinal speed from odometry."""
+    return {
+        'type': 'speed',
+        'speed': float(speed),
+        'stamp': time.time(),
+    }
+
+
+def stopwatch_message(elapsed_s: float, enabled: bool, running: bool,
+                      lb_held: bool, joy_fresh: bool,
+                      button_available: bool) -> dict:
+    """Server-owned stopwatch state shared by every connected browser tab."""
+    return {
+        'type': 'stopwatch',
+        'elapsed_s': float(elapsed_s),
+        'enabled': bool(enabled),
+        'running': bool(running),
+        'lb_held': bool(lb_held),
+        'joy_fresh': bool(joy_fresh),
+        'button_available': bool(button_available),
         'stamp': time.time(),
     }
 

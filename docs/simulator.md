@@ -72,14 +72,16 @@ are resolved by F1TENTH Gym and cached in `.sim/f1tenth_gym/maps`.
 ## What is actually tested
 
 The simulator runs at 40 Hz with a 5 ms RK4 integration step. Its vehicle is
-matched to this repository's configured 0.25 m wheelbase and 0.30 m width. The
-LiDAR model has 819 beams over ±135° with small seeded noise.
+matched to the Traxxas 74276-4's published 0.324m wheelbase, the deliberately
+padded 0.31m × 0.58m collision body, and estimated +0.33m LiDAR offset. The
+LiDAR model has 819 beams over ±135° with
+small seeded noise.
 
 `gap_solo` validates:
 
-- scan sanitization and emergency stopping;
-- disparity extension and the width-aware safety bubble;
-- gap scoring, steering, and steering-dependent speed; and
+- scan sanitization, rectangular-body clearance, and TTC braking;
+- disparity extension without double-padding and the width-aware safety bubble;
+- preferred gap scoring plus the slow tight-corner fallback; and
 - one complete lap with no Gym collision.
 
 `pure_solo` validates:

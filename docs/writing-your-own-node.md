@@ -69,11 +69,12 @@ src/your_package/
 
 Concretely, from `gap_follow`:
 
-- **`package.xml`** ([src/gap_follow/package.xml](../src/gap_follow/package.xml)) — note the three real dependencies: `rclpy`, `sensor_msgs`, `ackermann_msgs`. Match these (plus `nav_msgs` if you subscribe `/odom`). `sensor_msgs` already covers `Joy`, needed for the deadman check below — no extra dependency required.
+- **`package.xml`** ([src/gap_follow/package.xml](../src/gap_follow/package.xml)) — its dependencies are `rclpy`, `sensor_msgs`, `nav_msgs`, and `ackermann_msgs`: gap follow now consumes `/odom` for TTC as well as `/scan` and `/joy`. `sensor_msgs` covers both `LaserScan` and `Joy`.
 - **`gap_follow/gap_follow_node.py`** ([src/gap_follow/gap_follow/gap_follow_node.py](../src/gap_follow/gap_follow/gap_follow_node.py)) — the node itself:
   - `self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 10)`
+  - `self.create_subscription(Odometry, self.odom_topic, self.odom_callback, 10)`
   - `self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)`
-  - Topic names are declared as ROS parameters (`scan_topic`, `drive_topic`) with `/scan`/`/drive` as defaults, rather than hardcoded — this lets you retarget the node (e.g. for testing against a bag file) without editing code.
+  - Topic names are ROS parameters (`scan_topic`, `odom_topic`, `drive_topic`) rather than hardcoded, so tests and bag playback can retarget them without editing code.
   - All the tuning knobs (speed limits, steering limits, safety margins) are also parameters, not constants — see the pattern in `__init__`.
 - **`config/gap_follow.yaml`** ([src/gap_follow/config/gap_follow.yaml](../src/gap_follow/config/gap_follow.yaml)) — the actual parameter values, loaded at launch. Change behavior by editing this file, not the code.
 - **`launch/gap_follow_launch.py`** ([src/gap_follow/launch/gap_follow_launch.py](../src/gap_follow/launch/gap_follow_launch.py)) — loads the YAML above and starts the node. This is the minimum viable launch file pattern for a single-node package.

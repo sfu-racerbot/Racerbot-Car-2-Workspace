@@ -58,7 +58,7 @@ How the car's software is put together: every node, every topic, and how they co
   └──────────────┘                                    │ urg_node │──► /scan (sensor_msgs/LaserScan)   (bringup_launch.py)
                                                         └──────────┘
 
-  static_transform_publisher ──► tf: base_link → laser (fixed offset: 0.27m fwd, 0.11m up)   (bringup_launch.py)
+  static_transform_publisher ──► tf: base_link → laser (estimated offset: 0.33m fwd, 0.11m up)   (bringup_launch.py)
 ```
 
 ## Control layers: exactly one at a time, in a second terminal
@@ -126,7 +126,7 @@ All topics as they actually appear on the bus with `bringup_launch.py` plus a co
 | `/sensors/core` | `vesc_msgs/VescStateStamped` | `vesc_driver_node` | `vesc_to_odom_node` |
 | `/sensors/imu`, `/sensors/imu/raw` | `sensor_msgs/Imu` | `vesc_driver_node` | (nothing by default — the VESC's onboard IMU, available if you want it) |
 | `/sensors/servo_position_command` | `std_msgs/Float64` | `vesc_driver_node` | `vesc_to_odom_node` |
-| `/odom` | `nav_msgs/Odometry` | `vesc_to_odom_node` | `particle_filter` (if running) |
+| `/odom` | `nav_msgs/Odometry` | `vesc_to_odom_node` | `gap_follow` (TTC speed), `particle_filter` (if running) |
 | `/scan` | `sensor_msgs/LaserScan` | `urg_node` | `gap_follow`, `slam_toolbox`, `particle_filter` (whichever is running) |
 | `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | `static_transform_publisher`, `vesc_to_odom_node` | RViz, `slam_toolbox`, `particle_filter` |
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | `urg_node`, `ackermann_mux` | RViz / `ros2 topic echo` for debugging |
@@ -175,8 +175,8 @@ Each node exposes this as an `enable_deadman` parameter (default `true` in all t
 
 ## Frame conventions
 
-- `base_link`: origin of the car, at the rear axle (matches `wheelbase: 0.25m` in `vesc.yaml`, used by `vesc_to_odom_node` for odometry)
-- `laser`: the Hokuyo's frame, offset `+0.27m` forward / `+0.11m` up from `base_link` (fixed, via `static_transform_publisher`)
+- `base_link`: origin of the car, at the rear axle (matches the Traxxas 74276-4 `wheelbase: 0.324m` in `vesc.yaml`, used by `vesc_to_odom_node` for odometry)
+- `laser`: the Hokuyo's frame, estimated at `+0.33m` forward / `+0.11m` up from `base_link` (fixed via `static_transform_publisher`; measure the x offset to finalize it)
 - `odom`: continuous but drifting frame, published by `vesc_to_odom_node` from wheel-speed + servo-angle integration (no encoders/IMU fusion — this is dead-reckoning only)
 - `map`: only exists once `slam_toolbox` or `particle_filter`'s `map_server` is running
 

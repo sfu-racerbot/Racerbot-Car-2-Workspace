@@ -8,6 +8,9 @@ auto_map_race_node:
     base_frame: base_link
     control_rate_hz: 40.0
     command_timeout_sec: 0.5
+    # Print every state change immediately and periodically repeat the current
+    # command-selection/lap decision in the launch terminal (0 = changes only).
+    decision_log_period_sec: 1.0
 
     # Two laps are intentional: lap 1 discovers the course and closes the
     # SLAM loop; lap 2 records a cleaner map-frame raceline after closure.

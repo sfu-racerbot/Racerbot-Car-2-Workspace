@@ -6,6 +6,41 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-07-25 — Runtime autonomy decision logging
+
+### gap_follow and pure_pursuit
+
+- Both local autonomy nodes now print immediate `STOP [reason]` /
+  `DRIVE [reason]` state transitions and one-second steady-state summaries in
+  their launch terminals. The diagnostics include the measurements,
+  thresholds, algorithm choice, and final steering/speed command that explain
+  each decision.
+- Pure pursuit reports deadman/profile/localization/cross-track/LIDAR stop
+  gates; path target/lookahead/curvature/profile-speed choices; reactive
+  overrides; and opponent/overtake gating. Gap follow reports deadman and scan
+  failures, emergency/no-gap stops, chosen gap bearings, steering clipping,
+  and steering-based speed scaling.
+- New `decision_log_period_sec` parameter in both packages controls periodic
+  summaries (`1.0` s default, `0.0` for transitions only). Gap follow also has
+  a `scan_timeout_sec` diagnostic watchdog (`0.5` s) so a dead scan stream no
+  longer causes an unexplained mux timeout. Driving and deadman behavior are
+  unchanged.
+
+### Automatic workflow, waypoint recorder, and camera stream
+
+- `auto_map_race_node` now reports its final forwarded/stopped command and why:
+  deadman state, missing/stale child commands, selected controller, lap number
+  and closure measurements, profile loading, and transition hold time. Its new
+  `decision_log_period_sec` defaults to `1.0` s.
+- `waypoint_recorder_node` now reports missing/stale pose input and live
+  recording progress (waypoint count, path length, sample spacing, and output
+  file). New defaults are `pose_timeout_sec: 1.0` and
+  `status_log_period_sec: 2.0`.
+- `usb_cam_stream_node` now reports device/topic wait states, negotiated camera
+  mode, frame health, loss/recovery, stale frames, and conversion/JPEG errors.
+  New defaults are `frame_timeout_sec: 2.0` and
+  `status_log_period_sec: 5.0`.
+
 ## 2026-07-21 — F1TENTH Gym validation and automatic map-to-race launch
 
 **Simulator validation complete; physical validation still required.** The

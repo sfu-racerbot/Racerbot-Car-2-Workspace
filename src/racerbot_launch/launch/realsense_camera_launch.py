@@ -19,7 +19,8 @@ def generate_launch_description():
     Wraps realsense2_camera's own rs_launch.py the same way race_launch.py
     wraps particle_filter's/pure_pursuit's own launch files -- this file
     owns only this car's tuning (as launch arguments) and the
-    base_link->camera_link static transform, not the driver itself.
+    base_link->camera_link static transform. It also starts the color-topic
+    MJPEG bridge used by browsers and the web dashboard on port 9090.
 
     Pointcloud is deliberately off (not needed yet, costs CPU).
     """
@@ -54,4 +55,14 @@ def generate_launch_description():
                    '--frame-id', 'base_link', '--child-frame-id', 'camera_link'],
     )
 
-    return LaunchDescription([realsense_launch, camera_tf])
+    realsense_stream_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory('usb_cam_stream'), 'launch',
+                'realsense_stream_launch.py')
+        )
+    )
+
+    return LaunchDescription([
+        realsense_launch, camera_tf, realsense_stream_launch,
+    ])

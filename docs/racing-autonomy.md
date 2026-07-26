@@ -686,7 +686,7 @@ file for inline comments too):
 | `scan_topic` | `/scan` | LIDAR input for the reactive safety net |
 | `drive_topic` | `/drive` | Output, arbitrated by `ackermann_mux` like every other autonomy node |
 | `control_rate_hz` | `40.0` | Control loop frequency |
-| `wheelbase` | `0.25` | Meters; must match `vesc.yaml` |
+| `wheelbase` | `0.324` | Traxxas 74276-4 specification in meters; must match `vesc.yaml` |
 | `min_lookahead` / `max_lookahead` / `lookahead_speed_gain` | `0.6` / `1.5` / `0.15` | Adaptive lookahead formula, see above |
 | `nearest_search_window` | `40` | +/- waypoints searched around last tick's nearest point (`0` = search all) |
 | `max_speed` / `min_speed` | `4.0` / `0.5` | Hard safety ceiling/floor, independent of the `.csv` |
@@ -716,7 +716,7 @@ file for inline comments too):
 | `overtake_lateral_offset` | `0.35` | Meters; sideways nudge to the steering target while passing |
 | `opponent_detection_mode` | `map` | Map subtraction by default; `heuristic` is the no-map fallback |
 | `map_topic` / `map_beam_step` / `map_subtraction_margin` | `/map` / `4` / `0.4` | Occupancy map, ray-cast downsampling, and residual margin |
-| `laser_offset_x` / `laser_offset_y` | `0.27` / `0.0` | LIDAR mounting offset from `base_link`, used to place detections in the map frame |
+| `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` | Estimated LIDAR mounting offset from `base_link`, used to place detections in the map frame |
 | `enable_deadman` | `true` | **Mandatory workspace policy** — LB deadman button, checked first. Leave `true`; see [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car) |
 | `joy_topic` | `/joy` | Deadman button input |
 | `deadman_button` | `4` | Button index (LB on the F710 in XInput mode) |

@@ -13,6 +13,9 @@ to launch alongside anything else (bringup, teleop, `gap_follow`,
 ros2 launch racerbot_launch realsense_camera_launch.py
 ```
 
+That one launch starts both `realsense2_camera` (color/depth topics) and the
+color-topic MJPEG bridge on port `9090`; no second stream launch is needed.
+
 ## What's wired up, and what isn't
 
 | Stream | Status |
@@ -43,20 +46,17 @@ no kernel patching, no `librealsense` source clone needed.
 `realsense2_camera`'s own shipped `rs_launch.py` (same pattern
 `race_launch.py` uses for `particle_filter`/`pure_pursuit`), passing this
 car's tuning as launch arguments — color+depth at `424x240x15`, pointcloud
-off — plus a placeholder `base_link`→`camera_link` static transform.
+off — plus a placeholder `base_link`→`camera_link` static transform. It also
+includes `usb_cam_stream`'s `realsense_stream_launch.py`, so ROS images and the
+browser stream start and stop together.
 
 ## Seeing the feed in a browser — the dashboard's camera panel
 
 [web_dashboard](web-dashboard.md)'s bottom-right camera inset auto-connects
-to an MJPEG stream on port `9090`. To fill it with the RealSense's color
-feed, on top of `realsense_camera_launch.py` above, run:
-
-```bash
-ros2 launch usb_cam_stream realsense_stream_launch.py
-```
-
-then the dashboard itself. **Full step-by-step (all three launch commands,
-in which order, and how to find `<car-ip>`) is in
+to the MJPEG stream on port `9090` that `realsense_camera_launch.py` now starts.
+Launch the dashboard separately, then click its camera inset for the full-window
+recording view. **Full step-by-step (both launch commands and how to find
+`<car-ip>`) is in
 [web-dashboard.md#with-the-camera-panel-filled-in-too](web-dashboard.md#with-the-camera-panel-filled-in-too)
 — including a real gotcha if you're viewing through an editor's
 port-forwarding (VS Code, SSH `-L`) instead of the car's actual address,
@@ -136,7 +136,7 @@ config file for a wrapped driver package):
 ```
 src/realsense-ros/                                  # git submodule, ros2-master
 src/racerbot_launch/
-├── launch/realsense_camera_launch.py                # wraps realsense2_camera's rs_launch.py + static TF
+├── launch/realsense_camera_launch.py                # driver + static TF + MJPEG bridge
 ├── package.xml                                       # exec_depend on realsense2_camera
 src/usb_cam_stream/
 ├── launch/realsense_stream_launch.py                # browser MJPEG stream of the color feed (dashboard camera panel)

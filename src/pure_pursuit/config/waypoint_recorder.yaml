@@ -5,3 +5,7 @@ waypoint_recorder_node:
     #   /home/racerbotcar-2/racerbot-ws/src/pure_pursuit/waypoints/my_track_raw.csv
     output_file: ''
     min_spacing_m: 0.15
+    # Diagnose a missing/stalled localization feed and report recording
+    # progress in the launch terminal (0 = state changes only).
+    pose_timeout_sec: 1.0
+    status_log_period_sec: 2.0

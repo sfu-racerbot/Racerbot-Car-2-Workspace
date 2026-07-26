@@ -12,3 +12,7 @@ usb_cam_stream_node:
     port: 9090      # 8080 is already used by web_dashboard on this car
     stream_fps: 15.0   # how often a connected browser is sent a new frame, independent of capture_fps
     jpeg_quality: 80   # 0-100 -- higher = better quality, more bandwidth/CPU
+
+    # --- Terminal diagnostics ---
+    frame_timeout_sec: 2.0      # warn if no newly encoded frame arrives for this long
+    status_log_period_sec: 5.0  # repeat healthy/fault state (0 = state changes only)

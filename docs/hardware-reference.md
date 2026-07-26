@@ -25,7 +25,7 @@ steering_angle_to_servo_gain: -1.2135
 steering_angle_to_servo_offset: 0.5304
 servo_min: 0.15
 servo_max: 0.85
-wheelbase: 0.25  # meters, used for odometry
+wheelbase: 0.324  # meters, Traxxas 74276-4 published specification
 ```
 The servo formula: `servo_position = -1.2135 × steering_angle + 0.5304`. Steering angle `0.0` → servo position `0.5304` (center). This is what you'll see repeatedly if you inspect `/commands/servo/position` — `0.5304` is neutral, not a bug.
 
@@ -42,7 +42,7 @@ Reading or writing the VESC's app configuration (including that servo-output fla
 | Jetson's wired NIC | `enP8p1s0` |
 | NetworkManager profile | `hokuyo`, static IPv4 `192.168.0.15/24` |
 | Scan rate | ~40Hz, ±180° (`angle_min`/`angle_max`: ±3.14 rad in `sensors.yaml`) |
-| Frame | `laser`, offset from `base_link`: +0.27m forward, +0.11m up, no rotation |
+| Frame | `laser`, estimated offset from `base_link`: +0.33m forward, +0.11m up, no rotation |
 
 To bring up this NIC on a fresh boot if the profile isn't auto-connecting:
 ```bash
@@ -78,5 +78,7 @@ watch which `axes[]` index moves as you work each stick/trigger, and which `butt
 
 ## Physical dimensions used in config
 
-- Wheelbase: 0.25m (`vesc.yaml`, used for odometry — verify this matches the actual chassis if it's ever swapped)
-- LiDAR mount offset from `base_link`: +0.27m forward, +0.11m up (`static_transform_publisher` args in `bringup_launch.py`) — update this if the LiDAR is ever remounted
+- Physical car: Traxxas Ford Fiesta ST Rally VXL 74276-4. [Traxxas publishes](https://traxxas.com/74276-4-ford-fiesta-st-rally-vxl) 0.535m length, 0.281m width, and 0.324m wheelbase.
+- Collision body: deliberately inflated to 0.58m long × 0.31m wide in `gap_follow.yaml`. Relative to the published body, that adds 22.5mm at each end and 14.5mm on each side before the separate `safety_margin` is applied.
+- Wheelbase: 0.324m in `vesc.yaml`, `pure_pursuit.yaml`, and `gap_follow.yaml`. `base_link` remains at the rear axle.
+- LiDAR mount: estimated at +0.33m forward / +0.11m up from `base_link`. Assuming symmetric bumper overhang, the physical nose is about 0.4295m ahead of the rear axle; a sensor about 0.10m inward gives +0.3295m. Measure rear-axle center to LiDAR center and replace the estimate in every linked config and static transform together.

@@ -3,7 +3,7 @@
 <package format="3">
   <name>web_dashboard</name>
   <version>0.1.0</version>
-  <description>Live browser dashboard: streams the SLAM/localization map, the raw LIDAR scan, and the car's pose to any web browser on the network over a WebSocket, rendered on an HTML5 canvas. Read-only -- never publishes anything, carries zero risk to how the car drives.</description>
+  <description>Read-only live browser dashboard for map, proximity-colored LIDAR, pose, vehicle telemetry, LB-gated stopwatch, system health, and camera recording view.</description>
   <maintainer email="bryanmaubc@gmail.com">racerbotcar-2</maintainer>
   <license>MIT</license>
 

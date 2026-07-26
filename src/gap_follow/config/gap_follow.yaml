@@ -2,25 +2,42 @@ gap_follow_node:
   ros__parameters:
     scan_topic: /scan
     drive_topic: /drive
+    odom_topic: /odom
     max_range: 10.0
     forward_fov_deg: 180.0
     # Deliberately higher than the code default (1.0): with this car's top
     # speed and this room's clutter, an opening has to be at least this
     # deep before it's worth steering into.
     min_gap_distance: 2.0
+    # If no 2m-deep gap exists at a blind/tight corner, accept a nearer
+    # post-inflation corridor and crawl through it instead of deadlocking.
+    fallback_min_gap_distance: 0.8
+    corner_speed: 0.5
     max_speed: 2.0
     min_speed: 0.8
     max_steering_angle: 0.4189
-    emergency_stop_distance: 0.15
-    # --- Physical clearance model (replaces the old fixed-angle
-    # bubble_angle_deg: a fixed 20 degrees was far too little clearance up
-    # close and wastefully much far away). Every obstacle edge (disparity)
-    # is extended, and the closest-obstacle bubble sized, by whatever
-    # (car_width/2 + safety_margin) subtends at that obstacle's actual
-    # distance -- see gap_logic.disparity_extend / safety_bubble. ---
-    car_width: 0.30            # meters -- chassis width, see docs/hardware-reference.md
-    safety_margin: 0.10        # meters -- extra clearance on top of the half-width, each side
-    disparity_threshold: 0.4   # meters -- a range jump bigger than this is an obstacle edge to extend
+    # --- Rectangular vehicle footprint ---
+    # Traxxas 74276-4 is 0.535 x 0.281 m; retain this intentionally inflated
+    # 0.58 x 0.31 m collision envelope. Its published wheelbase is 0.324 m.
+    # LiDAR x ~= 0.33 m estimates a mount about 0.10 m behind the physical nose.
+    car_width: 0.31
+    car_length: 0.58
+    wheelbase: 0.324
+    laser_offset_x: 0.33
+    laser_offset_y: 0.0
+    safety_margin: 0.10
+    disparity_threshold: 0.4
+    # Obstacles are already inflated by half-width + margin on both sides.
+    # Requiring another car width here was double-padding tight openings.
+    min_centerline_gap_width: 0.10
+    # Physical body clearance, not raw range from the offset LiDAR.
+    emergency_stop_clearance: 0.02
+
+    # --- Time-to-collision automatic emergency braking ---
+    enable_ttc: true
+    ttc_threshold_sec: 0.5
+    ttc_min_closing_speed: 0.05
+    odom_timeout_sec: 0.5
     # --- Deadman button (workspace policy -- see docs/architecture.md) ---
     # Mandatory workspace-wide safety policy: the car must not move under
     # any code, autonomous or manual, unless LB is held on the physical
@@ -31,3 +48,11 @@ gap_follow_node:
     joy_topic: /joy
     deadman_button: 4
     joy_timeout_sec: 0.5
+    # --- Terminal diagnostics ---
+    # Every state change prints immediately. While the state is unchanged,
+    # repeat the current stop/drive reason and final command at this rate.
+    # Set 0.0 for transitions only.
+    decision_log_period_sec: 1.0
+    # Gap follow is driven by scan callbacks, so a dead scan makes /drive go
+    # quiet. The status timer uses this threshold to explain that mux stop.
+    scan_timeout_sec: 0.5

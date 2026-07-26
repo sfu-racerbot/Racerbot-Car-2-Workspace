@@ -20,9 +20,8 @@ identical in both modes. See docs/realsense-camera.md.
 Three concurrency models share this one process (an extra one compared to
 web_dashboard_node -- see that file's docstring for the base pattern this
 extends):
-  - rclpy's own executor, spun on a background thread purely so
-    `ros2 param`/lifecycle introspection still works on this node -- it
-    has no subscriptions or publishers of its own.
+  - rclpy's own executor, spun on a background thread for parameter/
+    lifecycle introspection and the optional image-topic subscription.
   - A dedicated capture thread that owns cv2.VideoCapture exclusively.
     OpenCV's blocking .read() call must never run on Tornado's IOLoop
     thread (it would stall every HTTP client, including the WebSocket-less
@@ -31,9 +30,9 @@ extends):
     including the long-lived multipart MJPEG response each connected
     browser tab keeps open.
 
-The capture thread and IOLoop handlers only ever communicate through one
-`(sequence number, JPEG bytes)` pair, written by the capture thread and
-read by every stream handler. Both are plain attribute assignments, so
+The frame source and IOLoop handlers communicate through the latest sequence
+number, JPEG bytes, and timestamp, written by the source and read by every
+stream handler. These are plain attribute assignments, so
 under the GIL they're atomic; a handler occasionally reading one frame
 late is a non-issue for a live video feed, so -- same reasoning as
 web_dashboard_node's `_last_pose` etc. -- no lock is used here.
@@ -42,6 +41,7 @@ web_dashboard_node's `_last_pose` etc. -- no lock is used here.
 import asyncio
 import os
 import threading
+import time
 
 import cv2
 import rclpy
@@ -110,6 +110,8 @@ class CameraStreamNode(Node):
         self.declare_parameter('jpeg_quality', 80)
         self.declare_parameter('host', '0.0.0.0')
         self.declare_parameter('port', 9090)
+        self.declare_parameter('frame_timeout_sec', 2.0)
+        self.declare_parameter('status_log_period_sec', 5.0)
 
         self.device = self.get_parameter('device').value
         self.image_topic = self.get_parameter('image_topic').value
@@ -120,6 +122,10 @@ class CameraStreamNode(Node):
         self.jpeg_quality = int(self.get_parameter('jpeg_quality').value)
         self.host = self.get_parameter('host').value
         self.port = int(self.get_parameter('port').value)
+        self.frame_timeout_sec = max(
+            0.1, float(self.get_parameter('frame_timeout_sec').value))
+        self.status_log_period_sec = max(
+            0.0, float(self.get_parameter('status_log_period_sec').value))
 
         # Written only by the frame source (capture thread, or the rclpy
         # executor thread in image_topic mode -- exactly one of the two
@@ -127,10 +133,15 @@ class CameraStreamNode(Node):
         # thread) -- see module docstring.
         self.latest_jpeg = None
         self.latest_seq = 0
+        self.latest_frame_time = None
+        self.last_stream_state = None
+        self.last_stream_log_time = None
 
         self._stop_event = threading.Event()
         self._cap = None
         self._encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
+        self.status_timer = self.create_timer(
+            min(0.5, self.frame_timeout_sec / 2.0), self._status_callback)
 
         if self.image_topic:
             # Topic source: frames arrive via subscription callbacks on the
@@ -142,13 +153,17 @@ class CameraStreamNode(Node):
             self.get_logger().info(
                 f"usb_cam_stream_node ready: source topic={self.image_topic}. "
                 f"Once the web server starts, open "
-                f"http://<this car's IP>:{self.port}/ in a browser."
+                f"http://<this car's IP>:{self.port}/ in a browser. "
+                f"Frame timeout={self.frame_timeout_sec:.1f}s; status logs every "
+                f"{self.status_log_period_sec:.1f}s."
             )
         else:
             self.get_logger().info(
                 f"usb_cam_stream_node ready: device={self.device} {self.width}x{self.height}"
                 f"@{self.capture_fps}fps. Once the web server starts, open "
-                f"http://<this car's IP>:{self.port}/ in a browser."
+                f"http://<this car's IP>:{self.port}/ in a browser. "
+                f"Frame timeout={self.frame_timeout_sec:.1f}s; status logs every "
+                f"{self.status_log_period_sec:.1f}s."
             )
 
     # ------------------------------------------------------------------------
@@ -156,11 +171,25 @@ class CameraStreamNode(Node):
     # ------------------------------------------------------------------------
 
     def _image_callback(self, msg: Image):
-        frame = self._cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        try:
+            frame = self._cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        except Exception as exc:
+            self._log_stream_status(
+                'topic_conversion_failed',
+                f"could not convert Image from '{self.image_topic}' to bgr8: "
+                f'{type(exc).__name__}: {exc}',
+                level='error',
+            )
+            return
         ok, buf = cv2.imencode('.jpg', frame, self._encode_params)
-        if ok:
-            self.latest_jpeg = buf.tobytes()
-            self.latest_seq += 1
+        if not ok:
+            self._log_stream_status(
+                'jpeg_encode_failed',
+                f"OpenCV could not JPEG-encode a frame from '{self.image_topic}'",
+                level='error',
+            )
+            return
+        self._store_frame(buf.tobytes())
 
     # ------------------------------------------------------------------------
     # Capture thread -- the only thread that ever touches cv2.VideoCapture.
@@ -190,6 +219,12 @@ class CameraStreamNode(Node):
         cap.set(cv2.CAP_PROP_FPS, self.capture_fps)
 
         self._cap = cap
+        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        self.get_logger().info(
+            f"CAMERA [opened] device='{self.device}', negotiated "
+            f'{actual_width}x{actual_height}@{actual_fps:.1f}fps; waiting for first frame')
         return True
 
     def capture_loop(self):
@@ -202,28 +237,111 @@ class CameraStreamNode(Node):
 
         while not self._stop_event.is_set():
             if self._cap is None and not self._open_capture():
-                self.get_logger().error(
+                self._log_stream_status(
+                    'waiting_for_camera',
                     f"Could not open camera '{self.device}' -- retrying in "
                     f"{retry_period_sec:.0f}s. Check it's plugged in and that the "
-                    f"device path is correct (`v4l2-ctl --list-devices`)."
+                    f"device path is correct (`v4l2-ctl --list-devices`).",
+                    level='error',
                 )
                 self._stop_event.wait(retry_period_sec)
                 continue
 
             ok, frame = self._cap.read()
             if not ok:
-                self.get_logger().warning(f"Lost camera '{self.device}' -- reopening.")
+                self._log_stream_status(
+                    'camera_lost',
+                    f"Lost camera '{self.device}' during frame capture -- reopening",
+                )
                 self._cap.release()
                 self._cap = None
                 continue
 
             ok, buf = cv2.imencode('.jpg', frame, self._encode_params)
-            if ok:
-                self.latest_jpeg = buf.tobytes()
-                self.latest_seq += 1
+            if not ok:
+                self._log_stream_status(
+                    'jpeg_encode_failed',
+                    f"OpenCV could not JPEG-encode a frame from camera '{self.device}'",
+                    level='error',
+                )
+                continue
+            self._store_frame(buf.tobytes())
 
         if self._cap is not None:
             self._cap.release()
+
+    def _store_frame(self, jpeg: bytes):
+        recovering = self.last_stream_state != 'streaming'
+        self.latest_jpeg = jpeg
+        self.latest_seq += 1
+        self.latest_frame_time = time.monotonic()
+        if recovering:
+            self._log_stream_status(
+                'streaming', self._streaming_detail(0.0), level='info')
+
+    def _streaming_detail(self, frame_age_sec: float) -> str:
+        source = (
+            f"topic='{self.image_topic}'" if self.image_topic
+            else f"camera='{self.device}'")
+        return (
+            f'{source}, frames encoded={self.latest_seq}, latest frame age='
+            f'{frame_age_sec:.2f}s, JPEG bytes={len(self.latest_jpeg or b"")}')
+
+    def _status_callback(self):
+        now = time.monotonic()
+        if self.latest_frame_time is None:
+            if self.image_topic:
+                state = 'waiting_for_image_topic'
+                detail = f"no Image received on '{self.image_topic}'"
+            elif self._cap is None:
+                state = 'waiting_for_camera'
+                detail = f"camera '{self.device}' is not open"
+            else:
+                state = 'waiting_for_first_frame'
+                detail = f"camera '{self.device}' is open but has not produced a frame"
+            self._log_stream_status(state, detail)
+            return
+
+        frame_age_sec = now - self.latest_frame_time
+        if frame_age_sec >= self.frame_timeout_sec:
+            if self.image_topic:
+                state = 'image_topic_stale'
+                source = f"Image topic '{self.image_topic}'"
+            else:
+                state = 'camera_frames_stale'
+                source = f"camera '{self.device}'"
+            self._log_stream_status(
+                state,
+                f'{source} has produced no frame for {frame_age_sec:.2f}s '
+                f'(limit {self.frame_timeout_sec:.2f}s)',
+            )
+            return
+
+        self._log_stream_status(
+            'streaming', self._streaming_detail(frame_age_sec), level='info')
+
+    def _log_stream_status(self, state: str, detail: str, level: str = None):
+        now = time.monotonic()
+        state_changed = state != self.last_stream_state
+        period_elapsed = (
+            self.status_log_period_sec > 0.0
+            and (
+                self.last_stream_log_time is None
+                or now - self.last_stream_log_time >= self.status_log_period_sec
+            )
+        )
+        if not state_changed and not period_elapsed:
+            return
+
+        message = f'CAMERA [{state}] {detail}'
+        if level == 'error':
+            self.get_logger().error(message)
+        elif level == 'info':
+            self.get_logger().info(message)
+        else:
+            self.get_logger().warn(message)
+        self.last_stream_state = state
+        self.last_stream_log_time = now
 
     def stop(self):
         self._stop_event.set()

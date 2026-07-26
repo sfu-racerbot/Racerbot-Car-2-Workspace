@@ -23,6 +23,15 @@ Map-based race controller: given a saved (x, y, speed) racing line and a live lo
 
 For a new course, `ros2 launch racerbot_launch auto_map_race_launch.py` performs autonomous mapping, raceline capture/profiling, and the transition to racing without a manual map save, particle-filter seed, or node restart. The normal `pure_pursuit_launch.py`, recorder, generator, and saved-map race launch remain available independently; see [operations](../../docs/operations.md#racing-with-the-pure-pursuit-stack).
 
+Those launch terminals now also explain the surrounding workflow. The automatic
+supervisor prints which child controller it selected, missing/stale commands,
+deadman stops, lap-closure measurements and transition/profile-loading gates as
+`STOP`, `FORWARD`, or `SUPERVISOR` states. The waypoint recorder prints missing
+or stale pose input plus waypoint count, path distance, sample spacing and its
+output file. `decision_log_period_sec` (supervisor), `pose_timeout_sec`, and
+`status_log_period_sec` (recorder) control the repeat/watchdog intervals; setting
+a log period to `0.0` keeps transition-only messages.
+
 ## The math (`racing_math.py`), in detail
 
 ### 1. Frame conversions
@@ -92,6 +101,14 @@ Two file "shapes": raw `x,y` (written by `waypoint_recorder_node`, read by `gene
 
 `control_loop()` also wraps the entire per-tick logic in `try/except`: any unhandled exception publishes a stop command *before* re-raising, so a bug can never leave the last (possibly full-speed) command sitting on `/drive`.
 
+The launch file sends ROS logs to the terminal. Every controller state change is
+printed immediately as `STOP [reason]` or `DRIVE [reason]`; an unchanged state
+is summarized every `decision_log_period_sec` (1.0 s by default). Drive summaries
+include pose, nearest/target waypoint, cross-track error, adaptive lookahead,
+profile speed, curvature, opponent/overtake reasoning, LIDAR status or override,
+and the final command. Stop summaries include the exact failed watchdog value
+and threshold. Set the period to `0.0` for transition-only logging.
+
 ### Per-tick sequence, in order
 
 1. **Deadman watchdog** (checked first, ahead of everything else) — LB must be held on a live `/joy` stream within `joy_timeout_sec`. **Mandatory workspace policy**, not specific to this node — see [docs/architecture.md](../../docs/architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car). `enable_deadman` should stay `true`.
@@ -115,7 +132,8 @@ Two file "shapes": raw `x,y` (written by `waypoint_recorder_node`, read by `gene
 | `pose_topic` | `/pf/viz/inferred_pose` | Localization input |
 | `scan_topic` / `drive_topic` | `/scan` / `/drive` | LIDAR / output |
 | `control_rate_hz` | `40.0` | Control loop frequency |
-| `wheelbase` | `0.25` m | Must match `vesc.yaml` |
+| `decision_log_period_sec` | `1.0` s | Repeat interval for an unchanged terminal decision (`0.0` = transitions only) |
+| `wheelbase` | `0.324` m | Traxxas 74276-4 specification; must match `vesc.yaml` |
 | `min_lookahead` / `max_lookahead` / `lookahead_speed_gain` | `0.6` / `1.5` / `0.15` | Adaptive lookahead formula above |
 | `nearest_search_window` | `40` | ±waypoints searched around last tick's nearest point (`0` = search all) |
 | `max_speed` / `min_speed` | `4.0` / `0.5` m/s | Hard safety ceiling/floor, independent of the CSV |
@@ -137,7 +155,7 @@ Two file "shapes": raw `x,y` (written by `waypoint_recorder_node`, read by `gene
 | `overtake_clear_margin` / `overtake_lateral_offset` | `1.0` m / `0.35` m | Track distance to consider a pass finished / sideways nudge while passing |
 | `opponent_detection_mode` | `map` | Subtract map-predicted walls from live scan; falls back to geometric detection until `/map` arrives |
 | `map_topic` / `map_beam_step` / `map_subtraction_margin` | `/map` / `4` / `0.4` m | Map-subtraction input, downsampling, and dynamic residual threshold |
-| `laser_offset_x` / `laser_offset_y` | `0.27` / `0.0` m | LIDAR mounting offset from `base_link`, used to place opponent detections in the map frame |
+| `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` m | Estimated LIDAR mounting offset from `base_link`, used to place opponent detections in the map frame |
 | `max_range` | `10.0` m | Range clip ceiling for every LIDAR-based check above (also fills in `inf` returns) |
 | `enable_deadman` / `joy_topic` / `deadman_button` / `joy_timeout_sec` | `true` / `/joy` / `4` / `0.5` s | **Mandatory** LB deadman button — do not disable |
 

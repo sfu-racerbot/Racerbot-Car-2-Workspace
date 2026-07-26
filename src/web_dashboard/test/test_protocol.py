@@ -107,6 +107,32 @@ def test_drive_message_shape():
     assert 'stamp' in msg
 
 
+def test_speed_message_shape():
+    msg = protocol.speed_message(speed=-1.25)
+    assert msg['type'] == 'speed'
+    assert msg['speed'] == pytest.approx(-1.25)
+    assert 'stamp' in msg
+
+
+def test_stopwatch_message_shape():
+    msg = protocol.stopwatch_message(
+        elapsed_s=12.34,
+        enabled=True,
+        running=True,
+        lb_held=True,
+        joy_fresh=True,
+        button_available=True,
+    )
+    assert msg['type'] == 'stopwatch'
+    assert msg['elapsed_s'] == pytest.approx(12.34)
+    assert msg['enabled'] is True
+    assert msg['running'] is True
+    assert msg['lb_held'] is True
+    assert msg['joy_fresh'] is True
+    assert msg['button_available'] is True
+    assert 'stamp' in msg
+
+
 def test_stats_message_shape_with_temp_and_wifi():
     msg = protocol.stats_message(
         cpu_percent=42.0, mem_percent=63.5, cpu_temp_c=51.2, uptime_s=1234.0, wifi_dbm=-49.0)

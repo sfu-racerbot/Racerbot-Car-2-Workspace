@@ -53,6 +53,11 @@ class LapRecorder:
         self.last_sample = None
         self.distance = 0.0
         self.departed = False
+        # Latest closure-gate measurements, exposed for the supervisor's
+        # rate-limited progress diagnostics.
+        self.elapsed = 0.0
+        self.distance_from_start = 0.0
+        self.heading_error = 0.0
 
     def update(self, x: float, y: float, yaw: float, now_sec: float) -> bool:
         point = np.array([x, y], dtype=np.float64)
@@ -74,14 +79,15 @@ class LapRecorder:
         if distance_from_start >= self.departure_distance:
             self.departed = True
 
-        elapsed = now_sec - self.start_time
-        heading_error = abs(angle_difference(yaw, self.start_yaw))
+        self.elapsed = now_sec - self.start_time
+        self.distance_from_start = distance_from_start
+        self.heading_error = abs(angle_difference(yaw, self.start_yaw))
         return bool(
             self.departed
             and self.distance >= self.min_distance
-            and elapsed >= self.min_duration_sec
-            and distance_from_start <= self.closure_distance
-            and heading_error <= self.closure_heading_rad
+            and self.elapsed >= self.min_duration_sec
+            and self.distance_from_start <= self.closure_distance
+            and self.heading_error <= self.closure_heading_rad
             and len(self.points) >= 3
         )
 
@@ -121,6 +127,7 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('deadman_button', 4)
         self.declare_parameter('joy_timeout_sec', 0.5)
+        self.declare_parameter('decision_log_period_sec', 1.0)
 
         def value(name):
             return self.get_parameter(name).value
@@ -144,8 +151,11 @@ class AutoMapRaceNode(Node):
         self.profile_smoothing_window = int(value('profile_smoothing_window'))
         self.profile_smoothing_passes = int(value('profile_smoothing_passes'))
         self.enable_deadman = bool(value('enable_deadman'))
+        self.joy_topic = str(value('joy_topic'))
         self.deadman_button = int(value('deadman_button'))
         self.joy_timeout_sec = float(value('joy_timeout_sec'))
+        self.decision_log_period_sec = max(
+            0.0, float(value('decision_log_period_sec')))
 
         self.recorder = LapRecorder(
             spacing=float(value('waypoint_spacing')),
@@ -164,10 +174,13 @@ class AutoMapRaceNode(Node):
         self.racing_cmd_time = None
         self.deadman_held = False
         self.last_joy_time = None
+        self.joy_button_available = False
         self.profile_request_started = False
         self.profile_path = None
         self.race_enable_time = None
         self.map_save_started = False
+        self.last_decision_state = None
+        self.last_decision_log_time = None
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -189,13 +202,16 @@ class AutoMapRaceNode(Node):
             self._racing_drive_callback, 10)
         if self.enable_deadman:
             self.create_subscription(
-                Joy, str(value('joy_topic')), self._joy_callback, 10)
+                Joy, self.joy_topic, self._joy_callback, 10)
 
         self.create_timer(1.0 / self.control_rate_hz, self._control_loop)
         self.get_logger().info(
             f'Automatic mapping started: gap follow will map {self.mapping_laps} lap(s), '
             'then the generated profile will be loaded and pure pursuit will race. '
-            f"Deadman {'ENABLED (hold LB)' if self.enable_deadman else 'DISABLED'}.")
+            f"Deadman {'ENABLED (hold LB)' if self.enable_deadman else 'DISABLED'}; "
+            f"mapping source='{self.mapping_drive_topic}', racing source="
+            f"'{self.racing_drive_topic}', output='{self.drive_topic}'; decision logs every "
+            f"{self.decision_log_period_sec:.1f}s (plus immediate state changes).")
 
     def _now_sec(self) -> float:
         return self.get_clock().now().nanoseconds / 1e9
@@ -210,17 +226,38 @@ class AutoMapRaceNode(Node):
 
     def _joy_callback(self, msg):
         self.last_joy_time = self._now_sec()
-        self.deadman_held = (
-            len(msg.buttons) > self.deadman_button
-            and bool(msg.buttons[self.deadman_button]))
+        self.joy_button_available = len(msg.buttons) > self.deadman_button
+        self.deadman_held = bool(
+            self.joy_button_available and msg.buttons[self.deadman_button])
 
     def _deadman_engaged(self, now_sec: float) -> bool:
+        return self._deadman_status(now_sec)[0]
+
+    def _deadman_status(self, now_sec: float):
         if not self.enable_deadman:
-            return True
-        return bool(
-            self.deadman_held
-            and self.last_joy_time is not None
-            and now_sec - self.last_joy_time < self.joy_timeout_sec)
+            return True, None, None
+        if self.last_joy_time is None:
+            return (
+                False,
+                'waiting_for_joy',
+                f"no Joy messages received on '{self.joy_topic}'; LB cannot be verified",
+            )
+        age_sec = now_sec - self.last_joy_time
+        if age_sec >= self.joy_timeout_sec:
+            return (
+                False,
+                'joy_stale',
+                f"last Joy message is {age_sec:.2f}s old (limit {self.joy_timeout_sec:.2f}s)",
+            )
+        if not self.joy_button_available:
+            return (
+                False,
+                'deadman_button_missing',
+                f"Joy message has no button index {self.deadman_button} (LB)",
+            )
+        if not self.deadman_held:
+            return False, 'deadman_released', 'LB deadman button is not held'
+        return True, None, None
 
     def _lookup_and_publish_pose(self):
         try:
@@ -255,18 +292,63 @@ class AutoMapRaceNode(Node):
             output.drive = source.drive
         self.drive_pub.publish(output)
 
-    def _fresh_command(self, command, stamp, now_sec):
+    def _command_status(self, command, stamp, now_sec, source_name: str):
         if command is None or stamp is None:
-            return None
-        if now_sec - stamp > self.command_timeout_sec:
-            return None
-        return command
+            return (
+                None,
+                f'{source_name}_command_missing',
+                f"no command has arrived on the selected '{source_name}' input",
+            )
+        age_sec = now_sec - stamp
+        if age_sec > self.command_timeout_sec:
+            return (
+                None,
+                f'{source_name}_command_stale',
+                f"selected '{source_name}' command is {age_sec:.2f}s old "
+                f"(limit {self.command_timeout_sec:.2f}s)",
+            )
+        return (
+            command,
+            None,
+            f"selected '{source_name}' command is fresh (age={age_sec:.2f}s)",
+        )
+
+    def _lap_progress_detail(self, pose) -> str:
+        current_lap = min(self.completed_mapping_laps + 1, self.mapping_laps)
+        prefix = f'lap {current_lap}/{self.mapping_laps}'
+        if pose is None:
+            return f'{prefix}: recorder waiting for a valid {self.map_frame}->{self.base_frame} pose'
+        if self.recorder.start is None:
+            return f'{prefix}: recorder waiting to initialize its start pose'
+        return (
+            f'{prefix}: samples={len(self.recorder.points)}, '
+            f'distance={self.recorder.distance:.1f}/{self.recorder.min_distance:.1f}m, '
+            f'elapsed={self.recorder.elapsed:.1f}/{self.recorder.min_duration_sec:.1f}s, '
+            f"departed={'yes' if self.recorder.departed else 'no'}, "
+            f'start distance={self.recorder.distance_from_start:.2f}/'
+            f'{self.recorder.closure_distance:.2f}m, heading error='
+            f'{math.degrees(self.recorder.heading_error):.1f}/'
+            f'{math.degrees(self.recorder.closure_heading_rad):.1f}deg')
 
     def _control_loop(self):
+        try:
+            self._control_step()
+        except Exception as exc:
+            self._publish_stop()
+            self._log_decision(
+                'control_exception',
+                f'unhandled {type(exc).__name__}: {exc}; supervisor published stop and will exit',
+                None,
+                level='error',
+            )
+            raise
+
+    def _control_step(self):
         now_sec = self._now_sec()
         pose = self._lookup_and_publish_pose()
+        deadman_ok, deadman_state, deadman_detail = self._deadman_status(now_sec)
 
-        if self.state == 'mapping' and pose is not None and self._deadman_engaged(now_sec):
+        if self.state == 'mapping' and pose is not None and deadman_ok:
             if self.recorder.update(*pose, now_sec):
                 self._mapping_lap_completed()
 
@@ -280,16 +362,109 @@ class AutoMapRaceNode(Node):
             self.state = 'racing'
             self.get_logger().info('Transition complete: pure pursuit now has drive control.')
 
-        if not self._deadman_engaged(now_sec):
+        if not deadman_ok:
             self._publish_stop()
+            self._log_decision(deadman_state, deadman_detail, None)
         elif self.state == 'mapping':
-            self._publish_command(self._fresh_command(
-                self.mapping_cmd, self.mapping_cmd_time, now_sec))
+            command, stop_state, source_detail = self._command_status(
+                self.mapping_cmd, self.mapping_cmd_time, now_sec, 'gap_follow')
+            progress_detail = self._lap_progress_detail(pose)
+            self._publish_command(command)
+            if command is None:
+                self._log_decision(
+                    stop_state, f'{source_detail}; {progress_detail}', None)
+            elif command.drive.speed <= 0.0:
+                self._log_decision(
+                    'mapping_controller_stop',
+                    f'{source_detail}; gap follow requested a neutral command; {progress_detail}',
+                    command,
+                )
+            else:
+                self._log_decision(
+                    'forwarding_mapping',
+                    f'{source_detail}; forwarding gap follow; {progress_detail}',
+                    command,
+                )
         elif self.state == 'racing':
-            self._publish_command(self._fresh_command(
-                self.racing_cmd, self.racing_cmd_time, now_sec))
+            command, stop_state, source_detail = self._command_status(
+                self.racing_cmd, self.racing_cmd_time, now_sec, 'pure_pursuit')
+            self._publish_command(command)
+            if command is None:
+                self._log_decision(stop_state, source_detail, None)
+            elif command.drive.speed <= 0.0:
+                self._log_decision(
+                    'racing_controller_stop',
+                    f'{source_detail}; pure pursuit requested a neutral command',
+                    command,
+                )
+            else:
+                self._log_decision(
+                    'forwarding_racing',
+                    f'{source_detail}; forwarding pure pursuit',
+                    command,
+                )
+        elif self.state == 'loading_profile':
+            self._publish_stop()
+            self._log_decision(
+                'loading_profile',
+                f"generated profile='{self.profile_path}'; waiting for pure pursuit to accept it",
+                None,
+                level='info',
+            )
+        elif self.state == 'transition':
+            self._publish_stop()
+            remaining_sec = max(0.0, self.race_enable_time - now_sec)
+            self._log_decision(
+                'transition_hold',
+                f'profile loaded; deliberate stop before racing has {remaining_sec:.2f}s remaining',
+                None,
+                level='info',
+            )
+        elif self.state == 'error':
+            self._publish_stop()
+            self._log_decision(
+                'supervisor_error',
+                'automatic map-to-race transition failed; remaining stopped',
+                None,
+                level='error',
+            )
         else:
             self._publish_stop()
+            self._log_decision(
+                'unknown_supervisor_state',
+                f"unrecognized supervisor state '{self.state}'; remaining stopped",
+                None,
+                level='error',
+            )
+
+    def _log_decision(self, state: str, detail: str, source, level: str = None):
+        """Log selector transitions immediately and steady state periodically."""
+        now_sec = self._now_sec()
+        state_changed = state != self.last_decision_state
+        period_elapsed = (
+            self.decision_log_period_sec > 0.0
+            and (
+                self.last_decision_log_time is None
+                or now_sec - self.last_decision_log_time >= self.decision_log_period_sec
+            )
+        )
+        if not state_changed and not period_elapsed:
+            return
+
+        steering = 0.0 if source is None else source.drive.steering_angle
+        speed = 0.0 if source is None else source.drive.speed
+        stopped = speed <= 0.0
+        message = (
+            f"{'STOP' if stopped else 'FORWARD'} [{state}] {detail}; output command: "
+            f'steering={steering:+.3f}rad, speed={speed:.2f}m/s')
+        if level == 'error':
+            self.get_logger().error(message)
+        elif level == 'info' or not stopped:
+            self.get_logger().info(message)
+        else:
+            self.get_logger().warn(message)
+        self.last_decision_state = state
+        self.last_decision_log_time = now_sec
 
     def _mapping_lap_completed(self):
         self.completed_mapping_laps += 1

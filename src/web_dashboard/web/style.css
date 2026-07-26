@@ -233,3 +233,115 @@ html, body {
 #camera-panel.has-feed .panel-placeholder {
   display: none;
 }
+
+
+/* Vehicle telemetry, proximity legend, and deadman-gated stopwatch. */
+.metric-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f0f6fc;
+}
+
+.lidar-legend {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 0 2px 17px;
+  color: #8b949e;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.lidar-gradient {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #f85149 0%, #d29922 50%, #3fb950 100%);
+}
+
+#stopwatch-display {
+  color: #f0f6fc;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 27px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1.2;
+}
+
+#stopwatch-display.running {
+  color: #3fb950;
+  text-shadow: 0 0 12px #3fb95055;
+}
+
+#stopwatch-state {
+  min-height: 17px;
+  margin-top: 2px;
+  color: #8b949e;
+  font-size: 10px;
+}
+
+#stopwatch-state.ready { color: #3fb950; }
+#stopwatch-state.warning { color: #d29922; }
+#stopwatch-state.error { color: #f85149; }
+
+.stopwatch-controls {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  pointer-events: auto;
+}
+
+.stopwatch-controls button {
+  min-width: 70px;
+  background: #21262d;
+  color: #e6edf3;
+  border: 1px solid #30363d;
+  border-radius: 5px;
+  padding: 4px 9px;
+  font: 11px "SFMono-Regular", Consolas, monospace;
+  cursor: pointer;
+}
+
+.stopwatch-controls button:hover { background: #30363d; }
+#stopwatch-toggle.enabled { border-color: #3fb950; color: #3fb950; }
+
+/* The entire camera inset opens a clean, full-window recording view. */
+#camera-link {
+  display: block;
+  width: 100%;
+  height: 100%;
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+#camera-panel:hover {
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 1px #58a6ff55, 0 8px 28px #0008;
+}
+
+.camera-open-hint {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
+  z-index: 2;
+  padding: 3px 6px;
+  background: rgba(11, 15, 20, 0.78);
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #e6edf3;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+#camera-panel:hover .camera-open-hint,
+#camera-panel:focus-within .camera-open-hint {
+  opacity: 1;
+}

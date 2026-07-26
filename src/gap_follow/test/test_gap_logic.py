@@ -216,3 +216,114 @@ def test_best_gap_returns_none_when_boxed_in():
     window = np.full(50, 0.8)
     start, end = gap_logic.find_best_gap(window, min_gap_distance=2.0)
     assert start is None and end is None
+
+# ============================================================================
+# Rectangular footprint and instantaneous TTC
+# ============================================================================
+
+
+def _body_boundaries(angles):
+    return gap_logic.vehicle_boundary_distances(
+        np.asarray(angles, dtype=float),
+        car_width=0.31,
+        car_length=0.58,
+        wheelbase=0.324,
+        laser_offset_x=0.33,
+    )
+
+
+def test_vehicle_boundary_matches_padded_traxxas_rectangle():
+    boundaries = _body_boundaries([0.0, math.pi / 2.0, math.pi])
+    # base_link is the rear axle. Body center is x=wheelbase/2=0.162m,
+    # so the padded 0.58m rectangle spans x=[-0.128, 0.452].
+    assert boundaries[0] == pytest.approx(0.122)
+    assert boundaries[1] == pytest.approx(0.155)
+    assert boundaries[2] == pytest.approx(0.458)
+
+
+def test_vehicle_boundary_rejects_lidar_outside_footprint():
+    with pytest.raises(ValueError, match='LiDAR origin'):
+        gap_logic.vehicle_boundary_distances(
+            np.array([0.0]), 0.31, 0.58, 0.324, laser_offset_x=0.50)
+
+
+def test_minimum_clearance_is_measured_from_body_not_lidar():
+    boundaries = _body_boundaries([0.0, math.pi / 2.0])
+    ranges = boundaries + np.array([0.40, 0.05])
+    clearance = gap_logic.minimum_footprint_clearance(
+        ranges, np.array([True, True]), boundaries)
+    assert clearance == pytest.approx(0.05)
+
+
+def test_ttc_projects_odometry_speed_and_subtracts_footprint():
+    angles = np.array([-math.pi / 2.0, 0.0, math.pi / 3.0])
+    boundaries = _body_boundaries(angles)
+    ranges = boundaries + np.array([0.01, 1.0, 0.5])
+    ttc = gap_logic.time_to_collision(
+        ranges,
+        np.ones(3, dtype=bool),
+        angles,
+        speed=2.0,
+        boundary_distances=boundaries,
+    )
+    assert math.isinf(ttc[0])  # side wall: no longitudinal closing rate
+    assert ttc[1] == pytest.approx(0.5)
+    assert ttc[2] == pytest.approx(0.5)
+
+
+def test_ttc_ignores_invalid_beams_and_stationary_vehicle():
+    angles = np.array([0.0, 0.1])
+    boundaries = _body_boundaries(angles)
+    ranges = boundaries + np.array([0.01, 2.0])
+    validity = np.array([False, True])
+    assert gap_logic.minimum_ttc(
+        ranges, validity, angles, 0.0, boundaries) == math.inf
+    assert gap_logic.minimum_ttc(
+        ranges, validity, angles, 1.0, boundaries) > 1.9
+
+
+# ============================================================================
+# Tight-corner fallback after obstacle inflation
+# ============================================================================
+
+
+def test_gap_fallback_accepts_passable_corner_hidden_inside_two_metres():
+    window = np.full(100, 0.5)
+    window[30:70] = 1.2
+    start, end, used_fallback = gap_logic.find_gap_with_fallback(
+        window,
+        preferred_distance=2.0,
+        fallback_distance=0.8,
+        angle_increment=0.01,
+        min_gap_width_m=0.10,
+    )
+    assert (start, end) == (30, 69)
+    assert used_fallback
+
+
+def test_gap_fallback_keeps_preferred_deep_gap_when_available():
+    window = np.full(100, 0.5)
+    window[30:70] = 3.0
+    start, end, used_fallback = gap_logic.find_gap_with_fallback(
+        window, 2.0, 0.8, 0.01, 0.10)
+    assert (start, end) == (30, 69)
+    assert not used_fallback
+
+
+def test_gap_fallback_still_rejects_boxed_in_scene():
+    window = np.full(100, 0.7)
+    start, end, used_fallback = gap_logic.find_gap_with_fallback(
+        window, 2.0, 0.8, 0.01, 0.10)
+    assert start is None and end is None
+    assert not used_fallback
+
+
+def test_post_inflation_gap_does_not_require_second_full_car_width():
+    # Disparity extension has already removed half-width + margin from each
+    # obstacle edge. A 0.12m remaining center corridor is valid; applying the
+    # old ~0.41m full-car filter here would double-pad it and cause a stop.
+    window = np.full(100, 0.5)
+    window[44:56] = 1.0
+    start, end = gap_logic.find_best_gap(
+        window, 0.8, angle_increment=0.01, min_gap_width_m=0.10)
+    assert (start, end) == (44, 55)

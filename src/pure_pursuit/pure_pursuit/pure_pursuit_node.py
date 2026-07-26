@@ -154,7 +154,7 @@ class PurePursuitNode(Node):
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('drive_topic', '/drive')
         self.declare_parameter('control_rate_hz', 40.0)
-        self.declare_parameter('wheelbase', 0.25)
+        self.declare_parameter('wheelbase', 0.324)
         self.declare_parameter('min_lookahead', 0.6)
         self.declare_parameter('max_lookahead', 1.5)
         self.declare_parameter('lookahead_speed_gain', 0.15)
@@ -173,6 +173,10 @@ class PurePursuitNode(Node):
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('deadman_button', 4)
         self.declare_parameter('joy_timeout_sec', 0.5)
+        # State changes are logged immediately. A slower periodic summary
+        # explains steady-state path, speed, opponent, and LIDAR decisions
+        # without printing at the full control_rate_hz.
+        self.declare_parameter('decision_log_period_sec', 1.0)
 
         # --- Reactive avoidance (steer around something close, not just
         # stop, when there's room) ---
@@ -199,7 +203,7 @@ class PurePursuitNode(Node):
         self.declare_parameter('overtake_clear_margin', 1.0)
         self.declare_parameter('overtake_lateral_offset', 0.35)
         self.declare_parameter('overtake_max_blind_sec', 3.0)
-        self.declare_parameter('laser_offset_x', 0.27)
+        self.declare_parameter('laser_offset_x', 0.33)
         self.declare_parameter('laser_offset_y', 0.0)
 
         # --- Opponent detection mode: 'heuristic' (shape-based, no map
@@ -235,6 +239,8 @@ class PurePursuitNode(Node):
         self.joy_topic = self.get_parameter('joy_topic').value
         self.deadman_button = int(self.get_parameter('deadman_button').value)
         self.joy_timeout_sec = float(self.get_parameter('joy_timeout_sec').value)
+        self.decision_log_period_sec = max(
+            0.0, float(self.get_parameter('decision_log_period_sec').value))
 
         self.max_range = float(self.get_parameter('max_range').value)
         self.avoidance_fallback_trigger_distance = float(
@@ -319,6 +325,13 @@ class PurePursuitNode(Node):
         # held, so the car never drives before that's been observed.
         self.deadman_held = False
         self.last_joy_time = None
+        self.joy_button_available = False
+
+        # Decision diagnostics: transitions are immediate, while an
+        # unchanged state is rate-limited by decision_log_period_sec.
+        self.last_decision_state = None
+        self.last_decision_log_time = None
+        self.last_opponent_status = 'opponent detection has not run yet'
 
         # Opponent tracking + overtake state -- see OpponentTracker above
         # and _update_opponent_and_overtake below.
@@ -403,7 +416,9 @@ class PurePursuitNode(Node):
             f"{self.control_rate_hz:.0f}Hz, deadman button "
             f"{'ENABLED (LB must be held)' if self.enable_deadman else 'DISABLED'}, "
             f"obstacle avoidance {'ON' if self.enable_obstacle_avoidance else 'OFF'}, "
-            f"opponent overtaking {'ON' if self.enable_opponent_overtake else 'OFF'}.")
+            f"opponent overtaking {'ON' if self.enable_opponent_overtake else 'OFF'}, "
+            f"decision logs every {self.decision_log_period_sec:.1f}s "
+            "(plus immediate state changes).")
 
     def _parameter_callback(self, parameters):
         for parameter in parameters:
@@ -453,18 +468,41 @@ class PurePursuitNode(Node):
 
     def joy_callback(self, msg: Joy):
         self.last_joy_time = self.get_clock().now()
-        if len(msg.buttons) > self.deadman_button:
+        self.joy_button_available = len(msg.buttons) > self.deadman_button
+        if self.joy_button_available:
             self.deadman_held = bool(msg.buttons[self.deadman_button])
         else:
             self.deadman_held = False
 
     def _deadman_engaged(self) -> bool:
+        return self._deadman_status()[0]
+
+    def _deadman_status(self):
+        """Return engagement plus a precise diagnostic when it is false."""
         if not self.enable_deadman:
-            return True
-        if not self.deadman_held or self.last_joy_time is None:
-            return False
+            return True, None, None
+        if self.last_joy_time is None:
+            return (
+                False,
+                'waiting_for_joy',
+                f"no Joy messages received on '{self.joy_topic}'; LB cannot be verified",
+            )
         age_sec = (self.get_clock().now() - self.last_joy_time).nanoseconds / 1e9
-        return age_sec < self.joy_timeout_sec
+        if age_sec >= self.joy_timeout_sec:
+            return (
+                False,
+                'joy_stale',
+                f"last Joy message is {age_sec:.2f}s old (limit {self.joy_timeout_sec:.2f}s)",
+            )
+        if not self.joy_button_available:
+            return (
+                False,
+                'deadman_button_missing',
+                f"Joy message has no button index {self.deadman_button} (LB)",
+            )
+        if not self.deadman_held:
+            return False, 'deadman_released', 'LB deadman button is not held'
+        return True, None, None
 
     # ------------------------------------------------------------------------
     # Control loop
@@ -479,12 +517,15 @@ class PurePursuitNode(Node):
         """
         try:
             self._control_step()
-        except Exception:
-            self.get_logger().error(
-                "Unhandled exception in pure_pursuit control loop -- stopping the car.",
-                throttle_duration_sec=1.0,
-            )
+        except Exception as exc:
             self._publish_drive(0.0, 0.0)
+            self._log_decision(
+                'control_exception',
+                f"unhandled {type(exc).__name__}: {exc}; node will exit after publishing stop",
+                0.0,
+                0.0,
+                level='error',
+            )
             raise
 
     def _control_step(self):
@@ -492,19 +533,34 @@ class PurePursuitNode(Node):
         # docs/architecture.md). Checked first, ahead of every other
         # watchdog: no held button means no drive command, full stop,
         # regardless of how healthy localization/LIDAR/the racing line are. ---
-        if not self._deadman_engaged():
-            self._publish_drive(0.0, 0.0)
+        deadman_ok, stop_state, stop_detail = self._deadman_status()
+        if not deadman_ok:
+            self._stop(stop_state, stop_detail)
             return
 
         # Auto-map mode intentionally starts without a line. It remains at
         # a hard stop until the supervisor loads the generated profile.
         if not self.profile_ready:
-            self._publish_drive(0.0, 0.0)
+            self._stop(
+                'waiting_for_profile',
+                "no racing-line profile is active; waiting for waypoints_file to be loaded",
+            )
             return
 
         # --- Watchdog 1: localization must be alive and recent. ---
-        if self.car_x is None or self._seconds_since(self.last_pose_time) > self.pose_timeout_sec:
-            self._publish_drive(0.0, 0.0)
+        pose_age = self._seconds_since(self.last_pose_time)
+        if self.car_x is None:
+            self._stop(
+                'waiting_for_pose',
+                f"no localization pose received on '{self.pose_topic}'",
+            )
+            return
+        if pose_age > self.pose_timeout_sec:
+            self._stop(
+                'pose_stale',
+                f"last localization pose is {pose_age:.2f}s old "
+                f"(limit {self.pose_timeout_sec:.2f}s)",
+            )
             return
 
         car_xy = (self.car_x, self.car_y)
@@ -531,15 +587,14 @@ class PurePursuitNode(Node):
         # anyway would aim the car at a point that may bear no relation to
         # where it actually is.
         if cross_track_error > self.max_cross_track_error:
-            self.get_logger().warn(
-                f"cross-track error {cross_track_error:.2f}m > max_cross_track_error "
-                f"({self.max_cross_track_error:.2f}m) even on a full-line search -- stopping.",
-                throttle_duration_sec=1.0,
-            )
             # Stay un-anchored while lost so recovery next tick starts
             # from a clean global search, not this bad index.
             self.prev_nearest_index = None
-            self._publish_drive(0.0, 0.0)
+            self._stop(
+                'off_racing_line',
+                f"cross-track error {cross_track_error:.2f}m exceeds "
+                f"{self.max_cross_track_error:.2f}m even after a full-line search",
+            )
             return
         self.prev_nearest_index = nearest_idx
 
@@ -559,11 +614,13 @@ class PurePursuitNode(Node):
         dy = target_y - self.car_y
         x_body, y_body = racing_math.world_to_body(dx, dy, self.car_yaw)
         kappa = racing_math.steering_arc_curvature(x_body, y_body)
-        steering_angle = racing_math.steering_from_curvature(kappa, self.wheelbase)
+        steering_unclipped = racing_math.steering_from_curvature(kappa, self.wheelbase)
+        steering_angle = steering_unclipped
         steering_angle = float(np.clip(steering_angle, -self.max_steering_angle, self.max_steering_angle))
 
         # --- Speed: the profiled speed for where the car is right now. ---
         speed_cmd = float(np.clip(speed_here, self.min_speed, self.max_speed))
+        decision_state = 'pure_pursuit'
 
         # --- Opponent tracking + overtaking: reconsiders the steering
         # *target* (not yet the final command) if another car has been
@@ -573,12 +630,28 @@ class PurePursuitNode(Node):
         if self.enable_lidar_safety and self.enable_opponent_overtake:
             overtake_target = self._update_opponent_and_overtake(nearest_idx, target_idx)
             if overtake_target is not None:
-                dx = overtake_target[0] - self.car_x
-                dy = overtake_target[1] - self.car_y
+                target_x, target_y = overtake_target
+                dx = target_x - self.car_x
+                dy = target_y - self.car_y
                 x_body, y_body = racing_math.world_to_body(dx, dy, self.car_yaw)
                 kappa = racing_math.steering_arc_curvature(x_body, y_body)
-                steering_angle = racing_math.steering_from_curvature(kappa, self.wheelbase)
+                steering_unclipped = racing_math.steering_from_curvature(kappa, self.wheelbase)
+                steering_angle = steering_unclipped
                 steering_angle = float(np.clip(steering_angle, -self.max_steering_angle, self.max_steering_angle))
+                decision_state = (
+                    'overtake_left' if self.overtake_side > 0 else 'overtake_right')
+
+        clipped_text = (
+            f", steering clipped from {steering_unclipped:+.3f}rad"
+            if not math.isclose(steering_angle, steering_unclipped) else "")
+        decision_detail = (
+            f"pose=({self.car_x:.2f},{self.car_y:.2f},{math.degrees(self.car_yaw):+.1f}deg), "
+            f"nearest waypoint={nearest_idx}, steering target={target_idx}, "
+            f"cross-track={cross_track_error:.2f}m, lookahead={lookahead:.2f}m, "
+            f"profile speed={speed_here:.2f}m/s, path curvature={kappa:+.3f}/m"
+            f"{clipped_text}")
+        if self.enable_lidar_safety and self.enable_opponent_overtake:
+            decision_detail += f"; {self.last_opponent_status}"
 
         # --- Reactive safety net: independent of everything above, and
         # always gets the final say regardless of the racing line or any
@@ -587,14 +660,21 @@ class PurePursuitNode(Node):
             # Emergency stopping always remains active. During a committed
             # pass, however, generic gap avoidance must not cap us below the
             # opponent's speed and make the pass mathematically impossible.
-            steering_override, speed_override = self._reactive_override(
+            steering_override, speed_override, reactive_state, reactive_detail = self._reactive_override(
                 allow_avoidance=not self.overtake_active)
             if steering_override is not None:
                 steering_angle = steering_override
             if speed_override is not None:
                 speed_cmd = speed_override
+            if reactive_state is not None:
+                decision_state = reactive_state
+                decision_detail = f"{reactive_detail}; base plan: {decision_detail}"
+            else:
+                decision_detail += f"; {reactive_detail}"
 
         self._publish_drive(steering_angle, speed_cmd)
+        self._log_decision(
+            decision_state, decision_detail, steering_angle, speed_cmd)
 
     def _fov_indices(self, scan: LaserScan, fov_deg: float):
         """Index bounds in `scan.ranges` for a forward cone `fov_deg`
@@ -673,8 +753,10 @@ class PurePursuitNode(Node):
     def _reactive_override(self, allow_avoidance: bool = True):
         """The reactive LIDAR safety net -- independent of the racing
         line and the overtake logic above, and always has the final say.
-        Returns (steering_override, speed_override); either is None where
-        that part of the already-computed plan should be left alone.
+        Returns (steering_override, speed_override, decision_state,
+        diagnostic_detail). An override is None where that part of the
+        already-computed plan should be left alone; decision_state is None
+        when the racing-line/overtake plan remains in control.
 
         Two tiers, most urgent first:
           1. Something is inside emergency_stop_distance in a narrow
@@ -689,16 +771,52 @@ class PurePursuitNode(Node):
              *if* a wide-enough gap actually exists; otherwise also stop
              rather than commit to a guessed steering angle.
         """
-        if self.last_scan is None or self._seconds_since(self.last_scan_time) > self.scan_timeout_sec:
-            return None, 0.0
+        if self.last_scan is None:
+            return (
+                None,
+                0.0,
+                'lidar_scan_missing',
+                f"no LaserScan received on '{self.scan_topic}', so the LIDAR safety net is blind",
+            )
+
+        scan_age = self._seconds_since(self.last_scan_time)
+        if scan_age > self.scan_timeout_sec:
+            return (
+                None,
+                0.0,
+                'lidar_scan_stale',
+                f"last LaserScan is {scan_age:.2f}s old (limit {self.scan_timeout_sec:.2f}s)",
+            )
 
         scan = self.last_scan
 
-        if self._closest_in_cone(scan, self.safety_fov_deg) < self.emergency_stop_distance:
-            return None, 0.0
+        emergency_closest = self._closest_in_cone(scan, self.safety_fov_deg)
+        if emergency_closest < self.emergency_stop_distance:
+            return (
+                None,
+                0.0,
+                'emergency_obstacle',
+                f"closest valid return in the {self.safety_fov_deg:.1f}deg safety cone is "
+                f"{emergency_closest:.2f}m, inside the "
+                f"{self.emergency_stop_distance:.2f}m emergency threshold",
+            )
 
-        if not self.enable_obstacle_avoidance or not allow_avoidance:
-            return None, None
+        if not self.enable_obstacle_avoidance:
+            return (
+                None,
+                None,
+                None,
+                f"LIDAR hard-stop cone clear (closest={emergency_closest:.2f}m); "
+                "generic obstacle avoidance is disabled",
+            )
+        if not allow_avoidance:
+            return (
+                None,
+                None,
+                None,
+                f"LIDAR hard-stop cone clear (closest={emergency_closest:.2f}m); "
+                "generic avoidance suppressed during the committed overtake",
+            )
 
         dynamic_closest = self._dynamic_closest_in_cone(scan, self.avoidance_fov_deg)
         if dynamic_closest is None:
@@ -707,25 +825,56 @@ class PurePursuitNode(Node):
             # fallback threshold avoids constantly reacting to normal walls.
             closest = self._closest_in_cone(scan, self.avoidance_fov_deg)
             trigger_distance = self.avoidance_fallback_trigger_distance
+            distance_source = 'raw scan (map subtraction unavailable)'
         else:
             closest = dynamic_closest
             trigger_distance = self.avoidance_trigger_distance
+            distance_source = 'map-unexplained object'
         if closest >= trigger_distance:
-            return None, None
+            return (
+                None,
+                None,
+                None,
+                f"LIDAR clear: closest {distance_source}={closest:.2f}m, "
+                f"avoidance trigger={trigger_distance:.2f}m",
+            )
 
         lo_idx, hi_idx = self._fov_indices(scan, self.avoidance_fov_deg)
         window = self._sanitized_window(scan, lo_idx, hi_idx)
         if window.size == 0:
-            return None, 0.0
+            return (
+                None,
+                0.0,
+                'avoidance_scan_empty',
+                f"{distance_source} at {closest:.2f}m triggered avoidance, but the "
+                f"{self.avoidance_fov_deg:.1f}deg scan window is empty",
+            )
 
         gap_start, gap_end = racing_math.find_best_gap(window, self.avoidance_min_gap_distance)
         if gap_start is None:
-            return None, 0.0  # boxed in -- stop rather than guess
+            return (
+                None,
+                0.0,
+                'avoidance_boxed_in',
+                f"{distance_source} at {closest:.2f}m triggered avoidance, but no gap "
+                f"is deeper than {self.avoidance_min_gap_distance:.2f}m",
+            )
 
         target_idx = lo_idx + (gap_start + gap_end) // 2
         angle = scan.angle_min + target_idx * scan.angle_increment
         angle = float(np.clip(angle, -self.max_steering_angle, self.max_steering_angle))
-        return angle, self.avoidance_speed
+        gap_lo_angle = scan.angle_min + (lo_idx + gap_start) * scan.angle_increment
+        gap_hi_angle = scan.angle_min + (lo_idx + gap_end) * scan.angle_increment
+        return (
+            angle,
+            self.avoidance_speed,
+            'lidar_avoidance',
+            f"{distance_source} at {closest:.2f}m is inside the "
+            f"{trigger_distance:.2f}m avoidance trigger; selected gap "
+            f"{math.degrees(gap_lo_angle):+.1f}deg to "
+            f"{math.degrees(gap_hi_angle):+.1f}deg and capped speed at "
+            f"{self.avoidance_speed:.2f}m/s",
+        )
 
     def _detect_opponent(self, scan: LaserScan, ranges: np.ndarray,
                          laser_world_x: float, laser_world_y: float):
@@ -786,6 +935,11 @@ class PurePursuitNode(Node):
         docs/racing-autonomy.md for the full strategy this implements.
         """
         now_sec = self.get_clock().now().nanoseconds / 1e9
+        detector_name = (
+            'map subtraction'
+            if self.opponent_detection_mode == 'map' and self.map_ray_caster is not None
+            else 'shape heuristic fallback')
+        self.last_opponent_status = f"opponent: none detected by {detector_name}"
 
         # The LIDAR's own map-frame position -- needed both as the origin
         # for map-subtraction ray casting and to place a detected cluster
@@ -802,10 +956,16 @@ class PurePursuitNode(Node):
                                     nan=0.0, posinf=self.max_range, neginf=0.0)
             ranges = np.clip(ranges, 0.0, self.max_range)
             detection = self._detect_opponent(scan, ranges, laser_world_x, laser_world_y)
+        else:
+            self.last_opponent_status = 'opponent: not checked because the LaserScan is missing/stale'
 
         start_idx = end_idx = None
         if detection is not None:
             start_idx, end_idx, centroid_range, centroid_angle = detection
+            detection_summary = (
+                f"opponent detected at {centroid_range:.2f}m, "
+                f"bearing={math.degrees(centroid_angle):+.1f}deg by {detector_name}")
+            self.last_opponent_status = detection_summary
 
             # Where that cluster actually is in the map frame, so its
             # progress along the racing line can be measured the same way
@@ -833,14 +993,33 @@ class PurePursuitNode(Node):
             gap_ahead = racing_math.track_progress_gap(
                 ego_arc_length, self.opponent.arc_length, self.total_track_length)
             ego_speed = float(self.speed_profile[nearest_idx])
-            closing_fast_enough = (ego_speed - self.opponent.progress_rate) > self.overtake_closing_margin
+            closing_rate = ego_speed - self.opponent.progress_rate
+            closing_fast_enough = closing_rate > self.overtake_closing_margin
             if detection is None or gap_ahead > self.overtake_trigger_gap or not closing_fast_enough:
+                reasons = []
+                if detection is None:
+                    reasons.append('not present in the current scan')
+                if gap_ahead > self.overtake_trigger_gap:
+                    reasons.append(
+                        f"track gap {gap_ahead:.2f}m > {self.overtake_trigger_gap:.2f}m trigger")
+                if not closing_fast_enough:
+                    reasons.append(
+                        f"closing rate {closing_rate:.2f}m/s <= "
+                        f"{self.overtake_closing_margin:.2f}m/s trigger")
+                self.last_opponent_status = (
+                    f"opponent tracked: gap={gap_ahead:.2f}m, "
+                    f"closing={closing_rate:.2f}m/s; no overtake because "
+                    + ', '.join(reasons))
                 return None
             self.overtake_active = True
             self.overtake_side = racing_math.pick_pass_side(ranges, start_idx, end_idx)
+            self.last_opponent_status = (
+                f"overtake active: opponent gap={gap_ahead:.2f}m, "
+                f"closing={closing_rate:.2f}m/s, passing "
+                f"{'left' if self.overtake_side > 0 else 'right'}")
             self.get_logger().info(
                 f"overtake: opponent {gap_ahead:.1f}m ahead on track, closing at "
-                f"{ego_speed - self.opponent.progress_rate:.1f}m/s -- passing "
+                f"{closing_rate:.1f}m/s -- passing "
                 f"{'left' if self.overtake_side > 0 else 'right'}.",
                 throttle_duration_sec=1.0,
             )
@@ -864,6 +1043,9 @@ class PurePursuitNode(Node):
                     throttle_duration_sec=1.0,
                 )
                 self.overtake_active = False
+                self.last_opponent_status = (
+                    f"overtake abandoned: opponent unseen for {blind_sec:.2f}s "
+                    f"> {self.overtake_max_blind_sec:.2f}s limit")
                 return None
             predicted_arc = self.opponent.predicted_arc_length(now_sec, self.total_track_length)
             gap_ahead = racing_math.track_progress_gap(
@@ -872,7 +1054,13 @@ class PurePursuitNode(Node):
                 self.get_logger().info("overtake: clear of the opponent -- back to the racing line.",
                                        throttle_duration_sec=1.0)
                 self.overtake_active = False
+                self.last_opponent_status = (
+                    f"overtake complete: ego is at least "
+                    f"{self.overtake_clear_margin:.2f}m past the predicted opponent position")
                 return None
+            self.last_opponent_status = (
+                f"overtake active: passing {'left' if self.overtake_side > 0 else 'right'}, "
+                f"opponent unseen for {blind_sec:.2f}s, wrapped track gap={gap_ahead:.2f}m")
 
         next_idx = (target_idx + 1) % self.num_waypoints if self.closed_loop \
             else min(target_idx + 1, self.num_waypoints - 1)
@@ -891,6 +1079,39 @@ class PurePursuitNode(Node):
         msg.drive.steering_angle = steering_angle
         msg.drive.speed = speed
         self.drive_pub.publish(msg)
+
+    def _stop(self, state: str, detail: str):
+        self._publish_drive(0.0, 0.0)
+        self._log_decision(state, detail, 0.0, 0.0)
+
+    def _log_decision(self, state: str, detail: str, steering_angle: float,
+                      speed: float, level: str = None):
+        """Log state transitions immediately and steady decisions periodically."""
+        now = self.get_clock().now()
+        state_changed = state != self.last_decision_state
+        period_elapsed = (
+            self.decision_log_period_sec > 0.0
+            and (
+                self.last_decision_log_time is None
+                or (now - self.last_decision_log_time).nanoseconds / 1e9
+                >= self.decision_log_period_sec
+            )
+        )
+        if not state_changed and not period_elapsed:
+            return
+
+        stopped = speed <= 0.0
+        message = (
+            f"{'STOP' if stopped else 'DRIVE'} [{state}] {detail}; "
+            f"command: steering={steering_angle:+.3f}rad, speed={speed:.2f}m/s")
+        if level == 'error':
+            self.get_logger().error(message)
+        elif stopped:
+            self.get_logger().warn(message)
+        else:
+            self.get_logger().info(message)
+        self.last_decision_state = state
+        self.last_decision_log_time = now
 
 
 def main(args=None):

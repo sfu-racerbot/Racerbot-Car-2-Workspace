@@ -43,7 +43,7 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='static_baselink_to_laser',
-        arguments=['0.27', '0.0', '0.11', '0.0', '0.0', '0.0', 'base_link', 'laser'],
+        arguments=['0.33', '0.0', '0.11', '0.0', '0.0', '0.0', 'base_link', 'laser'],
     )
 
     realsense_camera_launch = IncludeLaunchDescription(
@@ -51,13 +51,6 @@ def generate_launch_description():
             os.path.join(
                 get_package_share_directory('racerbot_launch'), 'launch',
                 'realsense_camera_launch.py')
-        )
-    )
-    realsense_stream_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('usb_cam_stream'), 'launch',
-                'realsense_stream_launch.py')
         )
     )
     web_dashboard_launch = IncludeLaunchDescription(
@@ -72,6 +65,5 @@ def generate_launch_description():
         urg_node,
         static_tf_node,
         realsense_camera_launch,
-        realsense_stream_launch,
         web_dashboard_launch,
     ])

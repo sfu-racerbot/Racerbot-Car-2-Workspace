@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>racerbot camera recording view</title>
+  <link rel="stylesheet" href="camera.css" />
+</head>
+<body>
+  <main id="camera-stage">
+    <img id="recording-camera-feed" alt="Racerbot camera feed" />
+    <div id="camera-offline">waiting for camera stream&hellip;</div>
+
+    <header id="recording-header">
+      <div class="brand-line">
+        <span class="live-dot"></span>
+        <span>RACERBOT</span>
+        <span id="camera-status">CAMERA CONNECTING</span>
+      </div>
+      <time id="current-time">--:--:--</time>
+      <div id="current-date">---</div>
+    </header>
+
+    <section id="primary-metrics" aria-label="Primary vehicle metrics">
+      <div class="metric-card speed-card">
+        <div class="metric-label">CURRENT SPEED</div>
+        <div><span id="recording-speed" class="metric-number">--</span><span class="metric-unit">m/s</span></div>
+      </div>
+      <div class="metric-card steering-card">
+        <div class="metric-label">STEERING ANGLE</div>
+        <div><span id="recording-steering" class="metric-number">--</span><span class="metric-unit">deg</span></div>
+      </div>
+      <div class="metric-card timer-card">
+        <div class="metric-label">LB STOPWATCH</div>
+        <div id="recording-stopwatch" class="timer-number">00:00.00</div>
+        <div id="recording-timer-state" class="metric-detail">TIMER OFF</div>
+      </div>
+    </section>
+
+    <footer id="secondary-metrics">
+      <div id="recording-lb" class="status-pill status-bad">LB: NO JOYSTICK</div>
+      <div class="secondary-item"><span>COMMAND</span><strong id="recording-command">-- m/s</strong></div>
+      <div class="secondary-item"><span>CPU</span><strong id="recording-cpu">--%</strong></div>
+      <div class="secondary-item"><span>WIFI</span><strong id="recording-wifi">-- dBm</strong></div>
+      <div id="telemetry-status" class="status-pill status-bad">TELEMETRY CONNECTING</div>
+    </footer>
+  </main>
+
+  <script src="camera.js"></script>
+</body>
+</html>

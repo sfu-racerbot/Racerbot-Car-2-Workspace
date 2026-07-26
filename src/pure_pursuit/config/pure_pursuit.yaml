@@ -16,7 +16,10 @@ pure_pursuit_node:
 
     # --- Control loop ---
     control_rate_hz: 40.0
-    wheelbase: 0.25          # meters -- matches src/f1tenth_system/f1tenth_stack/config/vesc.yaml
+    wheelbase: 0.324         # meters -- Traxxas 74276-4; matches vesc.yaml
+    # Print every state change immediately, plus a periodic summary of the
+    # path/LIDAR/opponent decision and final command. Set 0.0 for transitions only.
+    decision_log_period_sec: 1.0
 
     # --- Pure pursuit geometry ---
     # Validated headlessly on Spielberg, Silverstone, and Brands Hatch in
@@ -87,7 +90,7 @@ pure_pursuit_node:
     # blind for longer than this and the dead-reckoned position is no
     # longer trustworthy, so the pass is abandoned.
     overtake_max_blind_sec: 3.0
-    laser_offset_x: 0.27              # meters -- LIDAR mounting offset from base_link, matches hardware-reference.md
+    laser_offset_x: 0.33              # meters -- estimated rear-axle base_link to LiDAR
     laser_offset_y: 0.0
 
     # --- How opponents are recognized in the scan ---

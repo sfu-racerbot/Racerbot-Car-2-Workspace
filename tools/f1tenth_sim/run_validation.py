@@ -60,10 +60,11 @@ from pure_pursuit import racing_math
 
 CONTROL_DT = 0.025  # 40 Hz, matching pure_pursuit.yaml
 INTEGRATOR_DT = 0.005
-WHEELBASE = 0.25
-CAR_WIDTH = 0.30
+WHEELBASE = 0.324
+CAR_WIDTH = 0.31
+CAR_LENGTH = 0.58
 STEERING_LIMIT = 0.26
-LIDAR_OFFSET_X = 0.275
+LIDAR_OFFSET_X = 0.33
 
 LIDAR = LiDARConfig(
     enabled=True,
@@ -77,10 +78,11 @@ LIDAR = LiDARConfig(
 )
 
 VEHICLE_PARAMS = F1TENTH_VEHICLE_PARAMETERS.with_updates(
-    # Match this workspace's configured 0.25 m wheelbase and 0.30 m chassis.
-    lf=0.12,
-    lr=0.13,
+    # Padded Traxxas 74276-4 body with its published 0.324 m wheelbase.
+    lf=WHEELBASE / 2.0,
+    lr=WHEELBASE / 2.0,
     width=CAR_WIDTH,
+    length=CAR_LENGTH,
     collision_body_center_x=WHEELBASE / 2.0,
 )
 
@@ -252,20 +254,40 @@ class OpponentProgress:
         ) % total_length
 
 
-def gap_command(scan: np.ndarray) -> tuple[float, float, float, bool]:
-    clean, valid = gap_logic.sanitize_ranges(scan, max_range=10.0, range_min=0.05)
+def gap_command(scan: np.ndarray, current_speed: float) -> tuple[float, float, float, bool]:
+    clean, valid = gap_logic.sanitize_ranges(
+        scan, max_range=10.0, range_min=0.05)
     lo, hi = cone_indices(math.pi / 2.0)
     window = clean[lo : hi + 1]
     window_valid = valid[lo : hi + 1]
-    closest_index, closest_distance = gap_logic.closest_valid(window, window_valid)
+    beam_indices = np.arange(lo, hi + 1, dtype=float)
+    beam_angles = LIDAR.angle_min + beam_indices * LIDAR.angle_increment
+    boundaries = gap_logic.vehicle_boundary_distances(
+        beam_angles,
+        CAR_WIDTH,
+        CAR_LENGTH,
+        WHEELBASE,
+        LIDAR_OFFSET_X,
+    )
+    closest_index, closest_distance = gap_logic.closest_valid(
+        window, window_valid)
 
-    if closest_distance < 0.15:
+    clearance = gap_logic.minimum_footprint_clearance(
+        window, window_valid, boundaries)
+    min_ttc = gap_logic.minimum_ttc(
+        window,
+        window_valid,
+        beam_angles,
+        current_speed,
+        boundaries,
+        min_closing_speed=0.05,
+    )
+    if clearance <= 0.02 or min_ttc <= 0.5:
         return 0.0, 0.0, float(closest_distance), True
 
     half_width = CAR_WIDTH / 2.0 + 0.10
     window = gap_logic.disparity_extend(
-        window, LIDAR.angle_increment, 0.4, half_width
-    )
+        window, LIDAR.angle_increment, 0.4, half_width)
     if closest_index is not None:
         window = gap_logic.safety_bubble(
             window,
@@ -274,11 +296,12 @@ def gap_command(scan: np.ndarray) -> tuple[float, float, float, bool]:
             LIDAR.angle_increment,
             half_width,
         )
-    gap_start, gap_end = gap_logic.find_best_gap(
+    gap_start, gap_end, used_fallback = gap_logic.find_gap_with_fallback(
         window,
-        2.0,
+        preferred_distance=2.0,
+        fallback_distance=0.8,
         angle_increment=LIDAR.angle_increment,
-        min_gap_width_m=CAR_WIDTH + 0.10,
+        min_gap_width_m=0.10,
     )
     if gap_start is None:
         return 0.0, 0.0, float(closest_distance), True
@@ -288,6 +311,8 @@ def gap_command(scan: np.ndarray) -> tuple[float, float, float, bool]:
     steering = float(np.clip(steering, -0.4189, 0.4189))
     speed_scale = 1.0 - abs(steering) / 0.4189
     speed = 0.8 + speed_scale * (2.0 - 0.8)
+    if used_fallback:
+        speed = min(speed, 0.5)
     return steering, float(speed), float(closest_distance), False
 
 
@@ -327,11 +352,12 @@ def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
     try:
         for step in range(max_steps):
             ego = obs["agent_0"]
-            steering, speed, nearest_scan, stopped = gap_command(ego["scan"])
+            state = np.asarray(ego["std_state"], dtype=float)
+            steering, speed, nearest_scan, stopped = gap_command(
+                ego["scan"], float(state[3]))
             min_scan = min(min_scan, nearest_scan)
             stop_steps += int(stopped)
 
-            state = np.asarray(ego["std_state"], dtype=float)
             nearest, error = racing_math.find_nearest_index(
                 reference,
                 state[:2],

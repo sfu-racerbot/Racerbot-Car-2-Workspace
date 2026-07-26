@@ -112,6 +112,15 @@ def test_drives_normally_on_a_clear_track(node):
     assert abs(last.drive.steering_angle) < 0.05
     assert last.drive.speed > 0.5
     assert node.overtake_active is False
+    assert node.last_decision_state == 'pure_pursuit'
+
+
+def test_missing_lidar_stop_has_a_diagnostic_reason(node):
+    published = _capture_published(node)
+    _set_pose(node, -1.5, -1.2, 0.0)
+    node.control_loop()
+    assert published[-1].drive.speed == 0.0
+    assert node.last_decision_state == 'lidar_scan_missing'
 
 
 def test_overtakes_toward_the_more_open_side(node):
@@ -125,6 +134,7 @@ def test_overtakes_toward_the_more_open_side(node):
     assert node.overtake_active is True
     assert node.overtake_side == 1  # more open on the left -> pass left
     assert last.drive.steering_angle > 0.0
+    assert node.last_decision_state == 'overtake_left'
 
 
 def test_overtakes_toward_the_right_when_thats_more_open(node):
@@ -155,6 +165,7 @@ def test_hard_stop_overrides_an_active_overtake(node):
     node.control_loop()
     last = published[-1]
     assert last.drive.speed == 0.0, "the hard-stop safety net must win regardless of overtake state"
+    assert node.last_decision_state == 'emergency_obstacle'
 
 
 def test_overtake_resolves_once_ego_is_past_the_opponent(node):
@@ -203,6 +214,7 @@ def test_stays_stopped_when_genuinely_lost(node):
     _set_pose(node, 20.0, 20.0, 0.0)
     node.control_loop()
     assert published[-1].drive.speed == 0.0
+    assert node.last_decision_state == 'off_racing_line'
 
 
 def test_overtake_survives_losing_sight_of_the_opponent_mid_pass(node):
@@ -326,7 +338,7 @@ def test_map_subtraction_ignores_what_the_map_explains(map_mode_node):
     scan = _clear_scan()
     ranges = np.clip(np.nan_to_num(np.array(scan.ranges), nan=0.0, posinf=node.max_range),
                      0.0, node.max_range)
-    detection = node._detect_opponent(scan, ranges, node.car_x + 0.27, node.car_y)
+    detection = node._detect_opponent(scan, ranges, node.car_x + node.laser_offset_x, node.car_y)
     assert detection is None
 
 
@@ -339,7 +351,7 @@ def test_map_subtraction_detects_an_unmapped_car_directly(map_mode_node):
     scan, center = _car_ahead_scan(car_range=2.0)
     ranges = np.clip(np.nan_to_num(np.array(scan.ranges), nan=0.0, posinf=node.max_range),
                      0.0, node.max_range)
-    detection = node._detect_opponent(scan, ranges, node.car_x + 0.27, node.car_y)
+    detection = node._detect_opponent(scan, ranges, node.car_x + node.laser_offset_x, node.car_y)
     assert detection is not None
     start_idx, end_idx, centroid_range, centroid_angle = detection
     assert centroid_range == pytest.approx(2.0, abs=0.05)
@@ -366,6 +378,7 @@ def test_waiting_node_loads_generated_profile_at_runtime(profiled_csv):
         waiting.control_loop()
         assert published[-1].drive.speed == 0.0
         assert waiting.profile_ready is False
+        assert waiting.last_decision_state == 'waiting_for_profile'
 
         result = waiting._parameter_callback([
             Parameter('waypoints_file', Parameter.Type.STRING, profiled_csv)])

@@ -13,10 +13,12 @@ a steering target and can therefore be tested with plain numpy arrays:
 The processing pipeline, in the order the node applies it:
 
   sanitize_ranges     -> which beams are trustworthy, and a gap-safe copy
-  closest_valid       -> emergency-stop / bubble anchor (valid beams only)
+  vehicle_boundary... -> LiDAR-to-body clearance for each scan direction
+  minimum_ttc         -> footprint-aware odometry/LiDAR collision timing
+  closest_valid       -> safety-bubble anchor (valid beams only)
   disparity_extend    -> widen every obstacle *edge* by half a car width
   safety_bubble       -> zero out a car-width bubble around the closest hit
-  find_best_gap       -> the best (widest*deepest, car-sized) opening
+  find_gap_with...    -> preferred deep gap, then a slow corner fallback
 """
 
 import math
@@ -63,6 +65,124 @@ def closest_valid(clean: np.ndarray, valid: np.ndarray):
     masked = np.where(valid, clean, np.inf)
     idx = int(np.argmin(masked))
     return idx, float(masked[idx])
+
+
+def vehicle_boundary_distances(angles: np.ndarray, car_width: float,
+                               car_length: float, wheelbase: float,
+                               laser_offset_x: float,
+                               laser_offset_y: float = 0.0) -> np.ndarray:
+    """Distance from the LiDAR to the rectangular vehicle edge per beam.
+
+    ``base_link`` is the rear axle in this workspace. Following the F1TENTH
+    collision model, the rectangular body is centered halfway along the
+    wheelbase, with symmetric front/rear overhang. The LiDAR origin is offset
+    from ``base_link`` by ``laser_offset_x/y``.
+
+    The returned distance is the amount that must be subtracted from a raw
+    LiDAR range before it represents clearance from the *car body*, rather
+    than clearance from the sensor. The sensor must lie inside the footprint;
+    a mismatched transform or footprint raises ``ValueError`` instead of
+    silently creating unsafe collision distances.
+    """
+    beam_angles = np.asarray(angles, dtype=np.float64)
+    dimensions = (car_width, car_length, wheelbase)
+    if not all(math.isfinite(value) and value > 0.0 for value in dimensions):
+        raise ValueError('car_width, car_length, and wheelbase must be finite and positive')
+    if not math.isfinite(laser_offset_x) or not math.isfinite(laser_offset_y):
+        raise ValueError('LiDAR offsets must be finite')
+
+    half_width = car_width / 2.0
+    half_length = car_length / 2.0
+    body_center_x = wheelbase / 2.0
+    x_min = body_center_x - half_length
+    x_max = body_center_x + half_length
+    y_min = -half_width
+    y_max = half_width
+    tolerance = 1e-9
+    if not (x_min - tolerance <= laser_offset_x <= x_max + tolerance
+            and y_min - tolerance <= laser_offset_y <= y_max + tolerance):
+        raise ValueError('LiDAR origin must lie inside the configured vehicle footprint')
+
+    direction_x = np.cos(beam_angles)
+    direction_y = np.sin(beam_angles)
+    epsilon = 1e-12
+    distance_x = np.full(beam_angles.shape, np.inf, dtype=np.float64)
+    distance_y = np.full(beam_angles.shape, np.inf, dtype=np.float64)
+
+    positive_x = direction_x > epsilon
+    negative_x = direction_x < -epsilon
+    distance_x[positive_x] = (
+        (x_max - laser_offset_x) / direction_x[positive_x])
+    distance_x[negative_x] = (
+        (x_min - laser_offset_x) / direction_x[negative_x])
+
+    positive_y = direction_y > epsilon
+    negative_y = direction_y < -epsilon
+    distance_y[positive_y] = (
+        (y_max - laser_offset_y) / direction_y[positive_y])
+    distance_y[negative_y] = (
+        (y_min - laser_offset_y) / direction_y[negative_y])
+
+    return np.minimum(distance_x, distance_y)
+
+
+def minimum_footprint_clearance(clean: np.ndarray, valid: np.ndarray,
+                                boundary_distances: np.ndarray) -> float:
+    """Smallest valid obstacle clearance measured from the vehicle body."""
+    ranges = np.asarray(clean, dtype=np.float64)
+    validity = np.asarray(valid, dtype=bool)
+    boundaries = np.asarray(boundary_distances, dtype=np.float64)
+    if ranges.shape != validity.shape or ranges.shape != boundaries.shape:
+        raise ValueError('ranges, validity, and boundary distances must have matching shapes')
+    usable = validity & np.isfinite(boundaries)
+    if not np.any(usable):
+        return math.inf
+    return float(np.min(ranges[usable] - boundaries[usable]))
+
+
+def time_to_collision(clean: np.ndarray, valid: np.ndarray,
+                      angles: np.ndarray, speed: float,
+                      boundary_distances: np.ndarray,
+                      min_closing_speed: float = 0.05) -> np.ndarray:
+    """Instantaneous TTC for every scan beam, with the car footprint removed.
+
+    This is the F1TENTH iTTC construction: longitudinal odometry speed is
+    projected onto each beam with ``speed * cos(angle)``. Beams the car is not
+    approaching have infinite TTC. Raw ranges are converted to body clearance
+    first, so the clock reaches zero when the rectangular car body reaches the
+    obstacle, not when the LiDAR itself does.
+    """
+    ranges = np.asarray(clean, dtype=np.float64)
+    validity = np.asarray(valid, dtype=bool)
+    beam_angles = np.asarray(angles, dtype=np.float64)
+    boundaries = np.asarray(boundary_distances, dtype=np.float64)
+    if not (ranges.shape == validity.shape == beam_angles.shape == boundaries.shape):
+        raise ValueError('all TTC inputs must have matching shapes')
+    if not math.isfinite(speed):
+        raise ValueError('speed must be finite')
+    if not math.isfinite(min_closing_speed) or min_closing_speed < 0.0:
+        raise ValueError('min_closing_speed must be finite and non-negative')
+
+    closing_speed = speed * np.cos(beam_angles)
+    approaching = (
+        validity
+        & np.isfinite(boundaries)
+        & (closing_speed > min_closing_speed)
+    )
+    ttc = np.full(ranges.shape, np.inf, dtype=np.float64)
+    clearances = np.maximum(0.0, ranges - boundaries)
+    ttc[approaching] = clearances[approaching] / closing_speed[approaching]
+    return ttc
+
+
+def minimum_ttc(clean: np.ndarray, valid: np.ndarray,
+                angles: np.ndarray, speed: float,
+                boundary_distances: np.ndarray,
+                min_closing_speed: float = 0.05) -> float:
+    """Return the minimum finite footprint-aware iTTC, or infinity."""
+    ttc = time_to_collision(
+        clean, valid, angles, speed, boundary_distances, min_closing_speed)
+    return float(np.min(ttc)) if ttc.size else math.inf
 
 
 def disparity_extend(clean: np.ndarray, angle_increment: float,
@@ -139,11 +259,9 @@ def find_best_gap(window: np.ndarray, min_gap_distance: float,
     to win -- so the car stops driving into pockets it can't get back
     out of.
 
-    If `min_gap_width_m` is set (and `angle_increment` supplied), any
-    candidate whose *physical* width -- angular width times average depth
-    -- is narrower than that is discarded outright: a gap the car cannot
-    physically fit through must never win just because nothing better
-    exists. Returns (start, end) indices into `window`, or (None, None).
+    If `min_gap_width_m` is set (and `angle_increment` supplied), candidates
+    narrower than the conservative chord at their nearest depth are rejected.
+    Returns (start, end) indices into `window`, or (None, None).
     """
     free = window > min_gap_distance
     candidates = []
@@ -159,8 +277,12 @@ def find_best_gap(window: np.ndarray, min_gap_distance: float,
 
     def physical_width(run):
         start, end = run
-        avg_depth = float(np.mean(window[start:end + 1]))
-        return (end - start + 1) * angle_increment * avg_depth
+        # Use the chord at the narrowest depth, rather than arc length at
+        # average depth. That prevents a wedge-shaped opening from looking
+        # wide enough merely because its far edge is deep.
+        min_depth = float(np.min(window[start:end + 1]))
+        angular_width = min(math.pi, (end - start + 1) * angle_increment)
+        return 2.0 * min_depth * math.sin(angular_width / 2.0)
 
     if min_gap_width_m > 0.0 and angle_increment > 0.0:
         candidates = [run for run in candidates if physical_width(run) >= min_gap_width_m]
@@ -177,3 +299,34 @@ def find_best_gap(window: np.ndarray, min_gap_distance: float,
 
     best_start, best_end = max(candidates, key=score)
     return best_start, best_end
+
+
+def find_gap_with_fallback(window: np.ndarray, preferred_distance: float,
+                           fallback_distance: float, angle_increment: float,
+                           min_gap_width_m: float):
+    """Find a deep gap first, then a nearer safe opening for tight corners.
+
+    A fixed deep-range threshold can deadlock follow-the-gap immediately
+    before a passable corner: there may be ample width, but the turn hides
+    everything beyond the corner. The fallback relaxes only the visibility
+    depth; disparity extension and the post-inflation width requirement still
+    apply. Returns ``(start, end, used_fallback)``.
+    """
+    start, end = find_best_gap(
+        window,
+        preferred_distance,
+        angle_increment=angle_increment,
+        min_gap_width_m=min_gap_width_m,
+    )
+    if start is not None:
+        return start, end, False
+
+    if fallback_distance >= preferred_distance:
+        return None, None, False
+    start, end = find_best_gap(
+        window,
+        fallback_distance,
+        angle_increment=angle_increment,
+        min_gap_width_m=min_gap_width_m,
+    )
+    return start, end, start is not None

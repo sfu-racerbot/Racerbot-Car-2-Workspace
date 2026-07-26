@@ -42,9 +42,9 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from ackermann_msgs.msg import AckermannDriveStamped
-from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
+from sensor_msgs.msg import Joy, LaserScan
 
 import tornado.ioloop
 import tornado.web
@@ -52,6 +52,7 @@ import tornado.websocket
 from ament_index_python.packages import get_package_share_directory
 
 from web_dashboard import protocol
+from web_dashboard.stopwatch import DeadmanStopwatch
 
 
 def _read_cpu_temp_c():
@@ -121,12 +122,24 @@ class DashboardWebSocket(tornado.websocket.WebSocketHandler):
         self.node.ws_clients.discard(self)
 
     def on_message(self, message):
-        pass  # one-directional dashboard -- nothing expected from the browser
+        # The only accepted browser input controls the dashboard's own
+        # stopwatch. It never publishes to ROS or affects the car.
+        if not isinstance(message, str):
+            return
+        try:
+            payload = json.loads(message)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(payload, dict):
+            return
+        if payload.get('type') != 'stopwatch_control':
+            return
+        self.node.handle_stopwatch_control(
+            payload.get('action'), payload.get('enabled'))
 
 
 class DashboardNode(Node):
-    """Subscribes to the map/scan/pose topics and fans out every update to
-    every connected browser tab."""
+    """Fan read-only ROS telemetry out to every connected browser tab."""
 
     def __init__(self):
         super().__init__('web_dashboard_node')
@@ -134,18 +147,29 @@ class DashboardNode(Node):
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('pose_topic', '/pf/viz/inferred_pose')
-        self.declare_parameter('drive_topic', '/drive')
+        self.declare_parameter('drive_topic', '/ackermann_cmd')
+        self.declare_parameter('odom_topic', '/odom')
+        self.declare_parameter('joy_topic', '/joy')
+        self.declare_parameter('deadman_button', 4)
+        self.declare_parameter('joy_timeout_sec', 0.5)
+        self.declare_parameter('stopwatch_update_rate_hz', 10.0)
         self.declare_parameter('host', '0.0.0.0')
         self.declare_parameter('port', 8080)
         self.declare_parameter('scan_broadcast_rate_hz', 10.0)
         self.declare_parameter('stats_interval_sec', 1.0)
-        self.declare_parameter('laser_offset_x', 0.27)
+        self.declare_parameter('laser_offset_x', 0.33)
         self.declare_parameter('laser_offset_y', 0.0)
 
         self.map_topic = self.get_parameter('map_topic').value
         self.scan_topic = self.get_parameter('scan_topic').value
         self.pose_topic = self.get_parameter('pose_topic').value
         self.drive_topic = self.get_parameter('drive_topic').value
+        self.odom_topic = self.get_parameter('odom_topic').value
+        self.joy_topic = self.get_parameter('joy_topic').value
+        self.deadman_button = int(self.get_parameter('deadman_button').value)
+        self.joy_timeout_sec = float(self.get_parameter('joy_timeout_sec').value)
+        self.stopwatch_update_rate_hz = float(
+            self.get_parameter('stopwatch_update_rate_hz').value)
         self.host = self.get_parameter('host').value
         self.port = int(self.get_parameter('port').value)
         self.scan_broadcast_rate_hz = float(self.get_parameter('scan_broadcast_rate_hz').value)
@@ -164,8 +188,11 @@ class DashboardNode(Node):
         self._last_scan_msg = None
         self._last_pose = None  # (x, y, yaw)
         self._last_drive = None  # (speed, steering_angle)
+        self._last_speed = None
         self._last_stats = None  # (cpu_percent, mem_percent, cpu_temp_c, uptime_s)
         self._last_scan_broadcast_time = 0.0
+        self._stopwatch_lock = threading.Lock()
+        self._stopwatch = DeadmanStopwatch(self.joy_timeout_sec)
 
         # NOTE: named ws_clients, not clients -- rclpy.node.Node already
         # defines a read-only `clients` property (service clients created
@@ -194,6 +221,12 @@ class DashboardNode(Node):
         self.pose_sub = self.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 10)
         self.drive_sub = self.create_subscription(
             AckermannDriveStamped, self.drive_topic, self.drive_callback, 10)
+        self.odom_sub = self.create_subscription(
+            Odometry, self.odom_topic, self.odom_callback, 10)
+        self.joy_sub = self.create_subscription(
+            Joy, self.joy_topic, self.joy_callback, 10)
+        self.stopwatch_timer = self.create_timer(
+            1.0 / max(self.stopwatch_update_rate_hz, 0.1), self.stopwatch_callback)
 
         # Priming call: psutil.cpu_percent(interval=None) reports usage
         # *since the previous call*, so the very first call has nothing to
@@ -205,7 +238,8 @@ class DashboardNode(Node):
 
         self.get_logger().info(
             f"web_dashboard_node ready: map={self.map_topic} scan={self.scan_topic} "
-            f"pose={self.pose_topic} drive={self.drive_topic}. "
+            f"pose={self.pose_topic} drive={self.drive_topic} odom={self.odom_topic} "
+            f"joy={self.joy_topic} (LB index {self.deadman_button}). "
             f"Once the web server starts, open http://<this car's IP>:{self.port}/ in a browser."
         )
 
@@ -242,6 +276,38 @@ class DashboardNode(Node):
     def drive_callback(self, msg: AckermannDriveStamped):
         self._last_drive = (msg.drive.speed, msg.drive.steering_angle)
         self._broadcast(protocol.drive_message(*self._last_drive))
+
+    def odom_callback(self, msg: Odometry):
+        self._last_speed = msg.twist.twist.linear.x
+        self._broadcast(protocol.speed_message(self._last_speed))
+
+    def joy_callback(self, msg: Joy):
+        with self._stopwatch_lock:
+            self._stopwatch.update_joy(
+                msg.buttons, self.deadman_button, time.monotonic())
+
+    def _stopwatch_message(self):
+        with self._stopwatch_lock:
+            snapshot = self._stopwatch.snapshot(time.monotonic())
+        return protocol.stopwatch_message(**snapshot)
+
+    def _broadcast_stopwatch(self):
+        self._broadcast(self._stopwatch_message())
+
+    def stopwatch_callback(self):
+        self._broadcast_stopwatch()
+
+    def handle_stopwatch_control(self, action, enabled=None):
+        """Handle dashboard-local controls on Tornado's IOLoop thread."""
+        now = time.monotonic()
+        with self._stopwatch_lock:
+            if action == 'set_enabled':
+                self._stopwatch.set_enabled(bool(enabled), now)
+            elif action == 'reset':
+                self._stopwatch.reset(now)
+            else:
+                return
+        self._broadcast_stopwatch()
 
     def stats_callback(self):
         """Runs on a timer (rclpy spin thread, not per-message) -- cheap
@@ -296,8 +362,11 @@ class DashboardNode(Node):
             client.write_message(json.dumps(protocol.pose_message(*self._last_pose)))
         if self._last_drive is not None:
             client.write_message(json.dumps(protocol.drive_message(*self._last_drive)))
+        if self._last_speed is not None:
+            client.write_message(json.dumps(protocol.speed_message(self._last_speed)))
         if self._last_stats is not None:
             client.write_message(json.dumps(protocol.stats_message(*self._last_stats)))
+        client.write_message(json.dumps(self._stopwatch_message()))
 
     # ------------------------------------------------------------------------
     # Web server

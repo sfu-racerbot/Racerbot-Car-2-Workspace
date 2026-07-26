@@ -1,8 +1,8 @@
 # Live web dashboard: see what the car sees
 
-`web_dashboard` streams the car's SLAM/localization map, its raw LIDAR
-scan, its own pose, the currently-arbitrated `/drive` command, and coarse
-system health (CPU/mem/temp/WiFi/uptime) to a plain web page, live, over
+`web_dashboard` streams the car's SLAM/localization map, proximity-colored
+LIDAR, pose, measured `/odom` speed, selected `/ackermann_cmd` steering, LB
+state/stopwatch, and coarse system health (CPU/mem/temp/WiFi/uptime) live over
 the LAN — open a browser on a laptop or phone and watch the map build
 during SLAM, or watch the car's position and LIDAR returns during
 localization/racing, with no RViz, no ROS install, and no login needed on
@@ -27,13 +27,15 @@ see [Security note](#security-note) below). No other node needs to be
 running first — see the table below for what you'll see at each stage;
 worst case with nothing else up yet, the page just shows "no scan yet."
 
-This node is **entirely passive** — it only ever subscribes, it never
-publishes anything, to `/drive` or any other topic. That means the
+This node is **passive with respect to ROS and the car** — it subscribes to
+telemetry but never publishes to `/drive`, `/ackermann_cmd`, or any other ROS
+topic. Browser messages can only enable/reset its in-process stopwatch. That means the
 workspace's [mandatory LB-deadman policy](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)
 does not apply to it (that policy is scoped to nodes that can *move the
 car* — see [writing-your-own-node.md](writing-your-own-node.md#the-interface-contract)):
-there's nothing here for a deadman check to gate. It carries zero risk to
-how the car drives and can be left running at all times, alongside
+there's no driving output for a deadman check to gate. Reading LB only gates
+the stopwatch. It carries zero risk to how the car drives and can be left
+running at all times, alongside
 anything else in this workspace: `bringup_launch.py`, SLAM, localization,
 `gap_follow`, `pure_pursuit`, all of it.
 
@@ -72,7 +74,9 @@ flowchart LR
     M["/map\n(nav_msgs/OccupancyGrid)"] --> N[dashboard_node]
     S["/scan\n(sensor_msgs/LaserScan)"] --> N
     P["/pf/viz/inferred_pose\n(geometry_msgs/PoseStamped)"] --> N
-    D["/drive\n(ackermann_msgs/AckermannDriveStamped)"] --> N
+    D["/ackermann_cmd\n(selected steering command)"] --> N
+    O["/odom\n(measured speed)"] --> N
+    J["/joy\n(LB state)"] --> N
     T["CPU/mem/temp\n(psutil + /sys/class/thermal)"] --> N
     N -- WebSocket --> B1[Browser tab 1]
     N -- WebSocket --> B2[Browser tab 2 ...]
@@ -80,17 +84,18 @@ flowchart LR
 
 One ROS2 node (`dashboard_node.py`) does two jobs in one process:
 
-1. **Subscribes** to the map, scan, pose, and drive topics, exactly like any
-   other node in this workspace, and separately samples system stats
+1. **Subscribes** to map, scan, pose, selected command, odometry, and joy
+   topics, exactly like any other node, and separately samples system stats
    (CPU/mem/temp/uptime) on a timer rather than from a topic.
 2. **Runs a small web server** ([Tornado](https://www.tornadoweb.org/), a
    mature, single-dependency Python library that already ships on this
    machine) that serves the dashboard's HTML/JS/CSS as static files, and
    pushes every update out to any connected browser tab over a WebSocket.
 
-Subscribing to `/drive` only ever *reads* the current command for display
-— this node still never publishes anything, so it remains just as safe to
-leave running as before; see the [security note](#security-note).
+These subscriptions only feed displays and the dashboard-local stopwatch.
+The node never publishes to ROS; enabling/resetting the stopwatch changes no
+car state, so the dashboard remains safe to leave running; see the
+[security note](#security-note).
 
 ### Two concurrency models sharing one process
 
@@ -118,7 +123,9 @@ manual parsing:
 | Map | width, height, resolution, origin | `Int8Array` — one signed byte per cell, exactly matching `OccupancyGrid.data` (-1 unknown, 0 free, 100 occupied) |
 | Scan | angle range/increment, LIDAR mounting offset | `Float32Array` — one little-endian float per beam, exactly matching `LaserScan.ranges` |
 | Pose | `{x, y, yaw}` | *(none — small enough to just be JSON)* |
-| Drive | `{speed, steering_angle}` | *(none)* |
+| Drive | selected-command `{speed, steering_angle}` | *(none)* |
+| Speed | measured `{speed}` from odometry | *(none)* |
+| Stopwatch | elapsed/enabled/running plus LB/freshness flags | *(none)* |
 | Stats | `{cpu_percent, mem_percent, cpu_temp_c, uptime_s, wifi_dbm}` | *(none — `cpu_temp_c`/`wifi_dbm` are `null` if no readable thermal zone / wireless interface was found)* |
 
 All of this conversion lives in `web_dashboard/protocol.py`, deliberately
@@ -129,8 +136,8 @@ or web server.
 ### The browser side
 
 `web/dashboard.js` is one plain file, no build step, no framework:
-connects to `ws://<host>/ws`, keeps the latest map/scan/pose/drive/stats in
-a small state object, and redraws an HTML5 `<canvas>` whenever new data
+connects to `ws://<host>/ws`, keeps the latest map/scan/pose/command/speed/
+stopwatch/stats in a small state object, and redraws an HTML5 `<canvas>` whenever data
 arrives (plus on a 250ms timer, purely so "updated Xs ago" and stale-data
 coloring stay live even when nothing new has arrived). The occupancy grid
 is rendered into an off-screen canvas once per map update (not once per
@@ -154,15 +161,16 @@ never scans (e.g. the Hokuyo's ~270° field of view leaves a real ~90° gap
 behind its mount) — computed from the scan's own
 `angle_min`/`angle_increment`/count, not guessed from which beams read "no
 return" this frame (open space with nothing in range would look identical
-to a blind spot that way, and shouldn't be flagged as one). A scale bar in
+to a blind spot that way, and shouldn't be flagged as one). Valid returns
+use a red→yellow→green proximity scale (0.3m near to 5m far). A scale bar in
 the bottom-left corner shows the current zoom level in meters/cm.
 
 ### Layout
 
-- **Left sidebar** — connection status, then a `feeds` section (map,
-  scan, pose, drive, each with a small status dot: gray = never received,
-  green = updating, red = stale) and a `system` section (CPU%, mem%, CPU
-  temp, WiFi signal, uptime). It has no fixed/maximum height — it simply
+- **Left sidebar** — connection status; `feeds`; `vehicle` (measured speed,
+  selected steering, LB state); an LB-gated stopwatch with enable/reset;
+  and `system` health. Feed dots are gray = never received, green = fresh,
+  red = stale. It has no fixed/maximum height — it simply
   grows to fit whatever rows it has, rather than cramming them into a
   fixed box.
 - **Top-right inset** — a minimap: always shows the *whole* map at a
@@ -182,7 +190,9 @@ the bottom-left corner shows the current zoom level in meters/cm.
   that node fills this panel: `usb_cam_stream_launch.py` (a UVC webcam) or
   `realsense_stream_launch.py` (the RealSense D435i's color feed, via its
   ROS topic — see [realsense-camera.md](realsense-camera.md)); they share
-  port 9090, so run one at a time.
+  port 9090, so run one at a time. Click the inset to open a new full-window
+  recording tab with current time, speed, steering, LB, stopwatch, CPU, and
+  WiFi overlays; use the browser's tab/screen recording on that view.
 
 ## Running it
 
@@ -194,8 +204,8 @@ ros2 launch web_dashboard web_dashboard_launch.py
 Then open `http://<car-ip>:8080/` (see
 [Finding the car's address](#finding-the-cars-address-and-viewing-through-a-forwarded-port)
 below if you're not sure what to put there). That's the entire procedure
-for the dashboard alone — this node reads `/drive` only to display it and
-never publishes anything to it (or any other topic), so none of the
+for the dashboard alone — this node reads command/odom/joy only for display
+and its local stopwatch, and never publishes to ROS, so none of the
 joystick-override or wheels-off-ground precautions in
 [operations.md](operations.md) apply to it; it's safe to start and stop at
 any time, on top of anything else.
@@ -206,23 +216,19 @@ the [parameter reference](#parameter-reference) below.
 
 ### With the camera panel filled in too
 
-Three terminals, each sourced the same way as above
+Two terminals, each sourced the same way as above
 (`source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash`).
-Order doesn't matter — all three are support/tooling nodes (see
+Order doesn't matter — all components are support/tooling nodes (see
 [adding-your-own-code.md](adding-your-own-code.md)), none of them touch
 `/drive`, so there's no bringup sequencing or LB-deadman precaution to
 follow here, unlike the driving-code procedures in
 [operations.md](operations.md):
 
 ```bash
-# Terminal 1 — the RealSense camera itself (publishes color/depth topics)
+# Terminal 1 — RealSense driver + color-topic MJPEG stream on port 9090
 ros2 launch racerbot_launch realsense_camera_launch.py
 
-# Terminal 2 — bridges the color topic to the MJPEG port the dashboard's
-# camera panel looks for (see docs/realsense-camera.md)
-ros2 launch usb_cam_stream realsense_stream_launch.py
-
-# Terminal 3 — the dashboard
+# Terminal 2 — dashboard and recording view on port 8080
 ros2 launch web_dashboard web_dashboard_launch.py
 ```
 
@@ -304,12 +310,15 @@ All in `src/web_dashboard/config/web_dashboard.yaml`:
 | `map_topic` | `/map` | Subscribed with "transient local" durability to match `map_server`/`slam_toolbox`, so a dashboard started after the map was published still receives it |
 | `scan_topic` | `/scan` | Subscribed with best-effort sensor QoS |
 | `pose_topic` | `/pf/viz/inferred_pose` | `particle_filter`'s localized pose |
-| `drive_topic` | `/drive` | Whichever control layer is currently arbitrated onto `/drive` (see [architecture.md](architecture.md)) — read-only, purely for the `drive` readout |
+| `drive_topic` | `/ackermann_cmd` | Selected command after `ackermann_mux`; steering display and command-speed reference only |
+| `odom_topic` | `/odom` | Measured longitudinal speed |
+| `joy_topic` / `deadman_button` / `joy_timeout_sec` | `/joy` / `4` / `0.5` | Read-only LB state and freshness watchdog for the stopwatch |
+| `stopwatch_update_rate_hz` | `10.0` | Shared stopwatch state broadcast rate |
 | `host` | `0.0.0.0` | Listen on every network interface — see [security note](#security-note) |
 | `port` | `8080` | Web server port |
 | `scan_broadcast_rate_hz` | `10.0` | `/scan` runs ~40Hz; no browser needs to redraw that often, and this keeps WiFi/CPU load down |
 | `stats_interval_sec` | `1.0` | How often CPU%/mem%/temp/uptime are sampled and broadcast |
-| `laser_offset_x` / `laser_offset_y` | `0.27` / `0.0` | LIDAR mounting offset from `base_link` (matches [hardware-reference.md](hardware-reference.md)), used to place scan points correctly relative to the car's pose |
+| `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` | Estimated LIDAR mounting offset from `base_link` (matches [hardware-reference.md](hardware-reference.md)), used to place scan points correctly relative to the car's pose |
 
 ## Security note
 
@@ -317,8 +326,8 @@ This dashboard has **no authentication** and accepts WebSocket connections
 from any origin. That's a deliberate, reasonable trade-off for a read-only
 tool that never publishes anything and therefore can never be used to
 *command* the car — but it does mean anyone who can reach `<car-ip>:8080`
-on the network can see the map/scan/pose, the currently-arbitrated drive
-command, coarse system stats (CPU/mem/temp/WiFi/uptime), and — if
+on the network can see map/scan/pose, command/odom/LB telemetry, stopwatch,
+coarse system stats (CPU/mem/temp/WiFi/uptime), and — if
 `usb_cam_stream` is running — the camera feed. Don't port-forward this to
 the open internet. For remote-but-still-private access, this machine
 already has a `tailscale0` interface configured (see
@@ -345,10 +354,10 @@ address instead of exposing the port publicly.
   `dashboard_node`, that connects to the camera stream directly, so this
   is a JS constant, not a launch-time ROS parameter. Edit it directly if
   `usb_cam_stream` is ever reconfigured to a different port.
-- Exactly one shared view per browser tab — there's no multi-car, no
-  recording/playback. It does one job (see what the LIDAR, localization,
-  drive command, system health, and camera currently say) and does it
-  with almost no moving parts.
+- Exactly one car per dashboard. The camera page is recording-friendly, but
+  recording itself is intentionally left to the browser/OS. The dashboard
+  focuses on live LIDAR, localization, vehicle telemetry, system health, and
+  camera data with almost no moving parts.
 
 ## File map
 
@@ -356,12 +365,12 @@ address instead of exposing the port publicly.
 src/web_dashboard/
 ├── web_dashboard/
 │   ├── protocol.py          # wire-format conversion, framework-agnostic, unit-tested
+│   ├── stopwatch.py         # LB/freshness-gated timer logic, unit-tested
 │   └── dashboard_node.py    # ROS2 node + Tornado web/WebSocket server
 ├── web/
-│   ├── index.html
-│   ├── dashboard.js         # canvas rendering, pan/zoom, staleness display
-│   └── style.css
+│   ├── index.html / dashboard.js / style.css
+│   └── camera.html / camera.js / camera.css  # recording view
 ├── config/web_dashboard.yaml
 ├── launch/web_dashboard_launch.py
-└── test/test_protocol.py    # run: python3 -m pytest src/web_dashboard/test/ -v
+└── test/                    # run: python3 -m pytest src/web_dashboard/test/ -v
 ```

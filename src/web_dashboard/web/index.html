@@ -27,6 +27,9 @@
         <span class="row-label">scan</span>
         <span class="row-value" id="info-scan">no scan yet</span>
       </div>
+      <div class="lidar-legend" aria-label="LIDAR color scale: red is close, green is far">
+        <span>close</span><span class="lidar-gradient"></span><span>far</span>
+      </div>
       <div class="row">
         <span id="dot-pose" class="dot dot-gray"></span>
         <span class="row-label">pose</span>
@@ -34,8 +37,25 @@
       </div>
       <div class="row">
         <span id="dot-drive" class="dot dot-gray"></span>
-        <span class="row-label">drive</span>
-        <span class="row-value" id="info-drive">no drive yet</span>
+        <span class="row-label">cmd</span>
+        <span class="row-value" id="info-drive">no command yet</span>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">vehicle</div>
+      <div class="row"><span class="row-label">speed</span><span class="row-value metric-value" id="vehicle-speed">-- m/s</span></div>
+      <div class="row"><span class="row-label">steer</span><span class="row-value metric-value" id="vehicle-steering">-- deg</span></div>
+      <div class="row"><span class="row-label">LB</span><span class="row-value" id="vehicle-lb">waiting for joystick</span></div>
+    </div>
+
+    <div class="section stopwatch-section">
+      <div class="section-title">LB stopwatch</div>
+      <div id="stopwatch-display">00:00.00</div>
+      <div id="stopwatch-state">off &middot; enable, then hold LB to run</div>
+      <div class="stopwatch-controls">
+        <button id="stopwatch-toggle">enable</button>
+        <button id="stopwatch-reset">reset</button>
       </div>
     </div>
 
@@ -71,9 +91,12 @@
   </div>
 
   <div id="camera-panel">
-    <div class="panel-label">camera</div>
-    <img id="camera-feed" alt="camera feed" />
-    <div id="camera-placeholder" class="panel-placeholder">camera offline</div>
+    <a id="camera-link" href="camera.html" target="_blank" rel="noopener" title="Open recording view in a new tab">
+      <div class="panel-label">camera</div>
+      <div class="camera-open-hint">open recording view &#8599;</div>
+      <img id="camera-feed" alt="camera feed" />
+      <div id="camera-placeholder" class="panel-placeholder">camera offline</div>
+    </a>
   </div>
 
   <script src="dashboard.js"></script>
