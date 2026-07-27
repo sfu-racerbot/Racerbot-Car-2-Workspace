@@ -33,7 +33,15 @@ class GapFollowNode(Node):
         self.declare_parameter('corner_speed', 0.5)
         self.declare_parameter('max_speed', 2.0)
         self.declare_parameter('min_speed', 0.5)
-        self.declare_parameter('max_steering_angle', 0.4189)
+        self.declare_parameter('max_steering_angle', 0.26)
+        # Dynamic control: geometric target steering, physical speed ceilings,
+        # and bounded normal command changes. Safety stops bypass shaping.
+        self.declare_parameter('steering_lookahead_distance', 1.5)
+        self.declare_parameter('max_lateral_accel', 1.0)
+        self.declare_parameter('max_acceleration', 3.0)
+        self.declare_parameter('max_braking_decel', 3.0)
+        self.declare_parameter('max_steering_rate', 1.0)
+        self.declare_parameter('command_slew_max_dt', 0.10)
         # Padded Traxxas 74276-4 footprint (physical: 0.281 x 0.535 m),
         # combined with its rear-axle base_link and estimated LiDAR transform.
         self.declare_parameter('car_width', 0.31)
@@ -88,6 +96,18 @@ class GapFollowNode(Node):
         self.min_speed = float(self.get_parameter('min_speed').value)
         self.max_steering_angle = float(
             self.get_parameter('max_steering_angle').value)
+        self.steering_lookahead_distance = float(
+            self.get_parameter('steering_lookahead_distance').value)
+        self.max_lateral_accel = float(
+            self.get_parameter('max_lateral_accel').value)
+        self.max_acceleration = float(
+            self.get_parameter('max_acceleration').value)
+        self.max_braking_decel = float(
+            self.get_parameter('max_braking_decel').value)
+        self.max_steering_rate = float(
+            self.get_parameter('max_steering_rate').value)
+        self.command_slew_max_dt = float(
+            self.get_parameter('command_slew_max_dt').value)
         self.car_width = float(self.get_parameter('car_width').value)
         self.car_length = float(self.get_parameter('car_length').value)
         self.wheelbase = float(self.get_parameter('wheelbase').value)
@@ -145,6 +165,27 @@ class GapFollowNode(Node):
             raise ValueError(
                 'forward_stop_fov_deg must be positive and no wider than '
                 'forward_fov_deg')
+        dynamic_limits = (
+            self.steering_lookahead_distance,
+            self.max_lateral_accel,
+            self.max_acceleration,
+            self.max_braking_decel,
+            self.max_steering_rate,
+            self.command_slew_max_dt,
+        )
+        if not all(math.isfinite(value) and value > 0.0 for value in dynamic_limits):
+            raise ValueError('dynamic steering/speed limits must be finite and positive')
+        if not (math.isfinite(self.min_speed) and math.isfinite(self.max_speed)
+                and 0.0 <= self.min_speed <= self.max_speed):
+            raise ValueError('speed limits must be finite with 0 <= min_speed <= max_speed')
+        # The upper bound is not cosmetic. Speed capping recovers curvature as
+        # tan(delta)/wheelbase; at exactly pi/2 that is ~1e16 (the car would be
+        # capped to a standstill forever) and past pi/2 tan goes negative, so
+        # the curvature silently inverts. Both fail quietly, so reject them.
+        if not (math.isfinite(self.max_steering_angle)
+                and 0.0 < self.max_steering_angle < math.pi / 2.0):
+            raise ValueError(
+                'max_steering_angle must be finite and in (0, pi/2) radians')
         if not math.isfinite(self.ttc_command_speed_timeout_sec) or (
                 self.ttc_command_speed_timeout_sec < 0.0):
             raise ValueError(
@@ -164,6 +205,7 @@ class GapFollowNode(Node):
         self.current_speed = 0.0
         self.last_odom_time = None
         self.last_commanded_speed = 0.0
+        self.last_commanded_steering = 0.0
         self.last_command_time = None
 
         # Runtime diagnostics. The scan watchdog is informational: when a
@@ -414,43 +456,90 @@ class GapFollowNode(Node):
         target_idx_in_window = (gap_start + gap_end) // 2
         target_idx = lo_idx + target_idx_in_window
         target_angle = scan.angle_min + target_idx * scan.angle_increment
-        steering_angle = target_angle
-        steering_angle = float(np.clip(
-            steering_angle,
-            -self.max_steering_angle,
-            self.max_steering_angle,
-        ))
+        target_distance = float(window[target_idx_in_window])
 
-        speed_scale = 1.0 - (
-            abs(steering_angle) / self.max_steering_angle)
-        speed = self.min_speed + speed_scale * (
-            self.max_speed - self.min_speed)
+        target_curvature = gap_logic.target_curvature(
+            target_distance,
+            target_angle,
+            self.laser_offset_x,
+            self.laser_offset_y,
+            self.steering_lookahead_distance,
+        )
+        desired_steering = gap_logic.steering_from_curvature(
+            target_curvature, self.wheelbase, self.max_steering_angle)
+        now, command_dt = self._command_timing()
+        steering_angle = gap_logic.slew_rate_limit(
+            desired_steering,
+            self.last_commanded_steering,
+            command_dt,
+            self.max_steering_rate,
+        )
+
+        # Use the clipped requested curvature for the lateral-acceleration
+        # ceiling, so speed falls before the rate-limited rack reaches a newly
+        # requested turn. Clearance supplies an independent stopping-distance
+        # ceiling; unlike acceleration shaping, either ceiling may reduce the
+        # command immediately.
+        limited_curvature = math.tan(desired_steering) / self.wheelbase
+        curve_speed = gap_logic.curvature_speed_limit(
+            limited_curvature, self.max_lateral_accel, self.max_speed)
+        normal_speed = max(self.min_speed, curve_speed)
+        clearance_speed = gap_logic.braking_speed_limit(
+            forward_clearance,
+            self.forward_stop_clearance,
+            self.max_braking_decel,
+            self.max_speed,
+        )
+        desired_speed = min(normal_speed, clearance_speed)
         if used_fallback:
-            speed = min(speed, self.corner_speed)
+            desired_speed = min(desired_speed, self.corner_speed)
 
-        self._publish_drive(steering_angle, speed)
+        # Acceleration is deliberately gradual. A lower curvature/clearance
+        # ceiling takes effect immediately; delaying a safety-related slowdown
+        # merely to make the command look smooth would be the wrong tradeoff.
+        #
+        # The ramp starts from where the car actually *is*, not from the last
+        # command. A ceiling (or a stop) drops the command instantly while the
+        # car is still rolling at nearly its old speed; ramping up from that
+        # command would hold the throttle below the car's real speed, braking
+        # a car that never actually slowed. Fresh odometry closes that gap. It
+        # only ever raises the basis, is clamped to max_speed so a bad reading
+        # cannot inflate it, and every ceiling above still applies.
+        ramp_basis = self.last_commanded_speed
+        if self._odom_fresh():
+            ramp_basis = max(
+                ramp_basis, min(abs(self.current_speed), self.max_speed))
+        acceleration_ceiling = ramp_basis + self.max_acceleration * command_dt
+        speed = min(desired_speed, acceleration_ceiling)
+
+        self._publish_drive(steering_angle, speed, now=now)
         gap_lo_angle = scan.angle_min + (lo_idx + gap_start) * scan.angle_increment
         gap_hi_angle = scan.angle_min + (lo_idx + gap_end) * scan.angle_increment
         closest_text = (
             f"{closest_dist:.2f}m" if math.isfinite(closest_dist) else "no valid return")
-        clipped_text = (
-            f", clipped from {target_angle:+.3f}rad"
-            if not math.isclose(steering_angle, target_angle) else "")
+        steering_shape_text = (
+            f", steering shaped from {desired_steering:+.3f}rad"
+            if not math.isclose(steering_angle, desired_steering) else "")
+        speed_shape_text = (
+            f", acceleration-shaped from {desired_speed:.2f}m/s"
+            if not math.isclose(speed, desired_speed) else "")
         gap_mode = 'corner_fallback' if used_fallback else 'gap_follow'
         depth_text = (
             f"fallback depth {self.fallback_min_gap_distance:.2f}m"
             if used_fallback
             else f"preferred depth {self.min_gap_distance:.2f}m")
-        speed_text = (
-            f"corner cap {self.corner_speed:.2f}m/s"
-            if used_fallback
-            else f"{speed_scale * 100.0:.0f}% steering speed scale")
+        cap_text = (
+            f"curve cap={curve_speed:.2f}m/s, "
+            f"clearance cap={clearance_speed:.2f}m/s"
+            + (f", corner cap={self.corner_speed:.2f}m/s" if used_fallback else ""))
         self._log_decision(
             gap_mode,
             f"selected {depth_text} gap "
             f"{math.degrees(gap_lo_angle):+.1f}deg to "
-            f"{math.degrees(gap_hi_angle):+.1f}deg; aiming at its midpoint, "
-            f"closest={closest_text}; speed uses {speed_text}{clipped_text}",
+            f"{math.degrees(gap_hi_angle):+.1f}deg; target="
+            f"{target_distance:.2f}m at {math.degrees(target_angle):+.1f}deg, "
+            f"curvature={target_curvature:+.3f}/m, closest={closest_text}; "
+            f"{cap_text}{steering_shape_text}{speed_shape_text}",
             steering_angle,
             speed,
         )
@@ -489,12 +578,22 @@ class GapFollowNode(Node):
         hi_idx = max(0, min(hi_idx, num_points - 1))
         return lo_idx, hi_idx
 
-    def _publish_drive(self, steering_angle: float, speed: float):
+    def _command_timing(self):
+        """Return one bounded command interval and the clock sample behind it."""
         now = self.get_clock().now()
-        if math.isfinite(speed):
+        if self.last_command_time is None:
+            return now, self.command_slew_max_dt
+        elapsed = (now - self.last_command_time).nanoseconds / 1e9
+        return now, min(self.command_slew_max_dt, max(0.0, elapsed))
+
+    def _publish_drive(self, steering_angle: float, speed: float, now=None):
+        if now is None:
+            now = self.get_clock().now()
+        if math.isfinite(speed) and math.isfinite(steering_angle):
             # Every command supersedes the previous one. In particular, an
             # emergency zero must not leave an older positive command latched.
             self.last_commanded_speed = float(speed)
+            self.last_commanded_steering = float(steering_angle)
             self.last_command_time = now
 
         msg = AckermannDriveStamped()

@@ -332,12 +332,23 @@ actually catch.
    A *fixed* lookahead is a bad compromise — short enough to corner
    tightly at parking-lot speed and the car oscillates/overshoots at race
    speed; long enough to be smooth at race speed and it cuts corners at
-   low speed. Scaling lookahead with the current speed (`speed_here`, read
-   from the racing line's own profile at the nearest waypoint) fixes both
-   at once. Simulator-validated defaults are $L_{min}=0.6m$,
-   $L_{max}=1.5m$, $k=0.15$ — at the 4.0 m/s speed cap that is a 1.2m
-   lookahead. The old 2.0m-at-4m/s setting cut corners and collided in the
-   dynamics model; see [simulator.md](simulator.md).
+   low speed. Scaling lookahead with the current speed fixes both at once.
+   Simulator-validated defaults are $L_{min}=0.6m$, $L_{max}=1.5m$,
+   $k=0.15$ — at the 4.0 m/s speed cap that is a 1.2m lookahead. The old
+   2.0m-at-4m/s setting cut corners and collided in the dynamics model;
+   see [simulator.md](simulator.md).
+
+   The $v$ here is the car's **measured** speed from `/odom`
+   (`odom_topic`), not the profiled target. The two differ exactly when it
+   matters: while braking into a corner, or while recovering from a safety
+   stop, the profile still says "4 m/s" long before the car is going that
+   fast, and sizing the lookahead off the target would keep aiming far
+   ahead while the car is actually crawling. If `/odom` is missing or
+   staler than `odom_timeout_sec` (default `0.5s`), it falls back to the
+   profiled speed at the nearest waypoint — the pre-existing behavior. The
+   decision log names which one it used, so this is visible rather than
+   silent. This is a *sizing* input only: it is deliberately **not** a new
+   watchdog, and stale odometry never stops the car on its own.
 
 3. **Walk forward from the nearest waypoint** along the recorded path,
    accumulating segment distances, until $L_d$ has been covered — that
@@ -378,17 +389,84 @@ actually catch.
    $$\delta = \arctan(L \cdot \kappa)$$
 
    Finally clipped to `max_steering_angle` (default `0.26 rad`, ≈15°) —
-   see *"Where 0.26 rad comes from"* below.
+   see *"Where 0.26 rad comes from"* below — and then rate-limited against
+   the previous command by `max_steering_rate` (see *"Online command
+   shaping"*).
 
-### Speed: read straight from the profile
+### Speed: the profile, then two online ceilings
 
-No separate control law here — the commanded speed is simply the
-profiled speed at the car's *current* nearest waypoint (not the steering
-target's), clipped to `[min_speed, max_speed]` as a hard safety ceiling
-independent of whatever the `.csv` says. Using the car's current position
-(rather than the lookahead target) means the speed command reflects "how
-fast should I be going *right here, right now*" — the braking zones baked
-into the profile by Phase 4 already account for what's coming up.
+The **base** speed is simply the profiled speed at the car's *current*
+nearest waypoint (not the steering target's), clipped to
+`[min_speed, max_speed]` as a hard safety ceiling independent of whatever
+the `.csv` says. Using the car's current position (rather than the
+lookahead target) means the speed command reflects "how fast should I be
+going *right here, right now*" — the braking zones baked into the profile
+by Phase 4 already account for what's coming up.
+
+That profile, however, only knows about the *recorded* line. It has
+nothing to say about a turn the car is taking that isn't on that line —
+a correction after a localization jump, a reactive swerve around
+something, or the offset arc of an overtake. Those are precisely the
+moments the car is asking for its sharpest steering while the profile is
+still handing it a straight-line speed. So the final command also passes
+an **online curvature ceiling**, from the steering angle actually being
+commanded this tick:
+
+$$\kappa_{cmd} = \frac{\tan\delta}{L} \qquad v \le \sqrt{\frac{a_{lat,max}}{|\kappa_{cmd}|}}$$
+
+with `max_lateral_accel` (default `2.5 m/s²`). It is evaluated on the
+larger of the requested and the rate-limited curvature, so the slowdown
+lands as the turn is *asked for*, not after the rack has caught up. On the
+recorded line this ceiling is inactive by construction — Phase 4 already
+profiled that curvature, and more permissively (`a_lat_max` is typically
+higher). It only ever binds when the car is doing something the offline
+profile never saw.
+
+A reactive override (`avoidance_speed`, or a hard stop) is treated as a
+**ceiling too**, not merely a target: it can lower the command instantly.
+
+### Online command shaping
+
+The last stage before publishing bounds how fast a command may *change*,
+so one noisy tick cannot become a step input at the servo or the motor:
+
+| Limit | Default | Applies to |
+|---|---|---|
+| `max_steering_rate` | `1.0 rad/s` | steering, both directions |
+| `max_acceleration` | `6.0 m/s²` | speed, **rising only** |
+| `max_braking_decel` | `8.0 m/s²` | speed, falling, for normal commands |
+| `command_slew_max_dt` | `0.10 s` | cap on the `dt` any single slew step integrates |
+
+`command_slew_max_dt` exists so that a stalled control loop followed by a
+resumed one cannot cash in a large accumulated interval as one big jump.
+
+**The acceleration ramp starts from the car's measured speed, not from the
+last command.** This matters more than it sounds. A ceiling — avoidance,
+curvature, a hard stop — drops the *command* instantly, but the car keeps
+rolling: it cannot shed 3 m/s in one 25 ms tick. Ramping back up from that
+dropped command would hold the throttle far below the car's real speed for
+the whole climb, actively braking a car that never actually slowed. So the
+ramp basis is `max(last command, measured /odom speed)`, clamped to
+`max_speed` so a bad reading cannot inflate it. It only ever *raises* the
+basis, every ceiling below still applies, and stale odometry falls back to
+the old command-based behavior.
+
+Two properties of this stage are load-bearing and should not be quietly
+changed:
+
+- **Emergency stops bypass it entirely.** A zero-speed command from the
+  deadman check, pose timeout, cross-track watchdog, missing/stale scan,
+  or the LiDAR hard-stop net is published immediately and unshaped. Rate
+  limiting a stop into a nonzero command would be a safety regression, so
+  the shaping path is only ever reached with a positive desired speed.
+- **`max_acceleration` is bounded on both sides, and `6.0` is near the top
+  of the usable band.** It caps how fast a *command* may rise; it is not a
+  demand on the motor. Too low (`3.0`) and the car cannot re-accelerate out
+  of a safety stop behind a slower car — it stalls on track. Too high
+  (`7.0+`) and it arrives behind that slower car too fast for the overtake
+  to commit, hard-stops, and enters a stop-go cycle it never leaves.
+  Re-run the traffic scenario after touching it; see
+  [simulator.md](simulator.md#the-adaptive-speed-work-two-values-the-traffic-scenario-pinned-down).
 
 ### Why a windowed nearest-point search
 
@@ -419,6 +497,12 @@ computed. Ordered from "must never be violated" down to "nice to have":
 | Reactive avoidance (steer around) | An unmapped return in the 60° cone is under 1.5m; before a map is ready, raw range is under the 0.7m fallback | Map subtraction prevents ordinary walls from continuously triggering the traffic layer. A committed pass bypasses the generic 1m/s cap, while the emergency tier remains active |
 | Emergency hard stop (always wins) | Minimum range in a narrower `safety_fov_deg` cone (default 60°) is under `emergency_stop_distance` (default 0.4m), or `/scan` itself is stale/missing | Last resort, unconditional — a safety net that's gone blind is treated identically to "obstacle detected" |
 | Unhandled exception | Anything in the control step raises | `control_loop()` wraps the whole step in try/except; on *any* exception it publishes a stop command *before* re-raising, so an unexpected bug can't leave the last (possibly full-speed) command sitting on `/drive` forever |
+
+**Every stop in this table is published immediately and unshaped.** The
+acceleration/steering rate limits described in
+[Online command shaping](#online-command-shaping) sit on the *normal*
+command path only; a zero-speed command never passes through them, because
+rate-limiting a stop into a nonzero command would defeat the whole table.
 
 Because the deadman check runs first, holding LB is a precondition for the
 car moving at all — releasing it stops the car immediately regardless of
@@ -587,13 +671,28 @@ object" instead of "which gap in this whole scene."
 
 **Executing the pass** doesn't touch the recorded racing line at all -- it
 nudges the *steering target* sideways instead. `lateral_offset_point`
-takes the current Pure Pursuit target waypoint, estimates the track's
-local direction of travel from it to the next waypoint, and offsets the
-target perpendicular to that direction by `overtake_lateral_offset`
-meters, toward the chosen side. Steering is then computed from *that*
-shifted point using the exact same Pure Pursuit geometry as always -- the
-overtake is really just "aim slightly to one side for a while," not a
-separate control system.
+takes a waypoint ahead, estimates the track's local direction of travel
+from it to the next waypoint, and offsets it perpendicular to that
+direction by `overtake_lateral_offset` meters, toward the chosen side.
+Steering is then computed from *that* shifted point using the exact same
+Pure Pursuit geometry as always -- the overtake is really just "aim
+slightly to one side for a while," not a separate control system.
+
+The waypoint it offsets is deliberately **not** the normal Pure Pursuit
+target. It is a longer preview, `overtake_lookahead_distance` (default
+`4.0m`) of arc length ahead of the car, and this matters more than it
+looks. The normal target is at most `max_lookahead` (`1.5m`) away, and
+offsetting a point that close by 0.35m sideways demands a large curvature
+-- roughly a 0.45 rad heading change, well past the `0.26 rad` steering
+clamp. With the online curvature ceiling described above now in the loop,
+the controller answers that demand the only way it can: by braking. The
+car then slows down in the middle of the pass, which is exactly backwards.
+In the simulator's traffic scenario this was not a subtle degradation --
+the ego stalled behind the opponent and covered 0.1 laps in 240s. Spread
+over a 4m preview, the same 0.35m offset is a gentle arc the car can hold
+at speed, and the same scenario completes a clean lap with the pass done.
+Because of that coupling, the node **refuses to start** if
+`overtake_lookahead_distance` is less than `max_lookahead`.
 
 **Ending the overtake** happens once the ego car's own arc length is
 `overtake_clear_margin` meters past the opponent's *last known* position
@@ -684,13 +783,20 @@ file for inline comments too):
 | `closed_loop` | `true` | Whether the racing line wraps around (a normal lap track) |
 | `pose_topic` | `/pf/viz/inferred_pose` | Localization input |
 | `scan_topic` | `/scan` | LIDAR input for the reactive safety net |
+| `odom_topic` | `/odom` | Measured speed, used only to size the adaptive lookahead |
 | `drive_topic` | `/drive` | Output, arbitrated by `ackermann_mux` like every other autonomy node |
 | `control_rate_hz` | `40.0` | Control loop frequency |
 | `wheelbase` | `0.324` | Traxxas 74276-4 specification in meters; must match `vesc.yaml` |
 | `min_lookahead` / `max_lookahead` / `lookahead_speed_gain` | `0.6` / `1.5` / `0.15` | Adaptive lookahead formula, see above |
 | `nearest_search_window` | `40` | +/- waypoints searched around last tick's nearest point (`0` = search all) |
 | `max_speed` / `min_speed` | `4.0` / `0.5` | Hard safety ceiling/floor, independent of the `.csv` |
+| `max_lateral_accel` | `2.5` | m/s²; online cornering ceiling on the *commanded* curvature, see [Speed](#speed-the-profile-then-two-online-ceilings) |
+| `max_acceleration` | `6.0` | m/s²; cap on how fast a speed command may *rise*. Deliberately loose — too tight and the car cannot recover from a safety stop |
+| `max_braking_decel` | `8.0` | m/s²; cap on how fast a *normal* command may fall. Emergency stops are never rate-limited |
+| `max_steering_rate` | `1.0` | rad/s; steering slew limit between commands |
+| `command_slew_max_dt` | `0.10` | s; longest interval one slew step may integrate, so a stalled loop can't cash in a jump |
 | `max_steering_angle` | `0.26` | rad; derived from this car's real servo limits, see above |
+| `odom_timeout_sec` | `0.5` | Lookahead falls back to the profiled speed past this. Not a stop watchdog |
 | `pose_timeout_sec` | `0.5` | Localization watchdog |
 | `max_cross_track_error` | `1.0` | Lost/kidnapped watchdog, meters |
 | `enable_lidar_safety` | `true` | Master switch for the entire reactive net below (avoidance + opponent overtaking both require this too) |
@@ -714,6 +820,7 @@ file for inline comments too):
 | `overtake_closing_margin` | `0.3` | m/s; must be closing at least this fast to attempt a pass |
 | `overtake_clear_margin` | `1.0` | Meters of track distance past the opponent before resuming the racing line |
 | `overtake_lateral_offset` | `0.35` | Meters; sideways nudge to the steering target while passing |
+| `overtake_lookahead_distance` | `4.0` | Meters of arc ahead the offset above is applied to, instead of the normal target. Must be >= `max_lookahead` — the node refuses to start otherwise |
 | `opponent_detection_mode` | `map` | Map subtraction by default; `heuristic` is the no-map fallback |
 | `map_topic` / `map_beam_step` / `map_subtraction_margin` | `/map` / `4` / `0.4` | Occupancy map, ray-cast downsampling, and residual margin |
 | `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` | Estimated LIDAR mounting offset from `base_link`, used to place detections in the map frame |
@@ -741,6 +848,11 @@ documented via `--help` and in Phase 4 above.
 | Car swerves at a wall/curve like it's an opponent | A curving wall segment briefly measured as car-width | Narrow `opponent_min_width`/`opponent_max_width`, or raise `opponent_open_side_margin` so only genuinely isolated objects qualify |
 | Car never attempts to overtake a slower car ahead | Not closing fast enough, or opponent not detected at all | Check `ros2 topic echo /scan` for a plausible cluster; lower `overtake_closing_margin`; confirm the opponent isn't outside `opponent_engagement_range` |
 | Car overtakes then swerves back too early/late | `overtake_clear_margin` mismatched to this car's actual length/handling | Raise it if the pass looks unfinished when it ends, lower it if the car lingers off-line too long after passing |
+| Car slows down in the middle of an overtake instead of completing it | The offset passing line is sharper than `max_lateral_accel` allows, so the online curvature ceiling brakes for it | Raise `overtake_lookahead_distance` so the same offset is spread over a gentler arc — prefer this over raising `max_lateral_accel` past real grip |
+| Car stops behind traffic and never gets going again | `max_acceleration` too tight to rebuild speed between safety stops | Raise it. It caps how fast a *command* rises, not the motor; `3.0` was measurably too tight in simulation |
+| Lap times worse than before the adaptive-speed work | The `max_acceleration` ramp climbing back to speed after every avoidance event (~0.5 s each at `6.0`) | Expected, and free when avoidance isn't firing. Raise `max_acceleration` — solo lap time improves monotonically with it and nothing else measurably degrades. See [simulator.md](simulator.md#current-validated-result) |
+| Speed sags on a straight after a localization correction | Online curvature ceiling reacting to the correction's steering | Expected and usually correct. If localization itself is jittery, fix that first; only then loosen `max_steering_rate`/`max_lateral_accel` |
+| Steering feels laggy responding to an obstacle | `max_steering_rate` too low | Raise it. Hard stops are unaffected — they bypass rate limiting entirely |
 
 ## How this wins races
 

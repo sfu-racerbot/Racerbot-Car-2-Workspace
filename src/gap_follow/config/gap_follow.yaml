@@ -15,7 +15,24 @@ gap_follow_node:
     corner_speed: 0.5
     max_speed: 2.0
     min_speed: 0.8
-    max_steering_angle: 0.4189
+    # Symmetric achievable envelope from the calibrated servo mapping.
+    max_steering_angle: 0.26
+    # Target bearing + range become a rear-axle curvature over at most this
+    # lookahead. Speed is capped by lateral acceleration and stopping distance.
+    steering_lookahead_distance: 1.5
+    max_lateral_accel: 1.0
+    max_acceleration: 3.0
+    # SAFETY-CRITICAL, and NOT the same knob as pure_pursuit's identically
+    # named one. Here it is the braking authority the car *assumes it has*
+    # when deciding how fast it may drive for the clearance it can see
+    # (v <= sqrt(2*a*(clearance - forward_stop_clearance))). Setting it above
+    # what the car can really achieve makes it drive faster than it can stop.
+    # In pure_pursuit the same name is only a command slew rate and carries no
+    # such risk -- do not copy a value across from there.
+    max_braking_decel: 3.0
+    max_steering_rate: 1.0
+    # Never let a long scan pause turn into one unbounded command jump.
+    command_slew_max_dt: 0.10
     # --- Rectangular vehicle footprint ---
     # Traxxas 74276-4 is 0.535 x 0.281 m; retain this intentionally inflated
     # 0.58 x 0.31 m collision envelope. Its published wheelbase is 0.324 m.

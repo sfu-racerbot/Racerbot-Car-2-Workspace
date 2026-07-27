@@ -129,27 +129,97 @@ The former implementation stopped whenever no run remained continuously deeper t
 
 Obstacle inflation has already removed `car_width / 2 + safety_margin` from both sides of every edge. The old candidate filter required another `car_width + safety_margin` after inflation, effectively demanding roughly a 0.9m raw opening for a 0.31m car. `min_centerline_gap_width` now checks only the small corridor remaining for candidate center points, eliminating that double-padding.
 
-### 7. Steer at the middle of the winning gap
+### 7. Steer at the middle of the winning gap — as a Pure Pursuit arc
+
+The midpoint of the chosen gap gives a **bearing** $\alpha$ and, from the
+same beam, a **range** $r$. Earlier versions used the bearing directly as
+the steering angle (`steering_angle = target_angle`). That is
+dimensionally wrong: a bearing is where the target *is*, not the front-wheel
+angle that drives there. It over-steers at a near target and under-steers at
+a far one, because it ignores range entirely.
+
+The target is now converted to a point in the rear-axle `base_link` frame and
+followed with the same Pure Pursuit geometry `pure_pursuit` uses
+(`gap_logic.target_curvature` → `steering_from_curvature`):
+
+$$x = x_{laser} + d\cos\alpha \qquad y = y_{laser} + d\sin\alpha \qquad d = \min(r,\ L_{lookahead})$$
+
+$$\kappa = \frac{2y}{x^2 + y^2} \qquad \delta = \arctan(L \cdot \kappa)$$
+
+Two details matter. The LiDAR sits `laser_offset_x` ahead of the rear axle,
+so the sensor-frame point must be shifted into the body frame before the
+curvature formula applies. And the range is capped at
+`steering_lookahead_distance` (default `1.5m`), because a 9m return down a
+straight would otherwise flatten a meaningful bearing into almost no
+steering at all. Note that $r$ is read from the *processed* window — after
+disparity extension and the safety bubble — so it is already the
+conservative "how far can the car's center actually go this way" distance,
+not the raw beam.
+
+$\delta$ is then clipped to `max_steering_angle`. **This default changed
+from `0.4189 rad` (~24°) to `0.26 rad` (~15°)**, matching `pure_pursuit`.
+`0.4189` was never physically achievable symmetrically: this car's servo
+calibration reaches `+0.313 rad` one way and only `-0.263 rad` the other, so
+anything past `0.26` was a command the servo saturated on one side and not
+the other — see
+[docs/racing-autonomy.md](../../docs/racing-autonomy.md#where-026-rad-comes-from).
+Gap follow now turns *less* far than it used to ask for; it compensates by
+choosing gaps at a proper lookahead rather than chasing raw bearings.
+
+### 8. Speed: the lowest of a curvature ceiling and a stopping-distance ceiling
+
+The old law scaled speed linearly off the commanded steering angle. That used
+steering as a crude proxy for "how straight is the track", with no physical
+meaning: nothing in it knew what speed the car could actually hold through
+the turn, or how much room it had to stop. It is replaced by two physical
+ceilings, both in `gap_logic`, plus the existing corner-fallback cap:
+
+$$v_{curve} = \sqrt{\frac{a_{lat,max}}{|\kappa|}} \qquad v_{clear} = \sqrt{2\, a_{brake,max}\,(c - c_{reserve})}$$
+
+- **`curvature_speed_limit`** is the friction-circle bound — the fastest the
+  car can take the arc it just committed to without exceeding
+  `max_lateral_accel`. It is computed from the *requested* curvature, before
+  the steering rate limit below, so the car slows down as the turn is asked
+  for rather than after the rack has caught up.
+- **`braking_speed_limit`** is the speed the car could still stop from within
+  the forward clearance $c$ it can actually see, holding
+  `forward_stop_clearance` back as reserve. No obstacle in view (infinite
+  clearance) leaves `max_speed` untouched.
 
 ```python
-target_idx_in_window = (gap_start + gap_end) // 2
-target_idx = lo_idx + target_idx_in_window
-steering_angle = scan.angle_min + target_idx * scan.angle_increment
-steering_angle = float(np.clip(steering_angle, -self.max_steering_angle, self.max_steering_angle))
+normal_speed    = max(self.min_speed, curve_speed)
+desired_speed   = min(normal_speed, clearance_speed)
+if used_fallback:
+    desired_speed = min(desired_speed, self.corner_speed)
+speed = min(desired_speed, self.last_commanded_speed + self.max_acceleration * dt)
 ```
 
-The steering angle is simply the LIDAR bearing of the midpoint of the chosen gap, converted from an array index back into radians via the scan's own `angle_min`/`angle_increment` — the inverse of the conversion in step 1 — then clipped to what the servo can physically achieve (`max_steering_angle`, default `0.4189 rad` ≈ 24°; see [docs/racing-autonomy.md](../../docs/racing-autonomy.md#where-026-rad-comes-from) for how this car's actual servo limits were derived, though `gap_follow`'s default here is less conservative than `pure_pursuit`'s).
+`min_speed` floors only the curvature ceiling, never the clearance one — the
+car must always be allowed to brake below its cruising floor when something
+is close. With the default `max_lateral_accel: 1.0` and the `0.26 rad`
+steering clamp, the curvature ceiling spans `2.0 m/s` straight-ahead down to
+about `1.10 m/s` at full lock; the clearance ceiling starts biting below
+roughly `0.92m` of forward room.
 
-### 8. Speed: slow down proportionally to how hard you're turning
+### 9. Bound how fast a command may change
 
-```python
-speed_scale = 1.0 - (abs(steering_angle) / self.max_steering_angle)
-speed = self.min_speed + speed_scale * (self.max_speed - self.min_speed)
-```
+Both final commands are rate-limited against the previous one
+(`gap_logic.slew_rate_limit`), so a single noisy scan cannot produce a step
+change at the servo or the motor:
 
-$$v = v_{min} + \left(1 - \frac{|\delta|}{\delta_{max}}\right)(v_{max} - v_{min})$$
+- steering slews at most `max_steering_rate` (default `1.0 rad/s`, i.e. the
+  full `±0.26` envelope in about half a second);
+- speed may only *rise* at `max_acceleration`. Falling is never rate-limited
+  — braking is always allowed to be immediate.
 
-Straight ahead ($\delta = 0$) drives at `max_speed`; steering at the full clamp drives at `min_speed`; everything in between scales linearly. A gap found only by the tight-corner fallback is additionally capped at `corner_speed`.
+`dt` is the measured interval since the last command, capped at
+`command_slew_max_dt` (default `0.10s`) so that a stalled scan followed by a
+resumed one cannot cash in a large accumulated interval as one big jump.
+
+**Every emergency path bypasses all of the above.** `_stop()` publishes
+`0.0/0.0` directly, with no rate limiting, for the deadman check, footprint
+clearance, forward clearance, TTC brake, empty scan window, and no-safe-gap
+cases. Command shaping only ever applies to a normal drive command.
 
 ## Parameters (`config/gap_follow.yaml`)
 
@@ -164,7 +234,13 @@ Straight ahead ($\delta = 0$) drives at `max_speed`; steering at the full clamp 
 | `min_centerline_gap_width` | `0.10` m | Minimum center corridor remaining after obstacle inflation |
 | `min_gap_distance` / `fallback_min_gap_distance` | `2.0` / `0.8` m | Preferred depth and tight-corner fallback depth |
 | `max_speed` / `min_speed` / `corner_speed` | `2.0` / `0.8` / `0.5` m/s | Normal speed range and fallback cap |
-| `max_steering_angle` | `0.4189` rad (~24°) | Hard command clamp |
+| `max_steering_angle` | `0.26` rad (~15°) | Hard command clamp — the symmetric envelope this car's servo can actually reach |
+| `steering_lookahead_distance` | `1.5` m | Cap on the target range used for the Pure Pursuit curvature |
+| `max_lateral_accel` | `1.0` m/s² | Cornering speed ceiling: $v \le \sqrt{a_{lat}/\|\kappa\|}$ |
+| `max_braking_decel` | `3.0` m/s² | **Safety-critical.** Braking authority the car *assumes it has* when deciding how fast it may drive for the clearance it can see. Set above real capability and it drives faster than it can stop. Not the same knob as `pure_pursuit`'s identically named command slew rate — don't copy that value here |
+| `max_acceleration` | `3.0` m/s² | Cap on how fast a speed *command* may rise; braking is never limited |
+| `max_steering_rate` | `1.0` rad/s | Cap on how fast a steering command may slew |
+| `command_slew_max_dt` | `0.10` s | Longest interval one slew step may integrate, so a scan gap isn't cashed in as a jump |
 | `emergency_stop_clearance` | `0.02` m | All-direction final contact floor measured from the padded body |
 | `forward_stop_clearance` / `forward_stop_fov_deg` | `0.25m` / `60°` | Odom-independent forward-cone braking fallback |
 | `enable_ttc` / `ttc_threshold_sec` | `true` / `0.5s` | Enable iTTC braking and set its trigger |
@@ -193,5 +269,7 @@ commands, metrics, and checked-in JSON report are in
 - **TTC brakes too early/late:** compare logged odometry and recent-command speeds, then validate odometry scale and the footprint/LiDAR offsets before tuning `ttc_threshold_sec`. Do not compensate for wrong geometry by lowering the threshold.
 - **Disparity extension is too aggressive or misses obstacle edges:** lower `disparity_threshold` to detect smaller range jumps, or raise it to ignore more scan noise.
 - **Car oscillates rapidly between two nearby gaps:** this implementation has no gap "memory"/hysteresis between scans — each `LaserScan` is scored completely independently. If this becomes a real problem, the fix is adding a bias term favoring the previous tick's chosen gap, which doesn't exist here today.
-- **Speed always feels too conservative/too aggressive:** the `speed_scale` formula is linear and only looks at the *chosen* steering angle, not any measure of how open the track actually is — retune `max_speed`/`min_speed` directly rather than expecting curvature-aware pacing like `pure_pursuit` has.
+- **Too slow through corners:** the binding limit is logged every tick as `curve cap=` / `clearance cap=` — read it before changing anything. A low `curve cap` means `max_lateral_accel` is the constraint; raise it only as far as the tires actually grip. A low `clearance cap` means the car genuinely cannot see far enough ahead to stop, and the fix is `min_gap_distance`/LiDAR geometry, not a bigger `max_braking_decel` the car doesn't have.
+- **Sluggish to react to a gap that just opened:** `max_steering_rate` bounds how fast the rack moves. Raising it makes the car snappier and twitchier in equal measure; the emergency stops are unaffected either way, since they bypass rate limiting entirely.
+- **Car crawls after every emergency stop:** that is `max_acceleration` ramping the command back up from zero. Raise it if the recovery is too slow to be useful — an over-tight ramp is worse than none, because a car that cannot re-accelerate out of a stop just sits there.
 - Change one parameter at a time and re-test wheels-off-ground (see [docs/writing-your-own-node.md](../../docs/writing-your-own-node.md#testing-before-its-on-wheels)) — the interactions between the physical-clearance parameters, `min_gap_distance`, and `forward_fov_deg` are not always intuitive.

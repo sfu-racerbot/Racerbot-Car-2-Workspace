@@ -140,6 +140,60 @@ def test_disparity_extend_handles_an_edge_in_the_other_direction():
     assert np.allclose(out[:50 - expected_beams], 8.0)
 
 
+def test_target_curvature_uses_range_bearing_and_lidar_offset():
+    curvature = gap_logic.target_curvature(
+        target_range=2.0,
+        target_angle=math.pi / 6.0,
+        laser_offset_x=0.33,
+        max_lookahead=1.5,
+    )
+    x_body = 0.33 + 1.5 * math.cos(math.pi / 6.0)
+    y_body = 1.5 * math.sin(math.pi / 6.0)
+    assert curvature == pytest.approx(
+        2.0 * y_body / (x_body * x_body + y_body * y_body))
+    assert gap_logic.target_curvature(
+        2.0, 0.0, 0.33, max_lookahead=1.5) == pytest.approx(0.0)
+
+
+def test_target_curvature_sign_follows_the_ros_left_positive_convention():
+    # A target to the *left* (positive bearing, REP-103) must produce positive
+    # curvature and therefore a positive (left) steering angle, matching
+    # AckermannDriveStamped. Getting this backwards steers into the obstacle.
+    left = gap_logic.target_curvature(1.5, +0.3, 0.33, max_lookahead=1.5)
+    right = gap_logic.target_curvature(1.5, -0.3, 0.33, max_lookahead=1.5)
+    assert left > 0.0 and right < 0.0
+    assert left == pytest.approx(-right)
+    assert gap_logic.steering_from_curvature(left, 0.324, 0.26) > 0.0
+    assert gap_logic.steering_from_curvature(right, 0.324, 0.26) < 0.0
+
+
+def test_geometric_steering_is_dynamic_and_clipped():
+    assert gap_logic.steering_from_curvature(0.0, 0.324, 0.26) == 0.0
+    assert gap_logic.steering_from_curvature(0.5, 0.324, 0.26) > 0.0
+    assert gap_logic.steering_from_curvature(100.0, 0.324, 0.26) == pytest.approx(0.26)
+
+
+def test_curvature_speed_limit_is_fast_straight_and_slow_in_turn():
+    assert gap_logic.curvature_speed_limit(0.0, 1.0, 2.0) == pytest.approx(2.0)
+    assert gap_logic.curvature_speed_limit(1.0, 1.0, 2.0) == pytest.approx(1.0)
+    assert gap_logic.curvature_speed_limit(-4.0, 1.0, 2.0) == pytest.approx(0.5)
+
+
+def test_braking_speed_limit_reserves_stopping_clearance():
+    assert gap_logic.braking_speed_limit(
+        math.inf, 0.25, 3.0, 2.0) == pytest.approx(2.0)
+    assert gap_logic.braking_speed_limit(
+        0.25, 0.25, 3.0, 2.0) == pytest.approx(0.0)
+    assert gap_logic.braking_speed_limit(
+        0.75, 0.25, 3.0, 2.0) == pytest.approx(math.sqrt(3.0))
+
+
+def test_slew_rate_limit_has_asymmetric_rise_and_fall():
+    assert gap_logic.slew_rate_limit(2.0, 1.0, 0.1, 2.0, 4.0) == pytest.approx(1.2)
+    assert gap_logic.slew_rate_limit(0.0, 1.0, 0.1, 2.0, 4.0) == pytest.approx(0.6)
+    assert gap_logic.slew_rate_limit(-1.0, 0.0, 0.1, 1.5) == pytest.approx(-0.15)
+
+
 def test_disparity_extend_ignores_smooth_walls():
     # A gently receding wall (no jump above the threshold) is not an
     # edge -- nothing to extend.

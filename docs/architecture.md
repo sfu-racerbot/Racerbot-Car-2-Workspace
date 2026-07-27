@@ -92,7 +92,8 @@ The reusable saved-map race layers one more node on top of `particle_filter`'s o
 
 ```
 /pf/viz/inferred_pose ──┬──► pure_pursuit_node ──► /drive   (saved-map mode)
-/scan ───────────────────┘
+/scan ──────────────────┤
+/odom ──────────────────┘   (measured speed, sizes the adaptive lookahead)
 
 /scan ──► gap_follow ──► /auto_map/drive ──┐
                                             ├──► auto_map_race_node ──► /drive
@@ -126,7 +127,7 @@ All topics as they actually appear on the bus with `bringup_launch.py` plus a co
 | `/sensors/core` | `vesc_msgs/VescStateStamped` | `vesc_driver_node` | `vesc_to_odom_node` |
 | `/sensors/imu`, `/sensors/imu/raw` | `sensor_msgs/Imu` | `vesc_driver_node` | (nothing by default — the VESC's onboard IMU, available if you want it) |
 | `/sensors/servo_position_command` | `std_msgs/Float64` | `vesc_driver_node` | `vesc_to_odom_node` |
-| `/odom` | `nav_msgs/Odometry` | `vesc_to_odom_node` | `gap_follow` (TTC speed), `particle_filter` (if running) |
+| `/odom` | `nav_msgs/Odometry` | `vesc_to_odom_node` | `gap_follow` (TTC speed), `pure_pursuit` (lookahead sizing only, never a stop watchdog), `particle_filter` (if running) |
 | `/scan` | `sensor_msgs/LaserScan` | `urg_node` | `gap_follow`, `slam_toolbox`, `particle_filter` (whichever is running) |
 | `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | `static_transform_publisher`, `vesc_to_odom_node` | RViz, `slam_toolbox`, `particle_filter` |
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | `urg_node`, `ackermann_mux` | RViz / `ros2 topic echo` for debugging |

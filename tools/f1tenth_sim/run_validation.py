@@ -69,6 +69,18 @@ FORWARD_STOP_CLEARANCE = 0.25
 FORWARD_STOP_FOV = math.radians(60.0)
 TTC_COMMAND_SPEED_TIMEOUT = 0.5
 TTC_COMMAND_FALLBACK_MAX_ODOM_SPEED = 0.10
+GAP_STEERING_LOOKAHEAD = 1.5
+GAP_MAX_LATERAL_ACCEL = 1.0
+GAP_MAX_ACCELERATION = 3.0
+GAP_MAX_BRAKING_DECEL = 3.0
+MAX_STEERING_RATE = 1.0
+PURE_MAX_LATERAL_ACCEL = 2.5
+PURE_MAX_ACCELERATION = 6.0
+PURE_MAX_BRAKING_DECEL = 8.0
+# Mirrors pure_pursuit.yaml's overtake_lookahead_distance. Values at or below
+# max_lookahead (1.5) make the passing line a sharp turn that the curvature
+# speed cap brakes for, and the ego then stalls behind the opponent.
+OVERTAKE_LOOKAHEAD = 4.0
 
 LIDAR = LiDARConfig(
     enabled=True,
@@ -158,6 +170,52 @@ class PathPlan:
         return cls(xy=xy, seg_len=seg_len, speed=speed)
 
 
+class CommandShaper:
+    """Deterministic equivalent of pure_pursuit_node's final command stage."""
+
+    def __init__(self):
+        self.previous_steering = 0.0
+        self.previous_speed = 0.0
+
+    def command(self, desired_steering: float, desired_speed: float,
+                hard_speed_cap: float = 4.0,
+                measured_speed: Optional[float] = None) -> tuple[float, float]:
+        if desired_speed <= 0.0 or hard_speed_cap <= 0.0:
+            self.previous_steering = desired_steering
+            self.previous_speed = 0.0
+            return desired_steering, 0.0
+
+        steering = racing_math.slew_rate_limit(
+            desired_steering,
+            self.previous_steering,
+            CONTROL_DT,
+            MAX_STEERING_RATE,
+        )
+        desired_curvature = math.tan(desired_steering) / WHEELBASE
+        commanded_curvature = math.tan(steering) / WHEELBASE
+        online_curvature = max(abs(desired_curvature), abs(commanded_curvature))
+        curve_speed = racing_math.curvature_speed_limit(
+            online_curvature, PURE_MAX_LATERAL_ACCEL, 4.0)
+        speed_target = min(desired_speed, curve_speed, hard_speed_cap)
+        # Mirrors the node: ramp from the car's measured speed when it is
+        # higher than the last command, so a one-tick ceiling does not force a
+        # slow climb back from a speed the car was never actually at.
+        ramp_basis = self.previous_speed
+        if measured_speed is not None:
+            ramp_basis = max(ramp_basis, min(abs(float(measured_speed)), 4.0))
+        speed = racing_math.slew_rate_limit(
+            speed_target,
+            ramp_basis,
+            CONTROL_DT,
+            PURE_MAX_ACCELERATION,
+            PURE_MAX_BRAKING_DECEL,
+        )
+        speed = min(speed, curve_speed, hard_speed_cap)
+        self.previous_steering = steering
+        self.previous_speed = max(0.0, speed)
+        return steering, self.previous_speed
+
+
 class PathFollower:
     def __init__(
         self,
@@ -166,11 +224,13 @@ class PathFollower:
         min_lookahead: float = 0.6,
         max_lookahead: float = 1.5,
         lookahead_gain: float = 0.15,
+        use_measured_lookahead: bool = True,
     ):
         self.plan = plan
         self.min_lookahead = min_lookahead
         self.max_lookahead = max_lookahead
         self.lookahead_gain = lookahead_gain
+        self.use_measured_lookahead = use_measured_lookahead
         self.previous_index: Optional[int] = None
 
     def command(
@@ -179,7 +239,7 @@ class PathFollower:
         speed: Optional[float] = None,
         target_override: Optional[tuple[float, float]] = None,
     ) -> tuple[float, float, int, int, float]:
-        car_x, car_y, _delta, _velocity, yaw = np.asarray(state, dtype=float)[:5]
+        car_x, car_y, _delta, velocity, yaw = np.asarray(state, dtype=float)[:5]
         nearest, error = racing_math.find_nearest_index(
             self.plan.xy,
             (car_x, car_y),
@@ -196,8 +256,10 @@ class PathFollower:
         speed_command = (
             float(self.plan.speed[nearest]) if speed is None else float(speed)
         )
+        lookahead_basis = (
+            abs(float(velocity)) if self.use_measured_lookahead else speed_command)
         lookahead = racing_math.adaptive_lookahead(
-            speed_command,
+            lookahead_basis,
             self.lookahead_gain,
             self.min_lookahead,
             self.max_lookahead,
@@ -262,6 +324,7 @@ def gap_command(
     scan: np.ndarray,
     current_speed: float,
     last_commanded_speed: float = 0.0,
+    last_commanded_steering: float = 0.0,
     command_age_sec: float = math.inf,
 ) -> tuple[float, float, float, bool]:
     clean, valid = gap_logic.sanitize_ranges(
@@ -333,13 +396,41 @@ def gap_command(
     if gap_start is None:
         return 0.0, 0.0, float(closest_distance), True
 
-    target_index = lo + (gap_start + gap_end) // 2
-    steering = LIDAR.angle_min + target_index * LIDAR.angle_increment
-    steering = float(np.clip(steering, -0.4189, 0.4189))
-    speed_scale = 1.0 - abs(steering) / 0.4189
-    speed = 0.8 + speed_scale * (2.0 - 0.8)
+    target_in_window = (gap_start + gap_end) // 2
+    target_index = lo + target_in_window
+    target_angle = LIDAR.angle_min + target_index * LIDAR.angle_increment
+    target_distance = float(window[target_in_window])
+    target_curvature = gap_logic.target_curvature(
+        target_distance,
+        target_angle,
+        LIDAR_OFFSET_X,
+        max_lookahead=GAP_STEERING_LOOKAHEAD,
+    )
+    desired_steering = gap_logic.steering_from_curvature(
+        target_curvature, WHEELBASE, STEERING_LIMIT)
+    steering = gap_logic.slew_rate_limit(
+        desired_steering,
+        last_commanded_steering,
+        CONTROL_DT,
+        MAX_STEERING_RATE,
+    )
+    limited_curvature = math.tan(desired_steering) / WHEELBASE
+    curve_speed = gap_logic.curvature_speed_limit(
+        limited_curvature, GAP_MAX_LATERAL_ACCEL, 2.0)
+    clearance_speed = gap_logic.braking_speed_limit(
+        forward_clearance,
+        FORWARD_STOP_CLEARANCE,
+        GAP_MAX_BRAKING_DECEL,
+        2.0,
+    )
+    desired_speed = min(max(0.8, curve_speed), clearance_speed)
     if used_fallback:
-        speed = min(speed, 0.5)
+        desired_speed = min(desired_speed, 0.5)
+    # Mirrors the node: ramp from the car's measured speed when it exceeds the
+    # last command, so a transient ceiling does not brake a car that is still
+    # rolling at its old speed.
+    ramp_basis = max(last_commanded_speed, min(abs(float(current_speed)), 2.0))
+    speed = min(desired_speed, ramp_basis + GAP_MAX_ACCELERATION * CONTROL_DT)
     return steering, float(speed), float(closest_distance), False
 
 
@@ -374,6 +465,7 @@ def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
     min_scan = math.inf
     stop_steps = 0
     last_commanded_speed = 0.0
+    last_commanded_steering = 0.0
     last_command_step = None
     started = time.monotonic()
     max_steps = math.ceil(timeout_s / CONTROL_DT)
@@ -391,9 +483,11 @@ def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
                 ego["scan"],
                 float(state[3]),
                 last_commanded_speed,
+                last_commanded_steering,
                 command_age_sec,
             )
             last_commanded_speed = speed
+            last_commanded_steering = steering
             last_command_step = step
             min_scan = min(min_scan, nearest_scan)
             stop_steps += int(stopped)
@@ -486,6 +580,7 @@ def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
     obs, _ = env.reset(options={"poses": initial_pose(line, 0).reshape(1, 3)})
     plan = PathPlan.from_track(env.unwrapped.track)
     follower = PathFollower(plan)
+    command_shaper = CommandShaper()
     max_cross_track = 0.0
     min_scan = math.inf
     avoid_steps = 0
@@ -513,6 +608,10 @@ def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
                 speed = 0.0
                 stop_steps += 1
 
+            hard_speed_cap = 1.0 if safety == "avoid" else 4.0
+            steering, speed = command_shaper.command(
+                steering, speed, hard_speed_cap,
+                measured_speed=ego["std_state"][3])
             obs, _reward, done, _truncated, info = env.step(
                 np.array([[steering, speed]], dtype=np.float32)
             )
@@ -566,7 +665,10 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
 
     plan = PathPlan.from_track(env.unwrapped.track)
     ego_follower = PathFollower(plan)
-    opponent_follower = PathFollower(plan)
+    ego_command_shaper = CommandShaper()
+    # The scripted opponent is not the ROS pure-pursuit node under test;
+    # retain its established fixed 2 m/s lookahead so only ego changes here.
+    opponent_follower = PathFollower(plan, use_measured_lookahead=False)
     cumulative = racing_math.compute_cumulative_arc_length(plan.seg_len)
     total_length = float(plan.seg_len.sum())
     tracker = OpponentProgress()
@@ -689,10 +791,12 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
                         completed_passes += 1
 
             if overtake_active:
+                overtake_target = racing_math.find_lookahead_index(
+                    plan.seg_len, nearest, OVERTAKE_LOOKAHEAD, closed=True)
                 target_xy = racing_math.lateral_offset_point(
                     plan.xy,
-                    target,
-                    (target + 1) % len(plan.xy),
+                    overtake_target,
+                    (overtake_target + 1) % len(plan.xy),
                     overtake_side * 0.35,
                 )
                 steering, speed, nearest, target, error = ego_follower.command(
@@ -719,6 +823,10 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
             )
             avoid_steps += int(safety == "avoid")
             stop_steps += int(safety == "stop")
+            hard_speed_cap = 1.0 if safety == "avoid" else 4.0
+            steering, speed = ego_command_shaper.command(
+                steering, speed, hard_speed_cap,
+                measured_speed=ego["std_state"][3])
             min_commanded_speed = min(min_commanded_speed, float(speed))
             max_commanded_speed = max(max_commanded_speed, float(speed))
 

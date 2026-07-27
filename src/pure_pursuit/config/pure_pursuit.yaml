@@ -12,6 +12,7 @@ pure_pursuit_node:
     # --- Topics ---
     pose_topic: /pf/viz/inferred_pose   # geometry_msgs/PoseStamped, published by particle_filter
     scan_topic: /scan
+    odom_topic: /odom
     drive_topic: /drive
 
     # --- Control loop ---
@@ -32,6 +33,28 @@ pure_pursuit_node:
     # --- Speed limits (safety ceiling -- the .csv profile is still clipped to this) ---
     max_speed: 4.0
     min_speed: 0.5
+    # Runtime corrections/overtakes can be sharper than the profiled line.
+    # Cap their speed from commanded curvature and shape normal commands.
+    max_lateral_accel: 2.5     # m/s^2 -- online ceiling: v <= sqrt(a_lat/|kappa|)
+    # m/s^2. Ceiling on how fast a speed *command* may rise. Not a demand on
+    # the motor. Braking is never rate-limited on the way down.
+    #
+    # This value is bounded on BOTH sides and 6.0 is near the top of the
+    # usable band -- do not raise it without re-running the traffic scenario.
+    #   Too low  (3.0): the car cannot rebuild speed between safety stops and
+    #                   stalls outright behind a slower car.
+    #   Too high (7.0+): it arrives behind that slower car too fast for the
+    #                   overtake to commit, hard-stops inside
+    #                   emergency_stop_distance, and enters a stop-go cycle
+    #                   it does not get out of.
+    # 5.0 and 6.0 both pass; 7.0 fails. See docs/simulator.md.
+    max_acceleration: 6.0
+    max_braking_decel: 8.0     # m/s^2 -- only shapes normal commands; a safety stop is immediate
+    max_steering_rate: 1.0     # rad/s -- caps steering slew between commands
+    command_slew_max_dt: 0.10  # s -- longest interval a single slew step may integrate over
+    # Fresh measured speed sizes lookahead; a stale/missing stream falls back
+    # to the profiled target speed without weakening any existing watchdog.
+    odom_timeout_sec: 0.5
 
     # --- Steering limit ---
     # Derived from this car's actual servo calibration in vesc.yaml:
@@ -83,6 +106,11 @@ pure_pursuit_node:
     overtake_closing_margin: 0.3      # m/s -- must be closing at least this fast to bother attempting a pass
     overtake_clear_margin: 1.0        # meters of track distance past the opponent before resuming the racing line
     overtake_lateral_offset: 0.35      # meters, sideways nudge to the steering target while passing
+    # meters. While passing, the offset above is applied to a waypoint this
+    # far ahead instead of the normal max_lookahead target, so reaching the
+    # passing line is a gentle arc rather than a sharp turn the online
+    # curvature speed cap would answer by braking. Must be >= max_lookahead.
+    overtake_lookahead_distance: 4.0
     # Mid-pass the opponent is *expected* to leave the forward LIDAR cone
     # (it's alongside), so opponent_lost_timeout_sec deliberately does NOT
     # cancel an active overtake -- the pass completes on ego progress past

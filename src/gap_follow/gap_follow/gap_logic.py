@@ -17,6 +17,11 @@ The processing pipeline, in the order the node applies it:
   minimum_...         -> footprint clearance plus forward clearance floor
   conservative_...    -> safest recent odometry/command speed for TTC
   minimum_ttc         -> footprint-aware LiDAR collision timing
+  target_curvature    -> rear-axle curvature to a LiDAR target point
+  steering_from_...   -> bicycle-model steering for that curvature
+  curvature_speed...  -> lateral-acceleration speed ceiling
+  braking_speed...    -> clearance-aware stopping speed ceiling
+  slew_rate_limit     -> bounded normal command changes
   closest_valid       -> safety-bubble anchor (valid beams only)
   disparity_extend    -> widen every obstacle *edge* by half a car width
   safety_bubble       -> zero out a car-width bubble around the closest hit
@@ -232,6 +237,101 @@ def minimum_ttc(clean: np.ndarray, valid: np.ndarray,
     ttc = time_to_collision(
         clean, valid, angles, speed, boundary_distances, min_closing_speed)
     return float(np.min(ttc)) if ttc.size else math.inf
+
+
+def target_curvature(target_range: float, target_angle: float,
+                     laser_offset_x: float, laser_offset_y: float = 0.0,
+                     max_lookahead: float = math.inf) -> float:
+    """Pure-pursuit curvature from the rear axle to a LiDAR target.
+
+    A LaserScan point is expressed from the sensor, while Ackermann steering
+    geometry is referenced to ``base_link`` at the rear axle. Convert the
+    target to that body frame before applying ``kappa = 2*y/(x^2+y^2)``.
+    ``max_lookahead`` keeps a very distant return from making a meaningful
+    target bearing produce an unrealistically tiny steering command.
+
+    Curvature is a property of the path, not the vehicle, so no wheelbase is
+    involved here -- it enters only when this curvature is turned into a
+    steering angle by :func:`steering_from_curvature`.
+    """
+    if not all(value > 0.0 for value in (target_range, max_lookahead)):
+        raise ValueError('target_range and max_lookahead must be positive')
+    if not all(math.isfinite(value) for value in (
+            target_range, target_angle, laser_offset_x, laser_offset_y)):
+        raise ValueError('target geometry inputs must be finite')
+    if not math.isfinite(max_lookahead) and max_lookahead != math.inf:
+        raise ValueError('max_lookahead must be finite or positive infinity')
+
+    distance = min(target_range, max_lookahead)
+    x_body = laser_offset_x + distance * math.cos(target_angle)
+    y_body = laser_offset_y + distance * math.sin(target_angle)
+    distance_sq = x_body * x_body + y_body * y_body
+    if distance_sq < 1e-9:
+        return 0.0
+    return 2.0 * y_body / distance_sq
+
+
+def steering_from_curvature(curvature: float, wheelbase: float,
+                            max_steering_angle: float) -> float:
+    """Bicycle-model steering, clipped to the configured physical limit."""
+    if not all(math.isfinite(value) for value in (
+            curvature, wheelbase, max_steering_angle)):
+        raise ValueError('steering inputs must be finite')
+    if wheelbase <= 0.0 or max_steering_angle <= 0.0:
+        raise ValueError('wheelbase and max_steering_angle must be positive')
+    steering = math.atan(wheelbase * curvature)
+    return float(np.clip(steering, -max_steering_angle, max_steering_angle))
+
+
+def curvature_speed_limit(curvature: float, max_lateral_accel: float,
+                          max_speed: float) -> float:
+    """Maximum speed satisfying ``v^2 * abs(curvature) <= a_lat_max``."""
+    if not all(math.isfinite(value) for value in (
+            curvature, max_lateral_accel, max_speed)):
+        raise ValueError('curvature speed-limit inputs must be finite')
+    if max_lateral_accel <= 0.0 or max_speed < 0.0:
+        raise ValueError('max_lateral_accel must be positive and max_speed non-negative')
+    if abs(curvature) < 1e-9:
+        return max_speed
+    return min(max_speed, math.sqrt(max_lateral_accel / abs(curvature)))
+
+
+def braking_speed_limit(clearance: float, reserve_distance: float,
+                        max_braking_decel: float, max_speed: float) -> float:
+    """Clearance speed ceiling from ``v^2 <= 2*a*(clearance-reserve)``.
+
+    Positive infinity means no obstacle was observed and therefore leaves the
+    configured top speed unchanged.
+    """
+    if clearance == math.inf:
+        return max_speed
+    if not all(math.isfinite(value) for value in (
+            clearance, reserve_distance, max_braking_decel, max_speed)):
+        raise ValueError('braking speed-limit inputs must be finite')
+    if reserve_distance < 0.0 or max_braking_decel <= 0.0 or max_speed < 0.0:
+        raise ValueError(
+            'reserve_distance/max_speed must be non-negative and braking decel positive')
+    usable_distance = max(0.0, clearance - reserve_distance)
+    return min(max_speed, math.sqrt(2.0 * max_braking_decel * usable_distance))
+
+
+def slew_rate_limit(target: float, previous: float, dt: float,
+                    increase_rate: float, decrease_rate: float = None) -> float:
+    """Limit a normal command's rise and fall per second.
+
+    Emergency stops deliberately do not call this helper. ``decrease_rate``
+    defaults to ``increase_rate``, which is convenient for steering.
+    """
+    if decrease_rate is None:
+        decrease_rate = increase_rate
+    if not all(math.isfinite(value) for value in (
+            target, previous, dt, increase_rate, decrease_rate)):
+        raise ValueError('slew-rate inputs must be finite')
+    if dt < 0.0 or increase_rate < 0.0 or decrease_rate < 0.0:
+        raise ValueError('dt and slew rates must be non-negative')
+    lower = previous - decrease_rate * dt
+    upper = previous + increase_rate * dt
+    return float(np.clip(target, lower, upper))
 
 
 def disparity_extend(clean: np.ndarray, angle_increment: float,

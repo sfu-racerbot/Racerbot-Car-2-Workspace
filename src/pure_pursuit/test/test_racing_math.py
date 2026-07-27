@@ -107,6 +107,22 @@ def test_adaptive_lookahead_clips_to_bounds():
     assert mid == pytest.approx(0.35 * 2.0 + 0.6)
 
 
+def test_online_curvature_speed_limit():
+    assert racing_math.curvature_speed_limit(0.0, 2.5, 4.0) == pytest.approx(4.0)
+    assert racing_math.curvature_speed_limit(1.0, 2.5, 4.0) == pytest.approx(
+        math.sqrt(2.5))
+    assert racing_math.curvature_speed_limit(-4.0, 1.0, 4.0) == pytest.approx(0.5)
+
+
+def test_command_slew_rate_limit():
+    assert racing_math.slew_rate_limit(
+        4.0, 1.0, 0.1, 3.0, 8.0) == pytest.approx(1.3)
+    assert racing_math.slew_rate_limit(
+        0.0, 1.0, 0.1, 3.0, 8.0) == pytest.approx(0.2)
+    assert racing_math.slew_rate_limit(
+        -0.5, 0.0, 0.1, 1.5) == pytest.approx(-0.15)
+
+
 # ============================================================================
 # Path indexing
 # ============================================================================

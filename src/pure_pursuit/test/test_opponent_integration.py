@@ -24,6 +24,7 @@ import pytest
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import LaserScan
+from rclpy.duration import Duration
 from rclpy.parameter import Parameter
 
 from pure_pursuit.pure_pursuit_node import OpponentTracker, PurePursuitNode
@@ -110,9 +111,37 @@ def test_drives_normally_on_a_clear_track(node):
     node.control_loop()
     last = published[-1]
     assert abs(last.drive.steering_angle) < 0.05
-    assert last.drive.speed > 0.5
+    # This is the very first command, so it starts from a standstill and the
+    # acceleration limit -- not the racing line -- sets it: exactly one
+    # command_slew_max_dt step's worth of ramp.
+    assert last.drive.speed == pytest.approx(
+        node.max_acceleration * node.command_slew_max_dt)
+    assert last.drive.speed > 0.5, \
+        "the first command must still be a real drive command, not a crawl"
     assert node.overtake_active is False
     assert node.last_decision_state == 'pure_pursuit'
+
+
+def test_shaped_speed_ramps_up_to_the_profiled_speed(node):
+    # The acceleration limit shapes how fast a command may *rise*. It must
+    # converge on the profiled speed rather than hold the car below it: an
+    # over-tight ramp is what stalled the car behind traffic in simulation.
+    # Each loop is spaced one full command interval apart, as a real one is.
+    published = _capture_published(node)
+    node.scan_callback(_clear_scan())
+    _set_pose(node, -1.5, -1.2, 0.0)
+    for _ in range(12):
+        node.last_command_time = node.get_clock().now() - Duration(
+            seconds=node.command_slew_max_dt)
+        node.control_loop()
+
+    speeds = [msg.drive.speed for msg in published]
+    assert all(later >= earlier - 1e-9
+               for earlier, later in zip(speeds, speeds[1:])), speeds
+    assert speeds[-1] > speeds[0], "the ramp must actually let the car speed up"
+    assert speeds[-1] == pytest.approx(speeds[-2]), \
+        "the ramp must converge, leaving the racing line in charge of speed"
+    assert speeds[-1] > 1.0
 
 
 def test_missing_lidar_stop_has_a_diagnostic_reason(node):
@@ -148,6 +177,93 @@ def test_overtakes_toward_the_right_when_thats_more_open(node):
     assert node.overtake_active is True
     assert node.overtake_side == -1
     assert last.drive.steering_angle < 0.0
+
+
+def _set_odom(node, speed):
+    from nav_msgs.msg import Odometry
+    msg = Odometry()
+    msg.twist.twist.linear.x = float(speed)
+    node.odom_callback(msg)
+
+
+def test_acceleration_ramp_starts_from_measured_speed_not_the_last_command(node):
+    # A ceiling (avoidance, curvature, an overtake cap) drops the *command*
+    # instantly, but the car keeps rolling at nearly its old speed -- it
+    # cannot shed 3 m/s in one 25ms tick. Ramping back up from that command
+    # would hold the throttle far below the car's real speed for the whole
+    # climb, braking a car that never actually slowed. The ramp must start
+    # from measured speed instead.
+    published = _capture_published(node)
+    node.scan_callback(_clear_scan())
+    _set_pose(node, -1.5, -1.2, 0.0)
+    _set_odom(node, 3.0)
+    node.last_commanded_speed = 1.0   # as a one-tick ceiling would leave it
+
+    node.control_loop()
+    speed = published[-1].drive.speed
+    assert speed > 2.5, \
+        "must not crawl back up from the capped command while the car is at 3 m/s"
+
+    # ...and stale odometry must fall back to the old, conservative behavior
+    # rather than trusting a reading that is no longer current.
+    node.last_commanded_speed = 1.0
+    node.last_odom_time = node.get_clock().now() - Duration(
+        seconds=node.odom_timeout_sec + 0.1)
+    node.last_command_time = None
+    node.control_loop()
+    assert published[-1].drive.speed == pytest.approx(
+        1.0 + node.max_acceleration * node.command_slew_max_dt)
+
+
+def test_ramp_basis_never_exceeds_the_configured_speed_ceiling(node):
+    # A wildly wrong odometry reading must not be able to inflate the ramp
+    # basis past max_speed and let the command jump beyond the safety ceiling.
+    published = _capture_published(node)
+    node.scan_callback(_clear_scan())
+    _set_pose(node, -1.5, -1.2, 0.0)
+    _set_odom(node, 500.0)
+    node.control_loop()
+    assert published[-1].drive.speed <= node.max_speed
+
+
+def test_overtake_aims_further_ahead_than_the_normal_steering_target(node):
+    # The passing line is a lateral offset applied to a waypoint
+    # overtake_lookahead_distance ahead, deliberately *not* to the normal
+    # max_lookahead target. Offsetting a target only max_lookahead away asks
+    # for a turn sharp enough that the online curvature speed cap answers it
+    # by braking -- which stalls the pass instead of completing it.
+    scan, _center = _car_ahead_scan()
+    node.scan_callback(scan)
+    for step in range(4):
+        _set_pose(node, -1.5 + step * 0.2, -1.2, 0.0)
+        node.control_loop()
+    assert node.overtake_active is True
+
+    nearest_idx, _ = racing_math.find_nearest_index(
+        node.xy, (node.car_x, node.car_y), closed=node.closed_loop)
+    normal_target = node.xy[racing_math.find_lookahead_index(
+        node.seg_len, nearest_idx, node.max_lookahead, closed=node.closed_loop)]
+    overtake_x, overtake_y = node._update_opponent_and_overtake(nearest_idx)
+
+    overtake_range = math.hypot(overtake_x - node.car_x, overtake_y - node.car_y)
+    normal_range = math.hypot(
+        normal_target[0] - node.car_x, normal_target[1] - node.car_y)
+    assert overtake_range > normal_range
+    assert overtake_range > node.max_lookahead
+
+
+def test_overtake_preview_shorter_than_the_lookahead_is_rejected(profiled_csv):
+    # Guards the invariant the preview exists for: a preview at or inside
+    # max_lookahead reintroduces exactly the sharp passing turn it prevents.
+    rclpy.init(args=['--ros-args',
+                     '-p', f'waypoints_file:={profiled_csv}',
+                     '-p', 'enable_deadman:=false',
+                     '-p', 'overtake_lookahead_distance:=0.5'])
+    try:
+        with pytest.raises(RuntimeError, match='overtake_lookahead_distance'):
+            PurePursuitNode()
+    finally:
+        rclpy.shutdown()
 
 
 def test_hard_stop_overrides_an_active_overtake(node):

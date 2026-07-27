@@ -42,6 +42,7 @@ Interface (see docs/writing-your-own-node.md for the general contract
 every autonomy node in this repo follows):
   subscribes:  <pose_topic>  geometry_msgs/PoseStamped     (localization)
                <scan_topic>  sensor_msgs/LaserScan          (safety net)
+               <odom_topic>  nav_msgs/Odometry                (measured speed)
                <joy_topic>   sensor_msgs/Joy                (deadman button)
   publishes:   <drive_topic> ackermann_msgs/AckermannDriveStamped
 """
@@ -51,7 +52,7 @@ import sys
 
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
 import numpy as np
 import rclpy
 from rcl_interfaces.msg import SetParametersResult
@@ -152,6 +153,7 @@ class PurePursuitNode(Node):
         self.declare_parameter('closed_loop', True)
         self.declare_parameter('pose_topic', '/pf/viz/inferred_pose')
         self.declare_parameter('scan_topic', '/scan')
+        self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('drive_topic', '/drive')
         self.declare_parameter('control_rate_hz', 40.0)
         self.declare_parameter('wheelbase', 0.324)
@@ -162,6 +164,14 @@ class PurePursuitNode(Node):
         self.declare_parameter('max_speed', 4.0)
         self.declare_parameter('min_speed', 0.5)
         self.declare_parameter('max_steering_angle', 0.26)
+        # Online dynamics protect corrections/overtakes that are sharper than
+        # the offline racing line. Emergency stops bypass all command shaping.
+        self.declare_parameter('max_lateral_accel', 2.5)
+        self.declare_parameter('max_acceleration', 6.0)
+        self.declare_parameter('max_braking_decel', 8.0)
+        self.declare_parameter('max_steering_rate', 1.0)
+        self.declare_parameter('command_slew_max_dt', 0.10)
+        self.declare_parameter('odom_timeout_sec', 0.5)
         self.declare_parameter('pose_timeout_sec', 0.5)
         self.declare_parameter('max_cross_track_error', 1.0)
         self.declare_parameter('enable_lidar_safety', True)
@@ -202,6 +212,7 @@ class PurePursuitNode(Node):
         self.declare_parameter('overtake_closing_margin', 0.3)
         self.declare_parameter('overtake_clear_margin', 1.0)
         self.declare_parameter('overtake_lateral_offset', 0.35)
+        self.declare_parameter('overtake_lookahead_distance', 4.0)
         self.declare_parameter('overtake_max_blind_sec', 3.0)
         self.declare_parameter('laser_offset_x', 0.33)
         self.declare_parameter('laser_offset_y', 0.0)
@@ -219,6 +230,7 @@ class PurePursuitNode(Node):
         self.closed_loop = bool(self.get_parameter('closed_loop').value)
         self.pose_topic = self.get_parameter('pose_topic').value
         self.scan_topic = self.get_parameter('scan_topic').value
+        self.odom_topic = self.get_parameter('odom_topic').value
         self.drive_topic = self.get_parameter('drive_topic').value
         self.control_rate_hz = float(self.get_parameter('control_rate_hz').value)
         self.wheelbase = float(self.get_parameter('wheelbase').value)
@@ -229,6 +241,18 @@ class PurePursuitNode(Node):
         self.max_speed = float(self.get_parameter('max_speed').value)
         self.min_speed = float(self.get_parameter('min_speed').value)
         self.max_steering_angle = float(self.get_parameter('max_steering_angle').value)
+        self.max_lateral_accel = float(
+            self.get_parameter('max_lateral_accel').value)
+        self.max_acceleration = float(
+            self.get_parameter('max_acceleration').value)
+        self.max_braking_decel = float(
+            self.get_parameter('max_braking_decel').value)
+        self.max_steering_rate = float(
+            self.get_parameter('max_steering_rate').value)
+        self.command_slew_max_dt = float(
+            self.get_parameter('command_slew_max_dt').value)
+        self.odom_timeout_sec = float(
+            self.get_parameter('odom_timeout_sec').value)
         self.pose_timeout_sec = float(self.get_parameter('pose_timeout_sec').value)
         self.max_cross_track_error = float(self.get_parameter('max_cross_track_error').value)
         self.enable_lidar_safety = bool(self.get_parameter('enable_lidar_safety').value)
@@ -263,6 +287,8 @@ class PurePursuitNode(Node):
         self.overtake_closing_margin = float(self.get_parameter('overtake_closing_margin').value)
         self.overtake_clear_margin = float(self.get_parameter('overtake_clear_margin').value)
         self.overtake_lateral_offset = float(self.get_parameter('overtake_lateral_offset').value)
+        self.overtake_lookahead_distance = float(
+            self.get_parameter('overtake_lookahead_distance').value)
         self.overtake_max_blind_sec = float(self.get_parameter('overtake_max_blind_sec').value)
         self.laser_offset_x = float(self.get_parameter('laser_offset_x').value)
         self.laser_offset_y = float(self.get_parameter('laser_offset_y').value)
@@ -276,6 +302,39 @@ class PurePursuitNode(Node):
                 f"pure_pursuit_node: opponent_detection_mode must be 'heuristic' or 'map', "
                 f"got '{self.opponent_detection_mode}'."
             )
+        dynamic_limits = (
+            self.max_lateral_accel,
+            self.max_acceleration,
+            self.max_braking_decel,
+            self.max_steering_rate,
+            self.command_slew_max_dt,
+            self.odom_timeout_sec,
+        )
+        if not all(math.isfinite(value) and value > 0.0 for value in dynamic_limits):
+            raise RuntimeError(
+                'pure_pursuit_node: dynamic steering/speed limits must be finite and positive.')
+        if not (math.isfinite(self.min_speed) and math.isfinite(self.max_speed)
+                and 0.0 <= self.min_speed <= self.max_speed):
+            raise RuntimeError(
+                'pure_pursuit_node: speed limits must satisfy 0 <= min_speed <= max_speed.')
+        # The upper bound is not cosmetic. The online speed cap recovers
+        # curvature as tan(delta)/wheelbase; at exactly pi/2 that is ~1e16 (the
+        # car would be capped to a standstill forever) and past pi/2 tan goes
+        # negative, silently inverting the curvature. Both fail quietly.
+        if not (math.isfinite(self.max_steering_angle)
+                and 0.0 < self.max_steering_angle < math.pi / 2.0):
+            raise RuntimeError(
+                'pure_pursuit_node: max_steering_angle must be finite and in '
+                '(0, pi/2) radians.')
+        if not (math.isfinite(self.overtake_lookahead_distance)
+                and self.overtake_lookahead_distance >= self.max_lookahead):
+            # A pass is a lateral *offset* from the line. Spread over a short
+            # target it demands a curvature the online lateral-acceleration
+            # cap then answers by braking, which stalls the pass instead of
+            # completing it. The preview must be the longer horizon.
+            raise RuntimeError(
+                'pure_pursuit_node: overtake_lookahead_distance must be finite and '
+                'at least max_lookahead.')
 
         # ------------------------------------------------------------------
         # Racing-line state. Normal launches still fail loudly if no file is
@@ -320,6 +379,12 @@ class PurePursuitNode(Node):
         self.last_scan = None
         self.last_scan_time = None
 
+        self.current_speed = 0.0
+        self.last_odom_time = None
+        self.last_commanded_speed = 0.0
+        self.last_commanded_steering = 0.0
+        self.last_command_time = None
+
         # Deadman state: same pattern as gap_follow_node -- only ever
         # engages after a live /joy stream has actually shown the button
         # held, so the car never drives before that's been observed.
@@ -350,6 +415,8 @@ class PurePursuitNode(Node):
 
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
         self.pose_sub = self.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 10)
+        self.odom_sub = self.create_subscription(
+            Odometry, self.odom_topic, self.odom_callback, 10)
         if self.enable_lidar_safety:
             self.scan_sub = self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 10)
         if self.enable_deadman:
@@ -449,6 +516,17 @@ class PurePursuitNode(Node):
     def scan_callback(self, msg: LaserScan):
         self.last_scan = msg
         self.last_scan_time = self.get_clock().now()
+
+    def odom_callback(self, msg: Odometry):
+        self.current_speed = float(msg.twist.twist.linear.x)
+        self.last_odom_time = self.get_clock().now()
+
+    def _odom_fresh(self) -> bool:
+        return (
+            self.last_odom_time is not None
+            and math.isfinite(self.current_speed)
+            and self._seconds_since(self.last_odom_time) < self.odom_timeout_sec
+        )
 
     def map_callback(self, msg: OccupancyGrid):
         # Import here, not at module top: range_libc is only needed in
@@ -604,8 +682,18 @@ class PurePursuitNode(Node):
         # how fast we're going right now, not how fast we will be going
         # once we arrive at the target point.
         speed_here = float(self.speed_profile[nearest_idx])
+        if self._odom_fresh():
+            lookahead_speed = abs(self.current_speed)
+            lookahead_speed_source = 'fresh odometry'
+        else:
+            lookahead_speed = speed_here
+            lookahead_speed_source = 'profile fallback'
         lookahead = racing_math.adaptive_lookahead(
-            speed_here, self.lookahead_speed_gain, self.min_lookahead, self.max_lookahead)
+            lookahead_speed,
+            self.lookahead_speed_gain,
+            self.min_lookahead,
+            self.max_lookahead,
+        )
         target_idx = racing_math.find_lookahead_index(
             self.seg_len, nearest_idx, lookahead, closed=self.closed_loop)
         target_x, target_y = self.xy[target_idx]
@@ -620,6 +708,7 @@ class PurePursuitNode(Node):
 
         # --- Speed: the profiled speed for where the car is right now. ---
         speed_cmd = float(np.clip(speed_here, self.min_speed, self.max_speed))
+        hard_speed_cap = self.max_speed
         decision_state = 'pure_pursuit'
 
         # --- Opponent tracking + overtaking: reconsiders the steering
@@ -628,7 +717,7 @@ class PurePursuitNode(Node):
         # safety net to be enabled too -- overtaking is a more assertive
         # behavior layered on top of it, not a substitute for it. ---
         if self.enable_lidar_safety and self.enable_opponent_overtake:
-            overtake_target = self._update_opponent_and_overtake(nearest_idx, target_idx)
+            overtake_target = self._update_opponent_and_overtake(nearest_idx)
             if overtake_target is not None:
                 target_x, target_y = overtake_target
                 dx = target_x - self.car_x
@@ -647,7 +736,8 @@ class PurePursuitNode(Node):
         decision_detail = (
             f"pose=({self.car_x:.2f},{self.car_y:.2f},{math.degrees(self.car_yaw):+.1f}deg), "
             f"nearest waypoint={nearest_idx}, steering target={target_idx}, "
-            f"cross-track={cross_track_error:.2f}m, lookahead={lookahead:.2f}m, "
+            f"cross-track={cross_track_error:.2f}m, lookahead={lookahead:.2f}m "
+            f"from {lookahead_speed_source}={lookahead_speed:.2f}m/s, "
             f"profile speed={speed_here:.2f}m/s, path curvature={kappa:+.3f}/m"
             f"{clipped_text}")
         if self.enable_lidar_safety and self.enable_opponent_overtake:
@@ -666,13 +756,37 @@ class PurePursuitNode(Node):
                 steering_angle = steering_override
             if speed_override is not None:
                 speed_cmd = speed_override
+                hard_speed_cap = min(hard_speed_cap, speed_override)
             if reactive_state is not None:
                 decision_state = reactive_state
                 decision_detail = f"{reactive_detail}; base plan: {decision_detail}"
             else:
                 decision_detail += f"; {reactive_detail}"
 
-        self._publish_drive(steering_angle, speed_cmd)
+        desired_steering = steering_angle
+        desired_speed = speed_cmd
+        if desired_speed <= 0.0 or hard_speed_cap <= 0.0:
+            # Blind/stale/too-close safety overrides remain immediate. In
+            # particular, never rate-limit a stop into a nonzero command.
+            self._publish_drive(desired_steering, 0.0)
+            speed_cmd = 0.0
+            decision_detail += '; immediate safety stop bypassed command shaping'
+        else:
+            (now, steering_angle, speed_cmd, online_curvature,
+             online_curve_speed, command_dt) = self._shape_normal_command(
+                desired_steering, desired_speed, hard_speed_cap)
+            self._publish_drive(steering_angle, speed_cmd, now=now)
+            shaping_text = (
+                f", steering shaped from {desired_steering:+.3f}rad"
+                if not math.isclose(steering_angle, desired_steering) else "")
+            speed_shape_text = (
+                f", speed shaped/capped from {desired_speed:.2f}m/s"
+                if not math.isclose(speed_cmd, desired_speed) else "")
+            decision_detail += (
+                f"; online command curvature={online_curvature:.3f}/m, "
+                f"curve speed cap={online_curve_speed:.2f}m/s, "
+                f"command dt={command_dt:.3f}s{shaping_text}{speed_shape_text}")
+
         self._log_decision(
             decision_state, decision_detail, steering_angle, speed_cmd)
 
@@ -926,7 +1040,7 @@ class PurePursuitNode(Node):
             return None
         return candidate
 
-    def _update_opponent_and_overtake(self, nearest_idx: int, target_idx: int):
+    def _update_opponent_and_overtake(self, nearest_idx: int):
         """Look for another car in the live scan, track its progress along
         the racing line, and decide whether to start, continue, or end an
         overtake. Returns a (x, y) world-frame point to steer at instead
@@ -1062,19 +1176,83 @@ class PurePursuitNode(Node):
                 f"overtake active: passing {'left' if self.overtake_side > 0 else 'right'}, "
                 f"opponent unseen for {blind_sec:.2f}s, wrapped track gap={gap_ahead:.2f}m")
 
-        next_idx = (target_idx + 1) % self.num_waypoints if self.closed_loop \
-            else min(target_idx + 1, self.num_waypoints - 1)
+        # Deliberately *not* the normal steering target: offsetting a target
+        # only max_lookahead away demands a sharp turn to reach the passing
+        # line, which the online curvature speed cap answers by braking --
+        # slowing exactly when the pass needs speed. Previewing further ahead
+        # spreads the same lateral offset over a gentler arc. See
+        # docs/racing-autonomy.md's "Racing against opponents".
+        overtake_idx = racing_math.find_lookahead_index(
+            self.seg_len, nearest_idx, self.overtake_lookahead_distance,
+            closed=self.closed_loop)
+        next_idx = (overtake_idx + 1) % self.num_waypoints if self.closed_loop \
+            else min(overtake_idx + 1, self.num_waypoints - 1)
         return racing_math.lateral_offset_point(
-            self.xy, target_idx, next_idx, self.overtake_side * self.overtake_lateral_offset)
+            self.xy, overtake_idx, next_idx, self.overtake_side * self.overtake_lateral_offset)
 
     def _seconds_since(self, stamp) -> float:
         if stamp is None:
             return math.inf
         return (self.get_clock().now() - stamp).nanoseconds / 1e9
 
-    def _publish_drive(self, steering_angle: float, speed: float):
+    def _command_timing(self):
+        """Return one bounded command interval and the clock sample behind it."""
+        now = self.get_clock().now()
+        if self.last_command_time is None:
+            return now, self.command_slew_max_dt
+        elapsed = (now - self.last_command_time).nanoseconds / 1e9
+        return now, min(self.command_slew_max_dt, max(0.0, elapsed))
+
+    def _shape_normal_command(self, desired_steering: float,
+                              desired_speed: float, hard_speed_cap: float):
+        """Shape an ordinary drive command; emergency stops never enter here."""
+        now, command_dt = self._command_timing()
+        steering = racing_math.slew_rate_limit(
+            desired_steering,
+            self.last_commanded_steering,
+            command_dt,
+            self.max_steering_rate,
+        )
+        desired_curvature = math.tan(desired_steering) / self.wheelbase
+        commanded_curvature = math.tan(steering) / self.wheelbase
+        online_curvature = max(abs(desired_curvature), abs(commanded_curvature))
+        curve_speed = racing_math.curvature_speed_limit(
+            online_curvature, self.max_lateral_accel, self.max_speed)
+        speed_target = min(desired_speed, curve_speed, hard_speed_cap)
+        # Ramp from where the car actually *is*, not from the last command.
+        # A ceiling (avoidance, curvature) drops the command instantly while
+        # the car is still travelling at nearly its old speed; ramping from
+        # that command would then hold the throttle far below the car's real
+        # speed for the whole climb back -- braking a car that never slowed.
+        # Fresh odometry closes that gap. It only ever *raises* the basis, is
+        # clamped to max_speed so a wild reading cannot inflate it, and every
+        # ceiling below still applies, so this cannot outrun a safety limit.
+        ramp_basis = self.last_commanded_speed
+        if self._odom_fresh():
+            ramp_basis = max(
+                ramp_basis, min(abs(self.current_speed), self.max_speed))
+        speed = racing_math.slew_rate_limit(
+            speed_target,
+            ramp_basis,
+            command_dt,
+            self.max_acceleration,
+            self.max_braking_decel,
+        )
+        # A runtime turn or reactive override is a safety ceiling, not merely a
+        # comfort target. It may lower speed immediately; only acceleration is
+        # always gradual.
+        speed = min(speed, curve_speed, hard_speed_cap)
+        return now, steering, max(0.0, speed), online_curvature, curve_speed, command_dt
+
+    def _publish_drive(self, steering_angle: float, speed: float, now=None):
+        if now is None:
+            now = self.get_clock().now()
+        if math.isfinite(speed) and math.isfinite(steering_angle):
+            self.last_commanded_speed = float(speed)
+            self.last_commanded_steering = float(steering_angle)
+            self.last_command_time = now
         msg = AckermannDriveStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.stamp = now.to_msg()
         msg.header.frame_id = 'base_link'
         msg.drive.steering_angle = steering_angle
         msg.drive.speed = speed

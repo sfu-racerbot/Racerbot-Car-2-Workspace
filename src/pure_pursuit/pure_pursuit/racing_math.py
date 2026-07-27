@@ -139,6 +139,42 @@ def adaptive_lookahead(speed: float, gain: float, min_lookahead: float, max_look
     return float(np.clip(ld, min_lookahead, max_lookahead))
 
 
+def curvature_speed_limit(curvature: float, max_lateral_accel: float,
+                          max_speed: float) -> float:
+    """Online speed ceiling from the final commanded curvature.
+
+    The offline profile accounts for the recorded path's curvature. This
+    second ceiling covers runtime corrections, avoidance, and overtakes whose
+    steering can be sharper than the recorded line.
+    """
+    if not all(math.isfinite(value) for value in (
+            curvature, max_lateral_accel, max_speed)):
+        raise ValueError('curvature speed-limit inputs must be finite')
+    if max_lateral_accel <= 0.0 or max_speed < 0.0:
+        raise ValueError('max_lateral_accel must be positive and max_speed non-negative')
+    if abs(curvature) < 1e-9:
+        return max_speed
+    return min(max_speed, math.sqrt(max_lateral_accel / abs(curvature)))
+
+
+def slew_rate_limit(target: float, previous: float, dt: float,
+                    increase_rate: float, decrease_rate: float = None) -> float:
+    """Limit a normal command's rise and fall per second.
+
+    Safety stops bypass this helper and remain immediate.
+    """
+    if decrease_rate is None:
+        decrease_rate = increase_rate
+    if not all(math.isfinite(value) for value in (
+            target, previous, dt, increase_rate, decrease_rate)):
+        raise ValueError('slew-rate inputs must be finite')
+    if dt < 0.0 or increase_rate < 0.0 or decrease_rate < 0.0:
+        raise ValueError('dt and slew rates must be non-negative')
+    lower = previous - decrease_rate * dt
+    upper = previous + increase_rate * dt
+    return float(np.clip(target, lower, upper))
+
+
 # ============================================================================
 # 3. Path indexing
 # ============================================================================
