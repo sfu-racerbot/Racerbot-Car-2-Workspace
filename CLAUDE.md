@@ -54,6 +54,7 @@ Everything communicates over ROS2 topics only — no shared memory, no direct fu
 | `gap_follow` | local | reactive autonomy, follow-the-gap on `/scan` → `/drive`, no map — the reference template for new driving nodes |
 | `pure_pursuit` | local | map-based race controller: recorded+paced racing line, pure pursuit control, reactive safety net, opponent overtaking — see `docs/racing-autonomy.md` |
 | `web_dashboard` | local | read-only browser dashboard over WebSocket — subscribes only, never publishes, not subject to the safety policy below |
+| `race_diagnostics` | local | read-only run recorder + post-run analyzer (pipeline health, pose lag, watchdog stops, rosbag) — subscribes only; see `docs/run-diagnostics.md` |
 | `usb_cam_stream` | local | MJPEG webcam stream over plain HTTP |
 | `racerbot_launch` | local | launch glue not owned by any single driver repo (SLAM, race-day localization+pure_pursuit combos) |
 

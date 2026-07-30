@@ -1,0 +1,28 @@
+race_diag_node:
+  ros__parameters:
+    # --- Topics: every link of the driving pipeline ---
+    scan_topic: /scan
+    map_topic: /map
+    pose_topic: /slam_pose        # auto_map_race_node; use /pf/viz/inferred_pose when racing a saved map
+    odom_topic: /odom
+    drive_topic: /drive           # the arbitrated command the supervisor emits
+    joy_topic: /joy               # LB state, so a "why did it stop" answer is never ambiguous
+    map_frame: map
+    base_frame: base_link
+
+    # --- Reporting cadence ---
+    # A summary at most this often, and only when something changed --
+    # a parked car or a dead node must not bury real events.
+    summary_period_sec: 20.0
+    # Before any topic has ever been seen there is nothing to report.
+    idle_period_sec: 600.0
+    stale_sec: 3.0
+
+    # Alert once when pose lag first exceeds this. 0.30s was chosen from
+    # measurement, not taste: pure_pursuit's pose_timeout_sec is 0.50s, so
+    # this fires while there is still margin. At 1m/s it is also ~30cm of
+    # dashboard scan-vs-map overlay error, which is where it becomes
+    # visible to the eye.
+    pose_lag_alert_sec: 0.30
+    # Below this the pose counts as "not advancing" for frozen detection.
+    pose_still_travel_m: 0.02

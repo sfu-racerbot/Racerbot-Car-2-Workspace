@@ -25,6 +25,7 @@ Start here if you're new to the car or the codebase:
 | [docs/usb-camera-livestream.md](docs/usb-camera-livestream.md) | Live MJPEG video stream from a USB webcam, viewable in any browser — camera picks, how it works, security note |
 | [docs/realsense-camera.md](docs/realsense-camera.md) | Intel RealSense D435i color/depth over ROS2 — install notes, verified performance, and a known IMU limitation on this hardware |
 | [docs/operations.md](docs/operations.md) | Step-by-step procedures: driving, mapping, localizing, running autonomy, shutting down |
+| [docs/run-diagnostics.md](docs/run-diagnostics.md) | Recording a run so it can actually be diagnosed afterwards, plus the AI-agent prompt template |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Real issues hit during bring-up and how they were diagnosed |
 | [docs/git-setup.md](docs/git-setup.md) | How this repo is versioned: which `src/` packages are real git submodules vs. plain vendored code, cloning/updating them, and checking upstream f1tenth repos for updates |
 
@@ -41,6 +42,7 @@ This file stays a short quick-start; the docs above are the full reference.
 | `realsense-ros` | git submodule, `ros2-master` (natively supports Jazzy, unlike the submodules above) | Intel RealSense D435i driver — color/depth over ROS2. Detail: [docs/realsense-camera.md](docs/realsense-camera.md) |
 | `gap_follow` | local package | baseline reactive autonomy — follow-the-gap on `/scan` → `/drive`, no map needed. Code/algorithm detail: [src/gap_follow/README.md](src/gap_follow/README.md) |
 | `pure_pursuit` | local package | map-based race controller — pure pursuit over a curvature-paced recorded racing line, plus the tools to record and pace one. Pipeline/workflow: [docs/racing-autonomy.md](docs/racing-autonomy.md); code/math detail: [src/pure_pursuit/README.md](src/pure_pursuit/README.md) |
+| `race_diagnostics` | local package | read-only run recorder and post-run analyzer: pipeline health, localization lag, watchdog stops, rosbag. Not an autonomy node, safe alongside anything. Workflow: [docs/run-diagnostics.md](docs/run-diagnostics.md); code detail: [src/race_diagnostics/README.md](src/race_diagnostics/README.md) |
 | `web_dashboard` | local package | live browser dashboard of the map/LIDAR/pose, streamed over a WebSocket — read-only, not an autonomy node, safe to run alongside anything else. Workflow: [docs/web-dashboard.md](docs/web-dashboard.md); code detail: [src/web_dashboard/README.md](src/web_dashboard/README.md) |
 | `racerbot_launch` | local package | launch glue not owned by any single driver repo (SLAM, one-command autonomous map→race, saved-map race-day localization, and cameras) |
 | `usb_cam_stream` | local package | live MJPEG video stream from a USB webcam, served over plain HTTP for viewing in any browser. Detail: [docs/usb-camera-livestream.md](docs/usb-camera-livestream.md), [src/usb_cam_stream/README.md](src/usb_cam_stream/README.md) |
