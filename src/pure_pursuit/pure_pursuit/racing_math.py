@@ -871,3 +871,79 @@ def detect_dynamic_cluster(measured: np.ndarray, expected: np.ndarray,
                 best = (start, end, centroid_range, centroid_angle)
             start = i if split else None
     return best
+
+
+def vehicle_boundary_distances(angles: np.ndarray, car_width: float,
+                               car_length: float, wheelbase: float,
+                               laser_offset_x: float,
+                               laser_offset_y: float = 0.0) -> np.ndarray:
+    """Distance from the LiDAR to the rectangular vehicle edge, per beam.
+
+    Subtracting this from a raw LiDAR range converts "how far is that thing
+    from the *sensor*" into "how far is it from the *car body*" -- the only
+    form that answers whether the car is about to touch something. A forward
+    cone minimum cannot: a wall alongside the car reads as a comfortable
+    range on a beam pointing sideways while the bodywork is millimetres away.
+
+    ``base_link`` is the rear axle in this workspace; following the F1TENTH
+    collision model the rectangle is centred halfway along the wheelbase with
+    symmetric overhang, and the LiDAR sits at ``laser_offset_x/y`` from
+    ``base_link``. A sensor outside the footprint means the transform or the
+    footprint is wrong, which would silently *understate* collision distance,
+    so that raises rather than returning a dangerous number.
+
+    Deliberately duplicated from ``gap_follow``'s ``gap_logic.py`` rather
+    than imported: packages in this workspace talk over topics only, never
+    by direct cross-package import (see CLAUDE.md). Keep the two in sync --
+    ``gap_logic.vehicle_boundary_distances`` is the reference implementation.
+    """
+    beam_angles = np.asarray(angles, dtype=np.float64)
+    dimensions = (car_width, car_length, wheelbase)
+    if not all(math.isfinite(value) and value > 0.0 for value in dimensions):
+        raise ValueError('car_width, car_length, and wheelbase must be finite and positive')
+    if not math.isfinite(laser_offset_x) or not math.isfinite(laser_offset_y):
+        raise ValueError('LiDAR offsets must be finite')
+
+    half_width = car_width / 2.0
+    half_length = car_length / 2.0
+    body_center_x = wheelbase / 2.0
+    x_min = body_center_x - half_length
+    x_max = body_center_x + half_length
+    y_min, y_max = -half_width, half_width
+    tolerance = 1e-9
+    if not (x_min - tolerance <= laser_offset_x <= x_max + tolerance
+            and y_min - tolerance <= laser_offset_y <= y_max + tolerance):
+        raise ValueError('LiDAR origin must lie inside the configured vehicle footprint')
+
+    direction_x = np.cos(beam_angles)
+    direction_y = np.sin(beam_angles)
+    epsilon = 1e-12
+    distance_x = np.full(beam_angles.shape, np.inf, dtype=np.float64)
+    distance_y = np.full(beam_angles.shape, np.inf, dtype=np.float64)
+
+    positive_x = direction_x > epsilon
+    negative_x = direction_x < -epsilon
+    distance_x[positive_x] = (x_max - laser_offset_x) / direction_x[positive_x]
+    distance_x[negative_x] = (x_min - laser_offset_x) / direction_x[negative_x]
+
+    positive_y = direction_y > epsilon
+    negative_y = direction_y < -epsilon
+    distance_y[positive_y] = (y_max - laser_offset_y) / direction_y[positive_y]
+    distance_y[negative_y] = (y_min - laser_offset_y) / direction_y[negative_y]
+
+    return np.minimum(distance_x, distance_y)
+
+
+def minimum_footprint_clearance(ranges: np.ndarray, valid: np.ndarray,
+                                boundary_distances: np.ndarray) -> float:
+    """Smallest obstacle clearance measured from the vehicle body, over
+    every valid beam in any direction. ``inf`` when nothing is usable."""
+    measured = np.asarray(ranges, dtype=np.float64)
+    validity = np.asarray(valid, dtype=bool)
+    boundaries = np.asarray(boundary_distances, dtype=np.float64)
+    if measured.shape != validity.shape or measured.shape != boundaries.shape:
+        raise ValueError('ranges, validity, and boundary distances must have matching shapes')
+    usable = validity & np.isfinite(boundaries)
+    if not np.any(usable):
+        return math.inf
+    return float(np.min(measured[usable] - boundaries[usable]))

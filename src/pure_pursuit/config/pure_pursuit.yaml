@@ -69,6 +69,36 @@ pure_pursuit_node:
     pose_timeout_sec: 0.5         # stop if localization hasn't updated within this long
     max_cross_track_error: 1.0    # stop if further than this from every waypoint (lost/kidnapped)
 
+    # Frozen-localization watchdog. pose_timeout_sec above cannot catch a
+    # pose that keeps *arriving* on time while no longer *tracking* the car
+    # -- which is what auto_map_race_node republishing a stalled SLAM
+    # transform looks like, and what drove the car into a wall on
+    # 2026-07-27. Odometry is the independent witness: if it reports real
+    # motion while the pose stands still, localization is lying.
+    # Only armed above pose_frozen_min_speed, so a parked car never trips it;
+    # at 0.30m/s the car covers 0.15m in 0.50s, 3x the 0.05m travel floor.
+    pose_frozen_timeout_sec: 0.5
+    pose_frozen_min_speed: 0.3
+    pose_frozen_min_travel: 0.05
+
+    # --- Rectangular collision envelope (matches gap_follow.yaml) ---
+    # Traxxas 74276-4 is 0.535 x 0.281 m; this is the same intentionally
+    # inflated 0.58 x 0.31 m envelope gap_follow uses. Feeds the all-round
+    # body-clearance stop below, which -- unlike safety_fov_deg's forward
+    # cone -- can see a wall the car is *alongside*.
+    car_width: 0.31
+    car_length: 0.58
+    # All-direction contact floor measured from the body, not the sensor.
+    # gap_follow uses 0.02m; 0.05m here because this controller is the one
+    # travelling at racing speed, so it gets a slightly wider margin.
+    emergency_stop_clearance: 0.05
+    # Forward window for that check, matching gap_follow's forward_fov_deg.
+    # NOT the full 270deg this Hokuyo sweeps: its rearmost beams look back
+    # along the car and return its own chassis, which is inside the
+    # footprint by construction and pins the car at a permanent negative
+    # clearance. 180deg still covers both flanks, which is the point.
+    body_clearance_fov_deg: 180.0
+
     # --- Reactive LIDAR safety net (independent of the planned line -- for
     # opponents, spun-out cars, or anything else not in the map) ---
     enable_lidar_safety: true

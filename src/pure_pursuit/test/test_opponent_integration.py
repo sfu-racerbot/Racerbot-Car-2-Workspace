@@ -55,7 +55,10 @@ def node(profiled_csv):
     racing-line/avoidance/overtake logic, which is independent of (and
     already covered separately from) that gate.
     """
-    rclpy.init(args=['--ros-args', '-p', f'waypoints_file:={profiled_csv}', '-p', 'enable_deadman:=false'])
+    rclpy.init(args=['--ros-args',
+                     '-p', f'waypoints_file:={profiled_csv}',
+                     '-p', 'enable_deadman:=false',
+                     '-p', 'drive_topic:=/test_only/drive'])
     n = PurePursuitNode()
     yield n
     n.destroy_node()
@@ -258,6 +261,7 @@ def test_overtake_preview_shorter_than_the_lookahead_is_rejected(profiled_csv):
     rclpy.init(args=['--ros-args',
                      '-p', f'waypoints_file:={profiled_csv}',
                      '-p', 'enable_deadman:=false',
+                     '-p', 'drive_topic:=/test_only/drive',
                      '-p', 'overtake_lookahead_distance:=0.5'])
     try:
         with pytest.raises(RuntimeError, match='overtake_lookahead_distance'):
@@ -281,7 +285,54 @@ def test_hard_stop_overrides_an_active_overtake(node):
     node.control_loop()
     last = published[-1]
     assert last.drive.speed == 0.0, "the hard-stop safety net must win regardless of overtake state"
+    # 0.15m from the LiDAR straight ahead is only ~0.03m from the bodywork,
+    # so the footprint tier is the correct (and more urgent) classification.
+    assert node.last_decision_state == 'body_contact'
+
+
+def test_forward_cone_hard_stop_still_fires_outside_the_footprint_tier(node):
+    """The two hard-stop tiers are distinct: an obstacle close enough for
+    the forward cone but not touching the body must still stop the car,
+    and must report as emergency_obstacle rather than body_contact."""
+    published = _capture_published(node)
+    _set_pose(node, -1.5, -1.2, 0.0)
+    scan = _clear_scan()
+    center = len(scan.ranges) // 2
+    # 0.30m ahead: inside emergency_stop_distance (0.40m), but ~0.18m of
+    # body clearance -- comfortably outside emergency_stop_clearance.
+    scan.ranges[center] = 0.30
+    node.scan_callback(scan)
+    node.control_loop()
+    assert published[-1].drive.speed == 0.0
     assert node.last_decision_state == 'emergency_obstacle'
+
+
+def test_wall_alongside_the_car_stops_it_although_the_forward_cone_is_clear(node):
+    """Regression test for the 2026-07-27 collision.
+
+    The car sat against a wall that was *beside* it. Every forward-cone
+    minimum read clear (the track ahead genuinely was open), so the old
+    safety net logged "LIDAR clear" and pure pursuit accelerated into the
+    wall. Only a clearance measured from the car's own footprint can see
+    this, which is why the body tier exists.
+    """
+    published = _capture_published(node)
+    _set_pose(node, -1.5, -1.2, 0.0)
+    scan = _clear_scan()
+    n = len(scan.ranges)
+    center = n // 2
+    # A wall hard against the car's left flank, and nothing at all ahead.
+    quarter = n // 4          # +90deg with this helper's symmetric span
+    for i in range(center + quarter - 12, center + quarter + 12):
+        scan.ranges[i] = 0.17
+    node.scan_callback(scan)
+    node.control_loop()
+
+    forward_cone_min = min(scan.ranges[center - 30:center + 31])
+    assert forward_cone_min > node.emergency_stop_distance, (
+        "test is only meaningful if the forward cone really is clear")
+    assert published[-1].drive.speed == 0.0, "a wall against the flank must stop the car"
+    assert node.last_decision_state == 'body_contact'
 
 
 def test_overtake_resolves_once_ego_is_past_the_opponent(node):
@@ -382,6 +433,7 @@ def map_mode_node(profiled_csv):
     rclpy.init(args=['--ros-args',
                      '-p', f'waypoints_file:={profiled_csv}',
                      '-p', 'enable_deadman:=false',
+                     '-p', 'drive_topic:=/test_only/drive',
                      '-p', 'opponent_detection_mode:=map'])
     n = PurePursuitNode()
     yield n
@@ -487,7 +539,8 @@ def test_opponent_progress_rate_wraps_cleanly_at_start_finish():
 def test_waiting_node_loads_generated_profile_at_runtime(profiled_csv):
     rclpy.init(args=['--ros-args',
                      '-p', 'wait_for_waypoints:=true',
-                     '-p', 'enable_deadman:=false'])
+                     '-p', 'enable_deadman:=false',
+                     '-p', 'drive_topic:=/test_only/drive'])
     waiting = PurePursuitNode()
     try:
         published = _capture_published(waiting)

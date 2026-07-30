@@ -59,6 +59,7 @@ from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from rclpy.time import Time as RclpyTime
 from sensor_msgs.msg import Joy, LaserScan
 
 from pure_pursuit import racing_math
@@ -174,6 +175,16 @@ class PurePursuitNode(Node):
         self.declare_parameter('odom_timeout_sec', 0.5)
         self.declare_parameter('pose_timeout_sec', 0.5)
         self.declare_parameter('max_cross_track_error', 1.0)
+        # Frozen-localization watchdog: only armed once odometry is sure the
+        # car is really moving, so a legitimately parked car never trips it.
+        self.declare_parameter('pose_frozen_timeout_sec', 0.5)
+        self.declare_parameter('pose_frozen_min_speed', 0.3)
+        self.declare_parameter('pose_frozen_min_travel', 0.05)
+        # Rectangular collision envelope, mirroring gap_follow's.
+        self.declare_parameter('car_width', 0.31)
+        self.declare_parameter('car_length', 0.58)
+        self.declare_parameter('emergency_stop_clearance', 0.05)
+        self.declare_parameter('body_clearance_fov_deg', 180.0)
         self.declare_parameter('enable_lidar_safety', True)
         self.declare_parameter('safety_fov_deg', 60.0)
         self.declare_parameter('emergency_stop_distance', 0.4)
@@ -255,6 +266,18 @@ class PurePursuitNode(Node):
             self.get_parameter('odom_timeout_sec').value)
         self.pose_timeout_sec = float(self.get_parameter('pose_timeout_sec').value)
         self.max_cross_track_error = float(self.get_parameter('max_cross_track_error').value)
+        self.pose_frozen_timeout_sec = float(
+            self.get_parameter('pose_frozen_timeout_sec').value)
+        self.pose_frozen_min_speed = float(
+            self.get_parameter('pose_frozen_min_speed').value)
+        self.pose_frozen_min_travel = float(
+            self.get_parameter('pose_frozen_min_travel').value)
+        self.car_width = float(self.get_parameter('car_width').value)
+        self.car_length = float(self.get_parameter('car_length').value)
+        self.emergency_stop_clearance = float(
+            self.get_parameter('emergency_stop_clearance').value)
+        self.body_clearance_fov_deg = float(
+            self.get_parameter('body_clearance_fov_deg').value)
         self.enable_lidar_safety = bool(self.get_parameter('enable_lidar_safety').value)
         self.safety_fov_deg = float(self.get_parameter('safety_fov_deg').value)
         self.emergency_stop_distance = float(self.get_parameter('emergency_stop_distance').value)
@@ -317,6 +340,26 @@ class PurePursuitNode(Node):
                 and 0.0 <= self.min_speed <= self.max_speed):
             raise RuntimeError(
                 'pure_pursuit_node: speed limits must satisfy 0 <= min_speed <= max_speed.')
+        # Prove the footprint/LiDAR geometry is self-consistent now, at
+        # startup, rather than letting vehicle_boundary_distances raise from
+        # inside the control loop on the first scan -- an exception there
+        # takes the node down mid-drive.
+        try:
+            racing_math.vehicle_boundary_distances(
+                np.array([0.0]), self.car_width, self.car_length, self.wheelbase,
+                self.laser_offset_x, self.laser_offset_y)
+        except ValueError as exc:
+            raise RuntimeError(
+                f'pure_pursuit_node: vehicle footprint is unusable: {exc}') from exc
+        if not (math.isfinite(self.emergency_stop_clearance)
+                and self.emergency_stop_clearance >= 0.0):
+            raise RuntimeError(
+                'pure_pursuit_node: emergency_stop_clearance must be finite and non-negative.')
+        if not all(math.isfinite(value) and value > 0.0 for value in (
+                self.pose_frozen_timeout_sec, self.pose_frozen_min_speed,
+                self.pose_frozen_min_travel)):
+            raise RuntimeError(
+                'pure_pursuit_node: pose_frozen_* limits must be finite and positive.')
         # The upper bound is not cosmetic. The online speed cap recovers
         # curvature as tan(delta)/wheelbase; at exactly pi/2 that is ~1e16 (the
         # car would be capped to a standstill forever) and past pi/2 tan goes
@@ -374,15 +417,22 @@ class PurePursuitNode(Node):
         self.car_y = None
         self.car_yaw = None
         self.last_pose_time = None
+        self.last_pose_stamp = None       # when localization computed the pose
+        self._pose_reference_xy = None    # last pose that actually travelled
+        self._pose_frozen_since = None    # moving-but-not-tracking window start
         self.prev_nearest_index = None
 
         self.last_scan = None
         self.last_scan_time = None
+        self._boundary_distances = None   # per-beam body-edge distance cache
+        self._boundary_geometry = None    # (beam count, angle_min, increment)
 
         self.current_speed = 0.0
         self.last_odom_time = None
         self.last_commanded_speed = 0.0
-        self.last_commanded_steering = 0.0
+        # Basis the steering slew limiter rate-limits away from -- deliberately
+        # NOT "the last steering angle published". See _stop().
+        self.steering_basis = 0.0
         self.last_command_time = None
 
         # Deadman state: same pattern as gap_follow_node -- only ever
@@ -513,6 +563,27 @@ class PurePursuitNode(Node):
         self.car_yaw = racing_math.quaternion_to_yaw(q.x, q.y, q.z, q.w)
         self.last_pose_time = self.get_clock().now()
 
+        # Freshness must come from when localization *computed* this pose,
+        # not when the message showed up. auto_map_race_node republishes
+        # SLAM's map->base_link TF at a fixed rate whatever its age, so a
+        # frozen transform arrives just as punctually as a live one and
+        # arrival time alone cannot tell them apart. The stamp is copied
+        # from the TF and does carry the truth. Publishers that leave the
+        # stamp at zero fall back to arrival time rather than tripping the
+        # watchdog permanently.
+        stamp = RclpyTime.from_msg(msg.header.stamp)
+        self.last_pose_stamp = stamp if stamp.nanoseconds > 0 else None
+
+        # Second, independent check on the same failure: a pose that does
+        # not move while odometry says the car does. Reset the frozen-pose
+        # window whenever the pose actually travels a meaningful distance.
+        if (self._pose_reference_xy is None
+                or math.hypot(self.car_x - self._pose_reference_xy[0],
+                              self.car_y - self._pose_reference_xy[1])
+                >= self.pose_frozen_min_travel):
+            self._pose_reference_xy = (self.car_x, self.car_y)
+            self._pose_frozen_since = None
+
     def scan_callback(self, msg: LaserScan):
         self.last_scan = msg
         self.last_scan_time = self.get_clock().now()
@@ -626,20 +697,57 @@ class PurePursuitNode(Node):
             return
 
         # --- Watchdog 1: localization must be alive and recent. ---
-        pose_age = self._seconds_since(self.last_pose_time)
         if self.car_x is None:
             self._stop(
                 'waiting_for_pose',
                 f"no localization pose received on '{self.pose_topic}'",
             )
             return
+        # Age from the pose's own stamp where there is one, so a stale
+        # transform being faithfully republished at full rate is caught.
+        # Arrival age still applies as well: it is the only thing that
+        # notices the publisher itself going silent.
+        arrival_age = self._seconds_since(self.last_pose_time)
+        pose_age = arrival_age
+        age_source = 'arrival'
+        if self.last_pose_stamp is not None:
+            stamp_age = self._seconds_since(self.last_pose_stamp)
+            if stamp_age > pose_age:
+                pose_age = stamp_age
+                age_source = 'localization stamp'
         if pose_age > self.pose_timeout_sec:
             self._stop(
                 'pose_stale',
-                f"last localization pose is {pose_age:.2f}s old "
+                f"last localization pose is {pose_age:.2f}s old by {age_source} "
                 f"(limit {self.pose_timeout_sec:.2f}s)",
             )
             return
+
+        # --- Watchdog 1b: localization must actually be *tracking*. ---
+        # A pose can be fresh by both measures above and still be wrong: if
+        # SLAM stalls (a blocking map/pose-graph save, a lost scan match)
+        # the transform stops advancing while the car keeps rolling, and
+        # pure pursuit then steers from a position the car has already
+        # left. Odometry is an independent witness to real motion, so
+        # "odometry says we are moving, localization says we are not" is a
+        # detectable contradiction -- and the one that put the car into a
+        # wall on 2026-07-27 (see docs/troubleshooting.md).
+        if self._odom_fresh() and abs(self.current_speed) >= self.pose_frozen_min_speed:
+            if self._pose_frozen_since is None:
+                self._pose_frozen_since = self.get_clock().now()
+            else:
+                frozen_for = self._seconds_since(self._pose_frozen_since)
+                if frozen_for > self.pose_frozen_timeout_sec:
+                    self._stop(
+                        'pose_frozen',
+                        f"odometry reports {abs(self.current_speed):.2f}m/s but the "
+                        f"localization pose has not moved {self.pose_frozen_min_travel:.2f}m "
+                        f"in {frozen_for:.2f}s (limit {self.pose_frozen_timeout_sec:.2f}s) -- "
+                        "localization is not tracking the car",
+                    )
+                    return
+        else:
+            self._pose_frozen_since = None
 
         car_xy = (self.car_x, self.car_y)
 
@@ -822,6 +930,40 @@ class PurePursuitNode(Node):
             return math.inf
         return float(np.min(window))
 
+    def _footprint_clearance(self, scan: LaserScan) -> float:
+        """Smallest distance from the car's rectangular body to any valid
+        return, in any direction. Unlike a forward-cone minimum this sees a
+        wall the car is alongside. Readings below the sensor's own
+        range_min are its "invalid" encoding, not real contact.
+        """
+        ranges = np.asarray(scan.ranges, dtype=np.float64)
+        geometry = (len(ranges), scan.angle_min, scan.angle_increment)
+        if self._boundary_geometry != geometry:
+            # Scan geometry is fixed for a given LiDAR, so the per-beam
+            # body-edge distances are computed once, not every tick.
+            angles = scan.angle_min + np.arange(len(ranges)) * scan.angle_increment
+            self._boundary_distances = racing_math.vehicle_boundary_distances(
+                angles, self.car_width, self.car_length, self.wheelbase,
+                self.laser_offset_x, self.laser_offset_y)
+            self._boundary_geometry = geometry
+
+        # Restricted to a forward window, exactly as gap_follow does before
+        # its own footprint check, and for a concrete reason: this Hokuyo
+        # sweeps 270deg, so the rearmost beams look back along the car and
+        # hit its own chassis. Those returns sit *inside* the footprint by
+        # construction, giving a permanently negative clearance that pins
+        # the car at a standstill -- observed as a steady -0.110m on
+        # 2026-07-27. 180deg still spans both flanks (+/-90deg), which is
+        # the whole point of measuring clearance from the body rather than
+        # from a forward cone.
+        lo_idx, hi_idx = self._fov_indices(scan, self.body_clearance_fov_deg)
+        if hi_idx <= lo_idx:
+            return math.inf
+        window = ranges[lo_idx:hi_idx + 1]
+        boundaries = self._boundary_distances[lo_idx:hi_idx + 1]
+        valid = np.isfinite(window) & (window > 0.0) & (window >= scan.range_min)
+        return racing_math.minimum_footprint_clearance(window, valid, boundaries)
+
     def _dynamic_closest_in_cone(self, scan: LaserScan, fov_deg: float):
         """Closest scan return not explained by the static map.
 
@@ -903,6 +1045,27 @@ class PurePursuitNode(Node):
             )
 
         scan = self.last_scan
+
+        # --- Tier 0: is any part of the *body* about to touch something? ---
+        # Ahead of the forward-cone check below, because that check is a
+        # minimum range over a 60deg cone pointed straight ahead and is
+        # structurally blind to a wall alongside the car: a beam pointing
+        # sideways at a wall the bodywork is 1.5cm from still reports a
+        # perfectly comfortable range, and no cone minimum will ever see
+        # it. On 2026-07-27 that is exactly how the car accelerated into a
+        # wall it was already touching while its safety net logged "LIDAR
+        # clear". gap_follow has had this footprint check all along; the
+        # race controller needs it just as much.
+        body_clearance = self._footprint_clearance(scan)
+        if body_clearance <= self.emergency_stop_clearance:
+            return (
+                None,
+                0.0,
+                'body_contact',
+                f"minimum clearance from the car body is {body_clearance:.3f}m, at or "
+                f"below the {self.emergency_stop_clearance:.3f}m contact threshold "
+                "(measured over every beam, not just the forward cone)",
+            )
 
         emergency_closest = self._closest_in_cone(scan, self.safety_fov_deg)
         if emergency_closest < self.emergency_stop_distance:
@@ -1209,10 +1372,11 @@ class PurePursuitNode(Node):
         now, command_dt = self._command_timing()
         steering = racing_math.slew_rate_limit(
             desired_steering,
-            self.last_commanded_steering,
+            self.steering_basis,
             command_dt,
             self.max_steering_rate,
         )
+        self.steering_basis = steering
         desired_curvature = math.tan(desired_steering) / self.wheelbase
         commanded_curvature = math.tan(steering) / self.wheelbase
         online_curvature = max(abs(desired_curvature), abs(commanded_curvature))
@@ -1248,8 +1412,9 @@ class PurePursuitNode(Node):
         if now is None:
             now = self.get_clock().now()
         if math.isfinite(speed) and math.isfinite(steering_angle):
+            # The steering slew basis is deliberately not updated here --
+            # _shape_normal_command() and _stop() each own how it evolves.
             self.last_commanded_speed = float(speed)
-            self.last_commanded_steering = float(steering_angle)
             self.last_command_time = now
         msg = AckermannDriveStamped()
         msg.header.stamp = now.to_msg()
@@ -1259,7 +1424,18 @@ class PurePursuitNode(Node):
         self.drive_pub.publish(msg)
 
     def _stop(self, state: str, detail: str):
-        self._publish_drive(0.0, 0.0)
+        now, command_dt = self._command_timing()
+        # Decay the steering slew basis at the rate the rack can actually
+        # travel rather than snapping it to 0. Snapping means one transient
+        # stop caps the *next* steering command at max_steering_rate*dt, and
+        # a stop landing between every pair of control ticks pins steering
+        # near zero indefinitely -- while the speed ramp, which reads measured
+        # speed rather than the last command, recovers in full. That
+        # asymmetry drove gap_follow into a wall on 2026-07-27; the same
+        # shaping pattern lives here, so it gets the same treatment.
+        self.steering_basis = racing_math.slew_rate_limit(
+            0.0, self.steering_basis, command_dt, self.max_steering_rate)
+        self._publish_drive(0.0, 0.0, now=now)
         self._log_decision(state, detail, 0.0, 0.0)
 
     def _log_decision(self, state: str, detail: str, steering_angle: float,
