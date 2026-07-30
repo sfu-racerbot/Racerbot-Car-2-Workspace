@@ -34,9 +34,9 @@ class GapFollowNode(Node):
         self.declare_parameter('max_speed', 2.0)
         self.declare_parameter('min_speed', 0.5)
         self.declare_parameter('max_steering_angle', 0.26)
-        # Dynamic control: geometric target steering, physical speed ceilings,
-        # and bounded normal command changes. Safety stops bypass shaping.
-        self.declare_parameter('steering_lookahead_distance', 1.5)
+        # Dynamic control: bearing-proportional steering, physical speed
+        # ceilings, and bounded normal command changes. Stops bypass shaping.
+        self.declare_parameter('steering_gain', 1.0)
         self.declare_parameter('max_lateral_accel', 1.0)
         self.declare_parameter('max_acceleration', 3.0)
         self.declare_parameter('max_braking_decel', 3.0)
@@ -57,6 +57,9 @@ class GapFollowNode(Node):
         self.declare_parameter('emergency_stop_clearance', 0.02)
         self.declare_parameter('forward_stop_clearance', 0.25)
         self.declare_parameter('forward_stop_fov_deg', 60.0)
+        # Crawl allowed once inside forward_stop_clearance, so a car that has
+        # found its way out of a corner can take it instead of latching.
+        self.declare_parameter('escape_creep_speed', 0.25)
 
         # F1TENTH instantaneous TTC, using the safest recent speed estimate.
         self.declare_parameter('enable_ttc', True)
@@ -96,8 +99,8 @@ class GapFollowNode(Node):
         self.min_speed = float(self.get_parameter('min_speed').value)
         self.max_steering_angle = float(
             self.get_parameter('max_steering_angle').value)
-        self.steering_lookahead_distance = float(
-            self.get_parameter('steering_lookahead_distance').value)
+        self.steering_gain = float(
+            self.get_parameter('steering_gain').value)
         self.max_lateral_accel = float(
             self.get_parameter('max_lateral_accel').value)
         self.max_acceleration = float(
@@ -126,6 +129,8 @@ class GapFollowNode(Node):
             self.get_parameter('forward_stop_clearance').value)
         self.forward_stop_fov = math.radians(float(
             self.get_parameter('forward_stop_fov_deg').value))
+        self.escape_creep_speed = float(
+            self.get_parameter('escape_creep_speed').value)
         self.enable_ttc = bool(self.get_parameter('enable_ttc').value)
         self.ttc_threshold_sec = float(
             self.get_parameter('ttc_threshold_sec').value)
@@ -160,13 +165,21 @@ class GapFollowNode(Node):
             raise ValueError(
                 'forward_stop_clearance must be finite and no smaller than '
                 'emergency_stop_clearance')
+        # The creep is the one speed allowed inside the forward reserve, so it
+        # has to stay a crawl. Bounding it by min_speed keeps it from silently
+        # becoming the ordinary driving speed if someone tunes it upward.
+        if not (math.isfinite(self.escape_creep_speed)
+                and 0.0 < self.escape_creep_speed <= max(self.min_speed, 0.5)):
+            raise ValueError(
+                'escape_creep_speed must be finite, positive, and no greater '
+                'than max(min_speed, 0.5) -- it is a crawl, not a drive speed')
         if not math.isfinite(self.forward_stop_fov) or not (
                 0.0 < self.forward_stop_fov <= self.forward_fov):
             raise ValueError(
                 'forward_stop_fov_deg must be positive and no wider than '
                 'forward_fov_deg')
         dynamic_limits = (
-            self.steering_lookahead_distance,
+            self.steering_gain,
             self.max_lateral_accel,
             self.max_acceleration,
             self.max_braking_decel,
@@ -205,8 +218,15 @@ class GapFollowNode(Node):
         self.current_speed = 0.0
         self.last_odom_time = None
         self.last_commanded_speed = 0.0
-        self.last_commanded_steering = 0.0
+        # Basis the steering slew limiter rate-limits away from. Deliberately
+        # NOT "the last steering angle published": a safety stop publishes 0
+        # instantly, and feeding that back in lets a single transient stop
+        # collapse the next steering command to max_steering_rate*dt. See
+        # _stop() for the failure that caused.
+        self.steering_basis = 0.0
         self.last_command_time = None
+        # One-shot latch for the odometry direction warning below.
+        self.odom_direction_warned = False
 
         # Runtime diagnostics. The scan watchdog is informational: when a
         # callback-driven controller stops receiving scans it publishes no
@@ -273,6 +293,28 @@ class GapFollowNode(Node):
         )
         return effective_speed, recent_command_speed
 
+    def _check_odom_direction(self):
+        """Warn once if /odom reports motion opposing the commanded direction.
+
+        Every speed-aware layer here reads /odom: TTC braking and the
+        acceleration ramp. A sign-inverted odometry source does not fail
+        loudly -- it reports a forward-driving car as reversing, which reads
+        downstream as "no collision risk" and quietly degrades the brake. Say
+        so in the terminal instead of letting it present as a tuning problem.
+        """
+        if self.odom_direction_warned or not self._odom_fresh():
+            return
+        if self.last_commanded_speed > 0.5 and self.current_speed < -0.5:
+            self.odom_direction_warned = True
+            self.get_logger().error(
+                f"ODOMETRY DIRECTION: commanding "
+                f"{self.last_commanded_speed:+.2f}m/s while '{self.odom_topic}' "
+                f"reports {self.current_speed:+.2f}m/s. Driving forward must "
+                f"read positive. Check speed_to_erpm_gain for "
+                f"vesc_to_odom_node in f1tenth_stack/config/vesc.yaml. Until "
+                f"that is corrected, odometry-derived speed is unreliable and "
+                f"every layer built on it is degraded.")
+
     def _deadman_engaged(self) -> bool:
         return self._deadman_status()[0]
 
@@ -310,6 +352,7 @@ class GapFollowNode(Node):
         if not deadman_ok:
             self._stop(stop_state, stop_detail)
             return
+        self._check_odom_direction()
         if self.enable_ttc and not self._odom_fresh():
             self._stop(
                 'odometry_stale',
@@ -379,13 +422,20 @@ class GapFollowNode(Node):
             body_boundaries,
             self.forward_stop_fov,
         )
-        if forward_clearance <= self.forward_stop_clearance:
-            self._stop(
-                'forward_clearance',
-                f"minimum forward body clearance {forward_clearance:.3f}m is "
-                f"at or below the {self.forward_stop_clearance:.3f}m threshold",
-            )
-            return
+        # Below the reserve the car creeps instead of latching. A hard stop
+        # here is a trap: this cone points where the car is *aimed*, not where
+        # it is *going*, so a car turning out of a corner gets frozen by the
+        # wall it is already steering around -- measured in simulation at
+        # 0.58m from the nearest wall, full lock dialled in, exit found, stuck
+        # forever. It cannot recover, because the stop removes the very motion
+        # that would clear the cone, and nothing external will rescue it.
+        #
+        # Creeping keeps every independent layer intact: contact clearance and
+        # TTC are both checked above and still stop the car outright, and if
+        # no gap can be found at all the no_safe_gap stop below still fires.
+        # What changes is only that a car with a visible way out is allowed to
+        # inch toward it. The creep speed itself is bounded below.
+        creeping = forward_clearance <= self.forward_stop_clearance
 
         # Independent speed-aware layer from F1TENTH Lab 2. A recent positive
         # command backs up fresh odometry only if it is effectively near zero.
@@ -398,46 +448,33 @@ class GapFollowNode(Node):
                 effective_speed,
                 body_boundaries,
                 self.ttc_min_closing_speed,
+                self.car_width / 2.0 + self.safety_margin,
+                # The rack is where the last command left it, so that is the
+                # arc the car is about to sweep. Straight-line TTC on a car at
+                # full lock brakes for the outside of the very corner it is
+                # negotiating.
+                math.tan(self.steering_basis) / self.wheelbase,
+                self.laser_offset_x,
+                self.laser_offset_y,
             )
             if min_ttc <= self.ttc_threshold_sec:
                 self._stop(
                     'ttc_brake',
-                    f"minimum footprint-aware TTC {min_ttc:.3f}s is at or "
-                    f"below the {self.ttc_threshold_sec:.3f}s threshold at "
-                    f"effective speed {effective_speed:.2f}m/s "
-                    f"(odom {self.current_speed:.2f}m/s, recent command "
-                    f"{recent_command_speed:.2f}m/s)",
+                    lambda: (
+                        f"minimum footprint-aware TTC {min_ttc:.3f}s is at or "
+                        f"below the {self.ttc_threshold_sec:.3f}s threshold at "
+                        f"effective speed {effective_speed:.2f}m/s "
+                        f"(odom {self.current_speed:.2f}m/s, recent command "
+                        f"{recent_command_speed:.2f}m/s)"
+                        + self._escape_report(
+                            window, window_valid, scan, lo_idx,
+                            beam_angles)),
                 )
                 return
 
-        closest_idx, closest_dist = gap_logic.closest_valid(
-            window, window_valid)
-
-        # Inflate each edge by half the car width plus one side's margin.
-        # Remaining ranges represent valid car-center positions.
-        half_width = self.car_width / 2.0 + self.safety_margin
-        window = gap_logic.disparity_extend(
-            window,
-            scan.angle_increment,
-            self.disparity_threshold,
-            half_width,
-        )
-        if closest_idx is not None:
-            window = gap_logic.safety_bubble(
-                window,
-                closest_idx,
-                closest_dist,
-                scan.angle_increment,
-                half_width,
-            )
-
-        gap_start, gap_end, used_fallback = gap_logic.find_gap_with_fallback(
-            window,
-            self.min_gap_distance,
-            self.fallback_min_gap_distance,
-            scan.angle_increment,
-            self.min_centerline_gap_width,
-        )
+        (window, closest_dist, gap_start, gap_end, used_fallback,
+         target_idx_in_window) = self._select_gap(
+            window, window_valid, scan.angle_increment, beam_angles)
         if gap_start is None:
             closest_text = (
                 f"{closest_dist:.2f}m"
@@ -453,27 +490,37 @@ class GapFollowNode(Node):
             )
             return
 
-        target_idx_in_window = (gap_start + gap_end) // 2
         target_idx = lo_idx + target_idx_in_window
         target_angle = scan.angle_min + target_idx * scan.angle_increment
         target_distance = float(window[target_idx_in_window])
 
-        target_curvature = gap_logic.target_curvature(
-            target_distance,
-            target_angle,
-            self.laser_offset_x,
-            self.laser_offset_y,
-            self.steering_lookahead_distance,
-        )
-        desired_steering = gap_logic.steering_from_curvature(
-            target_curvature, self.wheelbase, self.max_steering_angle)
+        # Steer proportionally to the gap's bearing, rather than by pure
+        # pursuit curvature to a point on it. Follow-the-gap produces a
+        # *direction to head*, not a path to converge onto, and the two laws
+        # disagree exactly where it matters. Pure pursuit reads a 13deg gap
+        # bearing as a gentle 2.9m-radius arc even when the car is 0.24m from
+        # the wall it is trying to leave -- and that is its *ceiling*, not its
+        # tuning: with the LiDAR laser_offset_x ahead of the rear axle, the
+        # achievable curvature to a near-axial target is bounded, so no
+        # lookahead value recovers the authority. Measured on the 2026-07-27
+        # run, that capped every command between 0.064 and 0.118rad while the
+        # rack had 0.26rad available, and the car wall-hugged until its
+        # forward cone closed. Bearing steering asks for the 1.2m radius the
+        # car can actually turn.
+        desired_steering = float(np.clip(
+            self.steering_gain * target_angle,
+            -self.max_steering_angle,
+            self.max_steering_angle,
+        ))
         now, command_dt = self._command_timing()
+        steering_basis_before = self.steering_basis
         steering_angle = gap_logic.slew_rate_limit(
             desired_steering,
-            self.last_commanded_steering,
+            steering_basis_before,
             command_dt,
             self.max_steering_rate,
         )
+        self.steering_basis = steering_angle
 
         # Use the clipped requested curvature for the lateral-acceleration
         # ceiling, so speed falls before the rate-limited rack reaches a newly
@@ -490,6 +537,30 @@ class GapFollowNode(Node):
             self.max_braking_decel,
             self.max_speed,
         )
+        if creeping:
+            # Inside the reserve the stopping-distance formula returns zero by
+            # construction -- that is what latched the car. Keep the identical
+            # physics, but let the creep spend half the reserve and no more,
+            # and hard-cap it to a crawl on top.
+            #
+            # Half, rather than all the way down to the contact floor: at the
+            # 0.02m contact floor the creep's own stopping distance plus one
+            # scan period of latency (~0.017m at 0.25m/s) very nearly consumes
+            # the entire remaining gap, which is no margin at all. Halving the
+            # reserve keeps the speed tapering smoothly to zero while the car
+            # still has 0.125m of padded-body clearance in hand -- enough to
+            # crawl out of a corner, never enough to nose into a dead end.
+            creep_reserve = max(
+                self.emergency_stop_clearance, self.forward_stop_clearance / 2.0)
+            clearance_speed = min(
+                self.escape_creep_speed,
+                gap_logic.braking_speed_limit(
+                    forward_clearance,
+                    creep_reserve,
+                    self.max_braking_decel,
+                    self.max_speed,
+                ),
+            )
         desired_speed = min(normal_speed, clearance_speed)
         if used_fallback:
             desired_speed = min(desired_speed, self.corner_speed)
@@ -517,8 +588,14 @@ class GapFollowNode(Node):
         gap_hi_angle = scan.angle_min + (lo_idx + gap_end) * scan.angle_increment
         closest_text = (
             f"{closest_dist:.2f}m" if math.isfinite(closest_dist) else "no valid return")
+        # Name the *limiter* that shortened the turn, not just the fact that
+        # one did: a command pinned at the slew bound every tick means the
+        # basis keeps getting reset, which looks identical to gentle shaping
+        # unless the basis and the interval are both on screen.
         steering_shape_text = (
-            f", steering shaped from {desired_steering:+.3f}rad"
+            f", steering shaped from {desired_steering:+.3f}rad "
+            f"(slew-limited from basis {steering_basis_before:+.3f}rad "
+            f"over {command_dt:.3f}s at {self.max_steering_rate:.2f}rad/s)"
             if not math.isclose(steering_angle, desired_steering) else "")
         speed_shape_text = (
             f", acceleration-shaped from {desired_speed:.2f}m/s"
@@ -531,18 +608,126 @@ class GapFollowNode(Node):
         cap_text = (
             f"curve cap={curve_speed:.2f}m/s, "
             f"clearance cap={clearance_speed:.2f}m/s"
-            + (f", corner cap={self.corner_speed:.2f}m/s" if used_fallback else ""))
+            + (f", corner cap={self.corner_speed:.2f}m/s" if used_fallback else "")
+            + (f", CREEP (forward clearance {forward_clearance:.3f}m inside "
+               f"the {self.forward_stop_clearance:.3f}m reserve; crawling out)"
+               if creeping else ""))
         self._log_decision(
             gap_mode,
             f"selected {depth_text} gap "
             f"{math.degrees(gap_lo_angle):+.1f}deg to "
             f"{math.degrees(gap_hi_angle):+.1f}deg; target="
             f"{target_distance:.2f}m at {math.degrees(target_angle):+.1f}deg, "
-            f"curvature={target_curvature:+.3f}/m, closest={closest_text}; "
+            f"curvature={limited_curvature:+.3f}/m, closest={closest_text}, "
+            f"odom={self.current_speed:+.2f}m/s; "
             f"{cap_text}{steering_shape_text}{speed_shape_text}",
             steering_angle,
             speed,
         )
+
+    def _select_gap(self, window, window_valid, angle_increment, beam_angles):
+        """Inflate obstacle edges, bubble the closest hit, and pick a gap.
+
+        Split out of scan_callback so a *blocking stop* can ask the same
+        question the driving path asks -- "is there a way out of here?" --
+        and put the answer in the log. Returns the processed window plus
+        ``(closest_dist, gap_start, gap_end, used_fallback)``.
+        """
+        closest_idx, closest_dist = gap_logic.closest_valid(window, window_valid)
+
+        # Inflate each edge by half the car width plus one side's margin.
+        # Remaining ranges represent valid car-center positions.
+        half_width = self.car_width / 2.0 + self.safety_margin
+        processed = gap_logic.disparity_extend(
+            window, angle_increment, self.disparity_threshold, half_width)
+        if closest_idx is not None:
+            processed = gap_logic.safety_bubble(
+                processed, closest_idx, closest_dist, angle_increment,
+                half_width)
+
+        gap_start, gap_end, used_fallback = gap_logic.find_gap_with_fallback(
+            processed,
+            self.min_gap_distance,
+            self.fallback_min_gap_distance,
+            angle_increment,
+            self.min_centerline_gap_width,
+        )
+        target = self._aim_within_gap(
+            processed, gap_start, gap_end, beam_angles)
+        return processed, closest_dist, gap_start, gap_end, used_fallback, target
+
+    @staticmethod
+    def _aim_within_gap(window, gap_start, gap_end, beam_angles):
+        """Pick the beam to steer at inside a chosen gap.
+
+        The midpoint is the classic follow-the-gap answer, and it is the right
+        one when both edges are real obstacles -- it centres the car between
+        them. It is the wrong one when an edge is just the limit of the
+        sensor's field of view, because that edge carries no information about
+        where the track goes. A gap running from the -90deg FOV boundary to
+        +3deg has a midpoint of -44deg, which points into the wall beside the
+        car rather than down the course.
+
+        That is what tore the steering apart on 2026-07-27. Around a corner
+        nothing clears the preferred depth, so the fallback gap took over --
+        edge-clipped, aiming -44deg -- while on alternate scans a sliver of
+        deep space reappeared and aimed +6deg. Desired steering alternated
+        +0.26/-0.26rad at scan rate and the slew limiter averaged the pair to
+        0.009rad, so the car drove straight into the corner it was supposedly
+        turning away from.
+
+        When an edge is FOV-clipped, aim at the deepest beam in the gap
+        instead: that is the direction the course actually continues, and it
+        agrees with the preferred gap rather than fighting it.
+
+        Depth ties have to be broken deliberately. In open space every beam
+        reads max_range, so a plain argmax returns the first index -- which is
+        the edge of the field of view, i.e. hard over to one side in exactly
+        the situation where the car should go straight. Among the beams that
+        are effectively as deep as the deepest, take the one closest to
+        straight ahead.
+        """
+        if gap_start is None:
+            return None
+        if gap_start != 0 and gap_end != len(window) - 1:
+            return (gap_start + gap_end) // 2
+
+        depths = window[gap_start:gap_end + 1]
+        deepest = float(np.max(depths))
+        near_deepest = np.nonzero(
+            depths >= deepest - max(1e-6, 0.05 * deepest))[0]
+        angles = beam_angles[gap_start:gap_end + 1][near_deepest]
+        return gap_start + int(near_deepest[int(np.argmin(np.abs(angles)))])
+
+    def _escape_report(self, window, window_valid, scan, lo_idx,
+                       beam_angles) -> str:
+        """Say whether a stopped car can see a way out, and where.
+
+        A blocking stop that prints only the clearance that tripped it cannot
+        be told apart from a genuine dead end. When the car is sitting still
+        the question that actually matters is whether it is boxed in or
+        holding station in front of an escape it has already found -- so run
+        the same gap search the driving path runs and report the answer.
+
+        Only ever called from the logging path, so the extra work happens at
+        the log rate, not the scan rate.
+        """
+        _, _, gap_start, _, used_fallback, target = self._select_gap(
+            window, window_valid, scan.angle_increment, beam_angles)
+        if gap_start is None:
+            return ('; NO ESCAPE VISIBLE: no gap clears either depth '
+                    'threshold, so the car cannot steer out of this unaided')
+        target_angle = scan.angle_min + (
+            lo_idx + target) * scan.angle_increment
+        steering = float(np.clip(
+            self.steering_gain * target_angle,
+            -self.max_steering_angle,
+            self.max_steering_angle,
+        ))
+        depth = 'fallback-depth' if used_fallback else 'preferred-depth'
+        return (f"; escape visible: {depth} gap at "
+                f"{math.degrees(target_angle):+.1f}deg, would steer "
+                f"{steering:+.3f}rad as soon as this clears")
 
     def _sensor_status_callback(self):
         """Explain a missing scan stream even though scan_callback is idle."""
@@ -592,8 +777,9 @@ class GapFollowNode(Node):
         if math.isfinite(speed) and math.isfinite(steering_angle):
             # Every command supersedes the previous one. In particular, an
             # emergency zero must not leave an older positive command latched.
+            # The steering slew basis is deliberately not updated here -- the
+            # drive path and _stop() each own how it evolves.
             self.last_commanded_speed = float(speed)
-            self.last_commanded_steering = float(steering_angle)
             self.last_command_time = now
 
         msg = AckermannDriveStamped()
@@ -604,8 +790,27 @@ class GapFollowNode(Node):
         self.drive_pub.publish(msg)
 
     def _stop(self, state: str, detail: str):
-        self._publish_drive(0.0, 0.0)
-        self._log_decision(state, detail, 0.0, 0.0)
+        # Hold the rack where it is; only the speed goes to zero. A stationary
+        # car's steering angle is inert -- it cannot cause motion, and the mux
+        # stops the car regardless -- so centring it buys no safety, and it
+        # costs the one thing the car needs to get out of trouble.
+        #
+        # Centring here is what defeated two runs. TTC braking near a wall
+        # alternates stop/drive at scan rate, and every stop returned the rack
+        # to centre, so each drive command in between started its rate limit
+        # from 0 and never exceeded max_steering_rate*dt (~0.03rad) while the
+        # speed ramp -- which reads measured speed, not the last command --
+        # recovered in full. The car kept its throttle and lost its steering
+        # precisely while pinned against a wall.
+        #
+        # Holding is also the honest model: publishing 0 would really drive
+        # the servo to centre, so the basis would have to follow it down.
+        # Nothing here needs resetting by an operator -- the basis tracks the
+        # rack, the rack holds while stopped, and the next drive command slews
+        # from where the wheels actually are. Recovery must never depend on
+        # someone noticing the car and cycling LB.
+        self._publish_drive(self.steering_basis, 0.0)
+        self._log_decision(state, detail, self.steering_basis, 0.0)
 
     def _log_decision(self, state: str, detail: str, steering_angle: float,
                       speed: float, command_published: bool = True):
@@ -622,6 +827,12 @@ class GapFollowNode(Node):
         )
         if not state_changed and not period_elapsed:
             return
+
+        # Detail may be a thunk so that an expensive diagnostic (the escape
+        # report re-runs the whole gap pipeline) is only paid for on the ticks
+        # that actually print, not on every scan.
+        if callable(detail):
+            detail = detail()
 
         stopped = speed <= 0.0
         if command_published:

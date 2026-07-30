@@ -140,39 +140,6 @@ def test_disparity_extend_handles_an_edge_in_the_other_direction():
     assert np.allclose(out[:50 - expected_beams], 8.0)
 
 
-def test_target_curvature_uses_range_bearing_and_lidar_offset():
-    curvature = gap_logic.target_curvature(
-        target_range=2.0,
-        target_angle=math.pi / 6.0,
-        laser_offset_x=0.33,
-        max_lookahead=1.5,
-    )
-    x_body = 0.33 + 1.5 * math.cos(math.pi / 6.0)
-    y_body = 1.5 * math.sin(math.pi / 6.0)
-    assert curvature == pytest.approx(
-        2.0 * y_body / (x_body * x_body + y_body * y_body))
-    assert gap_logic.target_curvature(
-        2.0, 0.0, 0.33, max_lookahead=1.5) == pytest.approx(0.0)
-
-
-def test_target_curvature_sign_follows_the_ros_left_positive_convention():
-    # A target to the *left* (positive bearing, REP-103) must produce positive
-    # curvature and therefore a positive (left) steering angle, matching
-    # AckermannDriveStamped. Getting this backwards steers into the obstacle.
-    left = gap_logic.target_curvature(1.5, +0.3, 0.33, max_lookahead=1.5)
-    right = gap_logic.target_curvature(1.5, -0.3, 0.33, max_lookahead=1.5)
-    assert left > 0.0 and right < 0.0
-    assert left == pytest.approx(-right)
-    assert gap_logic.steering_from_curvature(left, 0.324, 0.26) > 0.0
-    assert gap_logic.steering_from_curvature(right, 0.324, 0.26) < 0.0
-
-
-def test_geometric_steering_is_dynamic_and_clipped():
-    assert gap_logic.steering_from_curvature(0.0, 0.324, 0.26) == 0.0
-    assert gap_logic.steering_from_curvature(0.5, 0.324, 0.26) > 0.0
-    assert gap_logic.steering_from_curvature(100.0, 0.324, 0.26) == pytest.approx(0.26)
-
-
 def test_curvature_speed_limit_is_fast_straight_and_slow_in_turn():
     assert gap_logic.curvature_speed_limit(0.0, 1.0, 2.0) == pytest.approx(2.0)
     assert gap_logic.curvature_speed_limit(1.0, 1.0, 2.0) == pytest.approx(1.0)
@@ -392,13 +359,43 @@ def test_conservative_ttc_speed_trusts_meaningful_fresh_odom():
     ) == pytest.approx(0.5)
 
 
-def test_conservative_ttc_speed_ignores_stale_command_and_reverse_motion():
+def test_conservative_ttc_speed_ignores_stale_command():
+    assert gap_logic.conservative_ttc_speed(
+        measured_speed=0.0,
+        commanded_speed=1.5,
+        command_age_sec=0.51,
+        command_timeout_sec=0.5,
+    ) == 0.0
+
+
+def test_conservative_ttc_speed_uses_reverse_motion_magnitude():
+    """A stale command must not hide real motion just because it reads
+    negative -- the magnitude is what the TTC clock runs on."""
     assert gap_logic.conservative_ttc_speed(
         measured_speed=-0.2,
         commanded_speed=1.5,
         command_age_sec=0.51,
         command_timeout_sec=0.5,
-    ) == 0.0
+    ) == pytest.approx(0.2)
+
+
+def test_conservative_ttc_speed_survives_inverted_odometry_sign():
+    """Regression: the 2026-07-27 collision.
+
+    With a sign-inverted /odom, a car really doing 1.8m/s reported -1.8m/s.
+    The old signed comparison read that as stationary, fell through to the
+    commanded speed -- which is 0 for exactly one tick after every brake --
+    and reported 0m/s, so TTC went infinite and released the brake on the
+    next scan. The magnitude must survive both the sign and the zero
+    command that a brake leaves behind.
+    """
+    assert gap_logic.conservative_ttc_speed(
+        measured_speed=-1.8,
+        commanded_speed=0.0,
+        command_age_sec=0.02,
+        command_timeout_sec=0.5,
+        fallback_max_measured_speed=0.1,
+    ) == pytest.approx(1.8)
 
 
 def test_conservative_ttc_speed_rejects_invalid_age():
@@ -451,3 +448,57 @@ def test_post_inflation_gap_does_not_require_second_full_car_width():
     start, end = gap_logic.find_best_gap(
         window, 0.8, angle_increment=0.01, min_gap_width_m=0.10)
     assert (start, end) == (44, 55)
+
+
+# ============================================================================
+# TTC swept-corridor gate: obstacles the car drives PAST are not collisions
+# ============================================================================
+
+def _beams(angles_deg, ranges):
+    ang = np.radians(np.array(angles_deg, dtype=float))
+    r = np.array(ranges, dtype=float)
+    return r, np.ones_like(r, dtype=bool), ang, np.zeros_like(r)
+
+
+def test_ttc_ignores_a_wall_the_car_drives_past():
+    """Regression: the 1m-course crawl.
+
+    iTTC projects speed radially onto every beam, so a wall well off to the
+    side reads as an approach that can never happen. On a wide track that is
+    harmless; in a 1m corridor it capped this car at 1.42m/s while perfectly
+    centred, and at 0.27m/s once it drifted toward one wall.
+    """
+    # Wall 0.42m to the side, seen at 45deg => range 0.60m.
+    r, valid, ang, bnd = _beams([45.0], [0.60])
+    ungated = gap_logic.minimum_ttc(r, valid, ang, 2.0, bnd)
+    gated = gap_logic.minimum_ttc(r, valid, ang, 2.0, bnd,
+                                  swept_half_width=0.255)
+    assert ungated < 0.5, 'the ungated model must show the phantom approach'
+    assert gated == math.inf, 'a wall 0.5m to the side is driven past, not hit'
+
+
+def test_ttc_still_brakes_for_an_obstacle_dead_ahead():
+    r, valid, ang, bnd = _beams([0.0], [0.4])
+    assert gap_logic.minimum_ttc(
+        r, valid, ang, 2.0, bnd, swept_half_width=0.255) == pytest.approx(0.2)
+
+
+def test_ttc_still_brakes_for_an_obstacle_inside_the_swept_width():
+    # 0.15m to the side at 30deg => range 0.30m, inside a 0.255m half-width.
+    r, valid, ang, bnd = _beams([30.0], [0.30])
+    assert gap_logic.minimum_ttc(
+        r, valid, ang, 1.0, bnd, swept_half_width=0.255) < math.inf
+
+
+def test_ttc_swept_corridor_follows_the_turn():
+    """A car at full lock curves around the outside of its own corner. Judging
+    it as if it were going straight is what deadlocked it mid-turn."""
+    # Obstacle 0.6m ahead, 0.1m to the left -- straight ahead that is a hit.
+    r, valid, ang, bnd = _beams([9.5], [0.608])
+    straight = gap_logic.minimum_ttc(
+        r, valid, ang, 1.0, bnd, swept_half_width=0.255, path_curvature=0.0)
+    turning = gap_logic.minimum_ttc(
+        r, valid, ang, 1.0, bnd, swept_half_width=0.255,
+        path_curvature=-0.821, laser_offset_x=0.33)
+    assert straight < math.inf, 'straight ahead, this is on the path'
+    assert turning == math.inf, 'turning hard right, the car goes around it'

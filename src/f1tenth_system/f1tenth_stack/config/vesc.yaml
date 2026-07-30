@@ -29,6 +29,19 @@
 
 vesc_to_odom_node:
   ros__parameters:
+    # LOCAL FIX (this car) -- see docs/git-setup.md before syncing upstream.
+    # vesc_to_odom.cpp computes  speed = (-state.speed - offset) / gain,
+    # i.e. it hardcodes a negation of the eRPM the VESC reports. This car's
+    # VESC already reports eRPM with the same sign as the commanded eRPM, so
+    # that negation makes /odom report NEGATIVE linear.x while the car drives
+    # FORWARD, and integrates the odom->base_link TF backwards with it.
+    # Negating the gain here -- and only here; the shared /** block keeps
+    # +4614.0 for ackermann_to_vesc_node, which sets the motor command --
+    # cancels it, so forward is positive again.
+    # Evidence (2026-07-27 gap_follow collision log): commanded +1.86m/s with
+    # /odom reading -1.76m/s while the car closed on a wall directly ahead;
+    # magnitudes tracked the command within ~5% throughout.
+    speed_to_erpm_gain: -4614.0
     odom_frame: odom
     base_frame: base_link
     # publish odom to base link tf

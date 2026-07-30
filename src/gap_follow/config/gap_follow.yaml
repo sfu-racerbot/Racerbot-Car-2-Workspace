@@ -17,9 +17,13 @@ gap_follow_node:
     min_speed: 0.8
     # Symmetric achievable envelope from the calibrated servo mapping.
     max_steering_angle: 0.26
-    # Target bearing + range become a rear-axle curvature over at most this
-    # lookahead. Speed is capped by lateral acceleration and stopping distance.
-    steering_lookahead_distance: 1.5
+    # Steering is proportional to the selected gap's bearing, clipped to
+    # max_steering_angle: 1.0 means "point the wheels at the gap". This
+    # replaced a Pure Pursuit curvature law that could not physically ask for
+    # more than ~0.11rad at the 13deg bearings this car sees in a corridor,
+    # so it hugged walls instead of leaving them. Raise above 1.0 only if the
+    # car is still slow to leave a wall; too high will make it weave.
+    steering_gain: 1.0
     max_lateral_accel: 1.0
     max_acceleration: 3.0
     # SAFETY-CRITICAL, and NOT the same knob as pure_pursuit's identically
@@ -53,6 +57,14 @@ gap_follow_node:
     # cone avoids treating a close side wall in a corner as a frontal hazard.
     forward_stop_clearance: 0.25
     forward_stop_fov_deg: 60.0
+    # Inside forward_stop_clearance the car crawls at this speed instead of
+    # latching at zero. That cone points where the car is aimed, not where it
+    # is going, so a car turning out of a corner used to be frozen by the wall
+    # it was already steering around -- with no way back out, since stopping
+    # removes the motion that would clear the cone. Contact clearance, TTC and
+    # the no-gap stop all still stop the car outright; this only lets a car
+    # that has found an exit inch toward it.
+    escape_creep_speed: 0.25
 
     # --- Time-to-collision automatic emergency braking ---
     enable_ttc: true

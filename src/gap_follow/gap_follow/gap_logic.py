@@ -17,8 +17,6 @@ The processing pipeline, in the order the node applies it:
   minimum_...         -> footprint clearance plus forward clearance floor
   conservative_...    -> safest recent odometry/command speed for TTC
   minimum_ttc         -> footprint-aware LiDAR collision timing
-  target_curvature    -> rear-axle curvature to a LiDAR target point
-  steering_from_...   -> bicycle-model steering for that curvature
   curvature_speed...  -> lateral-acceleration speed ceiling
   braking_speed...    -> clearance-aware stopping speed ceiling
   slew_rate_limit     -> bounded normal command changes
@@ -171,7 +169,11 @@ def conservative_ttc_speed(measured_speed: float,
                            command_age_sec: float = math.inf,
                            command_timeout_sec: float = 0.5,
                            fallback_max_measured_speed: float = 0.1) -> float:
-    """Safest speed when fresh odometry is absent or effectively zero."""
+    """Safest speed when fresh odometry is absent or effectively zero.
+
+    Sign-agnostic: ``measured_speed`` is used by magnitude, so an odometry
+    source with an inverted sign convention cannot suppress braking.
+    """
     if not math.isfinite(measured_speed):
         raise ValueError('measured_speed must be finite')
     if not math.isfinite(commanded_speed):
@@ -187,8 +189,22 @@ def conservative_ttc_speed(measured_speed: float,
         raise ValueError(
             'fallback_max_measured_speed must be finite and non-negative')
 
-    speed = max(0.0, measured_speed)
-    if (measured_speed <= fallback_max_measured_speed
+    # Use the *magnitude* of the measurement. A sign convention belongs to
+    # the odometry source, not to how fast the car is actually moving, and
+    # trusting it here does not fail loudly -- it fails silent and open:
+    #
+    #   A car driving forward at 1.8m/s whose odometry reports -1.8m/s reads
+    #   as "not moving forward", passes the effectively-stationary test
+    #   below, and falls through to the commanded speed. One tick after any
+    #   brake the commanded speed is 0, so the effective TTC speed is 0, no
+    #   beam counts as approaching, TTC is infinite -- and the brake releases
+    #   itself on the very next scan. The result is a 20Hz square wave of
+    #   full speed and zero rather than a stop. That crashed the car.
+    #
+    # This node never commands reverse, so the magnitude is always the
+    # conservative estimate, and it is correct under either sign convention.
+    speed = abs(measured_speed)
+    if (speed <= fallback_max_measured_speed
             and command_age_sec <= command_timeout_sec):
         speed = max(speed, commanded_speed)
     return max(0.0, speed)
@@ -197,7 +213,11 @@ def conservative_ttc_speed(measured_speed: float,
 def time_to_collision(clean: np.ndarray, valid: np.ndarray,
                       angles: np.ndarray, speed: float,
                       boundary_distances: np.ndarray,
-                      min_closing_speed: float = 0.05) -> np.ndarray:
+                      min_closing_speed: float = 0.05,
+                      swept_half_width: float = None,
+                      path_curvature: float = 0.0,
+                      laser_offset_x: float = 0.0,
+                      laser_offset_y: float = 0.0) -> np.ndarray:
     """Instantaneous TTC for every scan beam, with the car footprint removed.
 
     This is the F1TENTH iTTC construction: longitudinal odometry speed is
@@ -205,6 +225,24 @@ def time_to_collision(clean: np.ndarray, valid: np.ndarray,
     approaching have infinite TTC. Raw ranges are converted to body clearance
     first, so the clock reaches zero when the rectangular car body reaches the
     obstacle, not when the LiDAR itself does.
+
+    ``swept_half_width`` gates the whole thing on whether the car can actually
+    *reach* a beam's obstacle. The radial projection above is only valid for
+    something the car is driving at: for an obstacle off to the side it
+    manufactures a collision that cannot happen, because the car passes beside
+    it. On a wide track that is harmless, but it scales with how close the
+    walls are, and on a 1m course it dominates -- measured on this car,
+    perfectly centred, it capped the car at 1.42m/s off a wall 0.50m to the
+    side, and at 0.27m/s once it drifted to 0.22m from that wall. That is not
+    the brake being cautious, it is the brake being wrong.
+
+    Gating on lateral offset (``|r*sin(angle)| <= swept_half_width``) keeps
+    every obstacle the straight-ahead car would hit and drops the ones it
+    would pass. Pass ``None`` to keep the ungated behaviour.
+
+    Note this models straight-line travel, so it does not by itself cover a
+    wall the car is *turning* into; the all-direction contact floor and the
+    forward-cone clearance layer own that case.
     """
     ranges = np.asarray(clean, dtype=np.float64)
     validity = np.asarray(valid, dtype=bool)
@@ -223,6 +261,29 @@ def time_to_collision(clean: np.ndarray, valid: np.ndarray,
         & np.isfinite(boundaries)
         & (closing_speed > min_closing_speed)
     )
+    if swept_half_width is not None:
+        if not math.isfinite(swept_half_width) or swept_half_width <= 0.0:
+            raise ValueError('swept_half_width must be finite and positive')
+        if not math.isfinite(path_curvature):
+            raise ValueError('path_curvature must be finite')
+        point_x = ranges * np.cos(beam_angles)
+        point_y = ranges * np.sin(beam_angles)
+        if abs(path_curvature) < 1e-6:
+            offset_from_path = np.abs(point_y)
+        else:
+            # Turning: the swept region is an annulus about the turn centre,
+            # not a straight band. Evaluating a hard-over car as if it were
+            # going straight is what deadlocked it mid-corner -- the outer
+            # wall sat in the straight-ahead band while the car was curving
+            # around it, so TTC braked, the escape creep re-commanded motion,
+            # and the two alternated at scan rate to a net standstill.
+            radius = 1.0 / path_curvature
+            centre_x = -laser_offset_x
+            centre_y = -laser_offset_y + radius
+            offset_from_path = np.abs(
+                np.hypot(point_x - centre_x, point_y - centre_y)
+                - abs(radius))
+        approaching &= offset_from_path <= swept_half_width
     ttc = np.full(ranges.shape, np.inf, dtype=np.float64)
     clearances = np.maximum(0.0, ranges - boundaries)
     ttc[approaching] = clearances[approaching] / closing_speed[approaching]
@@ -232,55 +293,16 @@ def time_to_collision(clean: np.ndarray, valid: np.ndarray,
 def minimum_ttc(clean: np.ndarray, valid: np.ndarray,
                 angles: np.ndarray, speed: float,
                 boundary_distances: np.ndarray,
-                min_closing_speed: float = 0.05) -> float:
+                min_closing_speed: float = 0.05,
+                swept_half_width: float = None,
+                path_curvature: float = 0.0,
+                laser_offset_x: float = 0.0,
+                laser_offset_y: float = 0.0) -> float:
     """Return the minimum finite footprint-aware iTTC, or infinity."""
     ttc = time_to_collision(
-        clean, valid, angles, speed, boundary_distances, min_closing_speed)
+        clean, valid, angles, speed, boundary_distances, min_closing_speed,
+        swept_half_width, path_curvature, laser_offset_x, laser_offset_y)
     return float(np.min(ttc)) if ttc.size else math.inf
-
-
-def target_curvature(target_range: float, target_angle: float,
-                     laser_offset_x: float, laser_offset_y: float = 0.0,
-                     max_lookahead: float = math.inf) -> float:
-    """Pure-pursuit curvature from the rear axle to a LiDAR target.
-
-    A LaserScan point is expressed from the sensor, while Ackermann steering
-    geometry is referenced to ``base_link`` at the rear axle. Convert the
-    target to that body frame before applying ``kappa = 2*y/(x^2+y^2)``.
-    ``max_lookahead`` keeps a very distant return from making a meaningful
-    target bearing produce an unrealistically tiny steering command.
-
-    Curvature is a property of the path, not the vehicle, so no wheelbase is
-    involved here -- it enters only when this curvature is turned into a
-    steering angle by :func:`steering_from_curvature`.
-    """
-    if not all(value > 0.0 for value in (target_range, max_lookahead)):
-        raise ValueError('target_range and max_lookahead must be positive')
-    if not all(math.isfinite(value) for value in (
-            target_range, target_angle, laser_offset_x, laser_offset_y)):
-        raise ValueError('target geometry inputs must be finite')
-    if not math.isfinite(max_lookahead) and max_lookahead != math.inf:
-        raise ValueError('max_lookahead must be finite or positive infinity')
-
-    distance = min(target_range, max_lookahead)
-    x_body = laser_offset_x + distance * math.cos(target_angle)
-    y_body = laser_offset_y + distance * math.sin(target_angle)
-    distance_sq = x_body * x_body + y_body * y_body
-    if distance_sq < 1e-9:
-        return 0.0
-    return 2.0 * y_body / distance_sq
-
-
-def steering_from_curvature(curvature: float, wheelbase: float,
-                            max_steering_angle: float) -> float:
-    """Bicycle-model steering, clipped to the configured physical limit."""
-    if not all(math.isfinite(value) for value in (
-            curvature, wheelbase, max_steering_angle)):
-        raise ValueError('steering inputs must be finite')
-    if wheelbase <= 0.0 or max_steering_angle <= 0.0:
-        raise ValueError('wheelbase and max_steering_angle must be positive')
-    steering = math.atan(wheelbase * curvature)
-    return float(np.clip(steering, -max_steering_angle, max_steering_angle))
 
 
 def curvature_speed_limit(curvature: float, max_lateral_accel: float,

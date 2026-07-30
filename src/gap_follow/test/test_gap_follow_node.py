@@ -201,6 +201,142 @@ def test_steering_slews_at_the_configured_rate_and_no_faster(node):
         "a full sign reversal should saturate the rate limit, not undershoot it"
 
 
+def test_a_transient_stop_does_not_cost_the_car_its_steering(node):
+    """Regression: the 2026-07-27 wall collision.
+
+    A TTC brake was landing between every pair of scans. Each one published
+    steering=0, and that zero was fed straight back to the slew limiter as
+    its basis, so every drive command in between was re-limited starting
+    from centre and pinned at max_steering_rate*dt (~0.03rad, about 1.7deg).
+    The speed ramp reads *measured* speed rather than the last command, so
+    it recovered the full 1.8m/s every time. Full speed with almost no
+    steering authority is how the car drifted into a wall while its logs
+    showed it steering toward the gap the whole way.
+    """
+    _ready(node, speed=1.5)
+    published = _capture(node)
+    scene = _scan(_blocked_right())
+
+    for _ in range(30):
+        _tick(node, scene)
+        node._stop('injected_brake', 'transient safety stop between scans')
+
+    drive_steering = [
+        msg.drive.steering_angle for msg in published if msg.drive.speed > 0.0]
+    assert drive_steering, 'expected the node to keep issuing drive commands'
+
+    one_tick = node.max_steering_rate * node.command_slew_max_dt
+    assert abs(drive_steering[-1]) > one_tick, (
+        'steering must accumulate across ticks; a command still pinned at the '
+        'one-tick slew bound means a transient stop reset the limiter basis')
+    assert drive_steering[-1] > 0.0, 'obstacle on the right must steer left'
+
+
+def test_braking_mid_run_holds_the_rack_where_it_is(node):
+    """Braking is not a reason to throw away the turn the car is mid-way
+    through -- a stationary car's steering angle cannot cause motion, and the
+    car needs that angle the moment it is allowed to move again."""
+    _ready(node, speed=1.5)
+    published = _capture(node)
+    for _ in range(30):
+        _tick(node, _scan(_blocked_right()))
+    turning = node.steering_basis
+    assert abs(turning) > 0.05, 'expected a real turn to build up'
+
+    for _ in range(40):
+        node.last_command_time = node.get_clock().now() - Duration(seconds=0.025)
+        node._stop('sustained', 'held stop')
+    assert node.steering_basis == pytest.approx(turning)
+    assert published[-1].drive.speed == 0.0, 'a stop must still command zero speed'
+    assert published[-1].drive.steering_angle == pytest.approx(turning)
+
+
+def test_recovery_never_depends_on_cycling_the_deadman(node):
+    """Nothing in the stop path may need an operator to notice the car and
+    release LB. Whatever a stop leaves behind, the node must be able to drive
+    straight back out of it on its own the moment the scan says it can."""
+    _ready(node, speed=1.5)
+    published = _capture(node)
+    for _ in range(30):
+        _tick(node, _scan(_blocked_right()))
+    turning = node.steering_basis
+    assert abs(turning) > 0.05
+
+    # A long blocking stop, LB held the whole time -- exactly the deadlock the
+    # car sat in on 2026-07-27.
+    blocked = _scan([0.30] * 541)
+    for _ in range(40):
+        _tick(node, blocked)
+    assert published[-1].drive.speed == 0.0, 'expected the node to be stopped'
+
+    # The obstacle clears. No LB cycle, no operator, no reset: the very next
+    # scans must produce motion again.
+    for _ in range(10):
+        _tick(node, _scan(_blocked_right()))
+    assert published[-1].drive.speed > 0.0, \
+        'the node must resume on its own once the scan clears'
+
+
+def _wall_ahead(distance, n=541, elsewhere=8.0):
+    """A wall `distance` away across the forward +/-30deg cone only."""
+    ranges = [elsewhere] * n
+    for i in range(180, 361):          # -30deg .. +30deg on a 541/pi scan
+        ranges[i] = distance
+    return ranges
+
+
+def test_a_blocked_forward_cone_crawls_out_instead_of_latching(node):
+    """Regression: the deadlock that stranded the car on 2026-07-27.
+
+    The forward clearance cone points where the car is *aimed*, not where it
+    is *going*. A car turning out of a corner therefore trips it on the wall
+    it is already steering around -- and a hard stop there is unrecoverable,
+    because stopping removes the very motion that would clear the cone. With
+    an escape visible the car must keep crawling toward it.
+    """
+    _ready(node, speed=0.1)
+    published = _capture(node)
+    for _ in range(5):
+        _tick(node, _scan(_wall_ahead(0.35)))
+
+    last = published[-1]
+    assert last.drive.speed > 0.0, \
+        'a blocked cone with a visible escape must crawl, not latch at zero'
+    assert last.drive.speed <= node.escape_creep_speed + 1e-9, \
+        'the crawl must stay within escape_creep_speed'
+    assert abs(last.drive.steering_angle) > 0.0, 'it must steer while crawling'
+
+
+def test_the_crawl_never_exceeds_its_stopping_distance(node):
+    """The creep spends at most half the forward reserve, so it still has
+    real margin in hand -- it must taper toward zero as the wall closes."""
+    _ready(node, speed=0.1)
+    published = _capture(node)
+
+    speeds = []
+    for distance in (0.35, 0.28, 0.24, 0.20):
+        for _ in range(3):
+            _tick(node, _scan(_wall_ahead(distance)))
+        speeds.append(published[-1].drive.speed)
+
+    assert speeds == sorted(speeds, reverse=True), \
+        f'crawl speed must fall as the wall closes, got {speeds}'
+    assert speeds[-1] < speeds[0]
+
+
+def test_a_dead_end_still_stops_the_car_dead(node):
+    """The creep must not become a licence to drive into a wall. With no gap
+    anywhere, the car stops at zero and stays there."""
+    _ready(node, speed=0.1)
+    published = _capture(node)
+    for _ in range(10):
+        _tick(node, _scan([0.35] * 541))
+
+    assert published[-1].drive.speed == 0.0, \
+        'boxed in with no escape, the car must command a full stop'
+    assert node.last_decision_state in ('no_safe_gap', 'emergency_clearance')
+
+
 # ============================================================================
 # Emergency paths -- these must bypass all command shaping
 # ============================================================================

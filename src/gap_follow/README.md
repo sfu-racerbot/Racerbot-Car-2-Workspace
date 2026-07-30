@@ -75,11 +75,42 @@ This exists so the car never steers toward a "gap" that's actually behind or bes
 
 The collision model is a rectangle around `base_link` (rear axle). The [Traxxas 74276-4 specifications](https://traxxas.com/74276-4-ford-fiesta-st-rally-vxl) are 0.281m wide, 0.535m long, and 0.324m wheelbase; the configured rectangle deliberately remains inflated to 0.31m × 0.58m. `vehicle_boundary_distances()` ray-casts from the estimated LiDAR origin (+0.33m forward, about 0.10m behind the physical nose) to that padded rectangle. Subtracting this per-beam distance from the scan produces clearance from the body rather than from the sensor.
 
-Collision detection has three layers. The all-direction contact floor stops at `emergency_stop_clearance` (0.02m from the body). A separate odometry-independent fallback stops at `forward_stop_clearance` (0.25m) within the narrow `forward_stop_fov_deg` cone (60°, or ±30°); close side walls outside that cone do not trigger it. The speed-aware layer then evaluates every approaching beam:
+Collision detection has three layers. The all-direction contact floor stops at `emergency_stop_clearance` (0.02m from the body). A separate odometry-independent fallback covers `forward_stop_clearance` (0.25m) within the narrow `forward_stop_fov_deg` cone (60°, or ±30°); close side walls outside that cone do not trigger it. The speed-aware layer then evaluates every approaching beam:
 
 ```text
 iTTC = max(0, range - body_boundary) / (v_x * cos(beam_angle))
 ```
+
+**The forward-cone layer crawls rather than latches.** Inside
+`forward_stop_clearance` the car does not command zero — it drops to
+`escape_creep_speed` (0.25m/s), still steering at the gap. That cone points
+where the car is *aimed*, not where it is *going*, so a car turning out of a
+corner trips it on the wall it is already steering around; a hard stop there
+cannot be recovered from, because stopping removes the very motion that would
+clear the cone. On 2026-07-27 the car sat frozen mid-corner, 0.58m from the
+nearest wall with full lock dialled in and an exit already found, until an
+operator noticed. The crawl spends at most *half* the reserve — below that it
+tapers to zero with 0.125m of padded-body clearance still in hand — and every
+independent layer is untouched: contact clearance, TTC, and the no-gap stop
+each still stop the car outright, so a genuine dead end still ends in a full
+stop. Recovery must never depend on someone noticing the car.
+
+**TTC only counts obstacles inside the corridor the car will actually sweep.**
+The radial projection above (`v * cos(angle)`) is valid for something the car
+is driving *at*; for an obstacle off to the side it manufactures a collision
+that cannot happen, because the car passes beside it. That error scales with
+how close the walls are, so it is invisible on a wide track and dominant on a
+1m course: measured on this car, perfectly centred in a 1.0m corridor, a wall
+**0.50m to the side** held it to **1.42m/s**, falling to **0.27m/s** once it
+drifted to 0.22m from that wall. That is the brake being wrong, not cautious.
+
+A beam is therefore only counted if its obstacle lies within
+`car_width/2 + safety_margin` of the path — and the path is the *arc* implied
+by the current steering, not a straight line. A car at full lock curves around
+the outside of its own corner; judging it as though it were going straight
+made TTC brake for the very wall it was negotiating, which then fought the
+escape creep to a standstill mid-corner. Straight-line travel is the
+zero-curvature case of the same test.
 
 Beams with no positive closing speed have infinite TTC, so a close wall exactly beside the car does not create the old closest-range corner false positive. When fresh odometry is effectively zero (at or below `ttc_command_fallback_max_odom_speed`, 0.10m/s), TTC uses the larger of odometry and the latest drive command when that command is positive and no older than `ttc_command_speed_timeout_sec` (0.5s). Once odometry reports meaningful motion, TTC uses measured speed. This catches a stuck-zero/lagging reading without treating full requested speed as instantaneous in a healthy tight corner. A zero brake command supersedes the prior positive command, preventing stale intent from latching the stop. If minimum TTC is at or below `ttc_threshold_sec` (0.5s), the node publishes zero speed and logs `STOP [ttc_brake]`. Invalid LiDAR beams are excluded from all three checks.
 
@@ -129,32 +160,42 @@ The former implementation stopped whenever no run remained continuously deeper t
 
 Obstacle inflation has already removed `car_width / 2 + safety_margin` from both sides of every edge. The old candidate filter required another `car_width + safety_margin` after inflation, effectively demanding roughly a 0.9m raw opening for a 0.31m car. `min_centerline_gap_width` now checks only the small corridor remaining for candidate center points, eliminating that double-padding.
 
-### 7. Steer at the middle of the winning gap — as a Pure Pursuit arc
+### 7. Steer at the middle of the winning gap — proportional to its bearing
 
-The midpoint of the chosen gap gives a **bearing** $\alpha$ and, from the
-same beam, a **range** $r$. Earlier versions used the bearing directly as
-the steering angle (`steering_angle = target_angle`). That is
-dimensionally wrong: a bearing is where the target *is*, not the front-wheel
-angle that drives there. It over-steers at a near target and under-steers at
-a far one, because it ignores range entirely.
+The midpoint of the chosen gap gives a **bearing** $\alpha$. Steering is
+proportional to it, clipped to the rack's physical envelope:
 
-The target is now converted to a point in the rear-axle `base_link` frame and
-followed with the same Pure Pursuit geometry `pure_pursuit` uses
-(`gap_logic.target_curvature` → `steering_from_curvature`):
+$$\delta = \mathrm{clip}\big(K \cdot \alpha,\ \pm\delta_{max}\big)$$
 
-$$x = x_{laser} + d\cos\alpha \qquad y = y_{laser} + d\sin\alpha \qquad d = \min(r,\ L_{lookahead})$$
+with $K$ = `steering_gain` (default `1.0`, i.e. "point the wheels at the
+gap"). The bearing is read from the *processed* window — after disparity
+extension and the safety bubble — so it already encodes "how far can the
+car's centre actually go this way", not a raw beam.
 
-$$\kappa = \frac{2y}{x^2 + y^2} \qquad \delta = \arctan(L \cdot \kappa)$$
+**This replaced a Pure Pursuit arc, and the reason is worth recording.**
+Pure pursuit converted the target to a rear-axle point and followed
+$\kappa = 2y/(x^2+y^2)$, $\delta = \arctan(L\kappa)$. That is the right law
+for tracking a *path* — which is what `pure_pursuit` does — but follow-the-gap
+does not produce a path. It produces a direction to head, and the two
+disagree badly in exactly the situation that matters. A gap bearing of 13°
+reads to pure pursuit as a gentle 2.9 m-radius arc, even when the car is
+0.24 m from the wall it is trying to leave.
 
-Two details matter. The LiDAR sits `laser_offset_x` ahead of the rear axle,
-so the sensor-frame point must be shifted into the body frame before the
-curvature formula applies. And the range is capped at
-`steering_lookahead_distance` (default `1.5m`), because a 9m return down a
-straight would otherwise flatten a meaningful bearing into almost no
-steering at all. Note that $r$ is read from the *processed* window — after
-disparity extension and the safety bubble — so it is already the
-conservative "how far can the car's center actually go this way" distance,
-not the raw beam.
+Worse, that was a *ceiling* rather than a tuning problem. With the LiDAR
+sitting `laser_offset_x` = 0.33 m ahead of the rear axle, the target point
+is always at least that far forward and nearly on-axis, which bounds the
+achievable curvature no matter what lookahead is configured:
+
+| gap bearing | best $\delta$ pure pursuit can *ever* ask for | bearing law ($K$=1) |
+|---|---|---|
+| 10° | 0.086 rad (3.8 m radius) | 0.175 rad (1.8 m) |
+| 13° | 0.111 rad (2.9 m radius) | 0.227 rad (1.4 m) |
+| 20° | 0.171 rad (1.9 m radius) | 0.260 rad (1.2 m) |
+
+On the 2026-07-27 run this held every command between 0.064 and 0.118 rad
+while the rack had 0.26 rad available, and the car hugged a wall until its
+forward cone closed and the clearance stop deadlocked it. The bearing law
+is also what the standard F1TENTH follow-the-gap reference uses.
 
 $\delta$ is then clipped to `max_steering_angle`. **This default changed
 from `0.4189 rad` (~24°) to `0.26 rad` (~15°)**, matching `pure_pursuit`.
@@ -235,7 +276,7 @@ cases. Command shaping only ever applies to a normal drive command.
 | `min_gap_distance` / `fallback_min_gap_distance` | `2.0` / `0.8` m | Preferred depth and tight-corner fallback depth |
 | `max_speed` / `min_speed` / `corner_speed` | `2.0` / `0.8` / `0.5` m/s | Normal speed range and fallback cap |
 | `max_steering_angle` | `0.26` rad (~15°) | Hard command clamp — the symmetric envelope this car's servo can actually reach |
-| `steering_lookahead_distance` | `1.5` m | Cap on the target range used for the Pure Pursuit curvature |
+| `steering_gain` | `1.0` | Steering per radian of gap bearing, before the `max_steering_angle` clip. `1.0` points the wheels at the gap. Raise only if the car is slow to leave a wall; too high weaves |
 | `max_lateral_accel` | `1.0` m/s² | Cornering speed ceiling: $v \le \sqrt{a_{lat}/\|\kappa\|}$ |
 | `max_braking_decel` | `3.0` m/s² | **Safety-critical.** Braking authority the car *assumes it has* when deciding how fast it may drive for the clearance it can see. Set above real capability and it drives faster than it can stop. Not the same knob as `pure_pursuit`'s identically named command slew rate — don't copy that value here |
 | `max_acceleration` | `3.0` m/s² | Cap on how fast a speed *command* may rise; braking is never limited |
@@ -243,6 +284,34 @@ cases. Command shaping only ever applies to a normal drive command.
 | `command_slew_max_dt` | `0.10` s | Longest interval one slew step may integrate, so a scan gap isn't cashed in as a jump |
 | `emergency_stop_clearance` | `0.02` m | All-direction final contact floor measured from the padded body |
 | `forward_stop_clearance` / `forward_stop_fov_deg` | `0.25m` / `60°` | Odom-independent forward-cone braking fallback |
+| `escape_creep_speed` | `0.25` m/s | Crawl allowed *inside* `forward_stop_clearance` so a car mid-corner can drive out instead of latching. Spends at most half the reserve; contact clearance, TTC and the no-gap stop all still stop the car outright |
+
+### Turning circle vs. course width — a hard geometric limit
+
+`max_steering_angle` 0.26 rad is the **symmetric physical envelope** of the
+servo, not a tuning choice: the calibration `servo = -1.2135*delta + 0.5304`
+over the usable `servo_min`/`servo_max` 0.15–0.85 range gives +0.3135 rad one
+way and −0.2634 rad the other, so ±0.26 is all the car has both ways. That
+fixes the **minimum turn radius at 1.218 m**, and no parameter in this file
+changes it.
+
+On a 1.0 m course that is the binding constraint on what the car can drive:
+
+| corner | outcome |
+|---|---|
+| gentle/rounded bend (≥1.0 m inner radius) | fine — validated closed-loop, 0.047 m clearance |
+| S-bend / chicane | fine — validated closed-loop |
+| **sharp 90°, taken on the centreline** | **not physically possible** |
+
+A centreline arc through a square 90° corner between two 1.0 m corridors
+clears the inner corner by only **0.048 m** with the bare padded body, and is
+a *collision* once `safety_margin` is added at all. Reaching such a corner
+requires a racing line — approaching hard against the outer wall so the arc
+starts wide — which a reactive gap follower that tracks the middle of the
+visible opening does not do. If the course has square 1 m corners, that is a
+planner/route problem, not something to tune out of this node, and the honest
+options are to round the corner, widen it, or drive it under `pure_pursuit` on
+a recorded line.
 | `enable_ttc` / `ttc_threshold_sec` | `true` / `0.5s` | Enable iTTC braking and set its trigger |
 | `ttc_min_closing_speed` / `odom_timeout_sec` | `0.05m/s` / `0.5s` | Ignore negligible closing rates; fail closed on stale odometry |
 | `ttc_command_speed_timeout_sec` | `0.5s` | Freshness limit for a latest positive command used as TTC backup |
