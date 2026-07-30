@@ -3,7 +3,13 @@ web_dashboard_node:
     # --- Topics ---
     map_topic: /map
     scan_topic: /scan
-    pose_topic: /pf/viz/inferred_pose
+    # Every pose source this car can run, subscribed at once so the same
+    # dashboard process works across all of them without a relaunch:
+    #   /pf/viz/inferred_pose  particle_filter (race/localization stacks)
+    #   /slam_pose             auto_map_race_node, while slam_toolbox maps
+    pose_topics:
+      - /pf/viz/inferred_pose
+      - /slam_pose
     drive_topic: /ackermann_cmd  # selected command after ackermann_mux
     odom_topic: /odom            # measured longitudinal speed
     joy_topic: /joy              # read-only LB state for the stopwatch

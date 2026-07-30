@@ -26,7 +26,7 @@ apply to it; both are scoped to nodes that can move the car (see
 
 ## Interface
 
-- **Subscribes:** map (`/map`), scan (`/scan`), pose (`/pf/viz/inferred_pose`), selected command (`/ackermann_cmd`), measured odometry (`/odom`), and joystick state (`/joy`). Every subscription is display/timer input only.
+- **Subscribes:** map (`/map`), scan (`/scan`), pose (`/pf/viz/inferred_pose` *and* `/slam_pose`), selected command (`/ackermann_cmd`), measured odometry (`/odom`), and joystick state (`/joy`). Every subscription is display/timer input only.
 - Also samples CPU%/mem%/CPU temp/WiFi signal/uptime on a timer (`psutil` + `/sys/class/thermal` + `/proc/net/wireless`).
 - **Publishes:** nothing to ROS or anywhere in the driving path. Browser input can only enable/reset the dashboard-local stopwatch; it never leaves this process.
 
@@ -227,7 +227,8 @@ via CSS (`#minimap-panel` top-right, `#camera-panel` bottom-right):
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `map_topic` / `scan_topic` / `pose_topic` | `/map` / `/scan` / `/pf/viz/inferred_pose` | Map/LIDAR/localization inputs |
+| `map_topic` / `scan_topic` | `/map` / `/scan` | Map and LIDAR inputs |
+| `pose_topics` | `[/pf/viz/inferred_pose, /slam_pose]` | Every map-frame pose source, subscribed at once so one dashboard works across the localization *and* SLAM stacks; last message wins |
 | `drive_topic` / `odom_topic` | `/ackermann_cmd` / `/odom` | Selected steering command / measured speed |
 | `joy_topic` / `deadman_button` / `joy_timeout_sec` | `/joy` / `4` / `0.5` | Read-only LB input and freshness timeout for the stopwatch |
 | `stopwatch_update_rate_hz` | `10.0` | Shared stopwatch broadcast rate |

@@ -309,7 +309,7 @@ All in `src/web_dashboard/config/web_dashboard.yaml`:
 |---|---|---|
 | `map_topic` | `/map` | Subscribed with "transient local" durability to match `map_server`/`slam_toolbox`, so a dashboard started after the map was published still receives it |
 | `scan_topic` | `/scan` | Subscribed with best-effort sensor QoS |
-| `pose_topic` | `/pf/viz/inferred_pose` | `particle_filter`'s localized pose |
+| `pose_topics` | `[/pf/viz/inferred_pose, /slam_pose]` | Every map-frame pose source this car can run, subscribed at once: `particle_filter`'s localized pose, and the pose `auto_map_race_node` republishes from SLAM's `map`→`base_link` TF. One dashboard process therefore works across all stacks without a relaunch; last message wins |
 | `drive_topic` | `/ackermann_cmd` | Selected command after `ackermann_mux`; steering display and command-speed reference only |
 | `odom_topic` | `/odom` | Measured longitudinal speed |
 | `joy_topic` / `deadman_button` / `joy_timeout_sec` | `/joy` / `4` / `0.5` | Read-only LB state and freshness watchdog for the stopwatch |
@@ -336,16 +336,17 @@ address instead of exposing the port publicly.
 
 ## Limitations
 
-- **Live SLAM mapping shows the map, but the scan/car overlay stays
-  robot-centric, not locked to the map.** During live `slam_toolbox`
-  mapping (before you've saved a map and started `particle_filter`),
-  there's no simple pose *topic* publishing the car's position in the map
-  frame — `slam_toolbox` publishes that relationship as a `map`→`odom` TF
-  transform instead, which this node deliberately doesn't subscribe to,
-  to keep its dependency footprint small (no `tf2_ros` buffer/listener).
-  Point `pose_topic` at a topic that publishes a live map-frame pose (this
-  workspace's `particle_filter` is the simplest way to get one) for a
-  fully map-locked overlay.
+- **Plain `slam_launch.py` mapping shows the map, but the scan/car overlay
+  stays robot-centric, not locked to the map.** `slam_toolbox` publishes
+  the car's map-frame position as a `map`→`odom` TF transform, not as a
+  pose *topic*, and this node deliberately doesn't subscribe to TF, to
+  keep its dependency footprint small (no `tf2_ros` buffer/listener). Any
+  node that republishes that transform as a `PoseStamped` fixes the
+  overlay: `auto_map_race_launch.py` gets this for free because
+  `auto_map_race_node` already publishes `/slam_pose` (a listed
+  `pose_topics` entry) for pure pursuit's benefit, and `particle_filter`
+  does the same on `/pf/viz/inferred_pose` once you're racing a saved map.
+  Only bare `slam_launch.py` / `autonomous_mapping_launch.py` have neither.
 - **No rotated map origins.** The renderer assumes the map's origin
   orientation is identity (true for every map this workspace's tooling
   produces); a map saved with a rotated origin would render misaligned.

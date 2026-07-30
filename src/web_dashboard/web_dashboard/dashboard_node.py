@@ -146,7 +146,17 @@ class DashboardNode(Node):
 
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('scan_topic', '/scan')
-        self.declare_parameter('pose_topic', '/pf/viz/inferred_pose')
+        # A list, not a single topic, because which node localizes the car
+        # depends on which stack is up and the dashboard is deliberately
+        # started once and left running across all of them:
+        #   /pf/viz/inferred_pose  particle_filter (race_launch, localization)
+        #   /slam_pose             auto_map_race_node, while slam_toolbox maps
+        # Subscribing to every candidate means the car shows up on the map
+        # without having to relaunch the dashboard per mode. Only one of
+        # them publishes at a time in practice; if two ever did, last
+        # message wins, which is the right answer for a display anyway.
+        self.declare_parameter(
+            'pose_topics', ['/pf/viz/inferred_pose', '/slam_pose'])
         self.declare_parameter('drive_topic', '/ackermann_cmd')
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('joy_topic', '/joy')
@@ -162,7 +172,10 @@ class DashboardNode(Node):
 
         self.map_topic = self.get_parameter('map_topic').value
         self.scan_topic = self.get_parameter('scan_topic').value
-        self.pose_topic = self.get_parameter('pose_topic').value
+        # dict.fromkeys() rather than set(): de-duplicate without shuffling
+        # the configured order, so the log below reads as written.
+        self.pose_topics = list(dict.fromkeys(
+            str(topic) for topic in self.get_parameter('pose_topics').value if str(topic)))
         self.drive_topic = self.get_parameter('drive_topic').value
         self.odom_topic = self.get_parameter('odom_topic').value
         self.joy_topic = self.get_parameter('joy_topic').value
@@ -187,6 +200,7 @@ class DashboardNode(Node):
         self._last_map_msg = None
         self._last_scan_msg = None
         self._last_pose = None  # (x, y, yaw)
+        self._last_pose_topic = None  # which pose_topics entry last delivered
         self._last_drive = None  # (speed, steering_angle)
         self._last_speed = None
         self._last_stats = None  # (cpu_percent, mem_percent, cpu_temp_c, uptime_s)
@@ -218,7 +232,12 @@ class DashboardNode(Node):
         # subscriber can only match a reliable publisher.
         self.scan_sub = self.create_subscription(
             LaserScan, self.scan_topic, self.scan_callback, qos_profile_sensor_data)
-        self.pose_sub = self.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 10)
+        self.pose_subs = [
+            self.create_subscription(
+                PoseStamped, topic,
+                functools.partial(self.pose_callback, topic=topic), 10)
+            for topic in self.pose_topics
+        ]
         self.drive_sub = self.create_subscription(
             AckermannDriveStamped, self.drive_topic, self.drive_callback, 10)
         self.odom_sub = self.create_subscription(
@@ -238,7 +257,8 @@ class DashboardNode(Node):
 
         self.get_logger().info(
             f"web_dashboard_node ready: map={self.map_topic} scan={self.scan_topic} "
-            f"pose={self.pose_topic} drive={self.drive_topic} odom={self.odom_topic} "
+            f"pose={'|'.join(self.pose_topics) or '(none)'} "
+            f"drive={self.drive_topic} odom={self.odom_topic} "
             f"joy={self.joy_topic} (LB index {self.deadman_button}). "
             f"Once the web server starts, open http://<this car's IP>:{self.port}/ in a browser."
         )
@@ -267,10 +287,13 @@ class DashboardNode(Node):
             protocol.scan_header(msg, self.laser_offset_x, self.laser_offset_y),
             protocol.scan_ranges(msg))
 
-    def pose_callback(self, msg: PoseStamped):
+    def pose_callback(self, msg: PoseStamped, topic: str = ''):
         q = msg.pose.orientation
         yaw = protocol.quaternion_to_yaw(q.x, q.y, q.z, q.w)
         self._last_pose = (msg.pose.position.x, msg.pose.position.y, yaw)
+        if topic != self._last_pose_topic:
+            self._last_pose_topic = topic
+            self.get_logger().info(f"Pose display is now following '{topic}'.")
         self._broadcast(protocol.pose_message(*self._last_pose))
 
     def drive_callback(self, msg: AckermannDriveStamped):
