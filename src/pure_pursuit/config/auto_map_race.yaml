@@ -22,6 +22,13 @@ auto_map_race_node:
     closure_distance: 0.75
     closure_heading_deg: 30.0
     transition_stop_sec: 2.0
+    # slam_toolbox's save_map/serialize_map block its executor, freezing the
+    # map->odom TF (and so /slam_pose) while they run. Racing does not start
+    # until both finish, so that freeze always lands while the car is
+    # deliberately stopped. If they overrun this, the handover proceeds
+    # anyway with a logged error -- the racing line is already on disk, and
+    # pure_pursuit's pose_frozen watchdog is the backstop.
+    map_save_timeout_sec: 20.0
     output_directory: ~/.ros/racerbot_auto
 
     # Conservative simulator-validated profile. Raise physical limits only

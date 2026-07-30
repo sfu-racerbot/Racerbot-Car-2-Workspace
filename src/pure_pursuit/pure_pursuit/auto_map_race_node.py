@@ -114,6 +114,7 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('closure_distance', 0.75)
         self.declare_parameter('closure_heading_deg', 30.0)
         self.declare_parameter('transition_stop_sec', 2.0)
+        self.declare_parameter('map_save_timeout_sec', 20.0)
         self.declare_parameter('output_directory', '~/.ros/racerbot_auto')
         self.declare_parameter('profile_max_speed', 4.0)
         self.declare_parameter('profile_min_speed', 0.5)
@@ -142,6 +143,7 @@ class AutoMapRaceNode(Node):
         self.command_timeout_sec = float(value('command_timeout_sec'))
         self.mapping_laps = max(1, int(value('mapping_laps')))
         self.transition_stop_sec = float(value('transition_stop_sec'))
+        self.map_save_timeout_sec = float(value('map_save_timeout_sec'))
         self.output_directory = Path(os.path.expanduser(str(value('output_directory'))))
         self.profile_max_speed = float(value('profile_max_speed'))
         self.profile_min_speed = float(value('profile_min_speed'))
@@ -179,6 +181,10 @@ class AutoMapRaceNode(Node):
         self.profile_path = None
         self.race_enable_time = None
         self.map_save_started = False
+        self.map_saves_expected = 2      # occupancy map + pose graph
+        self.map_saves_completed = 0
+        self.map_save_deadline = None
+        self.map_save_timed_out = False
         self.last_decision_state = None
         self.last_decision_log_time = None
 
@@ -353,10 +359,23 @@ class AutoMapRaceNode(Node):
                 self._mapping_lap_completed()
 
         if self.state == 'loading_profile':
-            self._try_load_profile()
+            # Order matters, and this is a safety ordering, not a tidiness
+            # one. slam_toolbox's save_map/serialize_map are long BLOCKING
+            # calls on its own executor: while they run it stops advancing
+            # map->odom, so the map->base_link TF this node republishes as
+            # /slam_pose freezes -- at full rate, with no gap a
+            # message-arrival watchdog could see. On 2026-07-27 the save
+            # was fired concurrently with the handover and pure pursuit
+            # spent its first second steering from a pose that was already
+            # a second out of date, into a wall.
+            #
+            # The car is deliberately stopped for this whole state, so it
+            # is the one moment a frozen transform is harmless. Finish the
+            # save FIRST, then hand the profile over; racing cannot begin
+            # until both have completed (or timed out).
             self._try_save_map()
-        elif self.state in ('transition', 'racing'):
-            self._try_save_map()
+            if self._map_save_settled(now_sec):
+                self._try_load_profile()
 
         if self.state == 'transition' and now_sec >= self.race_enable_time:
             self.state = 'racing'
@@ -520,7 +539,15 @@ class AutoMapRaceNode(Node):
     def _try_load_profile(self):
         if self.profile_request_started or self.profile_path is None:
             return
-        if not self.parameter_client.service_is_ready():
+        # services_are_ready(), NOT service_is_ready(). AsyncParameterClient
+        # fronts a whole set of parameter services (get/set/list/describe),
+        # so rclpy names its readiness check in the plural -- unlike the
+        # single-service rclpy.client.Client used for save_map/serialize_map
+        # below, which really is service_is_ready(). Getting this wrong
+        # raises AttributeError inside the control loop, which kills the
+        # supervisor at the exact moment the mapping laps finish and the
+        # profile is handed to pure pursuit.
+        if not self.parameter_client.services_are_ready():
             self.get_logger().warn(
                 'Waiting for pure_pursuit_node parameter service before loading profile.',
                 throttle_duration_sec=2.0)
@@ -549,6 +576,37 @@ class AutoMapRaceNode(Node):
             f'Profile loaded successfully; holding a {self.transition_stop_sec:.1f}s stop '
             'before switching to racing.')
 
+    def _map_save_settled(self, now_sec: float) -> bool:
+        """True once both SLAM saves have finished (or been given up on).
+
+        Gates the handover: while a save is in flight slam_toolbox is not
+        updating map->odom, so nothing downstream should be driving on the
+        pose derived from it. On timeout this reports settled anyway and
+        says so -- the racing line is already safely on disk, and
+        pure_pursuit's own frozen-pose watchdog is the backstop if SLAM is
+        genuinely wedged -- but it never reports settled while a save is
+        known to still be running.
+        """
+        if self.map_saves_completed >= self.map_saves_expected:
+            return True
+        if self.map_save_deadline is None:
+            return False
+        if now_sec < self.map_save_deadline:
+            self.get_logger().info(
+                f'Waiting for slam_toolbox to finish saving before racing '
+                f'({self.map_saves_completed}/{self.map_saves_expected} done, '
+                f'{self.map_save_deadline - now_sec:.1f}s left).',
+                throttle_duration_sec=2.0)
+            return False
+        if not self.map_save_timed_out:
+            self.map_save_timed_out = True
+            self.get_logger().error(
+                f'slam_toolbox map save did not finish within '
+                f'{self.map_save_timeout_sec:.0f}s '
+                f'({self.map_saves_completed}/{self.map_saves_expected} completed). '
+                'Continuing to the racing handover; the racing line is already saved.')
+        return True
+
     def _try_save_map(self):
         if self.map_save_started or not hasattr(self, 'run_directory'):
             return
@@ -559,6 +617,7 @@ class AutoMapRaceNode(Node):
                 throttle_duration_sec=2.0)
             return
         self.map_save_started = True
+        self.map_save_deadline = self._now_sec() + self.map_save_timeout_sec
         map_base = str(self.run_directory / 'map')
         save_request = SaveMap.Request()
         save_request.name.data = map_base
@@ -574,6 +633,10 @@ class AutoMapRaceNode(Node):
             f'Requested map and pose-graph save in {self.run_directory}.')
 
     def _map_save_callback(self, future, artifact: str):
+        # Count the save as settled however it ended: a failed save is still
+        # a save that is no longer blocking slam_toolbox's executor, which
+        # is the only thing the handover gate actually cares about.
+        self.map_saves_completed += 1
         try:
             result = future.result().result
         except Exception as exc:
@@ -594,9 +657,20 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        # SIGINT may already have invalidated the rclpy context.
-        if rclpy.ok():
-            node._publish_stop()
+        # Best-effort final stop. rclpy.ok() can still flip between the
+        # check and the publish -- SIGINT tears the context down on another
+        # thread -- and letting that race raise here would make an ordinary
+        # Ctrl+C exit non-zero, which ros2 launch reports as
+        # "process has died [exit code 1]", indistinguishable in the logs
+        # from a real mid-run crash. The mux already brings the car to a
+        # stop on /drive timeout, so this publish is a courtesy, not the
+        # safety mechanism, and must never be the reason shutdown looks
+        # like a failure.
+        try:
+            if rclpy.ok():
+                node._publish_stop()
+        except Exception:
+            pass
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

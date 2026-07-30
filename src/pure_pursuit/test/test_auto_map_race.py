@@ -95,6 +95,7 @@ def test_profile_parameter_response_enables_racing_transition():
 def test_supervisor_reports_missing_then_forwards_fresh_mapping_command():
     rclpy.init(args=['--ros-args',
                      '-p', 'enable_deadman:=false',
+                     '-p', 'drive_topic:=/test_only/drive',
                      '-p', 'decision_log_period_sec:=0.0'])
     from pure_pursuit.auto_map_race_node import AutoMapRaceNode
     node = AutoMapRaceNode()
@@ -129,6 +130,96 @@ def test_supervisor_reports_missing_then_forwards_fresh_mapping_command():
         assert node.last_decision_state == 'forwarding_mapping'
         assert published[-1].drive.steering_angle == pytest.approx(0.12)
         assert published[-1].drive.speed == pytest.approx(0.8)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def _supervisor():
+    """A real AutoMapRaceNode with the deadman off and /drive remapped away
+    from the live topic (these nodes publish real drive commands)."""
+    rclpy.init(args=['--ros-args',
+                     '-p', 'enable_deadman:=false',
+                     '-p', 'drive_topic:=/test_only/drive',
+                     '-p', 'decision_log_period_sec:=0.0'])
+    from pure_pursuit.auto_map_race_node import AutoMapRaceNode
+    return AutoMapRaceNode()
+
+
+def test_profile_handover_waits_for_the_blocking_slam_save():
+    """Regression test for the 2026-07-27 collision.
+
+    slam_toolbox's save_map/serialize_map block its executor, freezing the
+    map->odom transform -- and so the /slam_pose this node republishes --
+    while they run. Previously the save was fired concurrently with the
+    handover, so pure pursuit began racing on a pose that was already
+    stale. The handover must now wait for the save to settle, which
+    happens while the car is deliberately stopped.
+    """
+    node = _supervisor()
+    try:
+        loaded = []
+        node._try_load_profile = lambda: loaded.append(node._now_sec())
+        node.state = 'loading_profile'
+        node.profile_path = '/tmp/does-not-need-to-exist.csv'
+        node.run_directory = '/tmp'
+        node._lookup_and_publish_pose = lambda: None
+
+        # A save is in flight: neither completion callback has fired yet.
+        node.map_save_started = True
+        node.map_save_deadline = node._now_sec() + 30.0
+        node.map_saves_completed = 0
+        node._control_step()
+        assert loaded == [], 'the profile must not be handed over mid-save'
+
+        # The occupancy map lands, but the pose graph is still serializing.
+        node.map_saves_completed = 1
+        node._control_step()
+        assert loaded == [], 'one of two saves finishing is not enough'
+
+        # Both done -- now the handover may proceed.
+        node.map_saves_completed = 2
+        node._control_step()
+        assert len(loaded) == 1, 'the profile must load once both saves settle'
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_handover_proceeds_after_the_save_times_out():
+    """A wedged save must not strand the car forever: the racing line is
+    already on disk, and pure_pursuit's pose_frozen watchdog is the
+    backstop if SLAM really is stuck."""
+    node = _supervisor()
+    try:
+        loaded = []
+        node._try_load_profile = lambda: loaded.append(True)
+        node.state = 'loading_profile'
+        node.profile_path = '/tmp/does-not-need-to-exist.csv'
+        node.run_directory = '/tmp'
+        node._lookup_and_publish_pose = lambda: None
+        node.map_save_started = True
+        node.map_saves_completed = 0
+        node.map_save_deadline = node._now_sec() - 1.0   # already overdue
+
+        node._control_step()
+        assert len(loaded) == 1
+        assert node.map_save_timed_out is True
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_a_failed_save_still_counts_as_settled():
+    """The gate cares whether slam_toolbox is still blocked, not whether
+    the save succeeded -- a failed save is no longer holding the executor."""
+    node = _supervisor()
+    try:
+        class _Failed:
+            def result(self):
+                raise RuntimeError('service call failed')
+        node._map_save_callback(_Failed(), 'occupancy map')
+        assert node.map_saves_completed == 1
     finally:
         node.destroy_node()
         rclpy.shutdown()
