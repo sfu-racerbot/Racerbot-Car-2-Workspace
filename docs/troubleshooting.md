@@ -76,6 +76,23 @@ If it isn't, this is why: `gap_follow_node` and `pure_pursuit_node` both have th
 
 **Fix:** restart `bringup_launch.py` so `joy_node` comes back, and hold LB while your autonomy node is active. See [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node).
 
+## `slam_toolbox` starts without errors but no map, no `map` frame, and mapping never finishes
+
+Symptom: `slam_launch.py` (or anything including it — `autonomous_mapping_launch.py`, `auto_map_race_launch.py`) starts cleanly and `slam_toolbox` appears in `ros2 node list`, but `ros2 topic echo /map --once` never returns, `ros2 run tf2_ros tf2_echo map base_link` reports `"map" passed to lookupTransform argument target_frame does not exist`, and `auto_map_race_node` logs `lap 1/N: recorder waiting for a valid map->base_link pose` forever no matter how many laps you drive.
+
+The giveaway is what `slam_toolbox` *didn't* print. Its full healthy startup is two lines:
+```
+[async_slam_toolbox_node-N] [INFO] [slam_toolbox]: Node using stack size 40000000
+[async_slam_toolbox_node-N] [INFO] [slam_toolbox]: Using solver plugin solver_plugins::CeresSolver
+```
+The first line comes from the constructor; the second from `on_configure`. If you only ever see the first, the node is parked in the `unconfigured` lifecycle state:
+```bash
+ros2 lifecycle get /slam_toolbox     # should say: active [3]
+```
+As of `slam_toolbox` 2.x (this car has 2.8.5 from `ros-jazzy-slam-toolbox`) `async_slam_toolbox_node` is an `rclcpp_lifecycle::LifecycleNode` and **does not configure itself** — no `autostart` parameter exists inside the node. Reading the parameter file, loading the solver, subscribing to `/scan`, publishing `/map`, publishing the `map`→`odom` TF, and advertising `/slam_toolbox/save_map` all happen in `on_configure`/`on_activate`, and the launch file has to emit those transitions. Started as a plain `launch_ros.actions.Node` it comes up and does nothing at all, silently, forever. Everything downstream then waits on it: the lap recorder never gets a pose, so no raceline is generated, so `pure_pursuit_node` stays on `STOP [waiting_for_profile]` and the run never leaves the cautious gap-follow mapping phase.
+
+**Fix:** launch it as a `LifecycleNode` and emit `TRANSITION_CONFIGURE`, then `TRANSITION_ACTIVATE` on reaching `inactive` — that's what `racerbot_launch/launch/slam_launch.py` does now (mirroring upstream's `slam_toolbox/launch/online_async_launch.py`). If you hit this in a launch file of your own, copy that pattern rather than adding a plain `Node`.
+
 ## `pkill -f joy_teleop` takes down `joy_node` too (and cascades into killing the whole bringup)
 
 You shouldn't need to `pkill` anything to switch between manual driving and autonomy anymore — `Ctrl+C` whichever control-layer terminal (`teleop_launch.py`, `gap_follow_launch.py`, `pure_pursuit_launch.py`) is running instead (see [operations.md](operations.md#the-two-layer-pattern-used-in-every-procedure-below)). But if you ever do reach for `pkill -f joy_teleop` out of habit (from before `teleop_launch.py` existed as its own file), know that it's still a trap: `joy_node` (started by `bringup_launch.py`) is launched with `--params-file .../joy_teleop.yaml` — the same config file `joy_teleop` uses, just a different top-level key inside it — so `joy_node`'s own command line contains the literal substring `joy_teleop` too. `pkill -f` matches against the whole command line, so it kills **both** processes, not just the one you meant to stop. Losing `joy_node` kills every autonomy node's deadman input (see the entry above) and, since `ros2 launch` treats any process it manages dying as fatal, tears down the *entire* bringup (VESC and LiDAR included) a few seconds later. If you ever do need to kill one specific node by pattern instead of `Ctrl+C`-ing its terminal, match something only that process's command line contains — e.g. `pkill -f "__node:=joy_teleop"` — or kill it by exact PID.

@@ -19,6 +19,9 @@
   <exec_depend>web_dashboard</exec_depend>
   <exec_depend>urg_node</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
+  <!-- slam_launch.py drives slam_toolbox's lifecycle transitions itself. -->
+  <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
