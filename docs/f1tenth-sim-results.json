@@ -5,42 +5,48 @@
   "results": [
     {
       "collision": false,
+      "corridor_samples": 6920,
       "laps": 1.0,
-      "max_cross_track_m": 0.8632,
+      "max_cross_track_m": 0.919,
+      "mean_corridor_offset_m": 0.0621,
       "min_forward_scan_m": 0.3094,
       "passed": true,
       "scenario": "gap_solo",
-      "sim_time_s": 173.875,
-      "steps": 6955,
-      "stop_steps": 3,
+      "sim_time_s": 173.025,
+      "steps": 6921,
+      "stop_steps": 1,
       "track": "Spielberg",
-      "wall_time_s": 9.463
+      "wall_time_s": 11.213
     },
     {
       "collision": false,
+      "corridor_samples": 9267,
       "laps": 1.0,
-      "max_cross_track_m": 0.8586,
+      "max_cross_track_m": 0.9319,
+      "mean_corridor_offset_m": 0.0756,
       "min_forward_scan_m": 0.2579,
       "passed": true,
       "scenario": "gap_solo",
-      "sim_time_s": 231.525,
-      "steps": 9261,
-      "stop_steps": 4,
+      "sim_time_s": 231.7,
+      "steps": 9268,
+      "stop_steps": 2,
       "track": "Silverstone",
-      "wall_time_s": 12.398
+      "wall_time_s": 14.64
     },
     {
       "collision": false,
+      "corridor_samples": 7178,
       "laps": 1.0,
-      "max_cross_track_m": 0.9144,
+      "max_cross_track_m": 0.8485,
+      "mean_corridor_offset_m": 0.0604,
       "min_forward_scan_m": 0.468,
       "passed": true,
       "scenario": "gap_solo",
-      "sim_time_s": 179.075,
-      "steps": 7163,
+      "sim_time_s": 179.475,
+      "steps": 7179,
       "stop_steps": 1,
       "track": "BrandsHatch",
-      "wall_time_s": 9.814
+      "wall_time_s": 11.53
     },
     {
       "avoid_steps": 1133,
@@ -57,7 +63,7 @@
       "steps": 5341,
       "stop_steps": 0,
       "track": "Spielberg",
-      "wall_time_s": 5.139
+      "wall_time_s": 5.181
     },
     {
       "avoid_steps": 2326,
@@ -74,7 +80,7 @@
       "steps": 8042,
       "stop_steps": 1,
       "track": "Silverstone",
-      "wall_time_s": 7.575
+      "wall_time_s": 7.767
     },
     {
       "avoid_steps": 0,
@@ -91,7 +97,7 @@
       "steps": 3608,
       "stop_steps": 0,
       "track": "BrandsHatch",
-      "wall_time_s": 3.376
+      "wall_time_s": 3.43
     },
     {
       "accumulated_progress_m": 338.128,
@@ -122,7 +128,7 @@
       "stop_steps": 96,
       "track": "Spielberg",
       "track_length_m": 338.128,
-      "wall_time_s": 7.543
+      "wall_time_s": 7.616
     }
   ],
   "schema_version": 1,

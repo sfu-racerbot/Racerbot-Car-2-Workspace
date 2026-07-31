@@ -61,6 +61,20 @@ class GapFollowNode(Node):
         # found its way out of a corner can take it instead of latching.
         self.declare_parameter('escape_creep_speed', 0.25)
 
+        # Corridor centering: the cross-track half of a lane-centring law,
+        # faded in only while the car is running straight down a corridor with
+        # a wall on each side. See gap_logic.corridor_centering_bias.
+        self.declare_parameter('enable_centering', True)
+        self.declare_parameter('centering_gain', 0.25)
+        self.declare_parameter('centering_max_steering', 0.08)
+        self.declare_parameter('centering_side_fov_deg', 60.0)
+        self.declare_parameter('centering_full_bearing_deg', 4.0)
+        self.declare_parameter('centering_zero_bearing_deg', 15.0)
+        self.declare_parameter('centering_full_forward_depth', 2.5)
+        self.declare_parameter('centering_zero_forward_depth', 1.5)
+        self.declare_parameter('centering_full_side_distance', 4.0)
+        self.declare_parameter('centering_zero_side_distance', 5.0)
+
         # F1TENTH instantaneous TTC, using the safest recent speed estimate.
         self.declare_parameter('enable_ttc', True)
         self.declare_parameter('ttc_threshold_sec', 0.5)
@@ -131,6 +145,26 @@ class GapFollowNode(Node):
             self.get_parameter('forward_stop_fov_deg').value))
         self.escape_creep_speed = float(
             self.get_parameter('escape_creep_speed').value)
+        self.enable_centering = bool(
+            self.get_parameter('enable_centering').value)
+        self.centering_gain = float(
+            self.get_parameter('centering_gain').value)
+        self.centering_max_steering = float(
+            self.get_parameter('centering_max_steering').value)
+        self.centering_side_half_span = math.radians(float(
+            self.get_parameter('centering_side_fov_deg').value)) / 2.0
+        self.centering_full_bearing = math.radians(float(
+            self.get_parameter('centering_full_bearing_deg').value))
+        self.centering_zero_bearing = math.radians(float(
+            self.get_parameter('centering_zero_bearing_deg').value))
+        self.centering_full_forward_depth = float(
+            self.get_parameter('centering_full_forward_depth').value)
+        self.centering_zero_forward_depth = float(
+            self.get_parameter('centering_zero_forward_depth').value)
+        self.centering_full_side_distance = float(
+            self.get_parameter('centering_full_side_distance').value)
+        self.centering_zero_side_distance = float(
+            self.get_parameter('centering_zero_side_distance').value)
         self.enable_ttc = bool(self.get_parameter('enable_ttc').value)
         self.ttc_threshold_sec = float(
             self.get_parameter('ttc_threshold_sec').value)
@@ -199,6 +233,8 @@ class GapFollowNode(Node):
                 and 0.0 < self.max_steering_angle < math.pi / 2.0):
             raise ValueError(
                 'max_steering_angle must be finite and in (0, pi/2) radians')
+        if self.enable_centering:
+            self._validate_centering_parameters()
         if not math.isfinite(self.ttc_command_speed_timeout_sec) or (
                 self.ttc_command_speed_timeout_sec < 0.0):
             raise ValueError(
@@ -224,6 +260,9 @@ class GapFollowNode(Node):
         # collapse the next steering command to max_steering_rate*dt. See
         # _stop() for the failure that caused.
         self.steering_basis = 0.0
+        # Last measured corridor, for the decision log only.
+        self.centering_left_distance = math.inf
+        self.centering_right_distance = math.inf
         self.last_command_time = None
         # One-shot latch for the odometry direction warning below.
         self.odom_direction_warned = False
@@ -507,8 +546,22 @@ class GapFollowNode(Node):
         # rack had 0.26rad available, and the car wall-hugged until its
         # forward cone closed. Bearing steering asks for the 1.2m radius the
         # car can actually turn.
+        #
+        # Bearing steering answers "which way", never "where in the corridor".
+        # On a straight the aim is the deepest beam, which runs parallel to the
+        # walls and therefore preserves whatever lateral offset the car entered
+        # with -- so it will happily hold 0.15m off one wall for the length of
+        # a straight. corridor_centering_bias adds the missing cross-track
+        # term, bounded and faded out the moment the car is actually turning.
+        # It is suppressed entirely while creeping: inside the forward reserve
+        # the gap logic is threading a specific way out at 0.25m/s, and that is
+        # not the moment to add an opinion about lateral position.
+        centering_bias, centering_weight = (
+            (0.0, 0.0) if creeping
+            else self._centering_bias(clean, valid, scan, target_angle,
+                                      target_distance))
         desired_steering = float(np.clip(
-            self.steering_gain * target_angle,
+            self.steering_gain * target_angle + centering_bias,
             -self.max_steering_angle,
             self.max_steering_angle,
         ))
@@ -600,6 +653,14 @@ class GapFollowNode(Node):
         speed_shape_text = (
             f", acceleration-shaped from {desired_speed:.2f}m/s"
             if not math.isclose(speed, desired_speed) else "")
+        # Report the measured corridor whenever centering is even partially
+        # engaged, so a car that is drifting to one side on a straight can be
+        # diagnosed from the log alone rather than by watching it.
+        centering_text = (
+            f", centering {centering_bias:+.3f}rad at weight "
+            f"{centering_weight:.2f} (left {self.centering_left_distance:.2f}m, "
+            f"right {self.centering_right_distance:.2f}m)"
+            if centering_weight > 0.0 else "")
         gap_mode = 'corner_fallback' if used_fallback else 'gap_follow'
         depth_text = (
             f"fallback depth {self.fallback_min_gap_distance:.2f}m"
@@ -620,10 +681,78 @@ class GapFollowNode(Node):
             f"{target_distance:.2f}m at {math.degrees(target_angle):+.1f}deg, "
             f"curvature={limited_curvature:+.3f}/m, closest={closest_text}, "
             f"odom={self.current_speed:+.2f}m/s; "
-            f"{cap_text}{steering_shape_text}{speed_shape_text}",
+            f"{cap_text}{centering_text}{steering_shape_text}{speed_shape_text}",
             steering_angle,
             speed,
         )
+
+    def _validate_centering_parameters(self):
+        """Reject a centering configuration that could fight the gap logic.
+
+        The important one is the authority bound. Centering is a *bias* on a
+        direction obstacle avoidance already chose; if it were allowed to reach
+        the full steering limit it could cancel or invert that choice, which
+        makes it a second, unreviewed driving policy rather than a refinement.
+        Half the steering limit is the ceiling, and the shipped default
+        (0.08 of 0.26 rad) is well inside it.
+        """
+        if not (math.isfinite(self.centering_gain) and self.centering_gain >= 0.0):
+            raise ValueError('centering_gain must be finite and non-negative')
+        if not (math.isfinite(self.centering_max_steering)
+                and 0.0 <= self.centering_max_steering
+                <= self.max_steering_angle / 2.0):
+            raise ValueError(
+                'centering_max_steering must be finite, non-negative, and no '
+                'more than half of max_steering_angle -- a centering bias that '
+                'can outvote the chosen gap is not a bias')
+        if not (math.isfinite(self.centering_side_half_span)
+                and 0.0 < self.centering_side_half_span <= math.pi / 2.0):
+            raise ValueError(
+                'centering_side_fov_deg must be positive and no wider than '
+                '180deg, so the side windows stay on their own side of the car')
+        if not (0.0 <= self.centering_full_bearing < self.centering_zero_bearing):
+            raise ValueError(
+                'centering_full_bearing_deg must be non-negative and strictly '
+                'below centering_zero_bearing_deg')
+        if not (0.0 <= self.centering_zero_forward_depth
+                < self.centering_full_forward_depth):
+            raise ValueError(
+                'centering_zero_forward_depth must be non-negative and strictly '
+                'below centering_full_forward_depth')
+        if not (0.0 < self.centering_full_side_distance
+                < self.centering_zero_side_distance):
+            raise ValueError(
+                'centering_full_side_distance must be positive and strictly '
+                'below centering_zero_side_distance')
+
+    def _centering_bias(self, clean, valid, scan, aim_bearing, aim_depth):
+        """Cross-track centering bias for the current scan, or (0.0, 0.0).
+
+        Deliberately measured against the *full* scan rather than the forward
+        window the gap search uses. The window is clipped to
+        ``forward_fov_deg`` (180deg), which puts both side directions exactly
+        on its boundary, so a window centred on +/-90deg would be half empty
+        and would lose the yaw tolerance that makes the minimum-range estimator
+        work. This Hokuyo sweeps 270deg and has the beams to spare.
+        """
+        if not self.enable_centering:
+            return 0.0, 0.0
+        angles = scan.angle_min + np.arange(
+            clean.size, dtype=np.float64) * scan.angle_increment
+        left = gap_logic.side_wall_distance(
+            clean, valid, angles, math.pi / 2.0, self.centering_side_half_span)
+        right = gap_logic.side_wall_distance(
+            clean, valid, angles, -math.pi / 2.0, self.centering_side_half_span)
+        bias, weight = gap_logic.corridor_centering_bias(
+            left, right, aim_bearing, aim_depth,
+            self.centering_gain, self.centering_max_steering,
+            self.centering_full_bearing, self.centering_zero_bearing,
+            self.centering_full_forward_depth, self.centering_zero_forward_depth,
+            self.centering_full_side_distance, self.centering_zero_side_distance,
+        )
+        self.centering_left_distance = left
+        self.centering_right_distance = right
+        return bias, weight
 
     def _select_gap(self, window, window_valid, angle_increment, beam_angles):
         """Inflate obstacle edges, bubble the closest hit, and pick a gap.
@@ -652,52 +781,9 @@ class GapFollowNode(Node):
             angle_increment,
             self.min_centerline_gap_width,
         )
-        target = self._aim_within_gap(
+        target = gap_logic.aim_within_gap(
             processed, gap_start, gap_end, beam_angles)
         return processed, closest_dist, gap_start, gap_end, used_fallback, target
-
-    @staticmethod
-    def _aim_within_gap(window, gap_start, gap_end, beam_angles):
-        """Pick the beam to steer at inside a chosen gap.
-
-        The midpoint is the classic follow-the-gap answer, and it is the right
-        one when both edges are real obstacles -- it centres the car between
-        them. It is the wrong one when an edge is just the limit of the
-        sensor's field of view, because that edge carries no information about
-        where the track goes. A gap running from the -90deg FOV boundary to
-        +3deg has a midpoint of -44deg, which points into the wall beside the
-        car rather than down the course.
-
-        That is what tore the steering apart on 2026-07-27. Around a corner
-        nothing clears the preferred depth, so the fallback gap took over --
-        edge-clipped, aiming -44deg -- while on alternate scans a sliver of
-        deep space reappeared and aimed +6deg. Desired steering alternated
-        +0.26/-0.26rad at scan rate and the slew limiter averaged the pair to
-        0.009rad, so the car drove straight into the corner it was supposedly
-        turning away from.
-
-        When an edge is FOV-clipped, aim at the deepest beam in the gap
-        instead: that is the direction the course actually continues, and it
-        agrees with the preferred gap rather than fighting it.
-
-        Depth ties have to be broken deliberately. In open space every beam
-        reads max_range, so a plain argmax returns the first index -- which is
-        the edge of the field of view, i.e. hard over to one side in exactly
-        the situation where the car should go straight. Among the beams that
-        are effectively as deep as the deepest, take the one closest to
-        straight ahead.
-        """
-        if gap_start is None:
-            return None
-        if gap_start != 0 and gap_end != len(window) - 1:
-            return (gap_start + gap_end) // 2
-
-        depths = window[gap_start:gap_end + 1]
-        deepest = float(np.max(depths))
-        near_deepest = np.nonzero(
-            depths >= deepest - max(1e-6, 0.05 * deepest))[0]
-        angles = beam_angles[gap_start:gap_end + 1][near_deepest]
-        return gap_start + int(near_deepest[int(np.argmin(np.abs(angles)))])
 
     def _escape_report(self, window, window_valid, scan, lo_idx,
                        beam_angles) -> str:

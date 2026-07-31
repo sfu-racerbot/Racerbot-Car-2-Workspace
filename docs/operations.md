@@ -198,6 +198,22 @@ These are the simulator-validated defaults; start even lower on untested physica
 
 A small synthetic example track is also checked in at `src/pure_pursuit/waypoints/example_stadium_raw.csv`, if you want to try the tool (and `pure_pursuit_node`, wheels off the ground) before you have a real recorded lap.
 
+#### 2b. Optional, better: optimize the line instead of just pacing it
+
+`generate_velocity_profile` paces the lap you drove. `optimize_raceline` also *reshapes* it, using the saved map to find the minimum-curvature line inside the track's real width — see [racing-autonomy.md](racing-autonomy.md#phase-4b-optional-optimize-the-line-itself-not-just-its-speed). It writes the same `(x, y, speed)` file, so it is a drop-in replacement for step 2:
+
+```bash
+ros2 run pure_pursuit optimize_raceline \
+    --map ~/maps/my_track.yaml \
+    --recorded-lap src/pure_pursuit/waypoints/my_track_raw.csv \
+    --output src/pure_pursuit/waypoints/my_track_profiled.csv \
+    --safety-margin 0.15
+```
+
+It prints the before/after curvature and estimated lap time, and **refuses to write the file** if the resulting line needs more steering than the rack has or passes closer to a wall than the car is wide. `--safety-margin` is the fast-versus-safe dial: the optimizer spends every centimetre it is given, so raise this (not lower it) if the first laps look tight. Expect it to take a minute or two — it is an offline optimization, not something that runs on the car.
+
+An optimized line apexes much closer to the walls than a recorded lap does, by design. Drive the first laps at reduced `--v-max` and watch the decision log for reactive-avoidance engagements: if map subtraction is not working, the car will keep braking for its own racing line.
+
 #### 3. Every race run: drive it
 
 1. Start the driver stack as normal, in its own terminal:

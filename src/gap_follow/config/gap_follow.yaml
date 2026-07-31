@@ -66,6 +66,52 @@ gap_follow_node:
     # that has found an exit inch toward it.
     escape_creep_speed: 0.25
 
+    # --- Corridor centering on straights ---
+    # Follow-the-gap only ever answers "which way do I point". On a straight
+    # the answer is "down the corridor", which is parallel to both walls -- so
+    # the car keeps whatever lateral offset it entered the straight with and
+    # will happily run a whole straight 15cm off one wall. This adds the
+    # missing cross-track term: a small steering bias toward the middle,
+    # faded out as soon as the car is actually turning so it never argues with
+    # the gap choice in a corner. See gap_logic.corridor_centering_bias.
+    enable_centering: true
+    # rad per meter of offset from the corridor middle. With the 0.08rad clamp
+    # below, this saturates at 0.32m off centre. Raise for a firmer pull to the
+    # middle; too high will weave, because the pull and the bearing term then
+    # fight each other faster than max_steering_rate can settle.
+    centering_gain: 0.25
+    # SAFETY-RELEVANT: the hard authority bound on the bias. The node refuses
+    # to start if this exceeds half of max_steering_angle -- centering is a
+    # refinement of the gap the obstacle-avoidance pipeline already chose, and
+    # a bias big enough to cancel that choice would be a second driving policy.
+    centering_max_steering: 0.08
+    # Width of the angular window centred on each of +/-90deg used to measure
+    # the wall beside the car. The minimum range inside the window is the
+    # perpendicular distance, so this width is really the yaw tolerance: 60deg
+    # keeps the estimate correct up to +/-30deg of yaw relative to the wall.
+    # Measured against the full 270deg scan, not the 180deg forward window.
+    centering_side_fov_deg: 60.0
+    # "Not actively turning": full centering at or below the first bearing,
+    # none at or above the second, linear between. A ramp rather than a switch
+    # -- a hard on/off on a steering term is what caused the scan-rate chatter
+    # documented in gap_follow_node._aim_within_gap.
+    centering_full_bearing_deg: 4.0
+    centering_zero_bearing_deg: 15.0
+    # There has to be a straight worth centring in. Faded out as the aimed-at
+    # depth drops, so the car stops centring on approach to a corner.
+    centering_full_forward_depth: 2.5
+    centering_zero_forward_depth: 1.5
+    # Both sides must be a real wall. Past this the "wall" is a doorway, an
+    # opening, or max_range, and centring against it would steer the car into
+    # the opening. Deliberately well above any plausible corridor width and
+    # well below max_range (10.0): the wall-hugging this fixes happens in the
+    # *wide* corridors, where the aim is the deepest beam and therefore
+    # parallel to the walls. In a corridor narrow enough that both gap edges
+    # are real obstacles, the existing midpoint aim is already correcting, and
+    # this term only trims what it leaves behind.
+    centering_full_side_distance: 4.0
+    centering_zero_side_distance: 5.0
+
     # --- Time-to-collision automatic emergency braking ---
     enable_ttc: true
     ttc_threshold_sec: 0.5

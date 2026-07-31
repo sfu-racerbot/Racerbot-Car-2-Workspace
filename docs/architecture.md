@@ -77,6 +77,20 @@ Run **exactly one** of these at a time — `Ctrl+C` whichever is currently runni
 
 The automatic composition is the deliberate exception *inside one launch*: gap follow publishes only to `/auto_map/drive`, pure pursuit only to `/auto_race/drive`, and `auto_map_race_node` forwards exactly one of those to the real `/drive`. Both child controllers can run without competing at the mux.
 
+### `gap_follow` and corridor centering: two questions, not one
+
+Follow-the-gap answers exactly one question — *which way should the car point* — and it answers it well. It never answers the second one: *where across the corridor should the car be*. Those come apart on a straight. The aim there is the deepest beam in the scan, which runs parallel to both walls, so the steering law reports zero error no matter how far off-centre the car actually is. Enter a straight 15cm off the left wall and the car tracks 15cm off the left wall for the length of it — spending its whole clearance budget for nothing and starting the next corner from the worst available place.
+
+`gap_logic.corridor_centering_bias` supplies the missing half: a small steering bias proportional to how far off the middle of the corridor the car sits. Together with the existing bearing term it is the standard two-state lane-centring law — cross-track error plus heading error — the same structure as Stanley control and the classic F1TENTH wall-follower. The bearing term is what damps it: as the car turns toward the middle its heading tilts, the aim bearing swings the other way, and the two oppose, so there is no derivative term and nothing to wind up.
+
+Three properties are what make this safe to add underneath an obstacle-avoidance pipeline:
+
+- **It is bounded.** `centering_max_steering` (0.08 rad of the 0.26 rad the rack has) caps it, and `gap_follow_node` refuses to start if that is set above half the steering limit. Centering refines the gap the avoidance pipeline chose; a bias big enough to cancel that choice would be a second, unreviewed driving policy.
+- **It fades, never switches.** Full weight below a 4° aim bearing, zero above 15°, linear between — so it is silent through a corner, where the fast line is deliberately *not* the middle. A hard on/off on a steering term is what produced the scan-rate steering chatter documented in `gap_logic.aim_within_gap`.
+- **It needs two real walls.** Both sides must return a wall within `centering_zero_side_distance`. An opening on one side is not something to centre against — without this the bias would steer into the doorway. It is also suppressed entirely while the car is creeping out of the forward reserve.
+
+Every existing safety layer is untouched and still runs first: contact clearance, the forward-cone brake, and TTC all decide before steering is computed, and the bias is applied before the node's existing steering clip and slew limiter. Measured in the F1TENTH Gym harness, mean off-centre distance fell 18–35% across the three validation tracks with no collisions — see [simulator.md](simulator.md). Tuning lives in `gap_follow.yaml`, which documents every knob.
+
 Everything below `/scan` and `/odom` is a separate kind of optional layer — not a control layer competing for the mux, but sensor processing (mapping, localization) that a control layer like `pure_pursuit` depends on:
 
 ```

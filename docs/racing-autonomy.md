@@ -296,6 +296,152 @@ change.**
 4. Only once cornering is solid, raise `v_max` to actually use more of the
    straights.
 
+## Phase 4b (optional): optimize the line itself, not just its speed
+
+Phase 4 answers "how fast can the car drive *this* line". It never asks
+whether the line is any good. That is a real ceiling: the recorded lap is
+wherever you happened to drive, and the racing line is a property of the
+*track*. `optimize_raceline` is the tool that closes the gap — same output
+format, same `waypoints_file` parameter, no change whatsoever to
+`pure_pursuit_node` or any of its safety layers.
+
+```bash
+# The normal path on this car: a saved SLAM map plus a recorded lap.
+ros2 run pure_pursuit optimize_raceline \
+    --map maps/my_track.yaml \
+    --recorded-lap src/pure_pursuit/waypoints/my_track_raw.csv \
+    --output src/pure_pursuit/waypoints/my_track_optimized.csv
+
+# Or from a ready-made centerline in the standard TUM/F1TENTH format
+# (x_m, y_m, w_tr_right_m, w_tr_left_m), which the Gym tracks ship.
+ros2 run pure_pursuit optimize_raceline \
+    --centerline Spielberg_centerline.csv --output spielberg.csv
+```
+
+### The algorithm: iterative minimum curvature
+
+This is the method from Heilmeier et al., *Minimum curvature trajectory
+planning and control for an autonomous race car* (Vehicle System Dynamics,
+2019, [DOI 10.1080/00423114.2019.1631455](https://doi.org/10.1080/00423114.2019.1631455)),
+the same one behind TUM's
+[`global_racetrajectory_optimization`](https://github.com/TUMFTM/global_racetrajectory_optimization).
+
+**Why minimum curvature and not minimum lap time.** Genuine time-optimality
+needs a nonlinear optimizer over path *and* speed together — expensive, and
+not guaranteed to converge. Minimum curvature is the standard convex
+stand-in, and it works because cornering speed is
+$v = \sqrt{a_{lat,max} / \kappa}$: minimising curvature raises the speed
+ceiling everywhere at once. Heilmeier et al. measure it within a few tenths
+of a second per lap of the true optimum. It gives up ground only where the
+limit is engine power rather than grip, which is not this car's problem.
+
+**The formulation.** Write every candidate line as a lateral offset
+$\alpha(s)$ from the centerline along its normals — one number per waypoint.
+Staying on the track is then just a box constraint,
+$-w_{right} \le \alpha \le +w_{left}$. For that *parallel offset curve*, the
+Frenet relations give the curvature to first order as
+
+$$\kappa_P \approx \kappa + \alpha'' + \alpha\,\kappa^2$$
+
+Three terms with three plain meanings: the curvature already there, the
+bending caused by *changing* the offset, and the fact that a fixed offset
+toward the inside of a corner tightens it. Minimising $\sum \kappa_P^2$ is
+then a linear least-squares in $\alpha$ with box constraints — exactly what
+`scipy.optimize.lsq_linear` solves, so there is no `quadprog`/`cvxpy` to
+install on the Jetson. Re-linearising about the answer and re-solving a few
+times is the "iterative" part, and it is what removes the linearisation
+error.
+
+Two details are load-bearing, and both were found the hard way:
+
+- **Each pass must re-parameterise before re-linearising.** Linearising
+  about an already-offset copy of the reference is wrong, because that
+  curve's parameterisation is stretched by $(1 - \alpha\kappa)$, which
+  collapses toward zero wherever the offset approaches the local radius of
+  curvature — an apex. The objective then went *up* on every pass after the
+  first and the line came back with a 6cm-radius kink in it.
+- **The $+\alpha\kappa^2$ term must not be dropped.** Linearising the
+  general curvature quotient with its denominator frozen is algebraically
+  tempting and gets $-2\alpha\kappa^2$ — inverted, not merely inaccurate. On
+  a circular test track, where the answer is obviously the outer wall since
+  that is the largest circle that fits, it converged confidently on the
+  *inner* wall. A closed-form case with a known answer is what caught it,
+  which is why one is kept in the tests.
+
+### Getting a centerline out of a SLAM map
+
+The optimizer needs a centerline with a drivable width at every point; a
+recorded lap is neither. But it is an excellent *seed* — guaranteed to be
+inside the track, to go round exactly once, and to run in the racing
+direction, none of which a skeletonisation of the occupancy grid gives you
+for free. So `refine_centerline` measures the walls either side of the seed,
+steps it to the middle of what it measured, and repeats.
+
+Two things make that loop unstable on a real map, and both are handled
+rather than hoped away. A pit entry, an unmapped doorway or a hole in a
+one-cell-thick wall lets a ray escape, which reads as an enormous amount of
+room on that side and throws the point out of the track — on Spielberg,
+3 escaped rays became 13 in four passes. Blocked cells are therefore dilated
+by one cell (closing the diagonal corners a ray can slip through, at the
+cost of one cell of measured width, in the conservative direction), points
+whose rays still escape get no vote, and the correction is smoothed and
+capped. Where a side genuinely has no wall, the reported width falls back to
+the map's clearance field rather than the ray cap.
+
+### The safety checks, and the one dial that matters
+
+`--safety-margin` (default 0.15m, on top of half the car's padded width) is
+the fast-versus-safe dial. **The optimizer will use every centimetre it is
+given** — that is what it is for — so this is the parameter that stops it
+apexing on the paint. Raise it, don't lower it.
+
+Then the finished line is checked *independently* of anything the optimizer
+believed:
+
+- **Steering feasibility.** $\kappa_{max}$ against $\tan(\delta_{max})/L$ —
+  0.821/m, a 1.22m radius, on this car. A line the rack cannot physically
+  steer is worthless.
+- **Wall clearance**, sampled from the map's distance transform along the
+  whole line.
+
+If either fails the tool **refuses to write the file**. `--allow-infeasible`
+downgrades that to a warning for inspection and says so loudly.
+
+### What it actually buys, measured
+
+In the F1TENTH Gym harness (`--scenario pure --raceline optimized`), against
+the same track's bare centerline and against the reference TUM raceline that
+ships with the track:
+
+| Track | Centerline | This optimizer | TUM reference |
+|---|---:|---:|---:|
+| Brands Hatch | 94.85 s | **92.30 s (−2.7%)** | 90.20 s (−4.9%) |
+
+Brands Hatch is the only one of the three tracks where that comparison is
+readable, and the reason is worth understanding because **it applies to the
+real car too**. `pure_solo` deliberately exercises the *no-map fallback*
+reactive-avoidance trigger, which fires on anything within 0.7m. A
+centerline never comes that close to a wall, so it never triggers; any
+racing line — mine or TUM's — apexes closer than 0.7m and gets capped to
+`avoidance_speed` (1.0 m/s) for 20–30% of the lap on Spielberg and
+Silverstone, which swamps the lap time. Brands Hatch is wide enough that
+nobody triggers it.
+
+The operational lesson: **a racing line apexes inside the reactive
+avoidance trigger distance by design.** On the car that is fine, because
+the default `opponent_detection_mode: map` subtracts mapped walls before the
+traffic layer sees them — but it means map subtraction has to actually be
+working before an optimized line is worth anything. If localization is off
+or the map is stale, the car will crawl round its own racing line. Check the
+decision log for avoidance engagements on the first laps.
+
+So: roughly **half the available gain** against the mature reference
+implementation, at a 0.15m clearance margin the reference was not holding.
+That is the honest summary. The gain against a *hand-recorded* lap — which
+is what you actually have for your own track — is larger than the
+centerline figure above, because a recorded lap is a good deal worse than a
+centerline.
+
 ## Phase 5: Race it — the Pure Pursuit controller
 
 `pure_pursuit_node` is the only node that runs *during* the race. Every
@@ -875,11 +1021,14 @@ when you built it.
 Being direct about what this *doesn't* do, as a map for where to take it
 next:
 
-- **The racing line is only as good as the lap you recorded.** Phase 4
-  paces your line; it never reshapes it. A proper next step is a
-  minimum-curvature path optimizer (e.g. the TUM tool linked above) that
-  re-derives the geometrically fastest line within the track's actual
-  width, not just your driven line.
+- **The racing line is only as good as the lap you recorded** -- *unless*
+  you run [Phase 4b](#phase-4b-optional-optimize-the-line-itself-not-just-its-speed).
+  Phase 4 alone paces your line and never reshapes it; `optimize_raceline`
+  re-derives the geometrically fastest line within the track's actual width.
+  What is still missing there is the last step beyond minimum curvature: a
+  genuine minimum-*time* optimizer over path and speed jointly, and a
+  velocity profile that knows about the specific corner it is entering
+  rather than only its curvature.
 - **The velocity profile is a simplified friction-circle model**, not a
   full vehicle dynamics simulation — no combined lateral/longitudinal tire
   ellipse, no weight transfer, no slip-angle model.
@@ -910,6 +1059,9 @@ next:
 src/pure_pursuit/
 ├── pure_pursuit/
 │   ├── racing_math.py              # all the math above, framework-agnostic, unit-tested
+│   ├── raceline_optimizer.py       # Phase 4b: iterative minimum-curvature line optimization
+│   ├── occupancy_map.py            # offline SLAM-map reader: ray casts, clearance field
+│   ├── optimize_raceline.py        # Phase 4b CLI: map + recorded lap -> optimized profiled line
 │   ├── pure_pursuit_node.py        # Phase 5 — the race controller
 │   ├── waypoint_recorder_node.py   # Phase 3 — records a driven lap
 │   └── generate_velocity_profile.py # Phase 4 — CLI tool, paces a recorded lap

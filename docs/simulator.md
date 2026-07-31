@@ -61,6 +61,20 @@ python3 tools/f1tenth_sim/run_validation.py --scenario pure
 python3 tools/f1tenth_sim/run_validation.py --scenario traffic --quick
 ```
 
+Two flags exist for measuring a change rather than just gating it:
+
+```bash
+# What does gap_follow's corridor centering actually do? Run both ways.
+python3 tools/f1tenth_sim/run_validation.py --scenario gap --no-centering
+
+# Which line should pure_pursuit follow: the one shipped with the track, one
+# computed by pure_pursuit.raceline_optimizer, or the bare centerline?
+python3 tools/f1tenth_sim/run_validation.py --scenario pure --raceline optimized
+python3 tools/f1tenth_sim/run_validation.py --scenario pure --raceline centerline
+```
+
+`--no-centering` is a measurement tool, not a supported car configuration.
+
 The process exits `0` only when every selected scenario passes, so it can be
 used in CI. Each scenario prints one JSON object; `--output` writes a combined
 machine-readable report. Other supported options are visible with `--help`,
@@ -83,9 +97,12 @@ small seeded noise.
   forward-cone brake, and conservative command-backed TTC braking;
 - disparity extension without double-padding and the width-aware safety bubble;
 - preferred gap scoring plus the slow tight-corner fallback;
-- the pure-pursuit target curvature from the gap midpoint's *range and*
-  bearing, its lateral-acceleration and stopping-distance speed ceilings, and
-  the steering/acceleration rate limits; and
+- `aim_within_gap`'s choice of target beam — midpoint between two real
+  obstacle edges, deepest beam when an edge is only the field-of-view
+  boundary;
+- bearing-proportional steering plus the corridor-centering bias, their
+  lateral-acceleration and stopping-distance speed ceilings, and the
+  steering/acceleration rate limits; and
 - one complete lap with no Gym collision.
 
 `pure_solo` validates:
@@ -116,25 +133,83 @@ directly. ROS-specific wiring, the joystick, physical VESC behavior, SLAM
 quality, and topic timing are covered by unit/integration/launch checks rather
 than emulated by this harness.
 
+## The gap scenario was broken, and is fixed
+
+Worth knowing before reading any `gap_solo` number below: between 2026-07-27
+and 2026-07-30 the harness could not run `--scenario gap` at all. When
+`gap_follow_node` moved from a pure-pursuit curvature law to bearing
+steering, `gap_logic.target_curvature` and `gap_logic.steering_from_curvature`
+went away with it, and `gap_command` was left calling both — an immediate
+`AttributeError`. The 2026-07-27 `gap_solo` figures in the table below are
+therefore the last ones the old code produced, not a baseline the current
+code was ever measured against.
+
+`gap_command` now mirrors the node: bearing steering, `aim_within_gap` (moved
+into `gap_logic` so both the node and this harness can use it), and the
+corridor-centering bias. One drift is deliberately left in place and flagged
+rather than silently fixed: the harness still hard-stops inside
+`forward_stop_clearance` where the node creeps out at `escape_creep_speed`.
+
+**The lesson for anyone editing a controller here: `run_validation.py` is a
+hand-maintained mirror of the nodes, and nothing tells you when it stops
+matching.** If you change the steering law, change it in both places, and run
+the scenario afterwards.
+
+## Corridor centering, measured
+
+`--scenario gap` with and without `--no-centering`, seed `12345`.
+`mean_corridor_offset_m` is the metric that answers the question directly:
+the average distance from the middle of the corridor over the lap, sampled
+only where both walls are actually visible.
+
+| Track | Off-centre, no centering | Off-centre, with | Change | Lap time | Safety stops |
+|---|---:|---:|---:|---:|---:|
+| Spielberg | 0.076 m | **0.062 m** | −18.5% | +0.65 s | 1 → 1 |
+| Silverstone | 0.095 m | **0.076 m** | −20.0% | +1.27 s | 2 → 2 |
+| Brands Hatch | 0.092 m | **0.060 m** | −34.6% | −0.60 s | **18 → 1** |
+
+No collisions in either configuration. Maximum cross-track error fell on all
+three tracks (0.950→0.919, 0.980→0.932, 0.870→0.849 m). The Brands Hatch
+result is the interesting one: better lateral positioning meant the car
+stopped tripping its own safety layers, and the stop count fell from 18 to 1.
+
+The cost is 0.4–0.6% of lap time on the two tracks where nothing else
+changed, which is the centering bias asking for steering that the curvature
+speed ceiling then answers by slowing down slightly. That is the trade being
+made deliberately: a little lap time for consistently better track position
+and more clearance in reserve for whatever the next corner holds.
+
 ## Current validated result
 
 The checked-in [full JSON report](f1tenth-sim-results.json) was regenerated on
-2026-07-27 with seed `12345`, after the adaptive-speed work below. All seven
-scenarios passed. The previous column is the 2026-07-21 run, before that work:
+2026-07-30 with seed `12345`, after the corridor-centering work. All seven
+scenarios passed. `pure_solo` and `pure_traffic` are unchanged to the
+millisecond from the 2026-07-27 run, which is the intended result — the
+raceline optimizer is an offline tool and changes nothing the node does.
+The previous column is the 2026-07-21 run:
 
 | Controller | Track | Simulated lap time | (was) | Max raceline error | (was) | Collision |
 |---|---:|---:|---:|---:|---:|---:|
-| Gap follow | Spielberg | 173.88 s | 178.20 s | 0.863 m | 0.954 m | No |
-| Gap follow | Silverstone | 231.53 s | 238.33 s | 0.859 m | 0.964 m | No |
-| Gap follow | Brands Hatch | 179.08 s | 185.53 s | 0.914 m | 0.866 m | No |
+| Gap follow | Spielberg | 173.03 s | 178.20 s | 0.919 m | 0.954 m | No |
+| Gap follow | Silverstone | 231.70 s | 238.33 s | 0.932 m | 0.964 m | No |
+| Gap follow | Brands Hatch | 179.47 s | 185.53 s | 0.849 m | 0.866 m | No |
 | Pure pursuit | Spielberg | 133.53 s | 94.45 s | 0.146 m | 0.197 m | No |
 | Pure pursuit | Silverstone | 201.05 s | 127.25 s | 0.175 m | 0.219 m | No |
 | Pure pursuit | Brands Hatch | 90.20 s | 88.95 s | 0.119 m | 0.157 m | No |
 | Pure pursuit + opponent | Spielberg | 92.18 s | 86.53 s | 0.636 m | 0.413 m | No, either car |
 
-**Gap follow got faster and tracked better on every track** — the range-aware
-Pure Pursuit steering and the curvature/clearance speed ceilings are a
-straight improvement over the old bearing-as-steering, linear-speed-scale law.
+**Gap follow tracks better on every track than the 2026-07-21 baseline.**
+Read those two columns as separate experiments rather than a controlled
+comparison, though: the "was" column predates both the switch to bearing
+steering and the harness repair described above.
+
+**The raceline optimizer does not appear in this table at all, by design.**
+`optimize_raceline` is an offline tool that writes a `waypoints_file`; the
+node is untouched, so the default `--raceline shipped` numbers must not move,
+and they don't. Its own measurement is in
+[racing-autonomy.md](racing-autonomy.md#what-it-actually-buys-measured) —
+including why Brands Hatch is the only one of the three tracks on which that
+comparison is readable.
 
 **Pure pursuit solo is still slower than the pre-change baseline on two of
 three tracks, and this is understood.** It is the `max_acceleration` command

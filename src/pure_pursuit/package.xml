@@ -16,6 +16,12 @@
   <depend>slam_toolbox</depend>
   <depend>tf2_ros</depend>
   <depend>python3-numpy</depend>
+  <!-- Offline raceline optimization only (raceline_optimizer/occupancy_map):
+       bounded least-squares, the map's distance transform, and reading the
+       saved map's yaml + image. Nothing on the driving path needs these. -->
+  <depend>python3-scipy</depend>
+  <depend>python3-yaml</depend>
+  <depend>python3-pil</depend>
 
   <test_depend>python3-pytest</test_depend>
 

@@ -69,7 +69,6 @@ FORWARD_STOP_CLEARANCE = 0.25
 FORWARD_STOP_FOV = math.radians(60.0)
 TTC_COMMAND_SPEED_TIMEOUT = 0.5
 TTC_COMMAND_FALLBACK_MAX_ODOM_SPEED = 0.10
-GAP_STEERING_LOOKAHEAD = 1.5
 GAP_MAX_LATERAL_ACCEL = 1.0
 GAP_MAX_ACCELERATION = 3.0
 GAP_MAX_BRAKING_DECEL = 3.0
@@ -128,6 +127,15 @@ def initial_pose(line, index: int) -> np.ndarray:
     return np.array([line.xs[index], line.ys[index], line.yaws[index]], dtype=float)
 
 
+def plan_initial_pose(plan, shipped_line) -> np.ndarray:
+    """Spawn pose on the path the car will follow, heading along it."""
+    if RACELINE_SOURCE == "shipped":
+        return initial_pose(shipped_line, 0).reshape(1, 3)
+    start, nxt = plan.xy[0], plan.xy[1]
+    yaw = math.atan2(nxt[1] - start[1], nxt[0] - start[0])
+    return np.array([[start[0], start[1], yaw]], dtype=float)
+
+
 def cone_indices(half_angle_rad: float) -> tuple[int, int]:
     lo = int((-half_angle_rad - LIDAR.angle_min) / LIDAR.angle_increment)
     hi = int((half_angle_rad - LIDAR.angle_min) / LIDAR.angle_increment)
@@ -143,6 +151,52 @@ def closest_valid(scan: np.ndarray, half_angle_rad: float) -> float:
     return float(values.min()) if values.size else math.inf
 
 
+# Which line pure_pursuit follows: "shipped" is the raceline that comes with
+# the track, "optimized" is one computed here from the track's own centerline.
+RACELINE_SOURCE = "shipped"
+_OPTIMIZED_CACHE: dict = {}
+
+
+def track_centerline(track):
+    """(xy, width_left, width_right) from the centerline CSV the track ships.
+
+    Gym's Raceline object drops the track widths, so read them back from the
+    file: x_m, y_m, w_tr_right_m, w_tr_left_m.
+    """
+    csv_path = Path(track.filepath).parent / f"{track.spec.name}_centerline.csv"
+    table = np.loadtxt(csv_path, delimiter=",", comments="#")
+    return (table[:, :2].astype(float),
+            table[:, 3].astype(float), table[:, 2].astype(float))
+
+
+def optimized_raceline(track) -> np.ndarray:
+    """Minimum-curvature line from the track's centerline and track widths.
+
+    Uses the same optimizer and the same car dimensions and margin that
+    optimize_raceline defaults to, so what is measured here is what the tool
+    would actually produce for this track.
+    """
+    key = getattr(track, "spec", None)
+    key = getattr(key, "name", None) or id(track)
+    if key in _OPTIMIZED_CACHE:
+        return _OPTIMIZED_CACHE[key]
+
+    from pure_pursuit import raceline_optimizer
+
+    xy, width_left, width_right = track_centerline(track)
+
+    result = raceline_optimizer.optimize_minimum_curvature(
+        xy, width_left, width_right,
+        vehicle_half_width=CAR_WIDTH / 2.0,
+        safety_margin=0.15,
+        spacing=0.5,
+        iterations=6,
+    )
+    line = raceline_optimizer.resample_closed_path(result["line"], 0.15)
+    _OPTIMIZED_CACHE[key] = line
+    return line
+
+
 @dataclass
 class PathPlan:
     xy: np.ndarray
@@ -151,8 +205,13 @@ class PathPlan:
 
     @classmethod
     def from_track(cls, track, v_max: float = 4.0, a_lat_max: float = 2.5):
-        line = track.raceline
-        xy = np.column_stack((line.xs, line.ys)).astype(float)
+        if RACELINE_SOURCE == "optimized":
+            xy = optimized_raceline(track)
+        elif RACELINE_SOURCE == "centerline":
+            xy = track_centerline(track)[0]
+        else:
+            line = track.raceline
+            xy = np.column_stack((line.xs, line.ys)).astype(float)
         seg_len = racing_math.compute_segment_lengths(xy, closed=True)
         curvature = racing_math.estimate_path_curvature(xy, closed=True)
         speed = racing_math.compute_velocity_profile(
@@ -320,6 +379,62 @@ class OpponentProgress:
         ) % total_length
 
 
+# gap_follow.yaml's corridor-centering block, mirrored. ENABLE_CENTERING is
+# flipped by --no-centering so the same harness can measure the term's effect.
+ENABLE_CENTERING = True
+GAP_STEERING_GAIN = 1.0
+CENTERING_GAIN = 0.25
+CENTERING_MAX_STEERING = 0.08
+CENTERING_SIDE_HALF_SPAN = math.radians(60.0) / 2.0
+CENTERING_FULL_BEARING = math.radians(4.0)
+CENTERING_ZERO_BEARING = math.radians(15.0)
+CENTERING_FULL_FORWARD_DEPTH = 2.5
+CENTERING_ZERO_FORWARD_DEPTH = 1.5
+CENTERING_FULL_SIDE_DISTANCE = 4.0
+CENTERING_ZERO_SIDE_DISTANCE = 5.0
+
+
+def centering_bias_for(clean: np.ndarray, valid: np.ndarray,
+                       aim_bearing: float, aim_depth: float) -> float:
+    """gap_follow_node._centering_bias against the full scan, not the cone."""
+    angles = LIDAR.angle_min + np.arange(
+        clean.size, dtype=float) * LIDAR.angle_increment
+    left = gap_logic.side_wall_distance(
+        clean, valid, angles, math.pi / 2.0, CENTERING_SIDE_HALF_SPAN)
+    right = gap_logic.side_wall_distance(
+        clean, valid, angles, -math.pi / 2.0, CENTERING_SIDE_HALF_SPAN)
+    bias, _ = gap_logic.corridor_centering_bias(
+        left, right, aim_bearing, aim_depth,
+        CENTERING_GAIN, CENTERING_MAX_STEERING,
+        CENTERING_FULL_BEARING, CENTERING_ZERO_BEARING,
+        CENTERING_FULL_FORWARD_DEPTH, CENTERING_ZERO_FORWARD_DEPTH,
+        CENTERING_FULL_SIDE_DISTANCE, CENTERING_ZERO_SIDE_DISTANCE,
+    )
+    return bias
+
+
+def corridor_offset(scan: np.ndarray) -> Optional[float]:
+    """How far off the middle of the corridor the car is, in meters.
+
+    Positive means it sits left of centre. Returns None where the car is not
+    in a corridor at all -- one side open, or no wall within reach -- because
+    "the middle" is not defined there and averaging a made-up number in would
+    hide the cases that matter.
+    """
+    clean, valid = gap_logic.sanitize_ranges(scan, max_range=10.0, range_min=0.05)
+    angles = LIDAR.angle_min + np.arange(
+        clean.size, dtype=float) * LIDAR.angle_increment
+    left = gap_logic.side_wall_distance(
+        clean, valid, angles, math.pi / 2.0, CENTERING_SIDE_HALF_SPAN)
+    right = gap_logic.side_wall_distance(
+        clean, valid, angles, -math.pi / 2.0, CENTERING_SIDE_HALF_SPAN)
+    if not (math.isfinite(left) and math.isfinite(right)):
+        return None
+    if max(left, right) > CENTERING_ZERO_SIDE_DISTANCE:
+        return None
+    return (right - left) / 2.0
+
+
 def gap_command(
     scan: np.ndarray,
     current_speed: float,
@@ -396,18 +511,22 @@ def gap_command(
     if gap_start is None:
         return 0.0, 0.0, float(closest_distance), True
 
-    target_in_window = (gap_start + gap_end) // 2
+    target_in_window = gap_logic.aim_within_gap(
+        window, gap_start, gap_end, beam_angles)
     target_index = lo + target_in_window
     target_angle = LIDAR.angle_min + target_index * LIDAR.angle_increment
     target_distance = float(window[target_in_window])
-    target_curvature = gap_logic.target_curvature(
-        target_distance,
-        target_angle,
-        LIDAR_OFFSET_X,
-        max_lookahead=GAP_STEERING_LOOKAHEAD,
-    )
-    desired_steering = gap_logic.steering_from_curvature(
-        target_curvature, WHEELBASE, STEERING_LIMIT)
+    # Bearing steering, mirroring gap_follow_node. This replaced a pure
+    # pursuit curvature law whose helpers (target_curvature,
+    # steering_from_curvature) no longer exist in gap_logic -- the harness
+    # had been left calling them and could not run the gap scenario at all.
+    centering_bias = 0.0
+    if ENABLE_CENTERING:
+        centering_bias = centering_bias_for(
+            clean, valid, target_angle, target_distance)
+    desired_steering = float(
+        np.clip(GAP_STEERING_GAIN * target_angle + centering_bias,
+                -STEERING_LIMIT, STEERING_LIMIT))
     steering = gap_logic.slew_rate_limit(
         desired_steering,
         last_commanded_steering,
@@ -464,6 +583,11 @@ def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
     max_cross_track = 0.0
     min_scan = math.inf
     stop_steps = 0
+    # Directly measures what corridor centering is for: how far off the middle
+    # of the corridor the car sits, averaged over the lap. max_cross_track_m
+    # only says how far it is from the reference raceline, which is a
+    # different question when the reference is not the middle either.
+    corridor_offsets = []
     last_commanded_speed = 0.0
     last_commanded_steering = 0.0
     last_command_step = None
@@ -491,6 +615,9 @@ def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
             last_command_step = step
             min_scan = min(min_scan, nearest_scan)
             stop_steps += int(stopped)
+            offset = corridor_offset(ego["scan"])
+            if offset is not None:
+                corridor_offsets.append(offset)
 
             nearest, error = racing_math.find_nearest_index(
                 reference,
@@ -518,6 +645,10 @@ def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
         {
             "max_cross_track_m": round(max_cross_track, 4),
             "min_forward_scan_m": round(min_scan, 4),
+            "mean_corridor_offset_m": (
+                round(float(np.mean(np.abs(corridor_offsets))), 4)
+                if corridor_offsets else None),
+            "corridor_samples": len(corridor_offsets),
             "stop_steps": stop_steps,
         }
     )
@@ -577,8 +708,13 @@ def apply_fallback_safety(
 def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
     env = make_env(track, 1, seed)
     line = env.unwrapped.track.raceline
-    obs, _ = env.reset(options={"poses": initial_pose(line, 0).reshape(1, 3)})
     plan = PathPlan.from_track(env.unwrapped.track)
+    # Start on the line the car is actually going to follow. Spawning it on
+    # the shipped raceline while it tracks a different one would begin the lap
+    # with most of a corridor's worth of cross-track error already on the
+    # clock, and the scenario's 0.5m limit would fail the comparison before
+    # the car had turned a wheel.
+    obs, _ = env.reset(options={"poses": plan_initial_pose(plan, line)})
     follower = PathFollower(plan)
     command_shaper = CommandShaper()
     max_cross_track = 0.0
@@ -915,11 +1051,30 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run only the first track (useful during development).",
     )
+    parser.add_argument(
+        "--no-centering",
+        action="store_true",
+        help="Disable gap_follow's corridor-centering term, for measuring what "
+             "it changes. Not a supported car configuration.",
+    )
+    parser.add_argument(
+        "--raceline",
+        choices=("shipped", "optimized", "centerline"),
+        default="shipped",
+        help="Path pure_pursuit follows: the raceline shipped with the track, "
+             "one computed here by pure_pursuit.raceline_optimizer from the "
+             "track's own centerline and widths, or the bare centerline -- the "
+             "closest stand-in for a hand-recorded lap, and the thing the "
+             "optimizer is actually replacing (default: %(default)s).",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
+    global ENABLE_CENTERING, RACELINE_SOURCE
     args = parse_args()
+    ENABLE_CENTERING = not args.no_centering
+    RACELINE_SOURCE = args.raceline
     tracks = args.tracks[:1] if args.quick else args.tracks
     results: list[dict] = []
 

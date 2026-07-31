@@ -24,6 +24,9 @@ The processing pipeline, in the order the node applies it:
   disparity_extend    -> widen every obstacle *edge* by half a car width
   safety_bubble       -> zero out a car-width bubble around the closest hit
   find_gap_with...    -> preferred deep gap, then a slow corner fallback
+  aim_within_gap      -> which beam inside that gap to steer at
+  side_wall_distance  -> perpendicular distance to the wall on one side
+  corridor_centering  -> bounded cross-track bias, faded in on straights
 """
 
 import math
@@ -501,3 +504,179 @@ def find_gap_with_fallback(window: np.ndarray, preferred_distance: float,
         min_gap_width_m=min_gap_width_m,
     )
     return start, end, start is not None
+
+
+def aim_within_gap(window, gap_start, gap_end, beam_angles):
+    """Pick the beam to steer at inside a chosen gap.
+
+    The midpoint is the classic follow-the-gap answer, and it is the right
+    one when both edges are real obstacles -- it centres the car between
+    them. It is the wrong one when an edge is just the limit of the
+    sensor's field of view, because that edge carries no information about
+    where the track goes. A gap running from the -90deg FOV boundary to
+    +3deg has a midpoint of -44deg, which points into the wall beside the
+    car rather than down the course.
+
+    That is what tore the steering apart on 2026-07-27. Around a corner
+    nothing clears the preferred depth, so the fallback gap took over --
+    edge-clipped, aiming -44deg -- while on alternate scans a sliver of
+    deep space reappeared and aimed +6deg. Desired steering alternated
+    +0.26/-0.26rad at scan rate and the slew limiter averaged the pair to
+    0.009rad, so the car drove straight into the corner it was supposedly
+    turning away from.
+
+    When an edge is FOV-clipped, aim at the deepest beam in the gap
+    instead: that is the direction the course actually continues, and it
+    agrees with the preferred gap rather than fighting it.
+
+    Depth ties have to be broken deliberately. In open space every beam
+    reads max_range, so a plain argmax returns the first index -- which is
+    the edge of the field of view, i.e. hard over to one side in exactly
+    the situation where the car should go straight. Among the beams that
+    are effectively as deep as the deepest, take the one closest to
+    straight ahead.
+    """
+    if gap_start is None:
+        return None
+    if gap_start != 0 and gap_end != len(window) - 1:
+        return (gap_start + gap_end) // 2
+
+    depths = window[gap_start:gap_end + 1]
+    deepest = float(np.max(depths))
+    near_deepest = np.nonzero(
+        depths >= deepest - max(1e-6, 0.05 * deepest))[0]
+    angles = beam_angles[gap_start:gap_end + 1][near_deepest]
+    return gap_start + int(near_deepest[int(np.argmin(np.abs(angles)))])
+
+
+def side_wall_distance(clean: np.ndarray, valid: np.ndarray,
+                       angles: np.ndarray, centre_angle: float,
+                       half_span: float) -> float:
+    """Perpendicular distance to the wall on one side of the car.
+
+    Takes the *minimum* valid range in an angular window centred on
+    ``centre_angle`` (+pi/2 for the left wall, -pi/2 for the right). The
+    minimum is not a conservative fudge, it is the correct estimator: a beam
+    striking a locally straight wall at angle ``theta`` away from the
+    perpendicular reads ``d / cos(theta)``, which is minimised exactly at the
+    perpendicular. So the window recovers the true perpendicular distance even
+    when the car is yawed relative to the wall, as long as the yaw stays inside
+    ``half_span`` -- and it is simultaneously robust to a doorway or gap in the
+    middle of the window, because the nearer surrounding wall still wins.
+
+    Returns ``inf`` when the window contains no valid beam (no wall on that
+    side, or the scan does not reach that far around), which the caller must
+    read as "no usable wall here" rather than "very far away".
+    """
+    ranges = np.asarray(clean, dtype=np.float64)
+    validity = np.asarray(valid, dtype=bool)
+    beam_angles = np.asarray(angles, dtype=np.float64)
+    if not (ranges.shape == validity.shape == beam_angles.shape):
+        raise ValueError('ranges, validity, and angles must have matching shapes')
+    if not math.isfinite(centre_angle):
+        raise ValueError('centre_angle must be finite')
+    if not math.isfinite(half_span) or half_span <= 0.0:
+        raise ValueError('half_span must be finite and positive')
+
+    inside = validity & (np.abs(beam_angles - centre_angle) <= half_span)
+    if not np.any(inside):
+        return math.inf
+    return float(np.min(ranges[inside]))
+
+
+def _ramp(value: float, full_at: float, zero_at: float) -> float:
+    """Linear fade in [0, 1]: 1.0 at ``full_at``, 0.0 at ``zero_at``.
+
+    Works in either direction -- ``full_at < zero_at`` fades out as ``value``
+    grows, ``full_at > zero_at`` fades out as it shrinks. Equal endpoints
+    degenerate to a hard step, which callers are expected to avoid.
+    """
+    if not all(math.isfinite(v) for v in (value, full_at, zero_at)):
+        raise ValueError('ramp inputs must be finite')
+    if full_at == zero_at:
+        return 1.0 if value == full_at else 0.0
+    fraction = (value - zero_at) / (full_at - zero_at)
+    return float(min(1.0, max(0.0, fraction)))
+
+
+def corridor_centering_bias(left_distance: float, right_distance: float,
+                            aim_bearing: float, aim_depth: float,
+                            gain: float, max_bias: float,
+                            bearing_full: float, bearing_zero: float,
+                            depth_full: float, depth_zero: float,
+                            side_full: float, side_zero: float):
+    """A small steering bias that pulls the car to the middle of a corridor.
+
+    Follow-the-gap answers "which way should I point", never "where in the
+    corridor should I be". Those are different questions, and the second one
+    is unanswered anywhere else in this node: aiming at the deepest beam sends
+    the car parallel to the walls, which holds whatever lateral offset it
+    happened to enter the straight with. Enter 0.15m off the left wall and it
+    tracks 0.15m off the left wall for the length of the straight, spending
+    the whole clearance budget for no reason and starting the next corner from
+    the worst possible place.
+
+    This adds the missing cross-track term. Together with the existing
+    ``steering_gain * aim_bearing`` heading term it forms the standard
+    two-state lane-centring law (cross-track error + heading error), the same
+    structure as Stanley control and the classic F1TENTH wall-follower. The
+    heading term supplies the damping: as the car turns toward the middle its
+    heading tilts, the aim bearing swings the other way, and the two oppose --
+    so no derivative term or error history is needed here, and there is
+    nothing to wind up.
+
+    Sign convention is ROS REP-103 (positive angle = left). The car sits left
+    of centre when ``left_distance < right_distance``, and the returned bias is
+    then negative, steering it back right.
+
+    Three independent conditions fade the bias in, all as smooth ramps rather
+    than switches -- a hard on/off on a steering term is what produced the
+    scan-rate steering chatter documented in ``aim_within_gap``:
+
+      * **the car is going straight** (``aim_bearing`` near zero). This is the
+        user-visible contract -- centre on the straights, never fight the gap
+        logic mid-corner -- and it also targets the failure mode precisely.
+        A large aim bearing already means either a corner, where the racing
+        line is deliberately not the middle, or an off-centre car that the
+        midpoint aim is *already* correcting.
+      * **there is a straight to centre in** (``aim_depth`` far enough ahead).
+        No point centring for a wall 1m away.
+      * **both walls are real** (each within ``side_zero``). Without this, a
+        doorway or an opening on one side reads as "acres of room over there"
+        and the bias would steer into it. An unbounded side is not a wall.
+
+    Returns ``(bias_rad, weight)``. The bias is already clamped to
+    ``+/-max_bias`` and scaled by the weight; the weight is returned only so
+    the caller can log why the bias is what it is. The clamp is the safety
+    property that matters: this term is a bounded nudge that can never
+    outvote the gap the obstacle-avoidance pipeline chose, and it is applied
+    before the node's existing steering clip and slew limiter, so every
+    downstream safety layer still sees a command it can shape.
+    """
+    if not all(math.isfinite(v) for v in (gain, max_bias)):
+        raise ValueError('centering gain and max_bias must be finite')
+    if gain < 0.0 or max_bias < 0.0:
+        raise ValueError('centering gain and max_bias must be non-negative')
+    if not math.isfinite(aim_bearing):
+        raise ValueError('aim_bearing must be finite')
+
+    # An unbounded side is not a wall to centre against.
+    if not (math.isfinite(left_distance) and math.isfinite(right_distance)):
+        return 0.0, 0.0
+
+    weight = (
+        _ramp(abs(aim_bearing), bearing_full, bearing_zero)
+        * _ramp(aim_depth, depth_full, depth_zero)
+        * _ramp(left_distance, side_full, side_zero)
+        * _ramp(right_distance, side_full, side_zero)
+    )
+    if weight <= 0.0:
+        return 0.0, 0.0
+
+    # Lateral offset from the middle, positive when the car sits left of it.
+    # The car body is symmetric, so its half-width cancels in the difference
+    # and raw ranges are the right thing to subtract here.
+    offset_from_middle = (right_distance - left_distance) / 2.0
+    bias = -gain * offset_from_middle
+    bias = float(min(max_bias, max(-max_bias, bias)))
+    return weight * bias, weight

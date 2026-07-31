@@ -16,6 +16,7 @@ joy_callback directly -- no topics or executor involved.
 """
 import math
 
+import numpy as np
 import pytest
 import rclpy
 from nav_msgs.msg import Odometry
@@ -409,3 +410,103 @@ def test_a_wild_odometry_reading_cannot_exceed_the_speed_ceiling(node):
     _ready(node, speed=500.0)
     node.scan_callback(_scan())
     assert published[-1].drive.speed <= MAX_SPEED
+
+
+# ============================================================================
+# Corridor centering -- the cross-track term, wired end to end
+# ============================================================================
+
+def _corridor_scan(left_dist, right_dist, n=811, span=math.radians(270)):
+    """A straight corridor seen by a 270deg scan, car parallel to the walls.
+
+    Uses the real sensor span rather than the 180deg default, because the node
+    deliberately measures the side walls against the *full* scan -- the
+    forward window puts both side directions exactly on its boundary.
+    """
+    msg = _scan(n=n, span=span)
+    angles = msg.angle_min + np.arange(n) * msg.angle_increment
+    ranges = np.full(n, 10.0)
+    for i, a in enumerate(angles):
+        hits = []
+        if math.cos(a - math.pi / 2) > 1e-3:
+            hits.append(left_dist / math.cos(a - math.pi / 2))
+        if math.cos(a + math.pi / 2) > 1e-3:
+            hits.append(right_dist / math.cos(a + math.pi / 2))
+        if hits:
+            ranges[i] = min(10.0, min(hits))
+    msg.ranges = [float(r) for r in ranges]
+    return msg
+
+
+def test_centering_steers_off_a_wall_it_is_running_parallel_to(node):
+    """The behaviour being fixed. In a corridor wide enough that the free
+    space reaches the FOV edge, the aim is the deepest beam -- straight down
+    the corridor, parallel to both walls -- so bearing steering alone reports
+    zero error while the car sits 0.75m off centre."""
+    published = _capture(node)
+    _ready(node, speed=1.0)
+    node.scan_callback(_corridor_scan(left_dist=1.50, right_dist=3.00))
+    assert published[-1].drive.speed > 0.0, 'should be driving, not stopped'
+    assert published[-1].drive.steering_angle < -0.01, (
+        'closer to the left wall, so it must steer right')
+
+
+def test_centering_is_symmetric(node):
+    published = _capture(node)
+    _ready(node, speed=1.0)
+    node.scan_callback(_corridor_scan(left_dist=3.00, right_dist=1.50))
+    assert published[-1].drive.steering_angle > 0.01
+
+
+def test_centering_is_silent_when_already_centred(node):
+    published = _capture(node)
+    _ready(node, speed=1.0)
+    node.scan_callback(_corridor_scan(left_dist=2.25, right_dist=2.25))
+    assert abs(published[-1].drive.steering_angle) < 0.01
+
+
+def test_centering_never_exceeds_its_authority_bound(node):
+    """Hard against one wall, the bias is still only a bias."""
+    published = _capture(node)
+    _ready(node, speed=1.0)
+    node.scan_callback(_corridor_scan(left_dist=0.60, right_dist=3.50))
+    assert abs(published[-1].drive.steering_angle) <= node.centering_max_steering + 1e-9
+
+
+def test_without_centering_the_car_holds_its_offset(node):
+    """Same scan with the term switched off: bearing steering sees a target
+    dead ahead and commands nothing, which is exactly the wall-hugging."""
+    published = _capture(node)
+    node.enable_centering = False
+    _ready(node, speed=1.0)
+    node.scan_callback(_corridor_scan(left_dist=1.50, right_dist=3.00))
+    assert abs(published[-1].drive.steering_angle) < 1e-9
+
+
+def test_narrow_corridor_still_uses_the_midpoint_aim(node):
+    """Where both gap edges are real obstacles the midpoint already steers off
+    the near wall. Centering must not fight it -- same sign, no cancellation."""
+    published = _capture(node)
+    _ready(node, speed=1.0)
+    node.scan_callback(_corridor_scan(left_dist=0.55, right_dist=1.25))
+    assert published[-1].drive.steering_angle < -0.01
+
+
+def test_centering_does_not_disturb_the_open_road(node):
+    """No walls in range is not a corridor; the car must go straight."""
+    published = _capture(node)
+    _ready(node, speed=1.0)
+    node.scan_callback(_scan(n=811, span=math.radians(270)))
+    assert abs(published[-1].drive.steering_angle) < 1e-9
+
+
+def test_centering_refuses_to_start_with_too_much_authority():
+    """A bias able to cancel the chosen gap is a second driving policy."""
+    rclpy.init(args=['--ros-args',
+                     '-p', 'max_steering_angle:=0.26',
+                     '-p', 'centering_max_steering:=0.25'])
+    try:
+        with pytest.raises(ValueError, match='centering_max_steering'):
+            GapFollowNode()
+    finally:
+        rclpy.shutdown()

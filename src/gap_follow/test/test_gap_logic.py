@@ -502,3 +502,235 @@ def test_ttc_swept_corridor_follows_the_turn():
         path_curvature=-0.821, laser_offset_x=0.33)
     assert straight < math.inf, 'straight ahead, this is on the path'
     assert turning == math.inf, 'turning hard right, the car goes around it'
+
+
+# ============================================================================
+# side_wall_distance: the perpendicular distance to one wall
+# ============================================================================
+
+def _corridor_scan(left_dist, right_dist, yaw=0.0, n=541, span_deg=135.0):
+    """Synthetic 270deg scan inside a straight corridor.
+
+    The car sits `left_dist` from the left wall and `right_dist` from the
+    right, yawed `yaw` radians (positive = nose swung left). Returns
+    (clean, valid, angles) as the node would after sanitize_ranges.
+    """
+    angles = np.linspace(-math.radians(span_deg), math.radians(span_deg), n)
+    # Wall normals in the car frame rotate with the car's yaw.
+    to_left = math.pi / 2.0 - yaw
+    to_right = -math.pi / 2.0 - yaw
+    ranges = np.full(n, 10.0)
+    for i, a in enumerate(angles):
+        hits = []
+        cos_left = math.cos(a - to_left)
+        if cos_left > 1e-3:
+            hits.append(left_dist / cos_left)
+        cos_right = math.cos(a - to_right)
+        if cos_right > 1e-3:
+            hits.append(right_dist / cos_right)
+        if hits:
+            ranges[i] = min(10.0, min(hits))
+    return ranges, np.ones(n, dtype=bool), angles
+
+
+def test_side_wall_distance_recovers_the_perpendicular_distance():
+    clean, valid, angles = _corridor_scan(0.80, 1.40)
+    left = gap_logic.side_wall_distance(clean, valid, angles, math.pi / 2, math.radians(30))
+    right = gap_logic.side_wall_distance(clean, valid, angles, -math.pi / 2, math.radians(30))
+    assert left == pytest.approx(0.80, abs=0.01)
+    assert right == pytest.approx(1.40, abs=0.01)
+
+
+def test_side_wall_distance_is_yaw_tolerant_inside_the_window():
+    """A beam hits a straight wall at d/cos(theta), minimised at the
+    perpendicular -- so a yawed car still measures the true distance as long
+    as the perpendicular is inside the window."""
+    clean, valid, angles = _corridor_scan(0.80, 1.40, yaw=math.radians(20))
+    left = gap_logic.side_wall_distance(clean, valid, angles, math.pi / 2, math.radians(30))
+    right = gap_logic.side_wall_distance(clean, valid, angles, -math.pi / 2, math.radians(30))
+    assert left == pytest.approx(0.80, abs=0.02)
+    assert right == pytest.approx(1.40, abs=0.02)
+
+
+def test_side_wall_distance_survives_a_doorway_mid_window():
+    """A hole in the wall must not read as 'acres of room on this side' --
+    the minimum keeps the surrounding wall."""
+    clean, valid, angles = _corridor_scan(0.80, 1.40)
+    doorway = np.abs(angles - math.pi / 2) < math.radians(6)
+    clean = clean.copy()
+    clean[doorway] = 9.5
+    left = gap_logic.side_wall_distance(clean, valid, angles, math.pi / 2, math.radians(30))
+    assert left == pytest.approx(0.80, abs=0.03)
+
+
+def test_side_wall_distance_is_infinite_with_no_valid_beam():
+    clean, valid, angles = _corridor_scan(0.80, 1.40)
+    assert gap_logic.side_wall_distance(
+        clean, np.zeros_like(valid), angles, math.pi / 2, math.radians(30)) == math.inf
+
+
+def test_side_wall_distance_ignores_invalid_beams():
+    clean, valid, angles = _corridor_scan(0.80, 1.40)
+    clean, valid = clean.copy(), valid.copy()
+    near_left = np.abs(angles - math.pi / 2) < math.radians(4)
+    clean[near_left] = 0.0      # dropout encoded as non-free
+    valid[near_left] = False    # but not trustworthy
+    left = gap_logic.side_wall_distance(clean, valid, angles, math.pi / 2, math.radians(30))
+    assert left == pytest.approx(0.80, abs=0.03), 'a dropout is unknown, not contact'
+
+
+# ============================================================================
+# corridor_centering_bias: the cross-track term
+# ============================================================================
+
+CENTERING = dict(
+    gain=0.25, max_bias=0.08,
+    bearing_full=math.radians(4), bearing_zero=math.radians(15),
+    depth_full=2.5, depth_zero=1.5,
+    side_full=4.0, side_zero=5.0,
+)
+
+
+def _bias(left, right, bearing=0.0, depth=5.0, **overrides):
+    kwargs = dict(CENTERING, **overrides)
+    return gap_logic.corridor_centering_bias(left, right, bearing, depth, **kwargs)
+
+
+def test_centering_is_silent_in_the_middle_of_the_corridor():
+    bias, weight = _bias(1.0, 1.0)
+    assert bias == pytest.approx(0.0)
+    assert weight == pytest.approx(1.0)
+
+
+def test_centering_steers_right_when_hugging_the_left_wall():
+    bias, weight = _bias(0.30, 1.50)
+    assert bias < 0.0, 'positive steering is left (REP-103), so this must be negative'
+    assert weight == pytest.approx(1.0)
+
+
+def test_centering_steers_left_when_hugging_the_right_wall():
+    bias, _ = _bias(1.50, 0.30)
+    assert bias > 0.0
+
+
+def test_centering_is_proportional_to_the_offset():
+    small, _ = _bias(0.90, 1.10)   # 0.10m off centre
+    large, _ = _bias(0.80, 1.20)   # 0.20m off centre
+    assert small == pytest.approx(-0.25 * 0.10)
+    assert large == pytest.approx(-0.25 * 0.20)
+
+
+def test_centering_is_clamped_to_its_authority_bound():
+    """The clamp is the safety property: this term can never outvote the gap
+    the obstacle-avoidance pipeline chose."""
+    # 1.10m off centre asks for 0.275rad; it may only ever have 0.08.
+    bias, weight = _bias(0.20, 2.40)
+    assert weight == pytest.approx(1.0), 'both sides are real walls here'
+    assert abs(bias) == pytest.approx(0.08)
+
+
+def test_centering_fades_out_while_turning():
+    assert _bias(0.30, 1.50, bearing=math.radians(3))[1] == pytest.approx(1.0)
+    assert _bias(0.30, 1.50, bearing=math.radians(20))[1] == 0.0
+    assert _bias(0.30, 1.50, bearing=math.radians(20))[0] == 0.0
+
+
+def test_centering_fade_is_a_ramp_not_a_switch():
+    """A hard on/off on a steering term is what produced the scan-rate
+    chatter documented in aim_within_gap."""
+    weights = [_bias(0.30, 1.50, bearing=math.radians(d))[1]
+               for d in (4, 6, 8, 10, 12, 15)]
+    assert weights[0] == pytest.approx(1.0)
+    assert weights[-1] == 0.0
+    assert all(a > b for a, b in zip(weights, weights[1:])), 'must decrease monotonically'
+    assert all(abs(a - b) < 0.35 for a, b in zip(weights, weights[1:])), 'no cliff'
+
+
+def test_centering_ignores_a_side_that_is_not_a_wall():
+    """An opening on one side is not something to centre against -- otherwise
+    the bias steers straight into it."""
+    assert _bias(0.30, math.inf)[1] == 0.0
+    assert _bias(0.30, 6.0)[1] == 0.0, 'past centering_zero_side_distance'
+    assert _bias(0.30, 3.5)[1] == pytest.approx(1.0), 'inside it, this is a wall'
+
+
+def test_centering_stops_before_a_corner():
+    assert _bias(0.30, 1.50, depth=3.0)[1] == pytest.approx(1.0)
+    assert _bias(0.30, 1.50, depth=1.2)[1] == 0.0
+
+
+def test_centering_can_be_disabled_by_zero_gain():
+    assert _bias(0.30, 1.50, gain=0.0)[0] == pytest.approx(0.0)
+
+
+def test_centering_rejects_a_negative_authority_bound():
+    with pytest.raises(ValueError):
+        _bias(1.0, 1.0, max_bias=-0.1)
+    with pytest.raises(ValueError):
+        _bias(1.0, 1.0, gain=-1.0)
+
+
+# ============================================================================
+# Closed loop: does the law actually centre the car, without weaving?
+# ============================================================================
+
+def _drive_corridor(width, start_offset, steps=600, speed=1.5, dt=0.025,
+                    wheelbase=0.324, steering_gain=1.0, max_steering=0.26,
+                    centering=True):
+    """Kinematic bicycle down a straight corridor under the real steering law.
+
+    Mirrors gap_follow_node: the aim bearing on a straight is the corridor
+    direction in the body frame (i.e. -yaw), the centering bias is added to
+    it, and the sum is clipped to the steering limit. Returns the lateral
+    offset history (0.0 = middle of the corridor, positive = left of it).
+    """
+    y, yaw = start_offset, 0.0
+    history = []
+    for _ in range(steps):
+        left = width / 2.0 - y
+        right = width / 2.0 + y
+        aim_bearing = -yaw
+        bias = _bias(left, right, bearing=aim_bearing)[0] if centering else 0.0
+        steering = min(max_steering, max(-max_steering,
+                                         steering_gain * aim_bearing + bias))
+        yaw += speed / wheelbase * math.tan(steering) * dt
+        y += speed * math.sin(yaw) * dt
+        history.append(y)
+    return np.array(history)
+
+
+def test_centering_converges_to_the_middle_of_a_straight():
+    history = _drive_corridor(width=2.0, start_offset=0.7)
+    assert abs(history[-1]) < 0.05, (
+        f'should settle in the middle, ended {history[-1]:+.3f}m off')
+
+
+def test_centering_converges_from_either_side():
+    for start in (0.7, -0.7, 0.35, -0.35):
+        history = _drive_corridor(width=2.0, start_offset=start)
+        assert abs(history[-1]) < 0.05, f'start {start:+.2f}m ended {history[-1]:+.3f}m'
+
+
+def test_centering_does_not_weave():
+    """The bearing term is the damping: as the car turns toward the middle its
+    heading tilts and the aim bearing swings back. Overshoot must stay small
+    and must not grow."""
+    history = _drive_corridor(width=2.0, start_offset=0.7)
+    overshoot = history[history < 0.0]
+    assert overshoot.size == 0 or abs(overshoot.min()) < 0.10, (
+        f'overshoot {abs(overshoot.min()) if overshoot.size else 0:.3f}m is too much')
+    # No growing oscillation: the second half must be quieter than the first.
+    assert np.std(history[300:]) < np.std(history[:300])
+
+
+def test_without_centering_the_car_holds_its_offset_forever():
+    """The behaviour being fixed: bearing steering alone is parallel to the
+    walls, so whatever offset the car entered the straight with, it keeps."""
+    history = _drive_corridor(width=2.0, start_offset=0.7, centering=False)
+    assert history[-1] == pytest.approx(0.7, abs=1e-6)
+
+
+def test_centering_never_leaves_the_corridor():
+    for start in (0.7, -0.7):
+        history = _drive_corridor(width=2.0, start_offset=start)
+        assert np.abs(history).max() <= abs(start) + 1e-9, 'must not go wider than it started'
