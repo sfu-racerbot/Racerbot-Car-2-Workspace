@@ -296,6 +296,18 @@ change.**
 4. Only once cornering is solid, raise `v_max` to actually use more of the
    straights.
 
+Note the distinction between these four and the controller's own limits.
+`a_lat_max`/`a_accel_max`/`a_brake_max`/`v_max` shape the *recorded speed
+profile*, so changing them means regenerating that profile
+([Phase 4](#phase-4-generate-the-velocity-profile)). `pure_pursuit_node`'s
+`max_speed`, `max_lateral_accel`, and friends are online ceilings applied
+on top of whatever profile is loaded — those you can change on a running
+node from the dashboard's
+[live tuning panel](web-dashboard.md#live-parameter-tuning), which is the
+fast way to answer "is it the profile or the controller?" between runs.
+Lowering `max_speed` there clips the whole profile without re-recording
+anything.
+
 ## Phase 4b (optional): optimize the line itself, not just its speed
 
 Phase 4 answers "how fast can the car drive *this* line". It never asks

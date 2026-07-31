@@ -48,6 +48,19 @@
   const resetViewBtn = document.getElementById('reset-view');
 
   const overlay = document.getElementById('overlay');
+
+  const tuningSection = document.getElementById('tuning-section');
+  const tuningSummary = document.getElementById('tuning-summary');
+  const tuningDot = document.getElementById('dot-tuning');
+  const tuningOpen = document.getElementById('tuning-open');
+  const tuningPanel = document.getElementById('tuning-panel');
+  const tuningClose = document.getElementById('tuning-close');
+  const tuningArm = document.getElementById('tuning-arm');
+  const tuningArmNote = document.getElementById('tuning-arm-note');
+  const tuningBody = document.getElementById('tuning-body');
+  const tuningSave = document.getElementById('tuning-save');
+  const tuningSaveStatus = document.getElementById('tuning-save-status');
+
   const minimapPanel = document.getElementById('minimap-panel');
   const minimapCanvas = document.getElementById('minimap');
   const minimapCtx = minimapCanvas.getContext('2d');
@@ -71,6 +84,8 @@
     speed: null, // { speed, receivedAt } -- measured /odom longitudinal speed
     stopwatch: null, // { elapsedS, enabled, running, lbHeld, joyFresh, buttonAvailable, receivedAt }
     stats: null, // { cpuPercent, memPercent, cpuTempC, uptimeS, wifiDbm, receivedAt }
+    tuning: null, // { enabled, allowSave, nodes: [...] } -- see protocol.tuning_state_message
+    tuningArmed: false, // server-confirmed, never assumed from the checkbox
   };
 
   // Pending "what does the next binary frame mean" -- set when a JSON
@@ -129,6 +144,10 @@
     ws.onopen = () => setConnected(true);
     ws.onclose = () => {
       setConnected(false);
+      // A dropped link disarms tuning. The server has already forgotten
+      // this connection's arm state, so anything else here would be the
+      // UI claiming an authority it no longer has.
+      setTuningArmed(false);
       setTimeout(connect, 1000); // keep trying -- cheap, and self-heals a dropped link
     };
     ws.onerror = () => ws.close();
@@ -173,6 +192,15 @@
         receivedAt: performance.now(),
       };
       updateStatusText();
+    } else if (header.type === 'tuning') {
+      state.tuning = { enabled: header.enabled, allowSave: header.allow_save, nodes: header.nodes || [] };
+      renderTuning();
+    } else if (header.type === 'tuning_armed') {
+      setTuningArmed(header.armed);
+    } else if (header.type === 'tuning_result') {
+      applyTuningResult(header);
+    } else if (header.type === 'tuning_saved') {
+      showTuningSaveResult(header);
     } else if (header.type === 'stats') {
       state.stats = {
         cpuPercent: header.cpu_percent,
@@ -890,6 +918,344 @@
   stopwatchReset.addEventListener('click', () => sendStopwatchControl('reset'));
 
   window.addEventListener('resize', render);
+
+  // ---------------------------------------------------------------------
+  // Live parameter tuning.
+  //
+  // This is the one part of the dashboard that writes to the car, so two
+  // rules shape all of it:
+  //
+  //   * The server is the source of truth, always. The arm switch shows
+  //     what the server confirmed (`tuning_armed`), not what was clicked;
+  //     a control that gets refused snaps back to the value the node
+  //     actually holds. A UI that optimistically displays what you asked
+  //     for is exactly how you end up believing the car is set to 2 m/s
+  //     while it drives 4.
+  //   * Never rebuild a control somebody is holding. The panel's DOM is
+  //     built once per parameter and only *updated* afterwards, and an
+  //     update skips any control that currently has focus or is mid-drag
+  //     -- otherwise a 2-second refresh landing mid-slide would yank the
+  //     slider out from under a thumb.
+  // ---------------------------------------------------------------------
+  const tuningControls = new Map(); // "node/name" -> control record
+  let tuningStructure = '';         // signature of the currently built DOM
+
+  function tuningKey(node, name) { return `${node}/${name}`; }
+
+  function decimalsFor(step) {
+    if (!step || step <= 0) return 3;
+    if (step >= 1) return 0;
+    return Math.min(4, Math.ceil(-Math.log10(step)));
+  }
+
+  function formatTuningValue(param, value) {
+    if (value === null || value === undefined) return '--';
+    if (param.kind === 'bool') return value ? 'on' : 'off';
+    return Number(value).toFixed(decimalsFor(param.step));
+  }
+
+  function sendTuningControl(payload) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify(Object.assign({ type: 'tuning_control' }, payload)));
+  }
+
+  function sendTuningSet(node, name, value) {
+    sendTuningControl({ action: 'set', node, name, value });
+  }
+
+  // A signature of the panel's *shape* only -- which nodes are up and
+  // which parameters they offer. Values deliberately excluded, so the
+  // 2-second value refresh never triggers a rebuild.
+  function structureSignature(nodes) {
+    return JSON.stringify(nodes.map((n) => [
+      n.node, n.online, n.error || '', n.savable,
+      (n.params || []).map((p) => p.name),
+    ]));
+  }
+
+  function renderTuning() {
+    const tuning = state.tuning;
+    if (!tuning) return;
+
+    tuningSection.style.display = tuning.enabled ? '' : 'none';
+    if (!tuning.enabled) {
+      tuningPanel.classList.remove('open');
+      return;
+    }
+
+    const nodes = tuning.nodes || [];
+    const onlineNodes = nodes.filter((n) => n.online);
+    tuningDot.className = 'dot ' + (onlineNodes.length ? 'dot-green' : 'dot-gray');
+    tuningSummary.textContent = onlineNodes.length
+      ? `${onlineNodes.map((n) => n.node.replace(/_node$/, '')).join(', ')} tunable`
+      : 'no driving node running';
+
+    const signature = structureSignature(nodes);
+    if (signature !== tuningStructure) {
+      tuningStructure = signature;
+      buildTuningPanel(nodes);
+    }
+    updateTuningValues(nodes);
+    updateTuningEnabled();
+  }
+
+  function buildTuningPanel(nodes) {
+    tuningControls.clear();
+    tuningBody.textContent = '';
+
+    const usable = nodes.filter((n) => n.online);
+    if (!usable.length) {
+      const empty = document.createElement('div');
+      empty.className = 'tuning-empty';
+      empty.textContent =
+        'No driving node is running. Start gap_follow or pure_pursuit and '
+        + 'its knobs will appear here.';
+      tuningBody.appendChild(empty);
+      return;
+    }
+
+    usable.forEach((node) => {
+      const title = document.createElement('div');
+      title.className = 'tuning-node-title';
+      title.textContent = node.node;
+      tuningBody.appendChild(title);
+
+      if (node.error) {
+        const error = document.createElement('div');
+        error.className = 'tuning-node-error';
+        error.textContent = node.error;
+        tuningBody.appendChild(error);
+        return;
+      }
+
+      let currentGroup = null;
+      (node.params || []).forEach((param) => {
+        if (param.group !== currentGroup) {
+          currentGroup = param.group;
+          const groupTitle = document.createElement('div');
+          groupTitle.className = 'tuning-group-title' + (param.safety ? ' safety' : '');
+          groupTitle.textContent = param.group;
+          tuningBody.appendChild(groupTitle);
+        }
+        tuningBody.appendChild(buildTuningParam(node.node, param));
+      });
+    });
+  }
+
+  function buildTuningParam(nodeName, param) {
+    const row = document.createElement('div');
+    row.className = 'tuning-param' + (param.safety ? ' safety' : '');
+
+    const head = document.createElement('div');
+    head.className = 'tuning-param-head';
+    const label = document.createElement('span');
+    label.className = 'tuning-param-name';
+    label.textContent = param.label;
+    head.appendChild(label);
+
+    const valueWrap = document.createElement('span');
+    valueWrap.className = 'tuning-param-value';
+
+    const revert = document.createElement('button');
+    revert.className = 'tuning-revert';
+    revert.title = 'Revert to the value this node started with';
+    revert.textContent = '↺';
+    valueWrap.appendChild(revert);
+
+    const record = { param, node: nodeName, row, revert, sliding: false };
+
+    if (param.kind === 'bool') {
+      const toggle = document.createElement('input');
+      toggle.type = 'checkbox';
+      toggle.addEventListener('change', () => {
+        sendTuningSet(nodeName, param.name, toggle.checked);
+      });
+      valueWrap.appendChild(toggle);
+      record.toggle = toggle;
+      head.appendChild(valueWrap);
+      row.appendChild(head);
+    } else {
+      const number = document.createElement('input');
+      number.type = 'number';
+      number.min = param.min;
+      number.max = param.max;
+      number.step = param.step || 'any';
+      valueWrap.appendChild(number);
+
+      const unit = document.createElement('span');
+      unit.className = 'tuning-unit';
+      unit.textContent = param.unit || '';
+      valueWrap.appendChild(unit);
+      head.appendChild(valueWrap);
+      row.appendChild(head);
+
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = param.min;
+      slider.max = param.max;
+      slider.step = param.step || (param.max - param.min) / 200;
+      row.appendChild(slider);
+
+      // Drag: mirror into the number box continuously so the readout
+      // tracks your thumb, but only send on release. Sending every
+      // intermediate value would put a whole sweep of speeds on the bus
+      // for one adjustment.
+      slider.addEventListener('pointerdown', () => { record.sliding = true; });
+      slider.addEventListener('input', () => {
+        number.value = Number(slider.value).toFixed(decimalsFor(param.step));
+      });
+      slider.addEventListener('change', () => {
+        record.sliding = false;
+        sendTuningSet(nodeName, param.name, Number(slider.value));
+      });
+      slider.addEventListener('pointerup', () => { record.sliding = false; });
+
+      number.addEventListener('change', () => {
+        const clamped = Math.min(Math.max(Number(number.value), param.min), param.max);
+        if (!Number.isFinite(clamped)) return;
+        number.value = clamped.toFixed(decimalsFor(param.step));
+        slider.value = clamped;
+        sendTuningSet(nodeName, param.name, clamped);
+      });
+
+      record.number = number;
+      record.slider = slider;
+    }
+
+    revert.addEventListener('click', () => {
+      if (record.baseline === null || record.baseline === undefined) return;
+      sendTuningSet(nodeName, param.name, record.baseline);
+    });
+
+    if (param.description) {
+      const desc = document.createElement('div');
+      desc.className = 'tuning-desc';
+      desc.textContent = param.description;
+      row.appendChild(desc);
+    }
+
+    const note = document.createElement('div');
+    note.className = 'tuning-note';
+    row.appendChild(note);
+    record.note = note;
+
+    tuningControls.set(tuningKey(nodeName, param.name), record);
+    return row;
+  }
+
+  function updateTuningValues(nodes) {
+    nodes.forEach((node) => {
+      (node.params || []).forEach((param) => {
+        const record = tuningControls.get(tuningKey(node.node, param.name));
+        if (!record) return;
+        record.baseline = param.baseline;
+        setTuningControlValue(record, param.value);
+      });
+    });
+  }
+
+  function setTuningControlValue(record, value) {
+    if (value === null || value === undefined) return;
+    const { param } = record;
+    if (record.toggle) {
+      if (document.activeElement !== record.toggle) record.toggle.checked = !!value;
+    } else {
+      // Skip anything the user is actively holding -- see the section
+      // comment. Their input wins until they let go.
+      if (!record.sliding && document.activeElement !== record.slider) {
+        record.slider.value = value;
+      }
+      if (!record.sliding && document.activeElement !== record.number) {
+        record.number.value = Number(value).toFixed(decimalsFor(param.step));
+      }
+    }
+    const baseline = record.baseline;
+    const dirty = baseline !== null && baseline !== undefined
+      && (param.kind === 'bool'
+        ? !!baseline !== !!value
+        : Math.abs(Number(baseline) - Number(value)) > 1e-9);
+    record.row.classList.toggle('dirty', dirty);
+    record.revert.title = `Revert to ${formatTuningValue(param, baseline)}`;
+  }
+
+  function applyTuningResult(message) {
+    const record = tuningControls.get(tuningKey(message.node, message.name));
+    if (!record) return;
+    // Snap to whatever the node reports it now holds -- on a rejection
+    // that is the *unchanged* value, so the control stops showing a
+    // number the car never accepted.
+    if (message.value !== null && message.value !== undefined) {
+      record.sliding = false;
+      setTuningControlValue(record, message.value);
+    }
+    record.row.classList.remove('applied', 'rejected');
+    if (message.ok) {
+      // Restart the flash animation rather than relying on class toggling
+      // alone, which a browser will collapse into no animation at all.
+      void record.row.offsetWidth;
+      record.row.classList.add('applied');
+      record.note.textContent = '';
+    } else {
+      record.row.classList.add('rejected');
+      record.note.textContent = message.reason || 'rejected';
+    }
+  }
+
+  function setTuningArmed(armed) {
+    state.tuningArmed = !!armed;
+    tuningArm.checked = state.tuningArmed;
+    tuningPanel.classList.toggle('armed', state.tuningArmed);
+    tuningArmNote.textContent = state.tuningArmed
+      ? 'ARMED · changes reach the car as soon as you release a control'
+      : 'disarmed · controls are read-only until you arm';
+    updateTuningEnabled();
+  }
+
+  function updateTuningEnabled() {
+    const armed = state.tuningArmed;
+    tuningControls.forEach((record) => {
+      if (record.toggle) record.toggle.disabled = !armed;
+      if (record.slider) record.slider.disabled = !armed;
+      if (record.number) record.number.disabled = !armed;
+      record.revert.disabled = !armed;
+    });
+    const savable = !!(state.tuning && state.tuning.allowSave
+      && (state.tuning.nodes || []).some((n) => n.online && n.savable));
+    tuningSave.disabled = !armed || !savable;
+  }
+
+  function showTuningSaveResult(message) {
+    tuningSaveStatus.className = message.ok ? 'ok' : 'error';
+    tuningSaveStatus.textContent = message.detail
+      + (message.files && message.files.length ? ` [${message.files.join(', ')}]` : '');
+  }
+
+  tuningOpen.addEventListener('click', () => {
+    tuningPanel.classList.add('open');
+    tuningPanel.setAttribute('aria-hidden', 'false');
+  });
+  tuningClose.addEventListener('click', () => {
+    tuningPanel.classList.remove('open');
+    tuningPanel.setAttribute('aria-hidden', 'true');
+  });
+  tuningArm.addEventListener('change', () => {
+    // Ask, don't assume: the checkbox is repainted from the server's
+    // answer (setTuningArmed), so if the server refuses, it stays off.
+    sendTuningControl({ action: 'arm', armed: tuningArm.checked });
+  });
+  tuningSave.addEventListener('click', () => {
+    const files = (state.tuning ? state.tuning.nodes : [])
+      .filter((n) => n.online && n.savable)
+      .map((n) => n.config_path)
+      .join('\n');
+    if (!window.confirm(
+      `Write the current tune into:\n\n${files}\n\n`
+      + 'These are the workspace\'s tracked config files -- review the '
+      + 'change with `git diff` afterwards.')) return;
+    tuningSaveStatus.className = '';
+    tuningSaveStatus.textContent = 'saving...';
+    sendTuningControl({ action: 'save' });
+  });
 
   // ---------------------------------------------------------------------
   // Camera feed (bottom-right inset): usb_cam_stream is a separate node

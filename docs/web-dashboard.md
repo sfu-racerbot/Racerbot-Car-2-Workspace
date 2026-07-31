@@ -8,7 +8,9 @@ during SLAM, or watch the car's position and LIDAR returns during
 localization/racing, with no RViz, no ROS install, and no login needed on
 the viewing device. A corner inset also embeds the live camera feed from
 [`usb_cam_stream`](../src/usb_cam_stream/README.md), if that node is
-running. This is the reference example of "support/tooling code" in
+running. A [live tuning panel](#live-parameter-tuning) can also adjust a
+running driving node's speeds and safety margins from the same page. This
+is the reference example of "support/tooling code" in
 [adding-your-own-code.md](adding-your-own-code.md) — see that doc first if
 you're adding something similar.
 
@@ -27,17 +29,24 @@ see [Security note](#security-note) below). No other node needs to be
 running first — see the table below for what you'll see at each stage;
 worst case with nothing else up yet, the page just shows "no scan yet."
 
-This node is **passive with respect to ROS and the car** — it subscribes to
-telemetry but never publishes to `/drive`, `/ackermann_cmd`, or any other ROS
-topic. Browser messages can only enable/reset its in-process stopwatch. That means the
-workspace's [mandatory LB-deadman policy](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)
+This node **publishes to no ROS topic at all** — not `/drive`, not
+`/ackermann_cmd`, not anything. It cannot steer, accelerate, or brake the
+car, so the workspace's [mandatory LB-deadman policy](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)
 does not apply to it (that policy is scoped to nodes that can *move the
 car* — see [writing-your-own-node.md](writing-your-own-node.md#the-interface-contract)):
 there's no driving output for a deadman check to gate. Reading LB only gates
-the stopwatch. It carries zero risk to how the car drives and can be left
-running at all times, alongside
-anything else in this workspace: `bringup_launch.py`, SLAM, localization,
-`gap_follow`, `pure_pursuit`, all of it.
+the stopwatch. It can be left running at all times, alongside anything else
+in this workspace: `bringup_launch.py`, SLAM, localization, `gap_follow`,
+`pure_pursuit`, all of it.
+
+It is not, however, purely a *viewer* any more.
+[Live parameter tuning](#live-parameter-tuning) (on by default) lets it call
+the standard `/<node>/set_parameters` service on this workspace's driving
+nodes, so you can change speeds, lookahead, and safety margins from a phone
+between runs instead of editing YAML and relaunching. That is a real path
+to the car and is documented as such below — read that section and the
+[security note](#security-note) before using it at a shared venue. Set
+`enable_tuning: false` for the strictly-read-only dashboard.
 
 ## What you'll actually see
 
@@ -80,6 +89,7 @@ flowchart LR
     T["CPU/mem/temp\n(psutil + /sys/class/thermal)"] --> N
     N -- WebSocket --> B1[Browser tab 1]
     N -- WebSocket --> B2[Browser tab 2 ...]
+    N -. "set_parameters (service, armed only)" .-> D1["pure_pursuit_node\ngap_follow_node"]
 ```
 
 One ROS2 node (`dashboard_node.py`) does two jobs in one process:
@@ -93,8 +103,10 @@ One ROS2 node (`dashboard_node.py`) does two jobs in one process:
    pushes every update out to any connected browser tab over a WebSocket.
 
 These subscriptions only feed displays and the dashboard-local stopwatch.
-The node never publishes to ROS; enabling/resetting the stopwatch changes no
-car state, so the dashboard remains safe to leave running; see the
+The node publishes to no topic; enabling/resetting the stopwatch changes no
+car state. The one thing that does reach the car is
+[live parameter tuning](#live-parameter-tuning), which is a *service*
+client, not a publisher, and is gated as described there; see also the
 [security note](#security-note).
 
 ### Two concurrency models sharing one process
@@ -127,6 +139,8 @@ manual parsing:
 | Speed | measured `{speed}` from odometry | *(none)* |
 | Stopwatch | elapsed/enabled/running plus LB/freshness flags | *(none)* |
 | Stats | `{cpu_percent, mem_percent, cpu_temp_c, uptime_s, wifi_dbm}` | *(none — `cpu_temp_c`/`wifi_dbm` are `null` if no readable thermal zone / wireless interface was found)* |
+| Tuning | the whole panel: per node, whether it's up, its advertised catalogue, and every current value | *(none)* |
+| Tuning result / saved / armed | outcome of one change, of a save, and this connection's arm state | *(none)* |
 
 All of this conversion lives in `web_dashboard/protocol.py`, deliberately
 kept free of any ROS/Tornado/network imports so it's directly
@@ -182,7 +196,8 @@ the bottom-left corner shows the current zoom level in meters/cm.
 
 - **Left sidebar** — connection status; `feeds`; `vehicle` (measured speed,
   selected steering, LB state); an LB-gated stopwatch with enable/reset;
-  and `system` health. Feed dots are gray = never received, green = fresh,
+  `live tuning` (which driving nodes are tunable, and the button that
+  opens the panel); and `system` health. Feed dots are gray = never received, green = fresh,
   red = stale. It has no fixed/maximum height — it simply
   grows to fit whatever rows it has, rather than cramming them into a
   fixed box.
@@ -251,10 +266,12 @@ Then open `http://<car-ip>:8080/` (see
 [Finding the car's address](#finding-the-cars-address-and-viewing-through-a-forwarded-port)
 below if you're not sure what to put there). That's the entire procedure
 for the dashboard alone — this node reads command/odom/joy only for display
-and its local stopwatch, and never publishes to ROS, so none of the
+and its local stopwatch, and publishes to no topic, so none of the
 joystick-override or wheels-off-ground precautions in
-[operations.md](operations.md) apply to it; it's safe to start and stop at
-any time, on top of anything else.
+[operations.md](operations.md) apply to *starting* it; it's safe to start
+and stop at any time, on top of anything else. (Changing a driving node's
+parameters from its tuning panel is a different matter — see
+[Live parameter tuning](#live-parameter-tuning).)
 
 To point it at different topics (e.g. testing against a bag file) or a
 different port, edit `src/web_dashboard/config/web_dashboard.yaml` — see
@@ -347,6 +364,144 @@ the one you loaded the page from will hit the same issue under
 port-forwarding. The camera panel is just the one place in this workspace
 that currently does that.
 
+## Live parameter tuning
+
+Open the **live tuning** panel from the sidebar to change a running
+driving node's speeds, geometry, and safety margins without editing YAML
+and relaunching. Values apply on the node's very next control tick, so you
+can lower `max_speed`, feel the difference on the next lap, and put it
+back — the loop that used to be "stop the car, Ctrl+C, edit a file,
+rebuild, relaunch, re-seed localization" becomes a slider.
+
+This is the only part of the dashboard that reaches the car, so it is
+worth understanding exactly what it can and cannot do.
+
+### What it can't do
+
+- **It cannot move the car.** There is still no publisher to `/drive`
+  here. The car moves because an autonomy node decided to, and only while
+  the driver holds LB. Tuning changes *how* a moving car behaves; it can
+  never start one.
+- **It cannot relax the deadman.** `enable_deadman` is not tunable, from
+  here or from `ros2 param set`, on any node — the driving nodes refuse it
+  at runtime. The [workspace LB policy](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)
+  is a team decision, not a knob.
+- **It cannot switch off `pure_pursuit`'s reactive safety net.** Its
+  *thresholds* are tunable (a margin that's wrong for the track is a real
+  thing to discover mid-session); `enable_lidar_safety` itself is not.
+- **It cannot exceed a node's own limits.** Every tunable carries a hard
+  min/max enforced inside the node that owns it, on every update. The
+  dashboard's sliders stop at the same bounds, but that's only so the UI
+  doesn't offer a value that will bounce — the authority is in the node,
+  which is why a hand-rolled `ros2 param set` hits the same wall.
+- **It cannot reach a teammate's code.** Only nodes named in
+  `tuning_nodes` are ever probed, and they must additionally advertise a
+  `live_tunable_spec` parameter to appear at all.
+
+### Arming
+
+Every control is inert until you flip **arm changes** at the top of the
+panel, and it starts disarmed on **every page load** — a reload, a dropped
+WiFi link, or a phone going to sleep all disarm it. That's enforced on the
+server, per connection, not just greyed out in the browser, so a stale tab
+or a hand-rolled WebSocket client is refused the same way.
+
+### Safety margins are marked
+
+Parameters that move a collision margin or an emergency stop are grouped
+under a **Safety margins** heading in amber, with an amber accent on each
+control. They're deliberately included — those are exactly the numbers
+you'd want to correct after watching the car stop too early on a tight
+section — but they should never be dragged with the same casualness as a
+lap-time knob.
+
+### Live-only, until you save
+
+Changes live in the running node's memory. **Restart the node and it's
+back to the config file**, which is the useful property: a tune that turns
+out to be wrong is one Ctrl+C away from gone, and there's always a known
+baseline. Each control shows a **↺** once it differs from the value the
+node started with, which puts that single parameter back.
+
+When a tune is worth keeping, **save tune to config files** writes it into
+the package's YAML — `src/pure_pursuit/config/pure_pursuit.yaml` and
+`src/gap_follow/config/gap_follow.yaml`, resolved through the
+`--symlink-install` chain to the real, git-tracked sources. Only values
+that actually differ from the file are written, and every comment,
+blank line, and key order in those files is preserved, so the result is a
+small diff you can read:
+
+```bash
+git diff src/gap_follow/config/gap_follow.yaml
+```
+
+Review it before committing — a saved tune is a change to the car's
+defaults for everyone. Set `tuning_allow_save: false` to allow live
+tuning but forbid writing to disk, which is a reasonable race-day setting.
+
+### What's tunable
+
+Each node advertises its own catalogue, so the panel is always in sync
+with the code rather than a hardcoded list that rots. To read it from a
+terminal:
+
+```bash
+ros2 param get /gap_follow_node live_tunable_spec
+```
+
+| Node | Groups |
+|---|---|
+| `pure_pursuit_node` | Speed (`max_speed`, `min_speed`, accel/braking, `max_lateral_accel`), Line following (lookahead trio, `max_steering_rate`), Avoidance, Overtaking, and Safety margins (`emergency_stop_distance`, `emergency_stop_clearance`, `safety_fov_deg`, `max_cross_track_error`) |
+| `gap_follow_node` | Speed, Gap selection (`min_gap_distance`, `disparity_threshold`, `steering_gain`, …), and Safety margins (`max_braking_decel`, `safety_margin`, the forward reserve, TTC) |
+
+The catalogues themselves — names, bounds, and the prose shown in the UI —
+live in `src/pure_pursuit/pure_pursuit/live_tuning.py` and
+`src/gap_follow/gap_follow/live_tuning.py`. Adding a parameter is a change
+there, deliberately: it means picking a hard range and writing down what
+the knob does, in code that gets reviewed.
+
+### Why a node has to opt in
+
+Both driving nodes read their parameters once at startup and cache them on
+instance attributes, because re-reading a parameter at 40Hz in the control
+loop would be pointless overhead. That means a plain `ros2 param set` on a
+parameter the node doesn't explicitly handle *succeeds and changes
+nothing*: the parameter server stores the new value, the control loop
+keeps using the cached one, and a dashboard reading the value back would
+cheerfully display `max_speed: 2.0` for a car still driving 4.0.
+
+So the nodes now **refuse** any runtime parameter change they don't know
+how to apply, instead of accepting it silently:
+
+```
+$ ros2 param set /gap_follow_node car_width 0.9
+Setting parameter failed: 'car_width' cannot be changed while the node is
+running. The control loop caches its parameters at startup, so accepting
+this would change the reported value without changing how the car drives.
+Restart the node with a new config to change it.
+```
+
+That's a deliberate tightening and applies to `ros2 param set` as much as
+to the dashboard. Cross-parameter invariants are enforced the same way and
+a rejected batch changes nothing at all — no half-applied speed limits:
+
+```
+$ ros2 param set /gap_follow_node min_speed 3.0
+Setting parameter failed: min_speed (3) cannot exceed max_speed (1.5)
+```
+
+`pure_pursuit`'s existing runtime `waypoints_file` update (how
+`auto_map_race_node` hands over a freshly generated racing line) is
+unaffected.
+
+### Testing a tune before trusting it
+
+Same order as any other change to driving behavior
+([writing-your-own-node.md](writing-your-own-node.md#testing-before-its-on-wheels)):
+wheels off the ground first, then floor at low speed, then open space. A
+slider makes a change *fast*, not *safe* — raising `max_speed` mid-session
+deserves the same care as editing it in YAML would.
+
 ## Parameter reference
 
 All in `src/web_dashboard/config/web_dashboard.yaml`:
@@ -365,18 +520,37 @@ All in `src/web_dashboard/config/web_dashboard.yaml`:
 | `scan_broadcast_rate_hz` | `10.0` | `/scan` runs ~40Hz; no browser needs to redraw that often, and this keeps WiFi/CPU load down |
 | `stats_interval_sec` | `1.0` | How often CPU%/mem%/temp/uptime are sampled and broadcast |
 | `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` | Estimated LIDAR mounting offset from `base_link` (matches [hardware-reference.md](hardware-reference.md)), used to place scan points correctly relative to the car's pose |
+| `enable_tuning` | `true` | Whether [live parameter tuning](#live-parameter-tuning) exists at all. `false` never creates the service clients, and the panel disappears — a strictly read-only dashboard |
+| `tuning_nodes` | `[pure_pursuit_node, gap_follow_node]` | The only nodes this dashboard will probe or write to. An explicit list rather than bus discovery, which is what keeps it inside this workspace's own driving code |
+| `tuning_config_files` | `[pure_pursuit/config/pure_pursuit.yaml, gap_follow/config/gap_follow.yaml]` | Parallel to `tuning_nodes`: `<package>/<path under its share dir>` for the file "save" writes back to. Blank = tunable live but never savable |
+| `tuning_allow_save` | `true` | `false` allows live tuning but forbids writing it to disk |
+| `tuning_refresh_sec` | `2.0` | How often node presence and current values are re-read |
+| `tuning_request_rate_hz` | `20.0` | How quickly a released slider reaches the car |
+| `tuning_service_timeout_sec` | `3.0` | When to give up on an unanswered parameter service call |
 
 ## Security note
 
 This dashboard has **no authentication** and accepts WebSocket connections
-from any origin. That's a deliberate, reasonable trade-off for a read-only
-tool that never publishes anything and therefore can never be used to
-*command* the car — but it does mean anyone who can reach `<car-ip>:8080`
-on the network can see map/scan/pose, command/odom/LB telemetry, stopwatch,
-coarse system stats (CPU/mem/temp/WiFi/uptime), and — if
-`usb_cam_stream` is running — the camera feed. Don't port-forward this to
-the open internet. For remote-but-still-private access, this machine
-already has a `tailscale0` interface configured (see
+from any origin. For the telemetry half that's a deliberate, reasonable
+trade-off for a tool that can only ever *watch* — but it does mean anyone
+who can reach `<car-ip>:8080` on the network can see map/scan/pose,
+command/odom/LB telemetry, stopwatch, coarse system stats
+(CPU/mem/temp/WiFi/uptime), and — if `usb_cam_stream` is running — the
+camera feed.
+
+**[Live parameter tuning](#live-parameter-tuning) does not rest on that
+reasoning, because it reaches the car.** It is bounded instead: it can't
+move the car or start it, can't disable the LB deadman, can't exceed the
+bounds each driving node enforces on itself, and requires an explicit
+per-connection arm that resets on every page load. What none of that
+protects against is someone who can already reach this port and means
+harm — an armed session is a session in which whoever is on the LAN can
+change how the car drives, within those bounds.
+
+So: don't port-forward this to the open internet, and on a venue's shared
+WiFi prefer `enable_tuning: false` (or at least `tuning_allow_save:
+false`). For remote-but-still-private access this machine already has a
+`tailscale0` interface configured (see
 [hardware-reference.md](hardware-reference.md)) — use the car's Tailscale
 address instead of exposing the port publicly.
 
@@ -396,6 +570,14 @@ address instead of exposing the port publicly.
 - **No rotated map origins.** The renderer assumes the map's origin
   orientation is identity (true for every map this workspace's tooling
   produces); a map saved with a rotated origin would render misaligned.
+- **Live tuning reaches only nodes that opt in.** A node has to advertise
+  a `live_tunable_spec` parameter *and* be listed in `tuning_nodes`. That
+  is the intended scope (this workspace's own driving code), but it does
+  mean a new driving node gets no panel until it declares a catalogue —
+  see `src/gap_follow/gap_follow/live_tuning.py` for the pattern.
+- **A saved tune edits tracked files.** "Save" writes into
+  `src/*/config/*.yaml`, which are git-tracked and shared. Review with
+  `git diff` before committing, or set `tuning_allow_save: false`.
 - **Camera port (`9090`) is hardcoded in `dashboard.js`** (`CAMERA_PORT`),
   not a `config/web_dashboard.yaml` parameter — it's the browser, not
   `dashboard_node`, that connects to the camera stream directly, so this
@@ -413,6 +595,7 @@ src/web_dashboard/
 ├── web_dashboard/
 │   ├── protocol.py          # wire-format conversion, framework-agnostic, unit-tested
 │   ├── stopwatch.py         # LB/freshness-gated timer logic, unit-tested
+│   ├── tuning.py            # spec parsing + comment-preserving YAML writer, unit-tested
 │   └── dashboard_node.py    # ROS2 node + Tornado web/WebSocket server
 ├── web/
 │   ├── index.html / dashboard.js / style.css

@@ -115,13 +115,19 @@ The reusable saved-map race layers one more node on top of `particle_filter`'s o
                          (automatic map→race mode; one branch selected at a time)
 ```
 
-`web_dashboard` is passive and layers on top of whatever's already running — it never publishes, so it isn't part of the driving path at all, just a viewer for it (see [web-dashboard.md](web-dashboard.md)):
+`web_dashboard` layers on top of whatever's already running and publishes to no topic, so it isn't part of the driving path at all (see [web-dashboard.md](web-dashboard.md)):
 
 ```
 /map ───────────────────┐
 /scan ───────────────────┼──► web_dashboard_node ──► WebSocket ──► any browser on the network
-/pf/viz/inferred_pose ───┘    (read-only; no /drive, no /joy, exempt from the deadman policy below)
+/pf/viz/inferred_pose ───┘    (no /drive publisher, so exempt from the deadman policy below)
+                              │
+                              └─ set_parameters service ──► pure_pursuit_node / gap_follow_node
+                                 (live tuning: changes how a driving node behaves,
+                                  never whether it drives — see below)
 ```
+
+Live tuning is the one path from the dashboard back to the car, and it is deliberately not a driving path: it cannot publish a command, cannot start the car, and cannot relax the deadman (`enable_deadman` is refused at runtime by every node that has it). It changes *tuning* on a car that is already being driven by an autonomy node with LB held. Each driving node enforces its own hard bounds on every such change, in its own process, so the browser is never the authority on what is safe. Full reasoning in [web-dashboard.md](web-dashboard.md#live-parameter-tuning).
 
 ## Topic reference
 
@@ -160,7 +166,7 @@ All topics as they actually appear on the bus with `bringup_launch.py` plus a co
 | `slam_toolbox` | apt (`ros-jazzy-slam-toolbox`) | Builds a map during manual or autonomous course discovery; remains online for the automatic race |
 | `gap_follow` | local, `src/gap_follow` | Baseline reactive autonomy (follow-the-gap) — see [writing-your-own-node.md](writing-your-own-node.md), this package *is* the worked example |
 | `pure_pursuit` | local, `src/pure_pursuit` | Race controller, record/profile tools, and automatic map-to-race supervisor — see [racing-autonomy.md](racing-autonomy.md) |
-| `web_dashboard` | local, `src/web_dashboard` | Read-only live browser dashboard of the map/scan/pose over a WebSocket — never publishes anything, not subject to the deadman policy below — see [web-dashboard.md](web-dashboard.md) |
+| `web_dashboard` | local, `src/web_dashboard` | Live browser dashboard of the map/scan/pose over a WebSocket, plus a live tuning panel for the driving nodes' parameters. Publishes to no topic and cannot move the car, so it isn't subject to the deadman policy below — see [web-dashboard.md](web-dashboard.md) |
 | `racerbot_launch` | local, `src/racerbot_launch` | Top-level SLAM, automatic map-to-race, and saved-map race launches |
 
 ## The safety model (read this before writing autonomy code)

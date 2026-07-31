@@ -29,3 +29,34 @@ web_dashboard_node:
     # correctly relative to the car's pose (see docs/hardware-reference.md) ---
     laser_offset_x: 0.33
     laser_offset_y: 0.0
+
+    # --- Live parameter tuning ---
+    # The one part of this dashboard that reaches the car rather than just
+    # watching it: it calls the /<node>/set_parameters service of the nodes
+    # below so speeds, lookahead, and safety margins can be adjusted from a
+    # phone between runs. It still publishes to no topic and cannot make the
+    # car move -- that needs an autonomy node and a held LB button, exactly
+    # as before. Set false for a strictly read-only dashboard; the panel then
+    # disappears and the service clients are never even created.
+    enable_tuning: true
+    # The ONLY nodes this dashboard will probe or write to. An explicit list,
+    # not bus discovery: this is what keeps it inside this workspace's own
+    # driving code and away from teammates' packages and vendored drivers. A
+    # node must also advertise a live_tunable_spec parameter to appear at all.
+    tuning_nodes:
+      - pure_pursuit_node
+      - gap_follow_node
+    # Parallel to tuning_nodes: where "save" writes each node's tune back to.
+    # Resolved through the install symlinks to the git-tracked file in src/,
+    # so a saved tune shows up in `git diff` for review. Blank = tunable live
+    # but never savable.
+    tuning_config_files:
+      - pure_pursuit/config/pure_pursuit.yaml
+      - gap_follow/config/gap_follow.yaml
+    # Set false to allow live tuning but forbid writing it to disk -- a
+    # reasonable race-day setting, where you want to adjust between runs but
+    # not to discover afterwards that the committed config drifted.
+    tuning_allow_save: true
+    tuning_refresh_sec: 2.0          # how often node presence/values are re-read
+    tuning_request_rate_hz: 20.0     # how quickly a moved slider reaches the car
+    tuning_service_timeout_sec: 3.0  # give up on an unanswered parameter service call

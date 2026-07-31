@@ -79,10 +79,50 @@
       <div class="row"><span class="row-label">up</span><span class="row-value" id="info-uptime">--</span></div>
     </div>
 
+    <div class="section" id="tuning-section">
+      <div class="section-title">
+        <span id="dot-tuning" class="dot dot-gray"></span>
+        live tuning
+      </div>
+      <div class="row"><span class="row-value" id="tuning-summary">looking for driving nodes...</span></div>
+      <div class="tuning-open-controls">
+        <button id="tuning-open">open panel</button>
+      </div>
+    </div>
+
     <div id="mode-banner"></div>
 
     <div id="help">drag to pan &middot; scroll to zoom &middot; <button id="reset-view">reset view</button></div>
   </div>
+
+  <!-- Live parameter tuning. A drawer rather than another sidebar section:
+       it carries ~40 controls across two nodes, which would push the rest
+       of the sidebar off a phone screen, and it is the one panel here that
+       reaches the car rather than just reporting on it -- so it earns its
+       own deliberate open/close rather than being always underfoot. -->
+  <aside id="tuning-panel" aria-hidden="true" aria-label="Live parameter tuning">
+    <header id="tuning-head">
+      <div id="tuning-title">live tuning</div>
+      <button id="tuning-close" aria-label="Close tuning panel">&times;</button>
+    </header>
+
+    <div id="tuning-arm-bar">
+      <label id="tuning-arm-label">
+        <input type="checkbox" id="tuning-arm" />
+        <span>arm changes</span>
+      </label>
+      <div id="tuning-arm-note">disarmed &middot; controls are read-only until you arm</div>
+    </div>
+
+    <div id="tuning-body">
+      <div class="tuning-empty">waiting for a driving node...</div>
+    </div>
+
+    <footer id="tuning-foot">
+      <button id="tuning-save" disabled>save tune to config files</button>
+      <div id="tuning-save-status">changes are live-only until saved &middot; they revert when the node restarts</div>
+    </footer>
+  </aside>
 
   <div id="minimap-panel">
     <div class="panel-label">map</div>

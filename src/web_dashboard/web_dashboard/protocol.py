@@ -164,3 +164,63 @@ def stats_message(cpu_percent: float, mem_percent: float, cpu_temp_c, uptime_s: 
         'wifi_dbm': None if wifi_dbm is None else float(wifi_dbm),
         'stamp': time.time(),
     }
+
+
+def tuning_state_message(nodes, enabled: bool, allow_save: bool) -> dict:
+    """The whole live-tuning picture: which driving nodes are up, what
+    each will let you change, and what every knob currently reads.
+
+    Sent whole rather than as per-parameter deltas. It is a few kilobytes
+    at most, it only moves when a node appears/disappears or a value
+    actually changes, and a browser that reconnects mid-session gets a
+    complete, self-consistent panel from one message instead of
+    reassembling one from a stream it partly missed.
+    """
+    return {
+        'type': 'tuning',
+        'enabled': bool(enabled),
+        'allow_save': bool(allow_save),
+        'nodes': nodes,
+        'stamp': time.time(),
+    }
+
+
+def tuning_result_message(node: str, name: str, ok: bool, value=None,
+                          reason: str = '') -> dict:
+    """Outcome of one attempted change, echoed back to every tab.
+
+    `value` is what the node actually holds afterwards -- not what was
+    requested -- so a browser whose slider was refused snaps back to the
+    truth rather than displaying a number the car never accepted.
+    """
+    return {
+        'type': 'tuning_result',
+        'node': str(node),
+        'name': str(name),
+        'ok': bool(ok),
+        'value': value,
+        'reason': str(reason),
+        'stamp': time.time(),
+    }
+
+
+def tuning_saved_message(ok: bool, detail: str, files=()) -> dict:
+    """Result of writing the current tune back into the package configs."""
+    return {
+        'type': 'tuning_saved',
+        'ok': bool(ok),
+        'detail': str(detail),
+        'files': list(files),
+        'stamp': time.time(),
+    }
+
+
+def tuning_armed_message(armed: bool) -> dict:
+    """Per-connection arm state. Deliberately not shared between tabs:
+    arming is a statement about the person holding *this* device, and a
+    second tab inheriting it would be an arming nobody performed."""
+    return {
+        'type': 'tuning_armed',
+        'armed': bool(armed),
+        'stamp': time.time(),
+    }
