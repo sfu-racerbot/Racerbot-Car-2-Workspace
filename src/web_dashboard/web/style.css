@@ -379,3 +379,281 @@ html, body {
   white-space: nowrap;
   transform: translateX(-50%);
 }
+
+/* ------------------------------------------------------------------ */
+/* Live tuning drawer.
+   Slides in from the right and overlays the canvas rather than shrinking
+   it -- the map/scan view keeps its full size and its pan/zoom untouched,
+   so opening the panel to change a speed never costs you the frame you
+   were looking at. Below 640px it takes the full width instead, because a
+   360px drawer on a phone leaves neither the panel nor the map usable. */
+/* ------------------------------------------------------------------ */
+.tuning-open-controls {
+  margin-top: 6px;
+}
+
+.tuning-open-controls button,
+#tuning-foot button,
+#tuning-close {
+  background: #21262d;
+  color: #e6edf3;
+  border: 1px solid #30363d;
+  border-radius: 5px;
+  padding: 4px 9px;
+  font: 11px "SFMono-Regular", Consolas, monospace;
+  cursor: pointer;
+}
+
+.tuning-open-controls button:hover,
+#tuning-foot button:not(:disabled):hover,
+#tuning-close:hover { background: #30363d; }
+
+#tuning-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  width: min(380px, 100vw);
+  height: 100%;
+  background: rgba(11, 15, 20, 0.97);
+  border-left: 1px solid #263140;
+  font-size: 13px;
+  /* Off-screen by default. transform rather than display:none so the
+     panel animates, and so its scroll position survives a close/open. */
+  transform: translateX(100%);
+  transition: transform 0.18s ease-out;
+}
+
+#tuning-panel.open { transform: translateX(0); }
+
+@media (max-width: 640px) {
+  #tuning-panel { width: 100vw; }
+}
+
+#tuning-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #263140;
+  flex: none;
+}
+
+#tuning-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8b949e;
+}
+
+#tuning-close {
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 8px;
+}
+
+/* The arm bar is deliberately loud when armed: it is the difference
+   between a display and a control surface on a moving vehicle. */
+#tuning-arm-bar {
+  padding: 10px 14px;
+  border-bottom: 1px solid #263140;
+  flex: none;
+  background: rgba(248, 81, 73, 0.05);
+}
+
+#tuning-panel.armed #tuning-arm-bar {
+  background: rgba(210, 153, 34, 0.12);
+  box-shadow: inset 3px 0 0 #d29922;
+}
+
+#tuning-arm-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#tuning-arm-label input { cursor: pointer; }
+
+#tuning-arm-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #8b949e;
+}
+
+#tuning-panel.armed #tuning-arm-note { color: #d29922; }
+
+#tuning-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 14px 14px;
+}
+
+.tuning-empty,
+.tuning-node-error {
+  color: #8b949e;
+  font-size: 12px;
+  padding: 10px 0;
+}
+
+.tuning-node-error { color: #d29922; }
+
+.tuning-node-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 12px 0 2px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #e6edf3;
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.tuning-group-title {
+  margin: 12px 0 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8b949e;
+  border-top: 1px solid #263140;
+  padding-top: 8px;
+}
+
+/* Safety-margin groups get the same amber the arm bar uses, so a knob
+   that moves a collision margin never looks like a lap-time knob. */
+.tuning-group-title.safety { color: #d29922; }
+.tuning-group-title.safety::after {
+  content: " -- affects when the car stops";
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #8b949e;
+}
+
+.tuning-param {
+  padding: 6px 0 7px;
+  border-radius: 5px;
+}
+
+.tuning-param.safety { box-shadow: inset 2px 0 0 rgba(210, 153, 34, 0.5); padding-left: 8px; }
+.tuning-param.applied { animation: tuning-flash 0.9s ease-out; }
+.tuning-param.rejected { box-shadow: inset 2px 0 0 #f85149; padding-left: 8px; }
+
+@keyframes tuning-flash {
+  from { background: rgba(63, 185, 80, 0.22); }
+  to { background: transparent; }
+}
+
+.tuning-param-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tuning-param-name {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  color: #e6edf3;
+}
+
+.tuning-param-value {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.tuning-param-value input[type="number"] {
+  width: 72px;
+  background: #0d1117;
+  color: #e6edf3;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 2px 5px;
+  font: 12px "SFMono-Regular", Consolas, monospace;
+  text-align: right;
+}
+
+.tuning-param-value input[type="number"]:disabled { color: #8b949e; }
+
+.tuning-unit {
+  font-size: 11px;
+  color: #8b949e;
+  min-width: 34px;
+}
+
+.tuning-revert {
+  background: none;
+  border: none;
+  color: #8b949e;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 2px;
+  visibility: hidden;
+}
+
+.tuning-param.dirty .tuning-revert { visibility: visible; }
+.tuning-revert:hover { color: #e6edf3; }
+
+.tuning-param input[type="range"] {
+  width: 100%;
+  margin: 4px 0 0;
+  accent-color: #58a6ff;
+}
+
+.tuning-param.safety input[type="range"] { accent-color: #d29922; }
+.tuning-param input:disabled { cursor: not-allowed; opacity: 0.55; }
+
+.tuning-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  font-size: 11px;
+  color: #8b949e;
+  cursor: pointer;
+}
+
+.tuning-desc {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #8b949e;
+}
+
+.tuning-note {
+  margin-top: 3px;
+  font-size: 11px;
+  color: #f85149;
+  display: none;
+}
+
+.tuning-param.rejected .tuning-note { display: block; }
+
+#tuning-foot {
+  flex: none;
+  padding: 10px 14px 12px;
+  border-top: 1px solid #263140;
+}
+
+#tuning-foot button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+#tuning-save-status {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #8b949e;
+  word-break: break-word;
+}
+
+#tuning-save-status.ok { color: #3fb950; }
+#tuning-save-status.error { color: #f85149; }

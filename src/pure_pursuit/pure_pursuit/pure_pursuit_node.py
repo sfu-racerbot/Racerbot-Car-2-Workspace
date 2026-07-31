@@ -55,14 +55,14 @@ from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
 import numpy as np
 import rclpy
-from rcl_interfaces.msg import SetParametersResult
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from rclpy.time import Time as RclpyTime
 from sensor_msgs.msg import Joy, LaserScan
 
-from pure_pursuit import racing_math
+from pure_pursuit import live_tuning, racing_math
 
 
 class OpponentTracker:
@@ -459,6 +459,28 @@ class PurePursuitNode(Node):
         # heuristic detector rather than racing blind.
         self.map_ray_caster = None
 
+        # Live tuning: publish the catalogue of parameters this node will
+        # accept changes to *while driving*, so the web dashboard can build
+        # its panel from the node itself rather than from a hardcoded copy
+        # of this list that would quietly rot. Read-only: the catalogue
+        # describes what may change, and is not itself one of them.
+        self._tunables = live_tuning.by_name(live_tuning.PURE_PURSUIT_TUNABLES)
+        # Parameter-unit values (never the transformed attribute), so the
+        # cross-parameter invariants always compare like with like.
+        # Includes the read-only context values those invariants need.
+        self._tunable_values = {
+            name: self.get_parameter(name).value
+            for name in tuple(self._tunables) + live_tuning.PURE_PURSUIT_INVARIANT_CONTEXT
+        }
+        self.declare_parameter(
+            'live_tunable_spec',
+            live_tuning.spec_json('pure_pursuit_node', live_tuning.PURE_PURSUIT_TUNABLES),
+            ParameterDescriptor(
+                read_only=True,
+                description='JSON catalogue of the parameters this node can '
+                            'apply live. Read by web_dashboard; see '
+                            'pure_pursuit/live_tuning.py.'))
+
         # Accept a newly generated profile at runtime. This is registered
         # only after every state object it resets has been initialized.
         self.add_on_set_parameters_callback(self._parameter_callback)
@@ -538,18 +560,45 @@ class PurePursuitNode(Node):
             "(plus immediate state changes).")
 
     def _parameter_callback(self, parameters):
+        """Runtime parameter changes: a new racing line, or a live tune.
+
+        Anything else is *refused*, not ignored. This node caches every
+        parameter on an attribute at startup (see __init__), so accepting a
+        change it does not know how to apply would update the value the
+        parameter server reports while the control loop kept driving on the
+        old one -- a dashboard reading back "max_speed: 2.0" from a car
+        still doing 4.0. Rejecting says so out loud instead. See
+        live_tuning.py.
+        """
+        requested = {}
         for parameter in parameters:
-            if parameter.name != 'waypoints_file':
+            if parameter.name == 'waypoints_file':
+                if parameter.type_ != Parameter.Type.STRING or not parameter.value:
+                    return SetParametersResult(
+                        successful=False,
+                        reason="waypoints_file must be a non-empty profiled CSV path")
+                try:
+                    self._activate_profile(str(parameter.value))
+                except RuntimeError as exc:
+                    return SetParametersResult(successful=False, reason=str(exc))
+                self._log_profile_ready(str(parameter.value))
                 continue
-            if parameter.type_ != Parameter.Type.STRING or not parameter.value:
-                return SetParametersResult(
-                    successful=False,
-                    reason="waypoints_file must be a non-empty profiled CSV path")
-            try:
-                self._activate_profile(str(parameter.value))
-            except RuntimeError as exc:
-                return SetParametersResult(successful=False, reason=str(exc))
-            self._log_profile_ready(str(parameter.value))
+            requested[parameter.name] = parameter.value
+
+        accepted, reason = live_tuning.review(
+            self._tunables, requested, self._tunable_values,
+            passthrough=('use_sim_time',),
+            invariants=live_tuning.PURE_PURSUIT_INVARIANTS)
+        if reason is not None:
+            self.get_logger().warn(f'live tune rejected: {reason}')
+            return SetParametersResult(successful=False, reason=reason)
+
+        for name, value in accepted.items():
+            tunable = self._tunables[name]
+            previous = self._tunable_values[name]
+            setattr(self, tunable.target_attr, tunable.store(value))
+            self._tunable_values[name] = value
+            self.get_logger().info(f'live tune: {name} {previous} -> {value}')
         return SetParametersResult(successful=True)
 
     # ------------------------------------------------------------------------

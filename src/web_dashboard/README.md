@@ -6,11 +6,18 @@ stopwatch to any web browser over a WebSocket. This file documents the code in
 detail; for the workflow (what you'll see at each stage, quick start,
 security note) see [docs/web-dashboard.md](../../docs/web-dashboard.md).
 
-**Not an autonomy node** — it only ever subscribes, never publishes, so
-none of [architecture.md](../../docs/architecture.md)'s safety model or
-the [mandatory LB-deadman policy](../../docs/architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)
+**Not an autonomy node** — it publishes to no ROS topic, so none of
+[architecture.md](../../docs/architecture.md)'s safety model or the
+[mandatory LB-deadman policy](../../docs/architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)
 apply to it; both are scoped to nodes that can move the car (see
 [writing-your-own-node.md](../../docs/writing-your-own-node.md#the-interface-contract)).
+
+It does have exactly one write path: [live parameter tuning](#live-parameter-tuning-tuningpy)
+calls the driving nodes' `set_parameters` service. That changes how a car
+that is *already* being driven behaves; it cannot command motion, start
+the car, or relax the deadman. See
+[docs/web-dashboard.md](../../docs/web-dashboard.md#live-parameter-tuning)
+for the user-facing account and `enable_tuning: false` to remove it.
 
 ## Files
 
@@ -18,6 +25,7 @@ apply to it; both are scoped to nodes that can move the car (see
 |---|---|
 | [`web_dashboard/protocol.py`](web_dashboard/protocol.py) | Wire-format conversion — turns ROS messages into JSON headers + binary payloads. No `rclpy`/Tornado/network imports, so it's unit-testable in isolation (see [`test/test_protocol.py`](test/test_protocol.py)). |
 | [`web_dashboard/stopwatch.py`](web_dashboard/stopwatch.py) | ROS-free deadman-gated stopwatch state machine, including joystick timeout handling. |
+| [`web_dashboard/tuning.py`](web_dashboard/tuning.py) | Live-tuning support: parsing a node's advertised catalogue, clamping a browser request, and the comment-preserving YAML writer. No ROS/Tornado imports either (see [`test/test_tuning.py`](test/test_tuning.py)). |
 | [`web_dashboard/dashboard_node.py`](web_dashboard/dashboard_node.py) | The ROS2 node: subscribes to map/scan/pose/command/odom/joy, runs a [Tornado](https://www.tornadoweb.org/) web + WebSocket server, and bridges its two threads. |
 | [`web/index.html`](web/index.html), [`web/dashboard.js`](web/dashboard.js), [`web/style.css`](web/style.css) | The main browser dashboard — plain HTML/JS/CSS, no build step. |
 | [`web/camera.html`](web/camera.html), [`web/camera.js`](web/camera.js), [`web/camera.css`](web/camera.css) | Full-window camera recording view with clock and telemetry overlays. |
@@ -28,7 +36,8 @@ apply to it; both are scoped to nodes that can move the car (see
 
 - **Subscribes:** map (`/map`), scan (`/scan`), pose (`/pf/viz/inferred_pose` *and* `/slam_pose`), selected command (`/ackermann_cmd`), measured odometry (`/odom`), and joystick state (`/joy`). Every subscription is display/timer input only.
 - Also samples CPU%/mem%/CPU temp/WiFi signal/uptime on a timer (`psutil` + `/sys/class/thermal` + `/proc/net/wireless`).
-- **Publishes:** nothing to ROS or anywhere in the driving path. Browser input can only enable/reset the dashboard-local stopwatch; it never leaves this process.
+- **Publishes:** nothing, to any topic. Browser input can enable/reset the dashboard-local stopwatch (which never leaves this process) and — once armed — change live-tunable parameters on the nodes in `tuning_nodes`.
+- **Calls (services):** `/<node>/get_parameters` and `/<node>/set_parameters` for each node in `tuning_nodes`, and nothing else.
 
 ## Two concurrency models, one process
 
@@ -237,6 +246,84 @@ via CSS (`#minimap-panel` top-right, `#camera-panel` bottom-right):
 | `scan_broadcast_rate_hz` | `10.0` | Throttle for `/scan` broadcasts (input itself runs ~40Hz) |
 | `stats_interval_sec` | `1.0` | How often CPU%/mem%/temp/WiFi/uptime are sampled and broadcast |
 | `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` | Estimated LIDAR mounting offset from `base_link` (matches [hardware-reference.md](../../docs/hardware-reference.md)) |
+| `enable_tuning` | `true` | Whether live tuning exists at all; `false` never creates the service clients |
+| `tuning_nodes` | `[pure_pursuit_node, gap_follow_node]` | The only nodes ever probed or written to |
+| `tuning_config_files` | see YAML | Parallel to `tuning_nodes`: `<package>/<path>` that "save" writes back to |
+| `tuning_allow_save` | `true` | `false` allows live tuning but forbids writing to disk |
+| `tuning_refresh_sec` / `tuning_request_rate_hz` / `tuning_service_timeout_sec` | `2.0` / `20.0` / `3.0` | Value refresh period, how fast a released slider reaches the car, and when to give up on a service call |
+
+## Live parameter tuning (`tuning.py`)
+
+Four pieces, split across three packages that only agree through ROS
+interfaces:
+
+1. **Each driving node advertises a catalogue.** `pure_pursuit` and
+   `gap_follow` each declare a read-only `live_tunable_spec` string
+   parameter holding JSON: every parameter they will accept live, with a
+   hard min/max, a group, a unit, a safety flag, and prose for the UI.
+   Built by their own `live_tuning.py`. One `get_parameters` call fetches
+   the whole thing, and `ros2 param get /gap_follow_node live_tunable_spec`
+   is a readable answer to "what can I change while this is running".
+
+2. **Each driving node enforces its own bounds.** Their
+   `add_on_set_parameters_callback` validates every update against that
+   same catalogue plus cross-parameter invariants (`min_speed <=
+   max_speed`, and so on), applies accepted values to the attributes the
+   control loop actually reads, and **refuses** anything it doesn't know
+   how to apply. That last part is the crux: these nodes cache parameters
+   at startup, so a change they can't apply would otherwise succeed
+   silently and leave the reported value disagreeing with how the car
+   drives. A rejected batch changes nothing at all.
+
+3. **This node brokers.** `dashboard_node` creates `get_parameters` /
+   `set_parameters` clients for each node in `tuning_nodes` only, tracks
+   which are alive via `get_node_names_and_namespaces()`, and re-reads
+   values on a timer. `tuning.py` parses the catalogue defensively (it
+   comes from another process, possibly a different version) and clamps
+   incoming requests — not as a safety mechanism, but so the UI can't
+   offer a value that will bounce.
+
+4. **The browser renders it.** `dashboard.js` builds the panel from the
+   catalogue rather than any hardcoded list, so it can't fall out of sync
+   with the nodes.
+
+### Threading
+
+The rule from ["Two concurrency models, one process"](#two-concurrency-models-one-process)
+is applied strictly here. All tuning state is owned by the rclpy spin
+thread; the IOLoop thread never touches it. A browser request goes onto a
+`queue.Queue` and a 20Hz timer on the rclpy thread drains it, coalescing
+repeated writes to the same parameter so a dragged slider produces one
+service call rather than forty. Service calls use `call_async`, whose done
+callbacks already run on the spin thread. The single value the IOLoop
+reads directly is `_last_tuning_json`, an immutable string replaced
+wholesale, so a newly-connected tab gets either the old snapshot or the
+new one, never a half-built dict.
+
+### Arming
+
+Arm state lives on the `WebSocketHandler` instance, not the node: it is a
+statement about the person holding *this* device and should not outlive
+their tab. It starts `False` on every connection and is enforced
+server-side, so a stale tab or a hand-rolled client is refused too.
+
+### Saving (`update_yaml_values`)
+
+Writes are surgical line edits, not a `yaml.safe_load`/`safe_dump` round
+trip. These config files are mostly comments explaining why each number is
+what it is — which ranges were validated in the simulator, what breaks if
+you raise one — and a dump would return a correct file with every one of
+them deleted, turning "save my tune" into the silent loss of the most
+valuable content in the file. Only values that actually differ from what's
+on disk are written, so the resulting `git diff` is reviewable. The write
+is atomic (temp file + `os.replace`): a half-written parameter YAML is a
+node that won't launch, discovered one run later.
+
+Paths resolve through `os.path.realpath()` on the package share directory,
+which follows the `--symlink-install` chain back to the git-tracked file
+in `src/`. Without `--symlink-install` this would land in `install/` and be
+overwritten by the next build — the panel reports the exact path it wrote,
+so that case is visible rather than silent.
 
 ## Troubleshooting
 

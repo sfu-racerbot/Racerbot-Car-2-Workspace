@@ -2,12 +2,13 @@ import math
 
 import numpy as np
 import rclpy
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, Joy
 from nav_msgs.msg import Odometry
 from ackermann_msgs.msg import AckermannDriveStamped
 
-from gap_follow import gap_logic
+from gap_follow import gap_logic, live_tuning
 
 
 class GapFollowNode(Node):
@@ -235,6 +236,32 @@ class GapFollowNode(Node):
         self.last_decision_state = None
         self.last_decision_log_time = None
 
+        # Live tuning: publish the catalogue of parameters this node will
+        # accept changes to *while driving*, so the web dashboard can build
+        # its panel from the node itself rather than from a hardcoded copy
+        # of this list that would quietly rot. Read-only: the catalogue
+        # describes what may change, and is not itself one of them.
+        self._tunables = live_tuning.by_name(live_tuning.GAP_FOLLOW_TUNABLES)
+        # Parameter-unit values (never the transformed attribute -- e.g.
+        # forward_stop_fov_deg, not the radians it is stored as), so the
+        # cross-parameter invariants always compare like with like.
+        # Includes the read-only context values those invariants need.
+        self._tunable_values = {
+            name: self.get_parameter(name).value
+            for name in tuple(self._tunables) + live_tuning.GAP_FOLLOW_INVARIANT_CONTEXT
+        }
+        self.declare_parameter(
+            'live_tunable_spec',
+            live_tuning.spec_json('gap_follow_node', live_tuning.GAP_FOLLOW_TUNABLES),
+            ParameterDescriptor(
+                read_only=True,
+                description='JSON catalogue of the parameters this node can '
+                            'apply live. Read by web_dashboard; see '
+                            'gap_follow/live_tuning.py.'))
+        # Registered only after every attribute it writes has been set and
+        # validated above, so a change can never land on a half-built node.
+        self.add_on_set_parameters_callback(self._parameter_callback)
+
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
         self.scan_sub = self.create_subscription(
             LaserScan, self.scan_topic, self.scan_callback, 10)
@@ -251,6 +278,34 @@ class GapFollowNode(Node):
             f"deadman {'ENABLED (LB must be held)' if self.enable_deadman else 'DISABLED'}, "
             f"decision logs every {self.decision_log_period_sec:.1f}s "
             "(plus immediate state changes).")
+
+    def _parameter_callback(self, parameters):
+        """Apply a live tune, or refuse it.
+
+        Anything outside the live-tunable catalogue is *refused*, not
+        ignored. This node caches every parameter on an attribute at
+        startup (see __init__), so accepting a change it does not know how
+        to apply would update the value the parameter server reports while
+        the scan callback kept driving on the old one -- a dashboard
+        reading back "max_speed: 1.0" from a car still doing 2.0.
+        Rejecting says so out loud instead. See live_tuning.py.
+        """
+        requested = {parameter.name: parameter.value for parameter in parameters}
+        accepted, reason = live_tuning.review(
+            self._tunables, requested, self._tunable_values,
+            passthrough=('use_sim_time',),
+            invariants=live_tuning.GAP_FOLLOW_INVARIANTS)
+        if reason is not None:
+            self.get_logger().warn(f'live tune rejected: {reason}')
+            return SetParametersResult(successful=False, reason=reason)
+
+        for name, value in accepted.items():
+            tunable = self._tunables[name]
+            previous = self._tunable_values[name]
+            setattr(self, tunable.target_attr, tunable.store(value))
+            self._tunable_values[name] = value
+            self.get_logger().info(f'live tune: {name} {previous} -> {value}')
+        return SetParametersResult(successful=True)
 
     def joy_callback(self, msg: Joy):
         self.last_joy_time = self.get_clock().now()
