@@ -357,3 +357,11 @@ behavior match the model. Before using new settings on the floor:
 5. increase speed one parameter at a time.
 
 The mandatory LB deadman policy remains enabled in every physical launch.
+
+**How far off is the model, specifically?** See
+[docs/sim-fidelity-audit.md](sim-fidelity-audit.md) for a measured audit of
+where this harness diverges from the real car. Short version: the geometry and
+timing match, but braking authority, tire grip, the steering actuator, and
+localization all diverge in the *optimistic* direction, and no dynamics
+parameter has ever been measured on this car. The audit also explains why the
+"steering rate limit is mildly helping" result above is a simulator artifact.

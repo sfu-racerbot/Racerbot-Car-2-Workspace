@@ -19,6 +19,7 @@ Start here if you're new to the car or the codebase:
 | [docs/architecture.md](docs/architecture.md) | The full node/topic graph, what talks to what, and the safety/priority model — **read this before writing any driving code** |
 | [docs/racing-autonomy.md](docs/racing-autonomy.md) | The map-based race stack (SLAM → localization → recorded racing line → curvature-paced velocity profile → pure pursuit control) — the algorithm, the math, and how to tune it |
 | [docs/simulator.md](docs/simulator.md) | Reproducible F1TENTH Gym setup, headless solo/multi-car validation commands, current results, and simulation limitations |
+| [docs/sim-fidelity-audit.md](docs/sim-fidelity-audit.md) | How closely the simulator matches this physical car — measured divergences (grip, braking, steering, localization), what they mean for tuning, and a prioritized plan to close them |
 | [docs/writing-your-own-node.md](docs/writing-your-own-node.md) | The full contract for driving code specifically, using `gap_follow` as a worked template |
 | [docs/web-dashboard.md](docs/web-dashboard.md) | Live browser dashboard of the car's map/scan/pose, plus live parameter tuning for the driving nodes — safe to run alongside anything |
 | [docs/hardware-reference.md](docs/hardware-reference.md) | VESC, LiDAR, joystick — exact addresses, ports, config values, and gotchas for this specific car |
