@@ -197,6 +197,33 @@
   }
 
   // ---------------------------------------------------------------------
+  // Map palette. Deliberately NOT the ROS/RViz convention of white free
+  // space on a mid-gray unknown: on this dashboard's dark theme that put a
+  // glaring white slab in the middle of the canvas, washed out the
+  // proximity-colored scan drawn on top of it, and read as a foreign image
+  // pasted onto the UI rather than part of it. Inverted instead, in the
+  // same palette style.css uses everywhere else:
+  //
+  //   unknown  -- a near-transparent hint of the panel border color, so
+  //               unmapped area recedes into the page background instead
+  //               of dominating it (drawMap outlines the map's extent, so
+  //               nothing is lost by letting it fade out)
+  //   free     -- a dark slate "track surface", clearly a mapped region
+  //               but dim enough to sit behind the scan and car
+  //   occupied -- the bright end: walls are the actual information in an
+  //               occupancy grid, and desaturated blue-gray keeps them
+  //               from competing with the saturated red/yellow/green of
+  //               the LIDAR points or the red car icon.
+  //
+  // Intermediate probabilities (1..99) interpolate between free and
+  // occupied, so a half-confident wall still reads as a half-bright one.
+  // ---------------------------------------------------------------------
+  const MAP_FREE_RGB = [30, 44, 61];        // #1e2c3d
+  const MAP_OCCUPIED_RGB = [150, 172, 196]; // #96acc4
+  const MAP_UNKNOWN_RGBA = [38, 49, 64, 50]; // #263140 (panel border) at ~20% alpha
+  const MAP_EDGE_COLOR = '#263140';         // same hairline as every panel border
+
+  // ---------------------------------------------------------------------
   // Turning a raw occupancy grid into something drawable, once per map
   // update (not once per frame): render it into an off-screen canvas at
   // its native resolution (1 pixel per cell), so the visible canvas can
@@ -221,17 +248,18 @@
       for (let col = 0; col < width; col++) {
         const value = cells[srcRow * width + col];
         const p = (row * width + col) * 4;
-        let gray;
         if (value < 0) {
-          gray = 128; // unknown
+          img.data[p] = MAP_UNKNOWN_RGBA[0];
+          img.data[p + 1] = MAP_UNKNOWN_RGBA[1];
+          img.data[p + 2] = MAP_UNKNOWN_RGBA[2];
+          img.data[p + 3] = MAP_UNKNOWN_RGBA[3];
         } else {
-          // 0 (free) -> white (255), 100 (occupied) -> near-black (20)
-          gray = 255 - Math.round((Math.min(value, 100) / 100) * 235);
+          const t = Math.min(value, 100) / 100; // 0 free -> 1 occupied
+          img.data[p] = Math.round(MAP_FREE_RGB[0] + (MAP_OCCUPIED_RGB[0] - MAP_FREE_RGB[0]) * t);
+          img.data[p + 1] = Math.round(MAP_FREE_RGB[1] + (MAP_OCCUPIED_RGB[1] - MAP_FREE_RGB[1]) * t);
+          img.data[p + 2] = Math.round(MAP_FREE_RGB[2] + (MAP_OCCUPIED_RGB[2] - MAP_FREE_RGB[2]) * t);
+          img.data[p + 3] = 255;
         }
-        img.data[p] = gray;
-        img.data[p + 1] = gray;
-        img.data[p + 2] = value < 0 ? 150 : gray; // faint blue tint on "unknown" so it visually reads differently from "free"
-        img.data[p + 3] = 255;
       }
     }
     octx.putImageData(img, 0, 0);
@@ -354,6 +382,9 @@
     const [x1, y1] = toMinimap(originX + width * resolution, originY);
     minimapCtx.imageSmoothingEnabled = false;
     minimapCtx.drawImage(mapCanvas, x0, y0, x1 - x0, y1 - y0);
+    minimapCtx.strokeStyle = MAP_EDGE_COLOR; // same map-extent hairline as the main canvas
+    minimapCtx.lineWidth = 1;
+    minimapCtx.strokeRect(x0 + 0.5, y0 + 0.5, x1 - x0 - 1, y1 - y0 - 1);
 
     if (!state.pose) return; // no map-frame pose yet -- nothing meaningful to overlay
 
@@ -367,7 +398,10 @@
       [view.centerX + halfW, view.centerY + halfH],
       [view.centerX - halfW, view.centerY + halfH],
     ].map(([wx, wy]) => toMinimap(wx, wy));
-    minimapCtx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+    // The dashboard's accent blue (#58a6ff, as used for links/hover in
+    // style.css) rather than plain white: it reads as a UI element on top
+    // of the map instead of another shade of map.
+    minimapCtx.strokeStyle = 'rgba(88, 166, 255, 0.75)';
     minimapCtx.lineWidth = 1;
     minimapCtx.beginPath();
     minimapCtx.moveTo(corners[0][0], corners[0][1]);
@@ -428,6 +462,13 @@
     const [x1, y1] = worldToCanvas(originX + width * resolution, originY);
     ctx.imageSmoothingEnabled = false; // crisp cell boundaries, not a blurry interpolation
     ctx.drawImage(mapCanvas, x0, y0, x1 - x0, y1 - y0);
+    // Hairline around the grid's extent, matching the panel borders in
+    // style.css: with "unknown" deliberately faded almost into the page
+    // background, this is what still says "the map covers exactly here"
+    // when zoomed out -- and it frames the map as part of the UI.
+    ctx.strokeStyle = MAP_EDGE_COLOR;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x0 + 0.5, y0 + 0.5, x1 - x0 - 1, y1 - y0 - 1);
   }
 
   const LIDAR_NEAR_M = 0.3;

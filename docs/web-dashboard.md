@@ -146,6 +146,19 @@ call — redrawing every cell every frame would be needlessly slow for a
 large map. Drag to pan (works both before and after localization — see
 below), scroll to zoom (toward the cursor), "reset view" to re-fit.
 
+The map is drawn in the dashboard's own dark palette rather than the
+ROS/RViz convention of white free space on mid-gray unknown, which on this
+UI looked like a lit-up slab pasted over the page and washed out the scan
+drawn on top of it. The polarity is inverted instead: **unknown** fades
+almost completely into the page background, **free space** is a dark slate
+"track surface", and **occupied cells** are the bright end — a desaturated
+blue-gray, so walls stay the most legible thing in the map without
+competing with the saturated red→green LIDAR points or the red car icon.
+Cells between free and occupied interpolate between the two. Since unknown
+area fades out, a one-pixel hairline (the same `#263140` every panel border
+uses) marks the grid's extent. All three colors are constants at the top of
+`applyMap()`'s section in `dashboard.js` if the theme ever changes.
+
 Robot-centric mode (no pose yet) and map-relative mode (once localized)
 use two different coordinate transforms (`bodyToCanvas` vs
 `worldToCanvas`), so panning/zooming tracks its own offset in each —
@@ -175,10 +188,10 @@ the bottom-left corner shows the current zoom level in meters/cm.
   fixed box.
 - **Top-right inset** — a minimap: always shows the *whole* map at a
   fixed auto-fit scale, independent of the main canvas's own pan/zoom,
-  with a white rectangle showing what the main view currently frames and
-  a small marker for the car — so zooming into one corner of the track on
-  the main canvas doesn't lose the big picture. Shows a placeholder until
-  a map has arrived.
+  with a rectangle in the UI's accent blue showing what the main view
+  currently frames and a small marker for the car — so zooming into one
+  corner of the track on the main canvas doesn't lose the big picture.
+  Shows a placeholder until a map has arrived.
 - **Bottom-right inset** — the live camera feed, if
   [`usb_cam_stream`](../src/usb_cam_stream/README.md) is running. This is
   a completely separate node on its own port (`9090`) — the browser just

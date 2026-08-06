@@ -180,6 +180,20 @@ slow for a large grid. `OccupancyGrid.data` has row 0 at the map's
 file can treat "top of the image" as "largest world Y" without
 re-deriving that.
 
+Its palette (`MAP_FREE_RGB`/`MAP_OCCUPIED_RGB`/`MAP_UNKNOWN_RGBA`) is
+deliberately *not* the ROS/RViz convention of white free space on mid-gray
+unknown — on this dark UI that reads as a glaring white slab with a gray
+border, and washes out the proximity-colored scan drawn on top of it. The
+polarity is inverted instead, in `style.css`'s own colors: unknown is a
+near-transparent hint of the panel border color (so unmapped area recedes
+into the page background), free space is a dark slate "track surface", and
+occupied cells are the bright end — desaturated blue-gray, so walls read
+clearly without competing with the saturated LIDAR points or the red car.
+Intermediate probabilities interpolate between free and occupied. Because
+unknown fades out, `drawMap()` strokes a one-pixel `#263140` hairline —
+the same border every panel uses — around the grid's extent, so the mapped
+area still has a visible boundary when zoomed out.
+
 Every one of map/scan/pose/drive/speed/stopwatch/stats carries its own `receivedAt` (this
 browser's own clock via `performance.now()`, not the server's), and a
 250ms timer recomputes "updated Xs ago" and turns the relevant readout red
@@ -207,8 +221,9 @@ via CSS (`#minimap-panel` top-right, `#camera-panel` bottom-right):
 
 - **`drawMinimap()`** renders `#minimap`, a *second* canvas with its own
   auto-fit transform, entirely independent of the main canvas's
-  `view.centerX/centerY/scale`. It always shows the whole map, plus a
-  white outline of whatever rectangle the main canvas currently frames
+  `view.centerX/centerY/scale`. It always shows the whole map (same
+  palette and extent hairline as the main canvas), plus an accent-blue
+  outline of whatever rectangle the main canvas currently frames
   (so panning/zooming the main view doesn't lose the big picture) and a
   small car marker. Shows a placeholder (`.has-map` CSS class toggle)
   until a map exists.
