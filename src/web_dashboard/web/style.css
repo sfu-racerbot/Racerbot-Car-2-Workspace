@@ -186,7 +186,8 @@ html, body {
 
 #camera-panel {
   bottom: 47px;
-  height: clamp(110px, 16vw, 165px); /* 4:3-ish, camera feeds are usually wider than tall */
+  height: clamp(110px, 16vw, 165px); /* 4:3-ish starting size; JS re-shapes it to the stream's real aspect */
+  box-sizing: border-box; /* so JS can set width/height as the visible box, border included */
 }
 
 .panel-label {
@@ -200,6 +201,58 @@ html, body {
   color: #8b949e;
   z-index: 1;
   pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+/* Drag-to-resize grip. The panel is pinned to the bottom-right corner, so
+   its top-left corner is the only one that can actually move -- which is
+   also where the panel label sits, so the two cross-fade rather than
+   fighting over the same 20 pixels. */
+#camera-resize {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 26px;
+  height: 26px;
+  z-index: 3;
+  cursor: nwse-resize;
+  touch-action: none; /* the grip owns the gesture; don't let a touch scroll instead */
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+#camera-resize::before {
+  content: "";
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  width: 10px;
+  height: 10px;
+  border-top: 2px solid #8b949e;
+  border-left: 2px solid #8b949e;
+  border-radius: 3px 0 0 0;
+}
+
+#camera-panel:hover #camera-resize,
+#camera-panel.resizing #camera-resize {
+  opacity: 1;
+}
+
+#camera-panel:hover .panel-label,
+#camera-panel.resizing .panel-label {
+  opacity: 0;
+}
+
+#camera-resize:hover::before,
+#camera-panel.resizing #camera-resize::before {
+  border-color: #58a6ff;
+}
+
+/* A touchscreen has no hover to reveal the grip with, so show it there
+   permanently and slide the label out of its way instead. */
+@media (hover: none) {
+  #camera-resize { opacity: 1; }
+  #camera-panel .panel-label { left: 32px; }
 }
 
 #minimap {
@@ -212,7 +265,11 @@ html, body {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* The panel is kept at the stream's own aspect ratio (see the resize
+     grip in dashboard.js), so "contain" shows the entire frame and has
+     nothing left over to letterbox -- until the first frame arrives and
+     reports its real shape, this is what keeps it uncropped. */
+  object-fit: contain;
 }
 
 .panel-placeholder {

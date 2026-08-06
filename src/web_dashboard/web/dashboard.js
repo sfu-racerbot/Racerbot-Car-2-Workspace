@@ -47,11 +47,13 @@
   const modeBanner = document.getElementById('mode-banner');
   const resetViewBtn = document.getElementById('reset-view');
 
+  const overlay = document.getElementById('overlay');
   const minimapPanel = document.getElementById('minimap-panel');
   const minimapCanvas = document.getElementById('minimap');
   const minimapCtx = minimapCanvas.getContext('2d');
   const cameraPanel = document.getElementById('camera-panel');
   const cameraFeed = document.getElementById('camera-feed');
+  const cameraResize = document.getElementById('camera-resize');
   const scaleRuler = document.getElementById('scale-ruler');
   const scaleLabel = document.getElementById('scale-label');
 
@@ -909,6 +911,12 @@
   cameraFeed.addEventListener('load', () => {
     cameraConnected = true;
     cameraPanel.classList.add('has-feed');
+    // First frame is also the first time the stream's real shape is known,
+    // which is what the panel gets sized to from here on.
+    if (cameraFeed.naturalWidth > 0 && cameraFeed.naturalHeight > 0) {
+      cameraAspect = cameraFeed.naturalWidth / cameraFeed.naturalHeight;
+      applyCameraSize();
+    }
   });
   cameraFeed.addEventListener('error', () => {
     cameraConnected = false;
@@ -916,6 +924,124 @@
   });
   tryCameraConnect();
   setInterval(() => { if (!cameraConnected) tryCameraConnect(); }, 3000);
+
+  // ---------------------------------------------------------------------
+  // Resizing the camera inset. The panel is pinned to the bottom-right, so
+  // its top-left corner is the only one that can move -- that's where the
+  // grip is. A drag *scales* the panel along the stream's own aspect ratio
+  // rather than reshaping it freely, so the inset is always exactly the
+  // shape of the frame: the whole image stays visible, never cropped and
+  // never letterboxed, at whatever size the driver wants it.
+  //
+  // The size is remembered in localStorage, since "make the camera bigger"
+  // is a per-person preference, not a per-session one. Double-clicking the
+  // grip forgets it and returns to the CSS default.
+  // ---------------------------------------------------------------------
+  const CAMERA_MIN_WIDTH = 120;
+  const CAMERA_WIDTH_KEY = 'racerbot.dashboard.cameraWidth';
+  const PANEL_GAP = 12; // matches the 12px inset every fixed panel uses
+
+  let cameraAspect = 4 / 3; // until the first frame reports its real shape
+  let cameraWidth = null;   // null = untouched, follow the CSS default size
+
+  // Grow only into empty space: never across the sidebar, never up into
+  // the minimap, never off the top of the window.
+  function cameraMaxSize() {
+    const style = getComputedStyle(cameraPanel);
+    const right = parseFloat(style.right) || PANEL_GAP;
+    const bottom = parseFloat(style.bottom) || 47;
+    const overlayRight = overlay.getBoundingClientRect().right;
+    const minimapBottom = minimapPanel.getBoundingClientRect().bottom;
+    return {
+      width: Math.max(CAMERA_MIN_WIDTH, window.innerWidth - right - overlayRight - PANEL_GAP),
+      height: Math.max(CAMERA_MIN_WIDTH / cameraAspect,
+                       window.innerHeight - bottom - minimapBottom - PANEL_GAP),
+    };
+  }
+
+  // Lay the panel out at the stream's aspect ratio. Until the grip is
+  // actually dragged the width stays on its responsive CSS clamp and only
+  // the height is derived from it, so an untouched dashboard still scales
+  // with the window the way it always did; once dragged, both are pinned.
+  function applyCameraSize() {
+    const max = cameraMaxSize();
+    if (cameraWidth === null) {
+      cameraPanel.style.width = '';
+      const cssWidth = cameraPanel.getBoundingClientRect().width;
+      const width = Math.max(CAMERA_MIN_WIDTH, Math.min(cssWidth, max.height * cameraAspect));
+      // Only override the CSS width in the corner case where the derived
+      // height wouldn't fit -- otherwise leave the clamp alone.
+      if (width < cssWidth - 0.5) cameraPanel.style.width = `${Math.round(width)}px`;
+      cameraPanel.style.height = `${Math.round(width / cameraAspect)}px`;
+      return;
+    }
+    cameraWidth = Math.max(CAMERA_MIN_WIDTH,
+                           Math.min(cameraWidth, max.width, max.height * cameraAspect));
+    cameraPanel.style.width = `${Math.round(cameraWidth)}px`;
+    cameraPanel.style.height = `${Math.round(cameraWidth / cameraAspect)}px`;
+  }
+
+  function setCameraWidth(width) {
+    cameraWidth = width;
+    applyCameraSize();
+  }
+
+  function resetCameraSize() {
+    cameraWidth = null;
+    cameraPanel.style.width = '';
+    cameraPanel.style.height = '';
+    applyCameraSize();
+    try {
+      localStorage.removeItem(CAMERA_WIDTH_KEY);
+    } catch (err) { /* private mode / storage disabled -- size just won't persist */ }
+  }
+
+  let resizeStart = null;
+
+  cameraResize.addEventListener('pointerdown', (e) => {
+    e.preventDefault(); // no text selection, no native link drag
+    const rect = cameraPanel.getBoundingClientRect();
+    resizeStart = { x: e.clientX, y: e.clientY, width: rect.width, height: rect.height };
+    cameraResize.setPointerCapture(e.pointerId);
+    cameraPanel.classList.add('resizing');
+  });
+
+  cameraResize.addEventListener('pointermove', (e) => {
+    if (!resizeStart) return;
+    // Dragging up/left grows the panel, since the opposite corner is fixed.
+    const wantWidth = resizeStart.width + (resizeStart.x - e.clientX);
+    const wantHeight = resizeStart.height + (resizeStart.y - e.clientY);
+    // The pointer can wander off the fixed-aspect diagonal, so project onto
+    // it (least-squares) instead of picking one axis -- that way a mostly
+    // sideways drag and a mostly vertical one both feel like they're
+    // dragging the corner, in either direction.
+    const scale = (wantWidth * cameraAspect + wantHeight) / (cameraAspect * cameraAspect + 1);
+    setCameraWidth(scale * cameraAspect);
+  });
+
+  function endCameraResize(e) {
+    if (!resizeStart) return;
+    resizeStart = null;
+    cameraPanel.classList.remove('resizing');
+    if (cameraResize.hasPointerCapture(e.pointerId)) cameraResize.releasePointerCapture(e.pointerId);
+    try {
+      if (cameraWidth !== null) localStorage.setItem(CAMERA_WIDTH_KEY, String(cameraWidth));
+    } catch (err) { /* see resetCameraSize */ }
+  }
+
+  cameraResize.addEventListener('pointerup', endCameraResize);
+  cameraResize.addEventListener('pointercancel', endCameraResize);
+  cameraResize.addEventListener('dblclick', resetCameraSize);
+
+  // A window that shrank can leave the panel overlapping the sidebar or
+  // minimap, so re-clamp (this rides along with the canvas's own resize
+  // handler above, which only re-renders the map).
+  window.addEventListener('resize', applyCameraSize);
+
+  try {
+    const saved = parseFloat(localStorage.getItem(CAMERA_WIDTH_KEY));
+    if (Number.isFinite(saved)) setCameraWidth(saved);
+  } catch (err) { /* see resetCameraSize */ }
 
   // ---------------------------------------------------------------------
   // Go

@@ -97,6 +97,10 @@
       <img id="camera-feed" alt="camera feed" />
       <div id="camera-placeholder" class="panel-placeholder">camera offline</div>
     </a>
+    <!-- Sibling of the link, not a child: a drag that ended inside the
+         anchor would otherwise open the recording view on mouse-up. -->
+    <div id="camera-resize" role="separator" aria-label="Resize camera view"
+         title="Drag to resize &middot; double-click to reset"></div>
   </div>
 
   <div id="scale-panel" aria-label="Map scale">

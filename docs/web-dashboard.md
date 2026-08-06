@@ -207,6 +207,19 @@ the bottom-left corner shows the current zoom level in meters/cm.
   recording tab with current time, speed, steering, LB, stopwatch, CPU, and
   WiFi overlays; use the browser's tab/screen recording on that view.
 
+  **Resizing it:** hover the inset and a grip appears in its top-left
+  corner (where the "camera" label normally sits) — drag it to make the
+  feed as large or as small as you want, double-click it to go back to the
+  default size. The panel is pinned to the bottom-right corner, so that's
+  the only corner that can move. Dragging *scales* the panel along the
+  stream's own aspect ratio rather than reshaping it freely, so the inset
+  is always exactly the shape of the frame: the whole image is visible at
+  every size, never cropped and never letterboxed. It won't grow over the
+  sidebar or up into the minimap, and the size is remembered in the
+  browser's `localStorage` (per browser, not per session — the car doesn't
+  know about it). Dragging the grip never opens the recording tab, even
+  though the rest of the panel is a link.
+
 ## Running it
 
 Dashboard by itself — map/scan/pose, no camera:

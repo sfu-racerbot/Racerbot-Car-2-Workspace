@@ -237,6 +237,21 @@ via CSS (`#minimap-panel` top-right, `#camera-panel` bottom-right):
   started after the dashboard page loads still gets picked up without a
   page reload. Clicking the inset opens a full-window recording tab with
   clock, speed, steering, LB, stopwatch, CPU, and WiFi overlays.
+- **`#camera-resize`** is the inset's drag-to-resize grip. The panel is
+  pinned to the bottom-right, so its top-left corner is the only one that
+  can move — which is also where `.panel-label` sits, so the two
+  cross-fade on hover rather than sharing the corner. The grip is a
+  *sibling* of `#camera-link`, not a child: a drag that ended inside the
+  anchor would otherwise open the recording tab on mouse-up. A drag scales
+  the panel along the stream's own aspect ratio (`cameraAspect`, read from
+  the first frame's `naturalWidth/naturalHeight`) instead of reshaping it
+  freely, so the frame is never cropped or letterboxed; the pointer's
+  offset from that fixed-aspect diagonal is projected onto it
+  (least-squares), so a mostly-sideways drag and a mostly-vertical one
+  both track the corner. `cameraMaxSize()` keeps it out of the sidebar and
+  the minimap, `applyCameraSize()` leaves the width on its responsive CSS
+  clamp until the grip is actually dragged, the chosen width is persisted
+  in `localStorage`, and double-clicking the grip clears it.
 
 ## Parameters (`config/web_dashboard.yaml`)
 
