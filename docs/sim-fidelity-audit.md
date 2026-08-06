@@ -13,6 +13,25 @@ not from reading code.
 Read [docs/simulator.md](simulator.md) first — it describes what the harness is
 and how to run it. This document is about how much to trust it.
 
+> **Status: acted on.** Most of the recommendations below are implemented in
+> `tools/f1tenth_sim/racerbot_sim/`; see
+> [tools/f1tenth_sim/README.md](../tools/f1tenth_sim/README.md) for what was
+> done, what was deliberately left alone, and what the fixes then revealed.
+>
+> Two corrections to this document, both found while implementing it:
+>
+> - **F10 badly understates the problem.** The collision check is not a 5 mm
+>   proximity test with a rear blind spot — it *cannot fire at all* in this
+>   harness's geometry. `side_distances` is identically zero on every beam,
+>   because the LiDAR at +0.33 m sits outside the ±0.29 m collision box it is
+>   supposed to be measured from, and `range_min` clipping at 0.05 m then makes
+>   the degenerate test unreachable. Measured: 198.9 m driven straight through
+>   the circuit and its barriers, never flagged.
+> - **R3's proposed fix is superseded.** A 5 ms control step shrinks the
+>   steering limit cycle 5× and costs 3.1× in run time.
+>   `SteerActionType.STEERING_SPEED` removes the limit cycle entirely, is more
+>   faithful to a real servo, and is free.
+
 ## Verdict
 
 **The harness is a good algorithm-and-regression check and a poor vehicle

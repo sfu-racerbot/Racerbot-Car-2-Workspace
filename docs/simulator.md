@@ -10,6 +10,22 @@ The supported path is intentionally headless and deterministic. It is suitable
 for regression tests and tuning on this Jetson/ARM64 machine; it does not need
 Docker, a display, RViz, or ROS topics.
 
+> **The vehicle is no longer stock gym, and the results below predate that.**
+> `tools/f1tenth_sim/racerbot_sim/` layers this car's real parameters, a
+> friction circle, a working steering servo, degraded sensing and — most
+> importantly — *working collision detection* on top of the pinned upstream
+> checkout, which stays pristine. Read
+> [tools/f1tenth_sim/README.md](../tools/f1tenth_sim/README.md) before
+> trusting any number on this page.
+>
+> In particular: **upstream's collision check could never fire in this
+> harness's geometry.** A car driven straight at the Spielberg barrier went
+> 198.9 m through the circuit unflagged. Every `"collision": false` recorded
+> below was true by construction. The two solo scenarios turn out to have been
+> genuinely clean; `pure_traffic` was rear-ending the opponent at 3.55 s.
+>
+> Everything below still reproduces exactly under `--fidelity legacy`.
+
 ## One-time setup
 
 From the workspace root:
@@ -89,7 +105,9 @@ The simulator runs at 40 Hz with a 5 ms RK4 integration step. Its vehicle is
 matched to the Traxxas 74276-4's published 0.324m wheelbase, the deliberately
 padded 0.31m × 0.58m collision body, and estimated +0.33m LiDAR offset. The
 LiDAR model has 819 beams over ±135° with
-small seeded noise.
+small seeded noise. (Under the default `car` profile it is 1081 beams, matching
+the Hokuyo UST-10LX — measured free. See
+[tools/f1tenth_sim/README.md](../tools/f1tenth_sim/README.md).)
 
 `gap_solo` validates:
 
@@ -365,3 +383,8 @@ timing match, but braking authority, tire grip, the steering actuator, and
 localization all diverge in the *optimistic* direction, and no dynamics
 parameter has ever been measured on this car. The audit also explains why the
 "steering rate limit is mildly helping" result above is a simulator artifact.
+
+**Most of that audit has since been acted on.** See
+[tools/f1tenth_sim/README.md](../tools/f1tenth_sim/README.md) for what was
+fixed, what deliberately was not, and the three problems the audit missed —
+including that collision detection was inoperative the whole time.

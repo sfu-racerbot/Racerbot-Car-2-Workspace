@@ -6,6 +6,12 @@ checking, and multi-agent ray casting.  It directly calls the repository's
 framework-independent controller math so failures are reproducible without
 ROS scheduling, joystick hardware, RViz, or wall-clock timing.
 
+The vehicle the controllers meet is not stock gym: racerbot_sim layers this
+car's measured and derived parameters, a friction circle, a real steering
+servo and realistic sensing on top of the pinned upstream checkout, which is
+left pristine.  See tools/f1tenth_sim/README.md; --fidelity legacy reproduces
+the original harness.
+
 Run tools/f1tenth_sim/setup.sh once before invoking this file.
 """
 
@@ -14,40 +20,28 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 from pathlib import Path
 import sys
 import time
 from dataclasses import dataclass
 from typing import Optional
 
-ROOT = Path(__file__).resolve().parents[2]
-SIM_ROOT = ROOT / ".sim"
-for import_path in (
-    SIM_ROOT / "python",
-    SIM_ROOT / "f1tenth_gym",
-    ROOT / "src" / "gap_follow",
-    ROOT / "src" / "pure_pursuit",
-):
-    sys.path.insert(0, str(import_path))
-os.environ.setdefault("NUMBA_CACHE_DIR", str(SIM_ROOT / "numba-cache"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from racerbot_sim.bootstrap import bootstrap  # noqa: E402
+
+ROOT = bootstrap()
 
 try:
     import gymnasium as gym
     import numpy as np
     import f1tenth_gym  # noqa: F401 - registers the Gymnasium environment
-    from f1tenth_gym.envs.dynamic_models import (
-        DynamicModel,
-        F1TENTH_VEHICLE_PARAMETERS,
-    )
+    from f1tenth_gym.envs.dynamic_models import DynamicModel
     from f1tenth_gym.envs.env_config import (
-        ControlConfig,
         EnvConfig,
         ObservationConfig,
         SimulationConfig,
     )
     from f1tenth_gym.envs.integrators import IntegratorType
-    from f1tenth_gym.envs.lidar import LiDARConfig
     from f1tenth_gym.envs.observation import ObservationType
 except ImportError as exc:
     raise SystemExit(
@@ -57,14 +51,18 @@ except ImportError as exc:
 from gap_follow import gap_logic
 from pure_pursuit import racing_math
 
+from racerbot_sim import CALIBRATION, FidelityPlant, PROFILES
+from racerbot_sim.calibration import unmeasured as unmeasured_parameters
+from racerbot_sim.plant import DEFAULT_PROFILE, env_components
+
 
 CONTROL_DT = 0.025  # 40 Hz, matching pure_pursuit.yaml
 INTEGRATOR_DT = 0.005
-WHEELBASE = 0.324
-CAR_WIDTH = 0.31
-CAR_LENGTH = 0.58
+WHEELBASE = CALIBRATION.wheelbase
+CAR_WIDTH = CALIBRATION.width
+CAR_LENGTH = CALIBRATION.length
 STEERING_LIMIT = 0.26
-LIDAR_OFFSET_X = 0.33
+LIDAR_OFFSET_X = CALIBRATION.lidar_offset_x
 FORWARD_STOP_CLEARANCE = 0.25
 FORWARD_STOP_FOV = math.radians(60.0)
 TTC_COMMAND_SPEED_TIMEOUT = 0.5
@@ -81,34 +79,29 @@ PURE_MAX_BRAKING_DECEL = 8.0
 # speed cap brakes for, and the ego then stalls behind the opponent.
 OVERTAKE_LOOKAHEAD = 4.0
 
-LIDAR = LiDARConfig(
-    enabled=True,
-    num_beams=819,
-    angle_min=math.radians(-135.0),
-    angle_max=math.radians(135.0),
-    range_min=0.05,
-    range_max=25.0,
-    noise_std=0.01,
-    base_link_to_lidar_tf=(LIDAR_OFFSET_X, 0.0, 0.0),
-)
-
-VEHICLE_PARAMS = F1TENTH_VEHICLE_PARAMETERS.with_updates(
-    # Padded Traxxas 74276-4 body with its published 0.324 m wheelbase.
-    lf=WHEELBASE / 2.0,
-    lr=WHEELBASE / 2.0,
-    width=CAR_WIDTH,
-    length=CAR_LENGTH,
-    collision_body_center_x=WHEELBASE / 2.0,
-)
+# Which fidelity fixes are in force. Set from --fidelity in main(); the
+# module-level default keeps probe scripts that import this file honest.
+PROFILE = PROFILES[DEFAULT_PROFILE]
+COMPONENTS = env_components(PROFILE, CALIBRATION)
+LIDAR = COMPONENTS["lidar_config"]
 
 
-def make_env(track: str, num_agents: int, seed: int):
+def select_profile(name: str) -> None:
+    """Switch the active fidelity profile, rebuilding what depends on it."""
+    global PROFILE, COMPONENTS, LIDAR
+    PROFILE = PROFILES[name]
+    COMPONENTS = env_components(PROFILE, CALIBRATION)
+    LIDAR = COMPONENTS["lidar_config"]
+
+
+def make_plant(track: str, num_agents: int, seed: int) -> FidelityPlant:
+    """Build the environment and wrap it in this car's fidelity layer."""
     config = EnvConfig(
         seed=seed,
         map_name=track,
-        params=VEHICLE_PARAMS,
+        params=COMPONENTS["params"],
         num_agents=num_agents,
-        control_config=ControlConfig(steer_delay_steps=1),
+        control_config=COMPONENTS["control_config"],
         simulation_config=SimulationConfig(
             timestep=CONTROL_DT,
             integrator_timestep=INTEGRATOR_DT,
@@ -117,10 +110,14 @@ def make_env(track: str, num_agents: int, seed: int):
             max_laps=1,
         ),
         observation_config=ObservationConfig(type=ObservationType.DIRECT),
-        lidar_config=LIDAR,
+        lidar_config=COMPONENTS["lidar_config"],
+        collision_check=COMPONENTS["collision_check"],
         render_enabled=False,
     )
-    return gym.make("f1tenth_gym:f1tenth-v0", config=config, render_mode=None)
+    env = gym.make("f1tenth_gym:f1tenth-v0", config=config, render_mode=None)
+    return FidelityPlant(
+        env, PROFILE, num_agents, seed, CONTROL_DT, CALIBRATION
+    )
 
 
 def initial_pose(line, index: int) -> np.ndarray:
@@ -575,9 +572,9 @@ def result_base(
 
 
 def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
-    env = make_env(track, 1, seed)
-    line = env.unwrapped.track.raceline
-    obs, _ = env.reset(options={"poses": initial_pose(line, 0).reshape(1, 3)})
+    plant = make_plant(track, 1, seed)
+    line = plant.env.unwrapped.track.raceline
+    obs, _ = plant.reset(initial_pose(line, 0).reshape(1, 3))
     reference = np.column_stack((line.xs, line.ys))
     previous_index = None
     max_cross_track = 0.0
@@ -619,28 +616,34 @@ def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
             if offset is not None:
                 corridor_offsets.append(offset)
 
+            # Measured against ground truth, not the degraded pose: sensor
+            # error must not be allowed to corrupt the metric that reports
+            # its effect.
             nearest, error = racing_math.find_nearest_index(
                 reference,
-                state[:2],
+                plant.truth(0)[:2],
                 prev_index=previous_index,
                 search_window=80,
             )
             previous_index = nearest
             max_cross_track = max(max_cross_track, float(error))
 
-            obs, _reward, done, _truncated, info = env.step(
-                np.array([[steering, speed]], dtype=np.float32)
+            obs, _reward, done, _truncated, info = plant.step(
+                [(steering, speed)]
             )
-            if done:
+            # Upstream ends the episode on its own collision flag; ours has
+            # to do the same or the car keeps driving through the barrier.
+            if done or obs["agent_0"]["collision"]:
                 break
         else:
             step = max_steps - 1
     finally:
-        env.close()
+        plant.close()
 
     result = result_base(
         "gap_solo", track, obs, info, step + 1, time.monotonic() - started
     )
+    result.update(plant.report())
     result.update(
         {
             "max_cross_track_m": round(max_cross_track, 4),
@@ -706,18 +709,19 @@ def apply_fallback_safety(
 
 
 def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
-    env = make_env(track, 1, seed)
-    line = env.unwrapped.track.raceline
-    plan = PathPlan.from_track(env.unwrapped.track)
+    plant = make_plant(track, 1, seed)
+    line = plant.env.unwrapped.track.raceline
+    plan = PathPlan.from_track(plant.env.unwrapped.track)
     # Start on the line the car is actually going to follow. Spawning it on
     # the shipped raceline while it tracks a different one would begin the lap
     # with most of a corridor's worth of cross-track error already on the
     # clock, and the scenario's 0.5m limit would fail the comparison before
     # the car had turned a wheel.
-    obs, _ = env.reset(options={"poses": plan_initial_pose(plan, line)})
+    obs, _ = plant.reset(plan_initial_pose(plan, line))
     follower = PathFollower(plan)
     command_shaper = CommandShaper()
     max_cross_track = 0.0
+    truth_index = None
     min_scan = math.inf
     avoid_steps = 0
     stop_steps = 0
@@ -727,10 +731,21 @@ def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
     try:
         for step in range(max_steps):
             ego = obs["agent_0"]
+            # `error` is the controller's own view, from the estimated pose,
+            # so the max_cross_track_error watchdog below trips on the same
+            # information the node has. The reported metric uses truth.
             steering, speed, _nearest, _target, error = follower.command(
                 ego["std_state"]
             )
-            max_cross_track = max(max_cross_track, error)
+            _truth_nearest, truth_error = racing_math.find_nearest_index(
+                plan.xy,
+                plant.truth(0)[:2],
+                closed=True,
+                prev_index=truth_index,
+                search_window=80,
+            )
+            truth_index = _truth_nearest
+            max_cross_track = max(max_cross_track, float(truth_error))
             min_scan = min(
                 min_scan, closest_valid(ego["scan"], math.radians(30.0))
             )
@@ -748,19 +763,20 @@ def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
             steering, speed = command_shaper.command(
                 steering, speed, hard_speed_cap,
                 measured_speed=ego["std_state"][3])
-            obs, _reward, done, _truncated, info = env.step(
-                np.array([[steering, speed]], dtype=np.float32)
+            obs, _reward, done, _truncated, info = plant.step(
+                [(steering, speed)]
             )
-            if done:
+            if done or obs["agent_0"]["collision"]:
                 break
         else:
             step = max_steps - 1
     finally:
-        env.close()
+        plant.close()
 
     result = result_base(
         "pure_solo", track, obs, info, step + 1, time.monotonic() - started
     )
+    result.update(plant.report())
     result.update(
         {
             "max_cross_track_m": round(max_cross_track, 4),
@@ -782,24 +798,16 @@ def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
     return result
 
 
-def static_expected_scan(env, agent_index: int) -> np.ndarray:
-    simulator = env.unwrapped.sim
-    lidar_pose = simulator._lidar_pose_from_base(  # official Gym internal API
-        simulator.state.poses[agent_index]
-    )
-    return simulator.scan_sims[agent_index].scan(lidar_pose, rng=None)
-
-
 def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
-    env = make_env(track, 2, seed)
-    line = env.unwrapped.track.raceline
+    plant = make_plant(track, 2, seed)
+    line = plant.env.unwrapped.track.raceline
     opponent_start_index = max(1, int(6.0 / 0.2))
     poses = np.vstack(
         (initial_pose(line, 0), initial_pose(line, opponent_start_index))
     )
-    obs, _ = env.reset(options={"poses": poses})
+    obs, _ = plant.reset(poses)
 
-    plan = PathPlan.from_track(env.unwrapped.track)
+    plan = PathPlan.from_track(plant.env.unwrapped.track)
     ego_follower = PathFollower(plan)
     ego_command_shaper = CommandShaper()
     # The scripted opponent is not the ROS pure-pursuit node under test;
@@ -817,6 +825,7 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
     avoid_steps = 0
     stop_steps = 0
     max_cross_track = 0.0
+    truth_index = None
     accumulated_progress = 0.0
     previous_arc = None
     min_commanded_speed = math.inf
@@ -834,8 +843,19 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
             steering, speed, nearest, target, error = ego_follower.command(
                 ego["std_state"]
             )
-            max_cross_track = max(max_cross_track, error)
-            current_arc = float(cumulative[nearest])
+            # Progress and cross-track come from ground truth, so completing
+            # a lap means the car really went round rather than its estimate
+            # having drifted round.
+            truth_nearest, truth_error = racing_math.find_nearest_index(
+                plan.xy,
+                plant.truth(0)[:2],
+                closed=True,
+                prev_index=truth_index,
+                search_window=80,
+            )
+            truth_index = truth_nearest
+            max_cross_track = max(max_cross_track, float(truth_error))
+            current_arc = float(cumulative[truth_nearest])
             if previous_arc is not None:
                 delta_arc = (
                     (current_arc - previous_arc + total_length / 2.0)
@@ -849,7 +869,7 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
             )
 
             scan = np.asarray(ego["scan"], dtype=float)
-            expected = static_expected_scan(env, 0)
+            expected = plant.expected_scan(0)
             measured_ds = scan[::downsample]
             expected_ds = expected[::downsample]
             angle_increment_ds = LIDAR.angle_increment * downsample
@@ -966,25 +986,29 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
             min_commanded_speed = min(min_commanded_speed, float(speed))
             max_commanded_speed = max(max_commanded_speed, float(speed))
 
-            actions = np.array(
-                [[steering, speed], [opponent_steering, 2.0]], dtype=np.float32
+            obs, _reward, done, _truncated, info = plant.step(
+                [(steering, speed), (opponent_steering, 2.0)]
             )
-            obs, _reward, done, _truncated, info = env.step(actions)
             # The pinned Gym branch does not advance lap_counts reliably in
             # multi-agent mode. Wrapped nearest-raceline progress remains
             # deterministic and is independently checked against collisions.
             if accumulated_progress >= total_length and completed_passes >= 1:
                 break
-            if done:
+            if (
+                done
+                or obs["agent_0"]["collision"]
+                or obs["agent_1"]["collision"]
+            ):
                 break
         else:
             step = max_steps - 1
     finally:
-        env.close()
+        plant.close()
 
     result = result_base(
         "pure_traffic", track, obs, info, step + 1, time.monotonic() - started
     )
+    result.update(plant.report())
     result.update(
         {
             "opponent_collision": bool(obs["agent_1"]["collision"]),
@@ -1002,12 +1026,9 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
             "progress_laps": round(accumulated_progress / total_length, 3),
             "min_commanded_speed_mps": round(min_commanded_speed, 3),
             "max_commanded_speed_mps": round(max_commanded_speed, 3),
-            "final_speed_mps": round(
-                float(obs["agent_0"]["std_state"][3]), 3
-            ),
+            "final_speed_mps": round(float(plant.truth(0)[3]), 3),
             "final_pose": [
-                round(float(obs["agent_0"]["std_state"][i]), 3)
-                for i in (0, 1, 4)
+                round(float(plant.truth(0)[i]), 3) for i in (0, 1, 4)
             ],
         }
     )
@@ -1036,6 +1057,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument(
+        "--repeat-seeds",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Re-run every scenario with N consecutive seeds starting at "
+             "--seed. The traffic scenario is genuinely seed-fragile -- it "
+             "deadlocks nose-to-wall behind the opponent on a meaningful "
+             "fraction of seeds even with stock parameters -- so a single "
+             "run of it is weak evidence either way (default: %(default)s).",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=240.0,
@@ -1058,6 +1090,18 @@ def parse_args() -> argparse.Namespace:
              "it changes. Not a supported car configuration.",
     )
     parser.add_argument(
+        "--fidelity",
+        choices=tuple(PROFILES),
+        default=DEFAULT_PROFILE,
+        help="How closely the simulated vehicle models this car. 'car' is "
+             "everything (calibrated parameters, friction circle, real servo, "
+             "degraded sensing); 'plant' is the vehicle fixes with perfect "
+             "sensing, for telling a physics change apart from a sensing one; "
+             "'legacy' reproduces the pre-audit harness and the results "
+             "checked in at docs/f1tenth-sim-results.json "
+             "(default: %(default)s).",
+    )
+    parser.add_argument(
         "--raceline",
         choices=("shipped", "optimized", "centerline"),
         default="shipped",
@@ -1075,31 +1119,36 @@ def main() -> int:
     args = parse_args()
     ENABLE_CENTERING = not args.no_centering
     RACELINE_SOURCE = args.raceline
+    select_profile(args.fidelity)
     tracks = args.tracks[:1] if args.quick else args.tracks
     results: list[dict] = []
 
-    if args.scenario in ("all", "gap"):
-        for track in tracks:
-            result = run_gap_solo(track, args.seed, args.timeout)
-            results.append(result)
+    for seed in range(args.seed, args.seed + max(1, args.repeat_seeds)):
+        batch: list[dict] = []
+        if args.scenario in ("all", "gap"):
+            batch += [run_gap_solo(t, seed, args.timeout) for t in tracks]
+        if args.scenario in ("all", "pure"):
+            batch += [run_pure_solo(t, seed, args.timeout) for t in tracks]
+        if args.scenario in ("all", "traffic"):
+            batch.append(run_pure_traffic(tracks[0], seed, args.timeout))
+        for result in batch:
+            result["seed"] = seed
             print(json.dumps(result, sort_keys=True), flush=True)
-
-    if args.scenario in ("all", "pure"):
-        for track in tracks:
-            result = run_pure_solo(track, args.seed, args.timeout)
-            results.append(result)
-            print(json.dumps(result, sort_keys=True), flush=True)
-
-    if args.scenario in ("all", "traffic"):
-        result = run_pure_traffic(tracks[0], args.seed, args.timeout)
-        results.append(result)
-        print(json.dumps(result, sort_keys=True), flush=True)
+        results += batch
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "gym_commit": "bdaec1420c3b0f103858d289866d0d4e2e597c30",
         "seed": args.seed,
         "control_rate_hz": 1.0 / CONTROL_DT,
+        "fidelity_profile": PROFILE.name,
+        "lidar_beams": LIDAR.num_beams,
+        "surface_friction": CALIBRATION.surface_friction,
+        "grip_limit_mps2": round(CALIBRATION.friction_accel_limit, 3),
+        # Parameters still inherited from gym rather than justified for this
+        # car. Recorded in the report so a stale result cannot quietly claim
+        # more authority than it has.
+        "unmeasured_parameters": unmeasured_parameters(),
         "passed": all(item["passed"] for item in results),
         "results": results,
     }
