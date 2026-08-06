@@ -16,6 +16,9 @@
   const wifiEl = document.getElementById('recording-wifi');
   const telemetryStatus = document.getElementById('telemetry-status');
 
+  const fullscreenToggle = document.getElementById('fullscreen-toggle');
+  const fullscreenLabel = document.getElementById('fullscreen-label');
+
   const state = { speed: null, drive: null, stats: null, stopwatch: null };
   let ws = null;
   let cameraConnected = false;
@@ -143,8 +146,73 @@
     cameraStatus.textContent = 'CAMERA RETRYING';
   });
 
+  // ---------------------------------------------------------------------
+  // Fullscreen. Windowed, the feed is letterboxed so the whole frame is
+  // visible; fullscreen switches it to cover (see camera.css) so it fills
+  // the screen with no black bars, cropping the overflowing edges rather
+  // than stretching the image -- a distorted frame would misrepresent how
+  // far away things are, which is the one thing this view exists to show.
+  //
+  // The whole document goes fullscreen rather than just the stage, so the
+  // telemetry overlay comes along with it.
+  // ---------------------------------------------------------------------
+  function isFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement);
+  }
+
+  function toggleFullscreen() {
+    if (isFullscreen()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (exit) Promise.resolve(exit.call(document)).catch(() => {});
+      return;
+    }
+    const target = document.documentElement;
+    const request = target.requestFullscreen || target.webkitRequestFullscreen;
+    // Fullscreen can be refused (permissions policy, an iframe, a browser
+    // that doesn't support it) -- the page stays perfectly usable, so just
+    // don't leave an unhandled rejection behind.
+    if (request) Promise.resolve(request.call(target)).catch(() => {});
+  }
+
+  function syncFullscreenState() {
+    const on = isFullscreen();
+    stage.classList.toggle('is-fullscreen', on);
+    fullscreenLabel.textContent = on ? 'exit fullscreen' : 'fullscreen';
+    fullscreenToggle.title = on
+      ? 'Leave fullscreen (F or Esc)'
+      : 'Fill the screen (F) · double-clicking the video does the same';
+  }
+
+  fullscreenToggle.addEventListener('click', toggleFullscreen);
+  stage.addEventListener('dblclick', (e) => {
+    if (e.target.closest('.stage-control, #telemetry-overlay')) return;
+    toggleFullscreen();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+  });
+  document.addEventListener('fullscreenchange', syncFullscreenState);
+  document.addEventListener('webkitfullscreenchange', syncFullscreenState);
+
+  // Hide the control and the cursor while the mouse sits still, so neither
+  // ends up baked into a recording.
+  const CONTROLS_IDLE_MS = 2500;
+  let idleTimer = null;
+
+  function wakeControls() {
+    stage.classList.remove('controls-idle');
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => stage.classList.add('controls-idle'), CONTROLS_IDLE_MS);
+  }
+
+  ['pointermove', 'pointerdown', 'keydown'].forEach((type) => {
+    document.addEventListener(type, wakeControls);
+  });
+
   tryCameraConnect();
   connectTelemetry();
+  syncFullscreenState();
+  wakeControls();
   updateClock();
   renderTelemetry();
   setInterval(() => {

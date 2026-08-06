@@ -253,6 +253,15 @@ via CSS (`#minimap-panel` top-right, `#camera-panel` bottom-right):
   clamp until the grip is actually dragged, the chosen width is persisted
   in `localStorage`, and double-clicking the grip clears it.
 
+The recording view (`camera.html`) letterboxes the feed while windowed and
+switches to `object-fit: cover` in fullscreen (`.is-fullscreen` on
+`#camera-stage`), so it fills the screen with no black bars and no
+stretching — entered from the `#fullscreen-toggle` button, the `F` key, or
+a double-click on the video, all of which go through `toggleFullscreen()`
+on `document.documentElement` so the telemetry overlay comes along. The
+button and cursor hide after `CONTROLS_IDLE_MS` of no input
+(`.controls-idle`) so they stay out of recordings.
+
 ## Parameters (`config/web_dashboard.yaml`)
 
 | Parameter | Default | Meaning |

@@ -62,6 +62,58 @@ html, body {
 
 #camera-stage.has-feed #camera-offline { display: none; }
 
+/* ------------------------------------------------------------------ */
+/* Fullscreen. Windowed, the feed is letterboxed (object-fit: contain)
+   so the whole frame is visible while framing a shot; fullscreen fills
+   the screen edge to edge instead -- scaled up until it covers, cropping
+   whatever overflows, so there are no black bars and no distortion.
+   The control auto-hides after a few idle seconds, together with the
+   cursor, so neither ends up in a recording. */
+/* ------------------------------------------------------------------ */
+#camera-stage.is-fullscreen #recording-camera-feed {
+  object-fit: cover;
+}
+
+.stage-control {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: rgba(3, 5, 7, 0.62);
+  border: 1px solid rgba(201, 209, 217, 0.22);
+  border-radius: 4px;
+  color: #c9d1d9;
+  font: 700 9px "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: opacity 200ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.stage-control:hover,
+.stage-control:focus-visible {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+
+.stage-control-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+#camera-stage.controls-idle .stage-control {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#camera-stage.controls-idle {
+  cursor: none;
+}
+
 #recording-header {
   position: absolute;
   top: clamp(18px, 3vw, 42px);

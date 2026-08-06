@@ -220,6 +220,26 @@ the bottom-left corner shows the current zoom level in meters/cm.
   know about it). Dragging the grip never opens the recording tab, even
   though the rest of the panel is a link.
 
+### The recording view (`camera.html`)
+
+Clicking the camera inset opens this in a new tab: the camera feed as the
+whole page, with a compact telemetry overlay (clock, speed, steering, LB,
+stopwatch, CPU, WiFi) in the top-left. It's meant to be captured with the
+browser's or OS's own screen recorder.
+
+By default the frame is letterboxed — the entire image is visible, with
+dark bars wherever the window's shape and the camera's disagree, which is
+what you want while framing a shot. **Fullscreen fills the screen with no
+bars at all:** click `fullscreen` in the top-right, press `F`, or
+double-click the video. The frame is scaled up until it covers the screen
+and whatever overflows the edges is cropped — it's never stretched, since
+a distorted frame would misrepresent how far away things are. `F` again or
+`Esc` leaves fullscreen and returns to the whole-frame view.
+
+The fullscreen button and the mouse cursor both fade out after ~2.5s of no
+input, so neither ends up baked into a recording; any mouse movement or
+keypress brings them back.
+
 ## Running it
 
 Dashboard by itself — map/scan/pose, no camera:
