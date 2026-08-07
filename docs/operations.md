@@ -113,7 +113,7 @@ Same result as above, but `gap_follow` drives the lap instead of a human — see
 
 If you're writing your own node, this deadman behavior is **required, not optional** — see [writing-your-own-node.md](writing-your-own-node.md#the-interface-contract) for the pattern to copy from `gap_follow_node.py`. If you ever see an autonomy node stuck at `0.0/0.0` even with LB held, first check `enable_deadman`/`joy_topic`/`deadman_button` in its config YAML, then confirm `joy_node` is actually still running (`ros2 node list | grep joy`) and publishing (`ros2 topic echo /joy`) — and confirm you don't also have `teleop_launch.py` running in another terminal, which would mask `/drive` at the mux regardless of what your node publishes (see [architecture.md](architecture.md#the-safety-model-read-this-before-writing-autonomy-code)).
 
-`gap_follow`'s tuning parameters (speed limits, steering limits, safety bubble radius, emergency stop distance, `deadman_button`, `joy_timeout_sec`, `enable_deadman`) live in `src/gap_follow/config/gap_follow.yaml`. Defaults are conservative (`max_speed: 2.0` m/s) — increase gradually, not all at once, and re-test wheels-off-ground after any change.
+`gap_follow`'s tuning parameters (speed limits, steering limits, safety bubble radius, emergency stop distance, `deadman_button`, `joy_timeout_sec`, `enable_deadman`) live in `src/gap_follow/config/gap_follow.yaml`. Defaults are conservative (`max_speed: 2.5` m/s) — increase gradually, not all at once, and re-test wheels-off-ground after any change.
 
 ## Racing with the pure-pursuit stack
 

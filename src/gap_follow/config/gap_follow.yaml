@@ -12,8 +12,13 @@ gap_follow_node:
     # If no 2m-deep gap exists at a blind/tight corner, accept a nearer
     # post-inflation corridor and crawl through it instead of deadlocking.
     fallback_min_gap_distance: 0.8
-    corner_speed: 0.5
-    max_speed: 2.0
+    # The cap that actually governs most of a lap here. On the 2026-08-06
+    # run the car was in the corner fallback for ~120 of its ~150 driving
+    # ticks, so it spent most of its time pinned to this value rather than to
+    # max_speed. Raised with max_speed so corners are quicker, not just
+    # straights; the curvature and clearance ceilings still apply on top.
+    corner_speed: 0.8
+    max_speed: 2.5
     min_speed: 0.8
     # Symmetric achievable envelope from the calibrated servo mapping.
     max_steering_angle: 0.26
@@ -46,7 +51,15 @@ gap_follow_node:
     wheelbase: 0.324
     laser_offset_x: 0.33
     laser_offset_y: 0.0
-    safety_margin: 0.10
+    # Padding added to half the car width when inflating obstacle edges
+    # (disparity_extend) and when sizing the safety bubble. This is the knob
+    # that decides how wide a berth the chosen gap gives the inside of a
+    # corner: the extension is car_width/2 + safety_margin, so 0.18 moves the
+    # drivable window 0.335m off every edge instead of 0.255m. Raised because
+    # the car was clipping corner apexes and then sitting ~0.08m off the wall.
+    # Costs gap width, so raise it further only alongside
+    # min_centerline_gap_width / fallback_min_gap_distance.
+    safety_margin: 0.18
     disparity_threshold: 0.4
     # Obstacles are already inflated by half-width + margin on both sides.
     # Requiring another car width here was double-padding tight openings.
@@ -114,7 +127,11 @@ gap_follow_node:
 
     # --- Time-to-collision automatic emergency braking ---
     enable_ttc: true
-    ttc_threshold_sec: 0.5
+    # Lowered from 0.5. At the 1.6m/s this car actually reaches, 0.5s meant
+    # braking 0.80m from a wall while mid-corner; 0.35s brakes at 0.56m, which
+    # still exceeds the 0.43m the clearance ceiling reserves to stop from that
+    # speed at max_braking_decel. The clearance-based stops are unchanged.
+    ttc_threshold_sec: 0.35
     ttc_min_closing_speed: 0.05
     # TTC uses max(fresh odom speed, latest command when it is positive),
     # so brief odom under-reporting cannot suppress braking. A zero brake
@@ -123,6 +140,17 @@ gap_follow_node:
     # Once fresh odom reports meaningful motion, use it rather than the much
     # higher requested speed; this prevents stop/restart latching in corners.
     ttc_command_fallback_max_odom_speed: 0.10
+    # Speed below which the TTC brake is not armed at all. TTC measures
+    # closing speed, and at a crawl it stops measuring anything useful: on the
+    # 2026-08-06 run 10 of 12 sampled TTC stops fired between 0.15 and
+    # 0.39m/s, where the old 0.5s threshold is just 0.08-0.20m of clearance,
+    # so a car that had eased up to a corner wall could never re-commit. Some
+    # of those samples read "odom 0.00m/s, recent command 0.16m/s" -- stopped,
+    # braking on its own commanded speed, releasing, re-braking at scan rate.
+    # Below this speed the clearance layers own the car instead, and they are
+    # the ones designed to let it escape: emergency_stop_clearance still stops
+    # on contact, and the forward reserve still creeps toward a visible exit.
+    ttc_min_brake_speed: 0.6
     odom_timeout_sec: 0.5
     # --- Deadman button (workspace policy -- see docs/architecture.md) ---
     # Mandatory workspace-wide safety policy: the car must not move under

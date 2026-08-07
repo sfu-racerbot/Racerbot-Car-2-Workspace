@@ -336,6 +336,13 @@ GAP_FOLLOW_TUNABLES = (
             step=0.05, safety=True,
             description='Time-to-impact at which that brake fires. Higher '
                         'brakes earlier and more often.'),
+    Tunable('ttc_min_brake_speed', 'Safety margins', 0.0, 2.0, unit='m/s',
+            step=0.05, safety=True,
+            description='Speed below which the TTC brake is not armed. At a '
+                        'crawl the clock measures almost no clearance, which '
+                        'traps the car against a corner it has already eased '
+                        'up to. The clearance stops and the forward-reserve '
+                        'creep still run below this speed.'),
 )
 
 

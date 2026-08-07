@@ -34,8 +34,8 @@ class GapFollowNode(Node):
         self.declare_parameter('forward_fov_deg', 180.0)
         self.declare_parameter('min_gap_distance', 1.0)
         self.declare_parameter('fallback_min_gap_distance', 0.8)
-        self.declare_parameter('corner_speed', 0.5)
-        self.declare_parameter('max_speed', 2.0)
+        self.declare_parameter('corner_speed', 0.8)
+        self.declare_parameter('max_speed', 2.5)
         self.declare_parameter('min_speed', 0.5)
         self.declare_parameter('max_steering_angle', 0.26)
         # Dynamic control: bearing-proportional steering, physical speed
@@ -53,7 +53,7 @@ class GapFollowNode(Node):
         self.declare_parameter('wheelbase', 0.324)
         self.declare_parameter('laser_offset_x', 0.33)
         self.declare_parameter('laser_offset_y', 0.0)
-        self.declare_parameter('safety_margin', 0.10)
+        self.declare_parameter('safety_margin', 0.18)
         self.declare_parameter('disparity_threshold', 0.4)
         # Obstacle inflation already accounts for the full car width. This
         # threshold is only the remaining centerline corridor after inflation.
@@ -81,10 +81,11 @@ class GapFollowNode(Node):
 
         # F1TENTH instantaneous TTC, using the safest recent speed estimate.
         self.declare_parameter('enable_ttc', True)
-        self.declare_parameter('ttc_threshold_sec', 0.5)
+        self.declare_parameter('ttc_threshold_sec', 0.35)
         self.declare_parameter('ttc_min_closing_speed', 0.05)
         self.declare_parameter('ttc_command_speed_timeout_sec', 0.5)
         self.declare_parameter('ttc_command_fallback_max_odom_speed', 0.10)
+        self.declare_parameter('ttc_min_brake_speed', 0.6)
         self.declare_parameter('odom_timeout_sec', 0.5)
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('deadman_button', 4)
@@ -195,6 +196,8 @@ class GapFollowNode(Node):
             self.get_parameter('ttc_command_speed_timeout_sec').value)
         self.ttc_command_fallback_max_odom_speed = float(self.get_parameter(
             'ttc_command_fallback_max_odom_speed').value)
+        self.ttc_min_brake_speed = float(
+            self.get_parameter('ttc_min_brake_speed').value)
         self.odom_timeout_sec = float(
             self.get_parameter('odom_timeout_sec').value)
         self.joy_topic = self.get_parameter('joy_topic').value
@@ -274,6 +277,10 @@ class GapFollowNode(Node):
             raise ValueError(
                 'ttc_command_fallback_max_odom_speed must be finite and '
                 'non-negative')
+        if not math.isfinite(self.ttc_min_brake_speed) or (
+                self.ttc_min_brake_speed < 0.0):
+            raise ValueError(
+                'ttc_min_brake_speed must be finite and non-negative')
 
         # Deadman state: gap_follow only drives while this button is held on
         # a live /joy stream. Defaults to "not engaged" so the car never
@@ -572,36 +579,54 @@ class GapFollowNode(Node):
         # command backs up fresh odometry only if it is effectively near zero.
         if self.enable_ttc:
             effective_speed, recent_command_speed = self._effective_ttc_speed()
-            min_ttc = gap_logic.minimum_ttc(
-                window,
-                window_valid,
-                beam_angles,
-                effective_speed,
-                body_boundaries,
-                self.ttc_min_closing_speed,
-                self.car_width / 2.0 + self.safety_margin,
-                # The rack is where the last command left it, so that is the
-                # arc the car is about to sweep. Straight-line TTC on a car at
-                # full lock brakes for the outside of the very corner it is
-                # negotiating.
-                math.tan(self.steering_basis) / self.wheelbase,
-                self.laser_offset_x,
-                self.laser_offset_y,
-            )
-            if min_ttc <= self.ttc_threshold_sec:
-                self._stop(
-                    'ttc_brake',
-                    lambda: (
-                        f"minimum footprint-aware TTC {min_ttc:.3f}s is at or "
-                        f"below the {self.ttc_threshold_sec:.3f}s threshold at "
-                        f"effective speed {effective_speed:.2f}m/s "
-                        f"(odom {self.current_speed:.2f}m/s, recent command "
-                        f"{recent_command_speed:.2f}m/s)"
-                        + self._escape_report(
-                            window, window_valid, scan, lo_idx,
-                            beam_angles)),
+            # Below ttc_min_brake_speed the clock is not consulted at all.
+            # TTC is a *closing-speed* brake, and at a crawl it stops being
+            # one. Measured on the 2026-08-06 run, 10 of 12 sampled TTC stops
+            # fired between 0.15 and 0.39m/s, where the 0.5s threshold is only
+            # 0.08-0.20m of clearance -- so a car that had already eased up to
+            # the inside of a corner could never re-commit to the turn. Worse,
+            # those samples repeatedly read "odom 0.00m/s, recent command
+            # 0.16m/s": the car was stopped, the command fallback supplied the
+            # speed, TTC braked, the command went to zero, the brake released,
+            # and the pair alternated at scan rate.
+            #
+            # The clearance layers own this regime and are built for it:
+            # emergency_stop_clearance still stops outright on contact and the
+            # forward reserve still creeps, which is what lets a car with a
+            # visible exit inch toward it. This gate removes the brake only
+            # where it was blocking that escape, not where it is doing work.
+            if effective_speed >= self.ttc_min_brake_speed:
+                min_ttc = gap_logic.minimum_ttc(
+                    window,
+                    window_valid,
+                    beam_angles,
+                    effective_speed,
+                    body_boundaries,
+                    self.ttc_min_closing_speed,
+                    self.car_width / 2.0 + self.safety_margin,
+                    # The rack is where the last command left it, so that is
+                    # the arc the car is about to sweep. Straight-line TTC on a
+                    # car at full lock brakes for the outside of the very
+                    # corner it is negotiating.
+                    math.tan(self.steering_basis) / self.wheelbase,
+                    self.laser_offset_x,
+                    self.laser_offset_y,
                 )
-                return
+                if min_ttc <= self.ttc_threshold_sec:
+                    self._stop(
+                        'ttc_brake',
+                        lambda: (
+                            f"minimum footprint-aware TTC {min_ttc:.3f}s is at "
+                            f"or below the {self.ttc_threshold_sec:.3f}s "
+                            f"threshold at effective speed "
+                            f"{effective_speed:.2f}m/s "
+                            f"(odom {self.current_speed:.2f}m/s, recent command "
+                            f"{recent_command_speed:.2f}m/s)"
+                            + self._escape_report(
+                                window, window_valid, scan, lo_idx,
+                                beam_angles)),
+                    )
+                    return
 
         (window, closest_dist, gap_start, gap_end, used_fallback,
          target_idx_in_window) = self._select_gap(
