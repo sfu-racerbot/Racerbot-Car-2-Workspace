@@ -134,6 +134,28 @@ gap_follow_node:
     joy_topic: /joy
     deadman_button: 4
     joy_timeout_sec: 0.5
+
+    # --- Drive intent (docs/drive-intent.md) ---
+    # Publishes a JSON description of what this controller is trying to do
+    # -- the predicted path, the speed ceilings that competed, and the
+    # reason for the current decision -- for the web dashboard's intent
+    # arrow and decision panel. Read-only diagnostics: it goes out only
+    # after the drive command for the tick has already been published, and
+    # disables itself rather than the node if it ever starts failing.
+    publish_intent: true
+    intent_topic: /drive_intent
+    # Well under the ~40Hz scan rate; no browser needs to redraw an arrow
+    # faster than this, and the Jetson is also driving the car.
+    intent_rate_hz: 20.0
+    # How far ahead the arrow predicts. The arrow's *length* is distance
+    # travelled over this horizon, so a stopped car draws a stub and a fast
+    # one draws a long arrow -- that is the intended reading.
+    intent_horizon_sec: 1.5
+    intent_samples: 16
+    # Never draw an arrow longer than this, however fast the plan is; past
+    # a certain length it stops being informative and just covers the map.
+    intent_max_length: 8.0
+
     # --- Terminal diagnostics ---
     # Every state change prints immediately. While the state is unchanged,
     # repeat the current stop/drive reason and final command at this rate.

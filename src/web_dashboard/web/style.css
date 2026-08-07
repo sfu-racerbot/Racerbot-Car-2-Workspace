@@ -714,3 +714,117 @@ html, body {
 
 #tuning-save-status.ok { color: #3fb950; }
 #tuning-save-status.error { color: #f85149; }
+
+
+/* ---------------------------------------------------------------------
+   Drive intent: what the algorithm is trying to do, and why.
+   Colours match the arrow on the canvas exactly (see INTENT_COLORS in
+   dashboard.js) so the chip in the sidebar and the ribbon on the map are
+   obviously the same statement rather than two things to correlate.
+   --------------------------------------------------------------------- */
+.intent-toggle {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #8b949e;
+  cursor: pointer;
+  text-transform: none;
+}
+
+.intent-toggle input {
+  margin: 0;
+  cursor: pointer;
+}
+
+.intent-headline {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.intent-chip {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #0b0f14;
+  background: #8b949e;
+  white-space: nowrap;
+}
+
+.intent-chip.intent-drive { background: #3fb950; }
+.intent-chip.intent-caution { background: #d29922; }
+.intent-chip.intent-stop { background: #f85149; }
+
+.intent-node {
+  font-size: 10px;
+  color: #8b949e;
+}
+
+/* The full sentence the car logged for this decision. Wraps and stays
+   selectable: these get pasted into issues verbatim. */
+.intent-reason {
+  font-size: 11px;
+  line-height: 1.45;
+  color: #c9d1d9;
+  margin: 2px 0 6px;
+  max-height: 6.5em;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.intent-subtitle {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6e7681;
+  margin: 8px 0 2px;
+}
+
+.intent-factor .row-label {
+  width: auto;
+  flex: 1;
+}
+
+.intent-factor .row-value {
+  flex: none;
+  font-size: 12px;
+  font-weight: 400;
+  color: #8b949e;
+}
+
+/* The one limit actually holding the car back. Everything else in this
+   list is context; this is the answer. */
+.intent-factor.intent-binding .row-label,
+.intent-factor.intent-binding .row-value {
+  color: #f0f6fc;
+  font-weight: 700;
+}
+
+.intent-log {
+  max-height: 128px;
+  overflow-y: auto;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.intent-log-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #8b949e;
+}
+
+.intent-log-line.intent-drive { color: #56d364; }
+.intent-log-line.intent-caution { color: #e3b341; }
+.intent-log-line.intent-stop { color: #ff7b72; }

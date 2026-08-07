@@ -79,6 +79,39 @@
       <div class="row"><span class="row-label">up</span><span class="row-value" id="info-uptime">--</span></div>
     </div>
 
+    <!-- What the driving algorithm is trying to do, and why. Sits above
+         live tuning because it is the thing you read while the car is
+         moving; tuning is what you reach for once it has stopped. -->
+    <div class="section" id="intent-section">
+      <div class="section-title">
+        <span id="dot-intent" class="dot dot-gray"></span>
+        intent
+        <label class="intent-toggle" title="show or hide the intent arrow">
+          <input type="checkbox" id="intent-toggle" checked />
+          <span>arrow</span>
+        </label>
+      </div>
+      <div class="intent-headline">
+        <span id="intent-state" class="intent-chip">no intent yet</span>
+        <span id="intent-node" class="intent-node"></span>
+      </div>
+      <div id="intent-reason" class="intent-reason">
+        no driving node is publishing /drive_intent -- start gap_follow or pure_pursuit
+      </div>
+      <div class="row">
+        <span class="row-label">speed</span>
+        <span class="row-value metric-value" id="intent-speeds">--</span>
+      </div>
+      <div class="row">
+        <span class="row-label">steer</span>
+        <span class="row-value metric-value" id="intent-steering">--</span>
+      </div>
+      <div class="intent-subtitle">limits (bold = binding)</div>
+      <div id="intent-factors"></div>
+      <div class="intent-subtitle">recent decisions</div>
+      <div id="intent-log" class="intent-log"></div>
+    </div>
+
     <div class="section" id="tuning-section">
       <div class="section-title">
         <span id="dot-tuning" class="dot dot-gray"></span>

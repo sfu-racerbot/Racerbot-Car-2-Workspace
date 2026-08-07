@@ -44,8 +44,26 @@
     drive: document.getElementById('dot-drive'),
     stats: document.getElementById('dot-stats'),
   };
+  const intentSection = document.getElementById('intent-section');
+  const intentDot = document.getElementById('dot-intent');
+  const intentState = document.getElementById('intent-state');
+  const intentNode = document.getElementById('intent-node');
+  const intentReason = document.getElementById('intent-reason');
+  const intentSpeeds = document.getElementById('intent-speeds');
+  const intentSteering = document.getElementById('intent-steering');
+  const intentFactors = document.getElementById('intent-factors');
+  const intentLog = document.getElementById('intent-log');
+  const intentToggle = document.getElementById('intent-toggle');
+
   const modeBanner = document.getElementById('mode-banner');
   const resetViewBtn = document.getElementById('reset-view');
+
+  if (intentToggle) {
+    intentToggle.addEventListener('change', () => {
+      state.showIntent = intentToggle.checked;
+      render();
+    });
+  }
 
   const overlay = document.getElementById('overlay');
 
@@ -86,7 +104,40 @@
     stats: null, // { cpuPercent, memPercent, cpuTempC, uptimeS, wifiDbm, receivedAt }
     tuning: null, // { enabled, allowSave, nodes: [...] } -- see protocol.tuning_state_message
     tuningArmed: false, // server-confirmed, never assumed from the checkbox
+    // What the driving node says it is *trying* to do -- see
+    // docs/drive-intent.md. `intent` is the raw schema payload; `reason`
+    // is held separately because the car only re-sends the (sometimes
+    // expensive) explanation on state changes and on a slow period, so
+    // most messages deliberately arrive without one.
+    intent: null,
+    intentReason: '',
+    intentReceivedAt: 0,
+    intentLog: [],   // [{ state, severity, at, heldMs }] newest first
+    showIntent: true,
   };
+
+  // How the arrow is drawn. Half-width is proportional to the *planned*
+  // speed at each sample, which is what makes "wider = faster" readable at
+  // a glance; the clamps keep a crawl visible and stop a 6m/s straight
+  // from covering the track.
+  const INTENT_HALF_WIDTH_PER_MPS = 0.07; // meters of half-width per m/s
+  const INTENT_MIN_HALF_WIDTH = 0.04;     // meters
+  const INTENT_MAX_HALF_WIDTH = 0.35;     // meters
+  // Older than this and the arrow is a claim about a moment that has
+  // passed; it fades rather than disappearing, so "the publisher died"
+  // and "the car is stopped" stay visually distinct.
+  const INTENT_STALE_MS = 1000;
+  const INTENT_LOG_LIMIT = 20;
+
+  const INTENT_COLORS = {
+    drive:   { fill: 'rgba(63, 185, 80, 0.28)',  edge: 'rgba(63, 185, 80, 0.90)',  ink: '#3fb950' },
+    caution: { fill: 'rgba(210, 153, 34, 0.30)', edge: 'rgba(210, 153, 34, 0.92)', ink: '#d29922' },
+    stop:    { fill: 'rgba(248, 81, 73, 0.28)',  edge: 'rgba(248, 81, 73, 0.92)',  ink: '#f85149' },
+  };
+
+  function intentColors(severity) {
+    return INTENT_COLORS[severity] || INTENT_COLORS.caution;
+  }
 
   // Pending "what does the next binary frame mean" -- set when a JSON
   // header arrives, consumed the moment the binary payload right after
@@ -192,6 +243,9 @@
         receivedAt: performance.now(),
       };
       updateStatusText();
+    } else if (header.type === 'intent') {
+      applyIntent(header.intent);
+      render();
     } else if (header.type === 'tuning') {
       state.tuning = { enabled: header.enabled, allowSave: header.allow_save, nodes: header.nodes || [] };
       renderTuning();
@@ -357,6 +411,13 @@
       // Map loaded but no pose yet: deliberately not drawing the scan --
       // plotting it without a pose would just be a guess dressed up as
       // data, and the banner above already explains why.
+    }
+
+    // Intent under the car icon, so the car always reads as the thing the
+    // arrow belongs to. Needs a body frame it can place: either a pose, or
+    // the robot-centric fallback that exists whenever there is no map.
+    if (state.intent && (mapRelative || !state.map)) {
+      drawIntent(mapRelative && !!state.map);
     }
 
     if (mapRelative) {
@@ -616,6 +677,340 @@
     ctx.restore();
   }
 
+  // ---------------------------------------------------------------------
+  // Drive intent: what the algorithm is *trying* to do (docs/drive-intent.md)
+  //
+  // Deliberately not derived from measured speed or heading -- those are
+  // already on screen, and the whole point of this overlay is to show the
+  // plan *before* the car acts it out, so a wrong plan can be caught while
+  // it is still only a plan.
+  //
+  // The car publishes in base_link, which is what lets the same arrow draw
+  // in robot-centric mode (no map, no pose, just /scan) and in map-relative
+  // mode without two code paths or a TF lookup in the browser.
+  // ---------------------------------------------------------------------
+  function applyIntent(payload) {
+    if (!payload || typeof payload !== 'object') return;
+    const previous = state.intent;
+    if (!previous || previous.state !== payload.state) {
+      const now = Date.now();
+      const head = state.intentLog[0];
+      if (head) head.heldMs = now - head.at;
+      state.intentLog.unshift({ state: payload.state, severity: payload.severity, at: now, heldMs: null });
+      state.intentLog.length = Math.min(state.intentLog.length, INTENT_LOG_LIMIT);
+      // A transition always carries its reason (the car guarantees that),
+      // so clearing here can never leave a transition unexplained -- and it
+      // stops the previous state's explanation from lingering under a new
+      // state label, which would be actively misleading.
+      state.intentReason = '';
+    }
+    if (typeof payload.reason === 'string') state.intentReason = payload.reason;
+    state.intent = payload;
+    state.intentReceivedAt = performance.now();
+  }
+
+  function intentAgeMs() {
+    return performance.now() - state.intentReceivedAt;
+  }
+
+  // Body frame (+X forward, +Y left) -> canvas, in whichever mode is live.
+  function bodyFrameProjector(mapRelative) {
+    if (mapRelative && state.pose) {
+      const cos = Math.cos(state.pose.yaw);
+      const sin = Math.sin(state.pose.yaw);
+      const px = state.pose.x;
+      const py = state.pose.y;
+      return (bx, by) => worldToCanvas(px + bx * cos - by * sin, py + bx * sin + by * cos);
+    }
+    return (bx, by) => bodyToCanvas(bx, by);
+  }
+
+  function intentHalfWidth(v) {
+    return Math.max(INTENT_MIN_HALF_WIDTH,
+      Math.min(INTENT_MAX_HALF_WIDTH, INTENT_HALF_WIDTH_PER_MPS * Math.abs(v)));
+  }
+
+  // Unit tangent at each sample: central difference where possible, so the
+  // ribbon's edges stay parallel to the path through a curve instead of
+  // kinking at every sample.
+  function pathTangents(pts) {
+    const out = [];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[Math.max(0, i - 1)];
+      const b = pts[Math.min(pts.length - 1, i + 1)];
+      let dx = b.x - a.x;
+      let dy = b.y - a.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-9) {
+        const prev = out[i - 1];
+        out.push(prev || { x: 1, y: 0 });
+      } else {
+        out.push({ x: dx / len, y: dy / len });
+      }
+    }
+    return out;
+  }
+
+  function polylineLength(pts) {
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) {
+      total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    }
+    return total;
+  }
+
+  // Cut `back` meters off the end of a polyline, returning the shortened
+  // path plus the point where it was cut. The arrow head occupies exactly
+  // that trimmed length, so the whole arrow -- head included -- is as long
+  // as the distance the plan actually covers, rather than overshooting it
+  // by the size of the head.
+  function trimTail(pts, back) {
+    if (pts.length < 2) return { body: pts.slice(), tip: pts[pts.length - 1] };
+    let remaining = back;
+    const body = pts.slice();
+    while (body.length >= 2) {
+      const last = body[body.length - 1];
+      const prev = body[body.length - 2];
+      const seg = Math.hypot(last.x - prev.x, last.y - prev.y);
+      if (seg >= remaining) {
+        const t = seg < 1e-9 ? 0 : (seg - remaining) / seg;
+        body[body.length - 1] = {
+          x: prev.x + (last.x - prev.x) * t,
+          y: prev.y + (last.y - prev.y) * t,
+          v: last.v,
+        };
+        return { body, tip: pts[pts.length - 1] };
+      }
+      remaining -= seg;
+      body.pop();
+    }
+    return { body, tip: pts[pts.length - 1] };
+  }
+
+  function drawIntent(mapRelative) {
+    const intent = state.intent;
+    if (!intent || !state.showIntent) return;
+    const project = bodyFrameProjector(mapRelative);
+    const colors = intentColors(intent.severity);
+    const stale = intentAgeMs() > INTENT_STALE_MS;
+
+    ctx.save();
+    if (stale) ctx.globalAlpha = 0.35;
+
+    drawIntentWedge(intent, project, colors);
+    // The ghost goes underneath: where it separates from the ribbon, the
+    // gap is the slew-rate and acceleration shaping between what the
+    // algorithm asked for and what actually went on the wire.
+    drawIntentGhost(intent, project);
+    drawIntentRibbon(intent, project, colors);
+    drawIntentTargets(intent, project, colors);
+
+    ctx.restore();
+  }
+
+  function drawIntentRibbon(intent, project, colors) {
+    const pts = intent.path || [];
+    if (polylineLength(pts) < 0.05) {
+      drawIntentHold(intent, project, colors);
+      return;
+    }
+
+    const tipHalfWidth = intentHalfWidth(pts[pts.length - 1].v);
+    const headLength = Math.max(0.18, 2.0 * tipHalfWidth);
+    const { body, tip } = trimTail(pts, headLength);
+    if (body.length < 2) {
+      drawIntentHold(intent, project, colors);
+      return;
+    }
+
+    const tangents = pathTangents(body);
+    const left = [];
+    const right = [];
+    for (let i = 0; i < body.length; i++) {
+      const half = intentHalfWidth(body[i].v);
+      // Normal is the tangent rotated +90deg in the body frame.
+      const nx = -tangents[i].y;
+      const ny = tangents[i].x;
+      left.push(project(body[i].x + nx * half, body[i].y + ny * half));
+      right.push(project(body[i].x - nx * half, body[i].y - ny * half));
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(left[0][0], left[0][1]);
+    for (let i = 1; i < left.length; i++) ctx.lineTo(left[i][0], left[i][1]);
+    for (let i = right.length - 1; i >= 0; i--) ctx.lineTo(right[i][0], right[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = colors.fill;
+    ctx.fill();
+    ctx.strokeStyle = colors.edge;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Head, based at the trim point and tipped at the true path end.
+    const base = body[body.length - 1];
+    const dirX = tip.x - base.x;
+    const dirY = tip.y - base.y;
+    const dirLen = Math.hypot(dirX, dirY) || 1;
+    const ux = dirX / dirLen;
+    const uy = dirY / dirLen;
+    const headHalf = Math.max(1.9 * tipHalfWidth, 0.09);
+    const p1 = project(base.x - uy * headHalf, base.y + ux * headHalf);
+    const p2 = project(base.x + uy * headHalf, base.y - ux * headHalf);
+    const p3 = project(tip.x, tip.y);
+    ctx.beginPath();
+    ctx.moveTo(p1[0], p1[1]);
+    ctx.lineTo(p3[0], p3[1]);
+    ctx.lineTo(p2[0], p2[1]);
+    ctx.closePath();
+    ctx.fillStyle = colors.edge;
+    ctx.fill();
+  }
+
+  // A stop is not "no intent" -- gap_follow deliberately *holds the rack*
+  // where it is while stopped, because centring it would throw away the
+  // steering the car needs to get out of trouble. Drawing that held angle
+  // is the difference between "stopped" and "stopped, aimed left".
+  function drawIntentHold(intent, project, colors) {
+    const steer = intent.desired_steering || 0;
+    const stub = 0.55;
+    const a = project(0, 0);
+    const b = project(stub * Math.cos(steer), stub * Math.sin(steer));
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = colors.edge;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]);
+    ctx.lineTo(b[0], b[1]);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.arc(a[0], a[1], 7, 0, Math.PI * 2);
+    ctx.strokeStyle = colors.edge;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  function drawIntentGhost(intent, project) {
+    const pts = intent.commanded_path || [];
+    if (polylineLength(pts) < 0.05) return;
+    ctx.save();
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = 'rgba(230, 237, 243, 0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      const [cx, cy] = project(p.x, p.y);
+      if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawIntentTargets(intent, project, colors) {
+    (intent.targets || []).forEach((t) => {
+      const [cx, cy] = project(t.x, t.y);
+      ctx.beginPath();
+      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+      ctx.fillStyle = colors.edge;
+      ctx.fill();
+      ctx.font = '11px sans-serif';
+      ctx.fillStyle = 'rgba(230, 237, 243, 0.75)';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(t.kind || '').replace(/_/g, ' '), cx + 9, cy);
+    });
+  }
+
+  // The angular span the reactive controller picked out of the scan. Drawn
+  // from the LIDAR's own origin, which is where those bearings were
+  // measured -- not from base_link, 0.33m behind it.
+  function drawIntentWedge(intent, project) {
+    const w = intent.wedge;
+    if (!w) return;
+    const steps = 24;
+    ctx.save();
+    ctx.beginPath();
+    const [ox, oy] = project(w.x, w.y);
+    ctx.moveTo(ox, oy);
+    for (let i = 0; i <= steps; i++) {
+      const a = w.a0 + (w.a1 - w.a0) * (i / steps);
+      const [px, py] = project(w.x + w.r * Math.cos(a), w.y + w.r * Math.sin(a));
+      ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(88, 166, 255, 0.10)';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ---------------------------------------------------------------------
+  // Decision panel: why the car is doing what it is doing
+  // ---------------------------------------------------------------------
+  function updateIntentPanel() {
+    const intent = state.intent;
+    if (!intent) {
+      intentState.textContent = 'no intent yet';
+      intentState.className = 'intent-chip';
+      intentNode.textContent = '';
+      intentReason.textContent =
+        'no driving node is publishing /drive_intent -- start gap_follow or pure_pursuit';
+      intentSpeeds.textContent = '--';
+      intentSteering.textContent = '--';
+      intentFactors.innerHTML = '';
+      setDot(intentDot, null);
+      return;
+    }
+
+    const stale = intentAgeMs() > INTENT_STALE_MS;
+    intentState.textContent = intent.state.replace(/_/g, ' ');
+    intentState.className = `intent-chip intent-${intent.severity}`;
+    intentNode.textContent = stale ? `${intent.node} (stale)` : intent.node;
+    intentReason.textContent = state.intentReason || 'waiting for the next explanation...';
+
+    const dv = intent.desired_speed;
+    const cv = intent.commanded_speed;
+    // Showing both, always, rather than only when they differ: the gap
+    // between "asked for" and "sent" is the shaping, and someone hunting a
+    // sluggish car needs to see it is zero as much as they need to see it
+    // is large.
+    intentSpeeds.textContent = `${cv.toFixed(2)} / want ${dv.toFixed(2)} m/s`;
+    const ds = (intent.desired_steering * 180 / Math.PI).toFixed(1);
+    const cs = (intent.commanded_steering * 180 / Math.PI).toFixed(1);
+    intentSteering.textContent = `${cs} / want ${ds} deg`;
+
+    intentFactors.innerHTML = '';
+    (intent.factors || []).forEach((f) => {
+      const row = document.createElement('div');
+      row.className = 'row intent-factor' + (f.binding ? ' intent-binding' : '');
+      const label = document.createElement('span');
+      label.className = 'row-label';
+      label.textContent = f.name;
+      const value = document.createElement('span');
+      value.className = 'row-value metric-value';
+      value.textContent = `${Number(f.value).toFixed(2)} ${f.unit || ''}`.trim();
+      row.appendChild(label);
+      row.appendChild(value);
+      intentFactors.appendChild(row);
+    });
+
+    intentLog.innerHTML = '';
+    state.intentLog.forEach((entry) => {
+      const line = document.createElement('div');
+      line.className = `intent-log-line intent-${entry.severity}`;
+      const held = entry.heldMs == null ? 'now' : `${(entry.heldMs / 1000).toFixed(1)}s`;
+      const at = new Date(entry.at);
+      const clock = `${String(at.getHours()).padStart(2, '0')}:` +
+        `${String(at.getMinutes()).padStart(2, '0')}:` +
+        `${String(at.getSeconds()).padStart(2, '0')}`;
+      line.textContent = `${clock}  ${entry.state.replace(/_/g, ' ')}  (${held})`;
+      intentLog.appendChild(line);
+    });
+
+    setDot(intentDot, { receivedAt: state.intentReceivedAt }, INTENT_STALE_MS);
+  }
+
   function drawCarMapRelative() {
     const [cx, cy] = worldToCanvas(state.pose.x, state.pose.y);
     // Canvas angle = -yaw: world yaw is measured counterclockwise, but
@@ -820,6 +1215,8 @@
       infoWifiText.textContent = '--';
       updateWifiBars(null);
     }
+
+    updateIntentPanel();
 
     setDot(dots.map, state.map);
     setDot(dots.scan, state.scan);

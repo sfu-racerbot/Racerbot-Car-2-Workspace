@@ -22,6 +22,27 @@ pure_pursuit_node:
     # path/LIDAR/opponent decision and final command. Set 0.0 for transitions only.
     decision_log_period_sec: 1.0
 
+    # --- Drive intent (docs/drive-intent.md) ---
+    # Publishes a JSON description of what this controller is trying to do
+    # -- the predicted path along the racing line, the speed ceilings that
+    # competed, and the reason for the current decision -- for the web
+    # dashboard's intent arrow and decision panel. Read-only diagnostics:
+    # it goes out only after the drive command for the tick has already
+    # been published, and disables itself rather than the node if it ever
+    # starts failing.
+    publish_intent: true
+    intent_topic: /drive_intent
+    intent_rate_hz: 20.0
+    # How far ahead the arrow predicts. The arrow's *length* is distance
+    # travelled over this horizon, so a stopped car draws a stub and a fast
+    # one draws a long arrow -- that is the intended reading. While the
+    # racing line is being followed the prediction re-runs the pure pursuit
+    # law at each sample, so the arrow bends through the corner ahead.
+    intent_horizon_sec: 1.5
+    intent_samples: 16
+    # Never draw an arrow longer than this, however fast the plan is.
+    intent_max_length: 8.0
+
     # --- Pure pursuit geometry ---
     # Validated headlessly on Spielberg, Silverstone, and Brands Hatch in
     # F1TENTH Gym; see docs/simulator.md for scenarios and limitations.

@@ -25,8 +25,9 @@ Run a package's standalone (non-ROS) unit tests directly, no sourcing/build requ
 ```bash
 python3 -m pytest src/pure_pursuit/test/ -v
 python3 -m pytest src/web_dashboard/test/ -v
+python3 -m pytest src/drive_intent/test/ -v
 ```
-These test framework-agnostic logic pulled out of the ROS nodes (`pure_pursuit/racing_math.py`, `web_dashboard/protocol.py`) — the pattern to follow for any new package with non-trivial math/parsing: keep it importable without `rclpy`.
+These test framework-agnostic logic pulled out of the ROS nodes (`pure_pursuit/racing_math.py`, `web_dashboard/protocol.py`, all of `drive_intent`) — the pattern to follow for any new package with non-trivial math/parsing: keep it importable without `rclpy`.
 
 Drive the car (manual):
 ```bash
@@ -53,6 +54,7 @@ Everything communicates over ROS2 topics only — no shared memory, no direct fu
 | `particle_filter` (+ `range_libc`) | git submodules (`humble-devel`) | Monte Carlo localization against a saved map |
 | `gap_follow` | local | reactive autonomy, follow-the-gap on `/scan` → `/drive`, no map — the reference template for new driving nodes |
 | `pure_pursuit` | local | map-based race controller: recorded+paced racing line, pure pursuit control, reactive safety net, opponent overtaking — see `docs/racing-autonomy.md` |
+| `drive_intent` | local | shared schema + trajectory prediction for `/drive_intent` (what a driving algorithm is trying to do, and why); pure Python, no `rclpy`, plus a single-header C++ port for `racerbot_a`/`racerbot_b` — see `docs/drive-intent.md` |
 | `web_dashboard` | local | read-only browser dashboard over WebSocket — subscribes only, never publishes, not subject to the safety policy below |
 | `race_diagnostics` | local | read-only run recorder + post-run analyzer (pipeline health, pose lag, watchdog stops, rosbag) — subscribes only; see `docs/run-diagnostics.md` |
 | `usb_cam_stream` | local | MJPEG webcam stream over plain HTTP |
@@ -65,6 +67,8 @@ Everything communicates over ROS2 topics only — no shared memory, no direct fu
 **Workspace policy, currently in force, do not relax unilaterally:** every node that can move the car requires the driver to be actively holding **LB** on the physical F710 controller (XInput mode), on top of `ackermann_mux` arbitration. This is enforced in code, independently, by every autonomy node — `gap_follow_node` and `pure_pursuit_node` each subscribe to `/joy` directly and refuse to publish non-zero drive commands without a live LB hold (`enable_deadman: true` default in both configs). **Never set `enable_deadman: false`** — that's a unilateral policy change, not a tuning knob. Full reasoning: `docs/architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car`.
 
 **Any new node that publishes to `/drive`, `/ackermann_cmd`, or `/commands/motor|servo/*` must implement the same LB deadman check** — copy-paste pattern from `gap_follow_node.py`'s `joy_callback`/`_deadman_engaged`, documented in full in `docs/writing-your-own-node.md`. Decide which category new code falls into (driving vs. support/tooling) using `docs/adding-your-own-code.md` — when in doubt, treat it as driving code.
+
+**Diagnostics published from a driving node** (currently only `/drive_intent`) must never be able to cost the car anything: publish strictly *after* the drive command for the tick, wrap the whole thing in one try/except that disables the diagnostic rather than the node, and read only what the control path already computed. Full contract and tests: `docs/drive-intent.md#safety-contract-for-publishers-read-this-first`.
 
 Test order for any new driving node, never skip ahead: static topic check (no driver stack running) → wheels off the ground (full stack + LB held) → floor, low speed, open space. See `docs/writing-your-own-node.md#testing-before-its-on-wheels`.
 

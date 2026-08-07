@@ -34,7 +34,7 @@ for the user-facing account and `enable_tuning: false` to remove it.
 
 ## Interface
 
-- **Subscribes:** map (`/map`), scan (`/scan`), pose (`/pf/viz/inferred_pose` *and* `/slam_pose`), selected command (`/ackermann_cmd`), measured odometry (`/odom`), and joystick state (`/joy`). Every subscription is display/timer input only.
+- **Subscribes:** map (`/map`), scan (`/scan`), pose (`/pf/viz/inferred_pose` *and* `/slam_pose`), selected command (`/ackermann_cmd`), measured odometry (`/odom`), joystick state (`/joy`), and drive intent (`/drive_intent`). Every subscription is display/timer input only.
 - Also samples CPU%/mem%/CPU temp/WiFi signal/uptime on a timer (`psutil` + `/sys/class/thermal` + `/proc/net/wireless`).
 - **Publishes:** nothing, to any topic. Browser input can enable/reset the dashboard-local stopwatch (which never leaves this process) and — once armed — change live-tunable parameters on the nodes in `tuning_nodes`.
 - **Calls (services):** `/<node>/get_parameters` and `/<node>/set_parameters` for each node in `tuning_nodes`, and nothing else.
@@ -98,6 +98,7 @@ payload), laid out to match a JavaScript `TypedArray` byte-for-byte:
 | `speed` | measured odometry `speed` | *(none)* |
 | `stopwatch` | `elapsed_s`, enabled/running flags, LB/freshness flags | *(none)* |
 | `stats` | `cpu_percent`, `mem_percent`, `cpu_temp_c` (nullable), `uptime_s`, `wifi_dbm` (nullable) | *(none)* |
+| `intent` | `intent`: one `/drive_intent` payload, forwarded unchanged after validation — see [docs/drive-intent.md](../../docs/drive-intent.md) | *(none)* |
 
 ```python
 def map_cells(msg) -> bytes:

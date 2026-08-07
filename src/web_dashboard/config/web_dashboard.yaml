@@ -13,6 +13,14 @@ web_dashboard_node:
     drive_topic: /ackermann_cmd  # selected command after ackermann_mux
     odom_topic: /odom            # measured longitudinal speed
     joy_topic: /joy              # read-only LB state for the stopwatch
+    # What the running driving node says it is *trying* to do -- the intent
+    # arrow and the decision panel. Still just another subscription; this
+    # dashboard publishes to no topic. See docs/drive-intent.md.
+    intent_topic: /drive_intent
+    # Malformed intent messages are reported at most this often. A publisher
+    # getting the schema wrong is usually getting it wrong at 20Hz, and the
+    # flood would bury the driving logs beside it.
+    intent_warn_period_sec: 5.0
     deadman_button: 4            # Logitech F710 LB in XInput mode
     joy_timeout_sec: 0.5         # same freshness limit as the driving nodes
     stopwatch_update_rate_hz: 10.0

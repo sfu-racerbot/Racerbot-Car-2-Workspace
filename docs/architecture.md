@@ -150,6 +150,7 @@ All topics as they actually appear on the bus with `bringup_launch.py` plus a co
 | `/odom` | `nav_msgs/Odometry` | `vesc_to_odom_node` | `gap_follow` (TTC speed), `pure_pursuit` (lookahead sizing only, never a stop watchdog), `particle_filter` (if running) |
 | `/scan` | `sensor_msgs/LaserScan` | `urg_node` | `gap_follow`, `slam_toolbox`, `particle_filter` (whichever is running) |
 | `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | `static_transform_publisher`, `vesc_to_odom_node` | RViz, `slam_toolbox`, `particle_filter` |
+| `/drive_intent` | `std_msgs/String` (JSON) | `gap_follow`, `pure_pursuit` (read-only diagnostics — never a control path) | `web_dashboard` — see [drive-intent.md](drive-intent.md) |
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | `urg_node`, `ackermann_mux` | RViz / `ros2 topic echo` for debugging |
 
 ## Package reference

@@ -19,6 +19,9 @@ comfortably in JSON):
   SCAN:  {"type": "scan", ...metadata...} -> binary: float32 ranges,
          little-endian, one 4-byte value per LaserScan.ranges entry.
   POSE/DRIVE/SPEED/STOPWATCH/STATS: compact JSON only (no binary payload).
+  INTENT: compact JSON only -- a driving node's own description of what it
+         is trying to do, forwarded almost unchanged from /drive_intent.
+         See drive_intent/schema.py and docs/drive-intent.md.
 
 Both binary payloads are laid out to match a JavaScript TypedArray
 byte-for-byte (Int8Array for the map, Float32Array for the scan), so the
@@ -130,6 +133,31 @@ def speed_message(speed: float) -> dict:
     return {
         'type': 'speed',
         'speed': float(speed),
+        'stamp': time.time(),
+    }
+
+
+def intent_message(payload: dict) -> dict:
+    """Wrap one validated /drive_intent payload for the browser.
+
+    Deliberately a pass-through rather than a re-encoding: the schema is
+    owned by drive_intent/schema.py, which the driving nodes publish and
+    the browser draws, and having this file paraphrase it would create a
+    third definition to keep in sync with the other two. The nesting under
+    'intent' keeps the dashboard's own envelope fields ('type', and the
+    server-side receive 'stamp') from colliding with schema fields.
+
+    The payload is validated by the caller *before* it gets here -- see
+    DashboardNode.intent_callback -- so anything reaching this function is
+    already known to be well-formed.
+    """
+    return {
+        'type': 'intent',
+        'intent': payload,
+        # The server's own receive time, kept separate from payload['stamp']
+        # (the car's). Two clocks, two fields: a browser on a laptop whose
+        # clock disagrees with the Jetson's can still tell "this arrow is
+        # stale" from the one it can trust.
         'stamp': time.time(),
     }
 

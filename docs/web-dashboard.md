@@ -84,6 +84,7 @@ flowchart LR
     S["/scan\n(sensor_msgs/LaserScan)"] --> N
     P["/pf/viz/inferred_pose\n(geometry_msgs/PoseStamped)"] --> N
     D["/ackermann_cmd\n(selected steering command)"] --> N
+    I["/drive_intent\n(what the algorithm is trying to do)"] --> N
     O["/odom\n(measured speed)"] --> N
     J["/joy\n(LB state)"] --> N
     T["CPU/mem/temp\n(psutil + /sys/class/thermal)"] --> N
@@ -139,6 +140,7 @@ manual parsing:
 | Speed | measured `{speed}` from odometry | *(none)* |
 | Stopwatch | elapsed/enabled/running plus LB/freshness flags | *(none)* |
 | Stats | `{cpu_percent, mem_percent, cpu_temp_c, uptime_s, wifi_dbm}` | *(none — `cpu_temp_c`/`wifi_dbm` are `null` if no readable thermal zone / wireless interface was found)* |
+| Intent | what the driving node is *trying* to do: predicted path, speeds, the constraint currently binding, and the reason — see [drive-intent.md](drive-intent.md) | *(none)* |
 | Tuning | the whole panel: per node, whether it's up, its advertised catalogue, and every current value | *(none)* |
 | Tuning result / saved / armed | outcome of one change, of a save, and this connection's arm state | *(none)* |
 
@@ -363,6 +365,45 @@ that has a browser make a *second* connection to a *different* port than
 the one you loaded the page from will hit the same issue under
 port-forwarding. The camera panel is just the one place in this workspace
 that currently does that.
+
+## Drive intent: the arrow and the decision panel
+
+Once a driving node is running, the dashboard draws a curved arrow ahead
+of the car showing where the algorithm **intends** to go, and a sidebar
+panel explaining **why** it is deciding what it is deciding. Full
+specification, safety contract, and the porting guide for teammates'
+codebases: [drive-intent.md](drive-intent.md).
+
+This is not measured speed or heading redrawn — those are already on
+screen under *vehicle*. It is the plan the controller is acting on, which
+is what lets you catch a wrong plan while it is still only a plan.
+
+Reading the arrow:
+
+| What you see | What it means |
+|---|---|
+| **Length** | Distance the plan covers over `intent_horizon_sec` (1.5s). A stopped car draws no arrow; a fast one draws a long one. |
+| **Width** | Planned speed, sampled along the arrow — so it tapers into a corner and flares coming out. |
+| **Curve** | `pure_pursuit` re-runs its steering law along the racing line, so the arrow bends through the corner ahead. `gap_follow` chooses a heading rather than a path, so its arrow is a single arc. |
+| **Colour** | Green = ordinary driving, amber = something unusual (corner fallback, overtake, reactive override), red = stopped. |
+| **Dashed line** | What the command actually on the wire will produce. The gap between it and the solid ribbon *is* the slew-rate/acceleration shaping. |
+| **Blue wedge** | The gap `gap_follow` selected out of the scan, drawn from the LIDAR's own origin. |
+| **Dot + label** | The point being steered at — `gap target` or `steering target`. |
+| **Dashed stub + ring** | A stop. The stub shows where the steering rack is being *held*, which `gap_follow` does deliberately rather than centring it. |
+
+The panel below it shows the current state, the reason sentence (the same
+text the terminal logs), every speed ceiling that competed with the
+binding one in bold, and a rolling log of the last 20 state transitions
+with how long each one held. The **binding** limit is the thing to look
+at first: it answers "what is actually holding the car back right now",
+which a single commanded-speed number cannot.
+
+Untick *arrow* in the panel header to hide the overlay without touching
+the car — useful while lining up a waypoint recording.
+
+If nothing is publishing, the panel says so and the map is unchanged;
+this is another purely additive subscription and the dashboard still
+publishes to no topic.
 
 ## Live parameter tuning
 

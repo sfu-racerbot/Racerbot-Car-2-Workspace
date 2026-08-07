@@ -11,6 +11,8 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>ackermann_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>drive_intent</depend>
   <depend>nav_msgs</depend>
   <depend>rcl_interfaces</depend>
   <depend>slam_toolbox</depend>

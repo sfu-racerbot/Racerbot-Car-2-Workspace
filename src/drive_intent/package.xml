@@ -1,18 +1,16 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>gap_follow</name>
+  <name>drive_intent</name>
   <version>0.1.0</version>
-  <description>Reactive follow-the-gap baseline autonomous driving algorithm for the race car</description>
+  <description>Shared schema and trajectory prediction for /drive_intent: what a driving algorithm is trying to do, and why</description>
   <maintainer email="bryanmaubc@gmail.com">racerbotcar-2</maintainer>
   <license>MIT</license>
 
-  <depend>rclpy</depend>
-  <depend>sensor_msgs</depend>
-  <depend>nav_msgs</depend>
-  <depend>ackermann_msgs</depend>
-  <depend>std_msgs</depend>
-  <depend>drive_intent</depend>
+  <!-- Deliberately no rclpy dependency. This package is pure data shaping
+       and geometry so it unit-tests without a robot and ports cleanly to
+       C++ for racerbot_a/racerbot_b (see include/drive_intent). The ROS
+       plumbing lives in the nodes that use it. -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

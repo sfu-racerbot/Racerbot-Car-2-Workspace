@@ -77,12 +77,14 @@ from rcl_interfaces.msg import Parameter as ParameterMsg
 from rcl_interfaces.msg import ParameterType, ParameterValue
 from rcl_interfaces.srv import GetParameters, SetParameters
 from sensor_msgs.msg import Joy, LaserScan
+from std_msgs.msg import String
 
 import tornado.ioloop
 import tornado.web
 import tornado.websocket
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 
+from drive_intent import schema as intent_schema
 from web_dashboard import protocol, tuning
 from web_dashboard.stopwatch import DeadmanStopwatch
 
@@ -342,6 +344,15 @@ class DashboardNode(Node):
         self.declare_parameter('stats_interval_sec', 1.0)
         self.declare_parameter('laser_offset_x', 0.33)
         self.declare_parameter('laser_offset_y', 0.0)
+        # --- Drive intent (docs/drive-intent.md) ---
+        # What the running driving node says it is *trying* to do. Purely
+        # another subscription: this dashboard still publishes to no topic.
+        self.declare_parameter('intent_topic', '/drive_intent')
+        # Malformed intent messages are logged at this interval rather than
+        # per message. A publisher that is getting the schema wrong is
+        # usually getting it wrong at 20Hz, and a flooded terminal would
+        # bury the far more important driving logs next to it.
+        self.declare_parameter('intent_warn_period_sec', 5.0)
 
         # --- Live parameter tuning (see the module docstring) ---
         self.declare_parameter('enable_tuning', True)
@@ -383,6 +394,9 @@ class DashboardNode(Node):
         self.port = int(self.get_parameter('port').value)
         self.scan_broadcast_rate_hz = float(self.get_parameter('scan_broadcast_rate_hz').value)
         self.stats_interval_sec = float(self.get_parameter('stats_interval_sec').value)
+        self.intent_topic = self.get_parameter('intent_topic').value
+        self.intent_warn_period_sec = max(
+            0.0, float(self.get_parameter('intent_warn_period_sec').value))
         self.laser_offset_x = float(self.get_parameter('laser_offset_x').value)
         self.laser_offset_y = float(self.get_parameter('laser_offset_y').value)
         self.enable_tuning = bool(self.get_parameter('enable_tuning').value)
@@ -406,6 +420,8 @@ class DashboardNode(Node):
         self._last_pose = None  # (x, y, yaw)
         self._last_pose_topic = None  # which pose_topics entry last delivered
         self._last_drive = None  # (speed, steering_angle)
+        self._last_intent = None  # last *valid* /drive_intent payload
+        self._last_intent_warn_time = 0.0
         self._last_speed = None
         self._last_stats = None  # (cpu_percent, mem_percent, cpu_temp_c, uptime_s)
         self._last_scan_broadcast_time = 0.0
@@ -444,6 +460,8 @@ class DashboardNode(Node):
         ]
         self.drive_sub = self.create_subscription(
             AckermannDriveStamped, self.drive_topic, self.drive_callback, 10)
+        self.intent_sub = self.create_subscription(
+            String, self.intent_topic, self.intent_callback, 10)
         self.odom_sub = self.create_subscription(
             Odometry, self.odom_topic, self.odom_callback, 10)
         self.joy_sub = self.create_subscription(
@@ -506,6 +524,34 @@ class DashboardNode(Node):
     def drive_callback(self, msg: AckermannDriveStamped):
         self._last_drive = (msg.drive.speed, msg.drive.steering_angle)
         self._broadcast(protocol.drive_message(*self._last_drive))
+
+    def intent_callback(self, msg: String):
+        """Forward one driving node's intent to every browser tab.
+
+        Everything arriving here is treated as untrusted input, even
+        though it comes off this car's own bus: the publisher may be a
+        teammate's node from racerbot_a/racerbot_b, or a version of the
+        schema this dashboard predates. A malformed message costs a
+        throttled warning and is dropped -- it must never raise inside a
+        subscription callback, and it must never reach the browser, where
+        a half-valid payload would draw a half-valid arrow.
+        """
+        try:
+            payload = intent_schema.decode(msg.data)
+            problem = intent_schema.validate(payload)
+        except ValueError as exc:
+            problem = str(exc)
+            payload = None
+        if problem is not None:
+            now = time.monotonic()
+            if now - self._last_intent_warn_time >= self.intent_warn_period_sec:
+                self._last_intent_warn_time = now
+                self.get_logger().warn(
+                    f"ignoring malformed message on '{self.intent_topic}': "
+                    f'{problem}')
+            return
+        self._last_intent = payload
+        self._broadcast(protocol.intent_message(payload))
 
     def odom_callback(self, msg: Odometry):
         self._last_speed = msg.twist.twist.linear.x
@@ -954,6 +1000,8 @@ class DashboardNode(Node):
             client.write_message(json.dumps(protocol.drive_message(*self._last_drive)))
         if self._last_speed is not None:
             client.write_message(json.dumps(protocol.speed_message(self._last_speed)))
+        if self._last_intent is not None:
+            client.write_message(json.dumps(protocol.intent_message(self._last_intent)))
         if self._last_stats is not None:
             client.write_message(json.dumps(protocol.stats_message(*self._last_stats)))
         client.write_message(json.dumps(self._stopwatch_message()))
