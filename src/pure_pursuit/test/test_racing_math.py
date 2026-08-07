@@ -403,6 +403,55 @@ def test_track_progress_gap_wraps_around_finish_line():
     assert gap == pytest.approx(10.0)
 
 
+def test_track_lead_distance_is_negative_while_the_opponent_leads():
+    lead = racing_math.track_lead_distance(
+        ego_arc_length=10.0, other_arc_length=13.0, total_length=100.0)
+    assert lead == pytest.approx(-3.0)
+
+
+def test_track_lead_distance_is_positive_once_the_ego_is_past():
+    lead = racing_math.track_lead_distance(
+        ego_arc_length=13.0, other_arc_length=10.0, total_length=100.0)
+    assert lead == pytest.approx(3.0)
+
+
+def test_track_lead_distance_wraps_around_the_finish_line():
+    # Ego just past the line, opponent just short of it: the ego leads by
+    # 4 m, not by 96 m the long way round.
+    lead = racing_math.track_lead_distance(
+        ego_arc_length=2.0, other_arc_length=98.0, total_length=100.0)
+    assert lead == pytest.approx(4.0)
+
+
+def test_overtake_is_not_complete_while_the_cars_are_still_alongside():
+    """The bug this function exists to prevent.
+
+    With a 0.535 m car and a 1.0 m clear margin, an ego 0.2 m past the
+    opponent is still overlapping it. The wrapped gap reads 99.8 -- which
+    satisfies the natural-looking `gap > total - clear_margin` test and
+    ended the pass early, cutting the car back into the opponent.
+    """
+    clear_margin, total = 1.0, 100.0
+    ego, opponent = 50.2, 50.0
+
+    misleading_gap = racing_math.track_progress_gap(ego, opponent, total)
+    assert misleading_gap > total - clear_margin  # the old, wrong predicate
+
+    lead = racing_math.track_lead_distance(ego, opponent, total)
+    assert lead == pytest.approx(0.2)
+    assert lead < clear_margin  # still alongside: stay on the passing line
+
+    # A metre further on the pass really is finished.
+    assert racing_math.track_lead_distance(51.0, opponent, total) >= clear_margin
+
+
+def test_approaching_an_opponent_never_reads_as_a_finished_pass():
+    # Guards the naive fix: flipping the comparison would make every
+    # approach look complete, because the opponent 3 m ahead wraps to 97.
+    total, clear_margin = 100.0, 1.0
+    assert racing_math.track_lead_distance(10.0, 13.0, total) < clear_margin
+
+
 def test_lateral_offset_point_moves_left_on_a_straight_segment():
     xy = np.array([[0.0, 0.0], [1.0, 0.0]])  # heading due +X
     x, y = racing_math.lateral_offset_point(xy, index=0, next_index=1, offset=0.5)

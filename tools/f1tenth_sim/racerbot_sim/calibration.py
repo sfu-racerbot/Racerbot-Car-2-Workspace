@@ -160,10 +160,13 @@ class CarCalibration:
     def friction_accel_limit(self) -> float:
         """Largest acceleration of any direction the floor can support.
 
-        The friction circle's radius. With all four wheels driven and braked
-        through the drivetrain, the longitudinal extreme is mu*g just as the
-        lateral one is, so a single number bounds acceleration, braking and
-        cornering alike.
+        The friction circle's radius. This chassis is four-wheel drive
+        (confirmed 2026-08-05), so the motor drives and brakes all four
+        wheels through the transmission and the longitudinal extreme is mu*g
+        just as the lateral one is -- a single number bounds acceleration,
+        braking and cornering alike. On a rear-drive car it would not: rear
+        axle load would cap braking near mu*g*lf/(L + mu*h), well under half
+        this figure.
         """
         return self.surface_friction * G
 

@@ -852,14 +852,37 @@ at speed, and the same scenario completes a clean lap with the pass done.
 Because of that coupling, the node **refuses to start** if
 `overtake_lookahead_distance` is less than `max_lookahead`.
 
-**Ending the overtake** happens once the ego car's own arc length is
+**Ending the overtake** happens once the ego car's own arc length is at least
 `overtake_clear_margin` meters past the opponent's *last known* position
+(`racing_math.track_lead_distance` -- a signed lead that takes the shorter way
+round the loop; see the warning below about using the wrapped gap here)
 -- deliberately not re-checked against a fresh detection every tick, since
 alongside or just past an opponent it commonly falls completely out of
 the forward LIDAR cone, and that must not look like "lost it, panic"
 rather than "passed it, done." If the tracked opponent goes stale
 (`opponent_lost_timeout_sec`, default 1s, with no update at all) with no
 overtake in progress, tracking is simply cleared -- nothing to react to.
+
+> **Two known defects in this logic, found in simulation on 2026-08-05.**
+>
+> The completion test used to compare `track_progress_gap` against
+> `total_length - overtake_clear_margin`. Because that gap wraps into
+> `[0, total_length)`, the comparison means "*at most* clear_margin past",
+> not "at least" -- it went true the instant the ego's nose edged in front,
+> with the two 0.535 m cars still fully overlapped, and the car cut back onto
+> the racing line and sideswiped the opponent 0.45 s later. Fixed by comparing
+> `racing_math.track_lead_distance(...) >= overtake_clear_margin`. Do not
+> reintroduce the wrapped gap here.
+>
+> **Still open:** nothing checks the passing line has room. `pick_pass_side`
+> returns whichever side is *more* open but never asks whether that side has
+> *enough* room for the 0.35 m offset plus half a car, and a committed pass
+> disables the avoidance tier (`allow_avoidance=not self.overtake_active`).
+> The car will therefore commit, steer 0.35 m into a wall, and only react at
+> the 0.4 m emergency stop -- measured forward clearance 0.19-0.34 m at
+> contact. A commit-time room check is the conservative fix, since its worst
+> case is following the opponent instead of passing. Floor-test the overtake
+> before relying on it.
 
 **This always sits underneath the existing reactive safety net, never
 instead of it.** If an overtake maneuver (or anything else) brings the

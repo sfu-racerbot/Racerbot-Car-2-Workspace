@@ -139,9 +139,10 @@ checked. It is now `μ·g`, so the same coefficient bounds acceleration, braking
 and cornering, exactly as a friction circle says it should. At μ = 0.70 that is
 6.87 m/s², and stopping from 4 m/s takes 1.16 m rather than 0.84 m.
 
-This assumes the drivetrain brakes all four wheels through the transmission. If
-this chassis is rear-drive only, braking is limited by rear axle load and the
-real figure is closer to 2.9 m/s² — a *much* bigger correction. Worth confirming.
+This chassis is four-wheel drive (confirmed 2026-08-05), so the motor brakes
+all four wheels through the transmission and `μg` is the right bound in both
+directions. On a rear-drive car it would not be: rear axle load under forward
+weight transfer would cap braking near 2.9 m/s², less than half this.
 
 ### 8. Sensor error (`sensing.py`)
 
@@ -171,9 +172,13 @@ because the harness re-implements the controller and so does not contain the
 | `plant` | vehicle fixes, perfect sensing — isolates physics from sensing |
 | `car` | everything (default) |
 
-`legacy` is verified to reproduce `docs/f1tenth-sim-results.json` exactly —
-same step counts, cross-track and sim times — so the old numbers stay
-meaningful and any future change can be bisected against it.
+`legacy` reproduces `docs/f1tenth-sim-results.json` exactly for `gap_solo` and
+`pure_solo` — same step counts, cross-track and sim times — so the old numbers
+stay meaningful and a fidelity change can be bisected against them.
+
+`pure_traffic` no longer matches, and should not: a genuine controller bug in
+the overtake logic was fixed (below), so the trajectory legitimately changed.
+`legacy` pins the *simulator*, not the controller.
 
 ## Results
 
@@ -183,7 +188,7 @@ Spielberg, seed 12345:
 |---|---|---|---|
 | `gap_solo` | pass | pass | pass |
 | `pure_solo` | pass | pass | pass |
-| `pure_traffic` | pass | **fail** | **fail** |
+| `pure_traffic` | **fail** | **fail** | **fail** |
 
 `pure_traffic` fails because of a real contact, and separately is not a
 trustworthy test in the first place:
@@ -202,6 +207,76 @@ trustworthy test in the first place:
 Treat `gap_solo` and `pure_solo` as the regression suite. Treat `pure_traffic`
 as an open bug in the overtaking logic, not something to tune the simulator
 around.
+
+## What the overtake investigation found
+
+Two defects, both in `pure_pursuit_node.py` itself rather than in the harness's
+copy of it.
+
+### Fixed: the pass was declared complete while the cars were still alongside
+
+`track_progress_gap` wraps everything into `[0, total_length)`, so it cannot
+tell "3 m behind" from "all but 3 m ahead". The completion test read:
+
+```python
+if gap_ahead > self.total_track_length - self.overtake_clear_margin:
+```
+
+which *looks* like "at least `clear_margin` past the opponent" and in fact
+means **"at most `clear_margin` past"** — satisfied the instant the ego's nose
+edges in front. `pure_pursuit.yaml` and `docs/racing-autonomy.md` both document
+the intent as *at least*.
+
+Traced on Spielberg: the pass was declared complete with the ego just 0.20 m
+ahead — the cars are 0.535 m long, so still fully overlapped. Steering swung
+from +0.028 to +0.219 rad hauling the car back onto the racing line, and it
+sideswiped the opponent 0.45 s later.
+
+Fixed with `racing_math.track_lead_distance`, a signed lead that picks the
+shorter way round the loop, plus unit tests that pin both the correct behaviour
+and the naive-flip trap (comparing the other way makes every *approach* look
+like a finished pass). After the fix the same seed completes the pass cleanly
+and rejoins the line with the opponent 5.2 m behind.
+
+### Open: nothing checks the passing line has room
+
+This is now the dominant failure, and fixing the above exposes more of it,
+because the car correctly holds the offset line for longer.
+
+`pick_pass_side` compares the average scan range just outside the cluster on
+each side and returns whichever is larger — but it **always returns a side**.
+It never asks whether the better side has enough room for a 0.35 m lateral
+offset plus half a car. Meanwhile a committed pass sets
+`allow_avoidance=not self.overtake_active`, disabling the 1.5 m avoidance tier
+for the duration.
+
+So the car commits to a pass, steers 0.35 m toward a wall, has no avoidance
+tier left, and only reacts at the 0.4 m emergency stop — then stands still.
+Measured at contact across five seeds: forward clearance 0.19–0.34 m, safety
+tier `stop`, and the opponent **behind** the ego by 0.5–1.5 m. The scripted
+opponent is a constant-2 m/s path follower with no braking and no avoidance
+whatsoever, so it simply drives into the stopped ego.
+
+Two consequences worth separating:
+
+- **The ego stopping dead against a wall mid-pass is a real bug.** It is also
+  what the "stuck" outcomes are: ~9,190 of 9,600 ticks pinned in the emergency
+  tier.
+- **`opponent_collision` is partly an artifact of the test opponent.** Any time
+  the ego legitimately stops, a brainless opponent rear-ends it. That criterion
+  says as much about the scripted car as about the controller.
+
+The obvious fix is a commit-time room check — refuse to start a pass unless the
+chosen side genuinely has room — which is strictly conservative, since the
+worst case is following the opponent instead of passing it. It was deliberately
+*not* implemented here: it changes when the car commits to a maneuver, it needs
+floor validation, and `pure_traffic` is too chaotic to validate it in
+simulation (changing only the LiDAR beam count flips its outcome).
+
+**Neither change should go on the car until the overtake is floor-tested.**
+Fixing the completion test alone makes the car hold the offset line *longer*
+near walls, which is not obviously an improvement on real ground until the room
+check exists too.
 
 ## Compute
 

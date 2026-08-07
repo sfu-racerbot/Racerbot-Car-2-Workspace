@@ -760,6 +760,30 @@ def track_progress_gap(ego_arc_length: float, other_arc_length: float, total_len
     return float((other_arc_length - ego_arc_length) % total_length)
 
 
+def track_lead_distance(ego_arc_length: float, other_arc_length: float,
+                        total_length: float) -> float:
+    """How far the ego car is *past* another point, as a signed distance.
+
+    Positive means the ego is ahead by that many meters; negative means the
+    other point is still ahead of the ego. Unlike track_progress_gap, which
+    wraps everything into [0, total_length) and so cannot tell "3 m behind"
+    from "all but 3 m ahead", this picks the shorter way round -- which is
+    the only sensible reading for two cars racing near each other.
+
+    This distinction caused a real collision. Asking track_progress_gap
+    whether a pass is finished invites `gap > total_length - clear_margin`,
+    which looks like "at least clear_margin past" and in fact means "at
+    most clear_margin past" -- true the instant the ego's nose edges in
+    front, while the two cars are still side by side. Compare against this
+    function instead: `track_lead_distance(...) >= clear_margin`.
+    """
+    if total_length <= 0.0:
+        return 0.0
+    half = total_length / 2.0
+    behind = (other_arc_length - ego_arc_length + half) % total_length - half
+    return float(-behind)
+
+
 def lateral_offset_point(xy: np.ndarray, index: int, next_index: int, offset: float):
     """A point `offset` meters to the *left* of waypoint `index` (negative
     offset = right), measured perpendicular to the track's local

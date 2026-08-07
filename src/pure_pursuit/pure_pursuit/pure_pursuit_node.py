@@ -1374,19 +1374,27 @@ class PurePursuitNode(Node):
                     f"> {self.overtake_max_blind_sec:.2f}s limit")
                 return None
             predicted_arc = self.opponent.predicted_arc_length(now_sec, self.total_track_length)
-            gap_ahead = racing_math.track_progress_gap(
+            # Signed lead, not the wrapped gap. track_progress_gap can only
+            # say "somewhere ahead within one lap", so the natural-looking
+            # test `gap > total - clear_margin` actually means "at most
+            # clear_margin past" -- satisfied the moment the ego's nose edges
+            # in front, with the cars still overlapping side by side. The car
+            # then cut straight back onto the racing line and sideswiped the
+            # opponent (reproduced in simulation, contact 0.45 s after the
+            # pass was declared complete). See racing_math.track_lead_distance.
+            lead = racing_math.track_lead_distance(
                 ego_arc_length, predicted_arc, self.total_track_length)
-            if gap_ahead > self.total_track_length - self.overtake_clear_margin:
+            if lead >= self.overtake_clear_margin:
                 self.get_logger().info("overtake: clear of the opponent -- back to the racing line.",
                                        throttle_duration_sec=1.0)
                 self.overtake_active = False
                 self.last_opponent_status = (
-                    f"overtake complete: ego is at least "
-                    f"{self.overtake_clear_margin:.2f}m past the predicted opponent position")
+                    f"overtake complete: ego is {lead:.2f}m past the predicted "
+                    f"opponent position (>= {self.overtake_clear_margin:.2f}m)")
                 return None
             self.last_opponent_status = (
                 f"overtake active: passing {'left' if self.overtake_side > 0 else 'right'}, "
-                f"opponent unseen for {blind_sec:.2f}s, wrapped track gap={gap_ahead:.2f}m")
+                f"opponent unseen for {blind_sec:.2f}s, ego lead={lead:.2f}m")
 
         # Deliberately *not* the normal steering target: offsetting a target
         # only max_lookahead away demands a sharp turn to reach the passing

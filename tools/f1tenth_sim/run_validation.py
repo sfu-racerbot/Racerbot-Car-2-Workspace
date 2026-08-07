@@ -78,6 +78,10 @@ PURE_MAX_BRAKING_DECEL = 8.0
 # max_lookahead (1.5) make the passing line a sharp turn that the curvature
 # speed cap brakes for, and the ego then stalls behind the opponent.
 OVERTAKE_LOOKAHEAD = 4.0
+# Mirrors pure_pursuit.yaml's overtake_clear_margin. Must exceed the car's
+# 0.535 m length or the ego resumes the racing line while its tail is still
+# beside the opponent.
+OVERTAKE_CLEAR_MARGIN = 1.0
 
 # Which fidelity fixes are in force. Set from --fidelity in main(); the
 # module-level default keeps probe scripts that import this file honest.
@@ -819,6 +823,7 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
 
     overtake_active = False
     overtake_side = 1
+    contact: dict = {}
     overtake_starts = 0
     completed_passes = 0
     detection_steps = 0
@@ -937,12 +942,16 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
                     overtake_active = False
                 else:
                     predicted = tracker.predicted_arc_length(now, total_length)
-                    gap_ahead = racing_math.track_progress_gap(
+                    # Mirrors the node: a pass is finished only once the ego
+                    # is genuinely clear_margin past the opponent. Using the
+                    # wrapped gap here ended the pass the moment the ego's
+                    # nose edged ahead, while the cars were still alongside.
+                    lead = racing_math.track_lead_distance(
                         float(cumulative[nearest]),
                         float(predicted),
                         total_length,
                     )
-                    if gap_ahead > total_length - 1.0:
+                    if lead >= OVERTAKE_CLEAR_MARGIN:
                         overtake_active = False
                         completed_passes += 1
 
@@ -999,6 +1008,30 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
                 or obs["agent_0"]["collision"]
                 or obs["agent_1"]["collision"]
             ):
+                # Capture how the cars were arranged when they touched.
+                # Whether the pass was still committed, and whether contact
+                # was nose-to-tail or side-by-side, is the whole difference
+                # between "closed too fast" and "cut back too early".
+                ego_truth = plant.truth(0)
+                opp_truth = plant.truth(1)
+                dx = float(opp_truth[0] - ego_truth[0])
+                dy = float(opp_truth[1] - ego_truth[1])
+                yaw = float(ego_truth[4])
+                contact = {
+                    "contact_at_s": round(now, 3),
+                    "contact_longitudinal_m": round(
+                        dx * math.cos(yaw) + dy * math.sin(yaw), 3),
+                    "contact_lateral_m": round(
+                        -dx * math.sin(yaw) + dy * math.cos(yaw), 3),
+                    "contact_speed_mps": round(float(ego_truth[3]), 3),
+                    "contact_during_overtake": bool(overtake_active),
+                    "contact_safety_tier": safety,
+                    # What the ego could see ahead. The emergency tier fires
+                    # below 0.4 m, so this says whether it stopped for the
+                    # opponent or for a wall it had steered towards.
+                    "contact_forward_scan_m": round(
+                        closest_valid(scan, math.radians(30.0)), 3),
+                }
                 break
         else:
             step = max_steps - 1
@@ -1009,6 +1042,7 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
         "pure_traffic", track, obs, info, step + 1, time.monotonic() - started
     )
     result.update(plant.report())
+    result.update(contact)
     result.update(
         {
             "opponent_collision": bool(obs["agent_1"]["collision"]),
