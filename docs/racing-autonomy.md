@@ -874,15 +874,18 @@ overtake in progress, tracking is simply cleared -- nothing to react to.
 > `racing_math.track_lead_distance(...) >= overtake_clear_margin`. Do not
 > reintroduce the wrapped gap here.
 >
-> **Still open:** nothing checks the passing line has room. `pick_pass_side`
-> returns whichever side is *more* open but never asks whether that side has
-> *enough* room for the 0.35 m offset plus half a car, and a committed pass
-> disables the avoidance tier (`allow_avoidance=not self.overtake_active`).
-> The car will therefore commit, steer 0.35 m into a wall, and only react at
-> the 0.4 m emergency stop -- measured forward clearance 0.19-0.34 m at
-> contact. A commit-time room check is the conservative fix, since its worst
-> case is following the opponent instead of passing. Floor-test the overtake
-> before relying on it.
+> The second defect: `pick_pass_side` returns whichever side is *more* open but
+> never asked whether that side had *enough* room, and a committed pass
+> disables the avoidance tier (`allow_avoidance=not self.overtake_active`). The
+> car would commit, steer 0.35 m into a wall, and only react at the 0.4 m
+> emergency stop -- measured forward clearance 0.19-0.34 m at contact. Now
+> guarded by `overtake_min_side_clearance` at commit time, plus a speed cap
+> during the pass computed from the *mapped* track edge
+> (`_static_closest_in_cone`). Do not compute that cap from the raw scan: the
+> nearest thing ahead during a pass is the car being passed, so the ego
+> throttles below the opponent and the pass becomes impossible.
+>
+> Floor-test the overtake before relying on it.
 
 **This always sits underneath the existing reactive safety net, never
 instead of it.** If an overtake maneuver (or anything else) brings the
@@ -1000,6 +1003,7 @@ file for inline comments too):
 | `overtake_trigger_gap` | `3.0` | Meters of *track distance*; start considering a pass this close |
 | `overtake_closing_margin` | `0.3` | m/s; must be closing at least this fast to attempt a pass |
 | `overtake_clear_margin` | `1.0` | Meters of track distance past the opponent before resuming the racing line |
+| `overtake_min_side_clearance` | `0.70` | Meters of room the passing side must have before the car will commit to a pass. `overtake_lateral_offset` + half the car width + margin |
 | `overtake_lateral_offset` | `0.35` | Meters; sideways nudge to the steering target while passing |
 | `overtake_lookahead_distance` | `4.0` | Meters of arc ahead the offset above is applied to, instead of the normal target. Must be >= `max_lookahead` — the node refuses to start otherwise |
 | `opponent_detection_mode` | `map` | Map subtraction by default; `heuristic` is the no-map fallback |

@@ -136,6 +136,15 @@ pure_pursuit_node:
     overtake_closing_margin: 0.3      # m/s -- must be closing at least this fast to bother attempting a pass
     overtake_clear_margin: 1.0        # meters of track distance past the opponent before resuming the racing line
     overtake_lateral_offset: 0.35      # meters, sideways nudge to the steering target while passing
+    # meters. Room the passing side must actually have before the car will
+    # commit. pick_pass_side only reports which side is *more* open and always
+    # names one; without this floor the car commits, steers
+    # overtake_lateral_offset toward a wall with generic avoidance suppressed
+    # for the whole pass, and only reacts at emergency_stop_distance -- ending
+    # up parked against the barrier. 0.70 = the 0.35 offset + half a 0.31m car
+    # + 0.15 margin. Raise it to make the car choosier about passing places;
+    # declining a pass is always safe.
+    overtake_min_side_clearance: 0.70
     # meters. While passing, the offset above is applied to a waypoint this
     # far ahead instead of the normal max_lookahead target, so reaching the
     # passing line is a gentle arc rather than a sharp turn the online

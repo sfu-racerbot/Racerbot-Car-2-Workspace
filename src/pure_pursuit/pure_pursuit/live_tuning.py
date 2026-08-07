@@ -336,6 +336,10 @@ PURE_PURSUIT_TUNABLES = (
     Tunable('overtake_clear_margin', 'Overtaking', 0.0, 5.0, unit='m', step=0.1,
             description='Track distance to get past the opponent before '
                         'rejoining the racing line.'),
+    Tunable('overtake_min_side_clearance', 'Overtaking', 0.0, 2.0, unit='m',
+            step=0.05,
+            description='Room the passing side must have before the car will '
+                        'commit. Higher = choosier about passing places.'),
 
     # --- Safety margins. Real knobs, marked so nobody drags one thinking
     # it is a lap-time setting. The reactive net itself cannot be switched

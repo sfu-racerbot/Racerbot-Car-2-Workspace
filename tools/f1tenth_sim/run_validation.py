@@ -82,6 +82,11 @@ OVERTAKE_LOOKAHEAD = 4.0
 # 0.535 m length or the ego resumes the racing line while its tail is still
 # beside the opponent.
 OVERTAKE_CLEAR_MARGIN = 1.0
+# Mirrors pure_pursuit.yaml's overtake_min_side_clearance. Room needed on the
+# passing side before committing: the 0.35 m offset, half a car, and margin.
+OVERTAKE_MIN_SIDE_CLEARANCE = 0.70
+# Stand-off the scripted opponent keeps from whatever is in front of it.
+OPPONENT_RESERVE_DISTANCE = 0.5
 
 # Which fidelity fixes are in force. Set from --fidelity in main(); the
 # module-level default keeps probe scripts that import this file honest.
@@ -671,6 +676,7 @@ def apply_fallback_safety(
     dynamic_ranges: Optional[np.ndarray] = None,
     dynamic_angles: Optional[np.ndarray] = None,
     overtake_active: bool = False,
+    expected_scan: Optional[np.ndarray] = None,
 ) -> tuple[float, float, str]:
     # The emergency tier is unconditional, including during an overtake.
     if closest_valid(scan, math.radians(30.0)) < 0.4:
@@ -679,9 +685,21 @@ def apply_fallback_safety(
     # A committed pass has already selected a route around the tracked car.
     # Replacing it with the generic 1 m/s avoidance command makes passing a
     # 2 m/s opponent impossible. Other close hazards still hit the raw-scan
-    # emergency tier above.
+    # emergency tier above. Steering therefore stays with the pass -- but the
+    # speed does not get a free ride: cap it at what still allows stopping
+    # short, or the car runs the racing-line speed straight into a wall and
+    # only reacts at 0.4 m. Mirrors the node's _reactive_override.
     if overtake_active:
-        return steering, speed, "none"
+        if expected_scan is None:
+            # No map prediction: walls and traffic are indistinguishable, so
+            # capping would throttle the ego below the car it is passing.
+            return steering, speed, "none"
+        # The mapped track edge only -- never the opponent, which is by
+        # definition the nearest thing ahead during a pass.
+        pass_clearance = closest_valid(expected_scan, math.radians(30.0))
+        pass_speed = racing_math.braking_speed_limit(
+            pass_clearance, 0.4, PURE_MAX_BRAKING_DECEL, 4.0)
+        return steering, min(speed, pass_speed), "none"
 
     if dynamic_ranges is None or dynamic_angles is None:
         trigger_distance = closest_valid(scan, math.radians(30.0))
@@ -825,6 +843,7 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
     overtake_side = 1
     contact: dict = {}
     overtake_starts = 0
+    declined_overtakes = 0
     completed_passes = 0
     detection_steps = 0
     avoid_steps = 0
@@ -872,6 +891,18 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
             opponent_steering, _opp_speed, _oni, _oti, _oe = (
                 opponent_follower.command(opponent["std_state"], speed=2.0)
             )
+            # Give the scripted opponent brakes. Without them it is a blind
+            # constant-speed car that drives into anything in front of it,
+            # including an ego that has legitimately stopped -- which made
+            # opponent_collision a statement about the test fixture rather
+            # than about the controller under test. It still does not steer
+            # or race; it only declines to rear-end a stationary object.
+            opponent_speed = min(2.0, gap_logic.braking_speed_limit(
+                closest_valid(opponent["scan"], math.radians(30.0)),
+                OPPONENT_RESERVE_DISTANCE,
+                GAP_MAX_BRAKING_DECEL,
+                2.0,
+            ))
 
             scan = np.asarray(ego["scan"], dtype=float)
             expected = plant.expected_scan(0)
@@ -932,11 +963,21 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
                     gap_ahead <= 3.0
                     and speed - tracker.progress_rate > 0.3
                 ):
-                    overtake_active = True
-                    overtake_side = racing_math.pick_pass_side(
+                    side = racing_math.pick_pass_side(
                         scan, full_detection[0], full_detection[1]
                     )
-                    overtake_starts += 1
+                    # pick_pass_side names the more open side but never asks
+                    # whether it is open enough. Mirrors the node.
+                    if racing_math.overtake_side_has_room(
+                            scan, LIDAR.angle_min, LIDAR.angle_increment,
+                            side, OVERTAKE_MIN_SIDE_CLEARANCE,
+                            math.radians(30.0), LIDAR.range_min,
+                            LIDAR.range_max):
+                        overtake_active = True
+                        overtake_side = side
+                        overtake_starts += 1
+                    else:
+                        declined_overtakes += 1
             elif overtake_active:
                 if tracker.seconds_since_seen(now) > 3.0:
                     overtake_active = False
@@ -985,6 +1026,7 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
                 dynamic_ranges=dynamic_ranges,
                 dynamic_angles=dynamic_angles,
                 overtake_active=overtake_active,
+                expected_scan=expected,
             )
             avoid_steps += int(safety == "avoid")
             stop_steps += int(safety == "stop")
@@ -996,7 +1038,7 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
             max_commanded_speed = max(max_commanded_speed, float(speed))
 
             obs, _reward, done, _truncated, info = plant.step(
-                [(steering, speed), (opponent_steering, 2.0)]
+                [(steering, speed), (opponent_steering, opponent_speed)]
             )
             # The pinned Gym branch does not advance lap_counts reliably in
             # multi-agent mode. Wrapped nearest-raceline progress remains
@@ -1050,6 +1092,7 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
             "max_cross_track_m": round(max_cross_track, 4),
             "detection_steps": detection_steps,
             "overtake_starts": overtake_starts,
+            "declined_overtakes": declined_overtakes,
             "completed_passes": completed_passes,
             "overtake_active_at_end": overtake_active,
             "last_pass_side": "left" if overtake_side > 0 else "right",

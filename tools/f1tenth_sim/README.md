@@ -188,25 +188,31 @@ Spielberg, seed 12345:
 |---|---|---|---|
 | `gap_solo` | pass | pass | pass |
 | `pure_solo` | pass | pass | pass |
-| `pure_traffic` | **fail** | **fail** | **fail** |
+| `pure_traffic` | pass | pass | **fail** |
 
-`pure_traffic` fails because of a real contact, and separately is not a
-trustworthy test in the first place:
+Across eight seeds, `pure_traffic` is 8/8 on `legacy`, 6/8 on `plant` with
+**zero collisions of any kind**, and 0/8 on `car`.
 
-- **It rear-ends the opponent.** At t = 3.55 s the opponent is 0.491 m dead
-  ahead (bearing −1.7°) and the two 0.535 m chassis overlap by 44 mm. Upstream
-  never flagged it, so the checked-in "pass" includes a car-to-car collision.
-- **It is a coin flip.** With completely stock parameters it fails on 2 of 8
-  seeds (12346 and 12352) by deadlocking nose-to-wall behind the opponent,
-  ~95% of ticks in the emergency-stop tier. Use `--repeat-seeds` — a single run
-  of this scenario is weak evidence in either direction.
-- **It has no margin for sensor error.** Pose lag, pose noise, scan dropout and
-  odometry noise each independently break it. `pure_solo` shrugs all of them
-  off (cross-track actually improved, 0.1459 → 0.1378).
+The rear-end this scenario used to hide is gone: `contact_steps` is now 0 for
+`plant`, where before the ego drove into the back of the opponent at t = 3.55 s
+with the two 0.535 m chassis overlapping by 44 mm and nothing noticing.
 
-Treat `gap_solo` and `pure_solo` as the regression suite. Treat `pure_traffic`
-as an open bug in the overtaking logic, not something to tune the simulator
-around.
+What remains is a **sensing-robustness gap, not a safety one**. Under the `car`
+profile the ego does not crash into the opponent — it fails to finish, sitting
+in the emergency-stop tier or eventually clipping a wall while running on a
+pose that lags 50 ms and jitters 2 cm. `pure_solo` shrugs the same sensor error
+off entirely (cross-track actually *improved*, 0.1459 → 0.1378), so this is
+specific to racing in traffic, where the margins are already thin.
+
+Two cautions about reading this scenario at all:
+
+- **It is chaotic.** Changing only the LiDAR beam count — pure angular
+  sampling, no physics — flips individual outcomes. Use `--repeat-seeds`; a
+  single run is weak evidence either way, and none of the fixes below were
+  justified on its pass rate.
+- **The opponent is a fixture, not a driver.** It follows the racing line at
+  2 m/s and now brakes for what is in front of it, but it does not steer,
+  race, or defend.
 
 ## What the overtake investigation found
 
@@ -238,7 +244,7 @@ and the naive-flip trap (comparing the other way makes every *approach* look
 like a finished pass). After the fix the same seed completes the pass cleanly
 and rejoins the line with the opponent 5.2 m behind.
 
-### Open: nothing checks the passing line has room
+### Fixed: nothing checked the passing line had room
 
 This is now the dominant failure, and fixing the above exposes more of it,
 because the car correctly holds the offset line for longer.
@@ -266,17 +272,36 @@ Two consequences worth separating:
   the ego legitimately stops, a brainless opponent rear-ends it. That criterion
   says as much about the scripted car as about the controller.
 
-The obvious fix is a commit-time room check — refuse to start a pass unless the
-chosen side genuinely has room — which is strictly conservative, since the
-worst case is following the opponent instead of passing it. It was deliberately
-*not* implemented here: it changes when the car commits to a maneuver, it needs
-floor validation, and `pure_traffic` is too chaotic to validate it in
-simulation (changing only the LiDAR beam count flips its outcome).
+Fixed with two changes, both strictly conservative — each can only make the car
+do less or go slower, never commit to something new:
 
-**Neither change should go on the car until the overtake is floor-tested.**
-Fixing the completion test alone makes the car hold the offset line *longer*
-near walls, which is not obviously an improvement on real ground until the room
-check exists too.
+1. **A commit-time room check.** `racing_math.overtake_side_has_room` measures
+   the perpendicular wall distance on the chosen side and refuses the pass
+   below `overtake_min_side_clearance` (0.70 m = the 0.35 m offset + half a
+   0.31 m car + 0.15 margin). Declining to pass is always available.
+2. **A speed cap during a committed pass.** Steering still stays with the pass
+   — swerving away mid-overtake is what the suppression exists to prevent — but
+   the speed no longer gets a free ride to the 0.4 m emergency stop.
+
+The cap **must** be computed from the *mapped* track edge, never the raw scan.
+Capping on the raw scan was tried and is a straightforward regression: the
+nearest thing ahead during a pass is by definition the car being passed, so the
+ego throttles below the opponent's speed and the pass becomes mathematically
+impossible. Every seed deadlocked. `_static_closest_in_cone` uses the map ray
+cast, and returns `None` when map subtraction is unavailable, which the caller
+reads as "cannot tell walls from traffic, so do not cap".
+
+### And the scripted opponent needed brakes
+
+Not a controller bug, but it was corrupting the measurement. The test opponent
+was a blind constant-2 m/s path follower, so it drove into the ego whenever the
+ego legitimately stopped — making `opponent_collision` a statement about the
+fixture. It now declines to rear-end a stationary object. That change alone
+took `legacy` from 3/8 to 8/8 and removed every artifact collision.
+
+**Floor-test the overtake before relying on it.** These are simulator results
+against a fixture opponent, on a car whose mass and centre of gravity are still
+unmeasured.
 
 ## Compute
 
