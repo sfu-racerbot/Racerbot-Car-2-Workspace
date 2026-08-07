@@ -290,6 +290,17 @@ Dashboard side, in `web_dashboard.yaml`:
 
 ## Porting guide: racerbot_a and racerbot_b
 
+**Each repo now carries its own step-by-step guide, written against its
+actual code**, plus a vendored copy of the header:
+
+| Repo | Guide | Vendored header |
+|---|---|---|
+| `racerbot_a` | `docs/DRIVE_INTENT.md` | `src/reactive/include/drive_intent/` |
+| `racerbot_b` | `DRIVE_INTENT.md` | `src/gap_follow_node/include/drive_intent/`, `src/pure_pursuit/include/drive_intent/` |
+
+The section below is the general version; the per-repo guides are more
+specific and should be preferred when working in those repos.
+
 Both are separate repositories, so nothing here requires a change to this
 workspace. Copy
 [`drive_intent.hpp`](../src/drive_intent/include/drive_intent/drive_intent.hpp)
@@ -329,8 +340,10 @@ against the Python validator (see [Testing](#testing)).
     commanding. This gives racerbot_a the single best intent arrow of the
     three codebases for almost no new maths, because unlike a constant
     arc it shows the actual curve the fit produced.
-- **`src/ftg_node/src/ftg_node.cpp`** — same pattern as
-  `drive_best_point()`.
+- **`src/ftg_node/src/ftg_node.cpp`** — nothing to do yet:
+  `FollowTheGapNode::lidar_callback` is currently an empty stub, so there
+  is no intent to report. Follow the `drive_best_point()` pattern once it
+  is implemented.
 - **`src/reactive/src/safety_node.cpp`** — if it can zero the command,
   publish a `stop` intent from it so the dashboard explains the stop.
 
