@@ -86,6 +86,8 @@ from ament_index_python.packages import PackageNotFoundError, get_package_share_
 
 from drive_intent import schema as intent_schema
 from web_dashboard import protocol, tuning
+from web_dashboard.batching import TelemetryBatcher
+from web_dashboard.mapstream import MapGeometry, MapStreamer
 from web_dashboard.stopwatch import DeadmanStopwatch
 
 
@@ -342,6 +344,25 @@ class DashboardNode(Node):
         self.declare_parameter('port', 8080)
         self.declare_parameter('scan_broadcast_rate_hz', 10.0)
         self.declare_parameter('stats_interval_sec', 1.0)
+        # --- Wire budget (docs/web-dashboard.md, "cost on the car") ---
+        # Compact telemetry is collected and sent as one frame at this rate
+        # instead of one frame per message. The inputs run at 32-44Hz each
+        # and a WebSocket frame costs about the same however small it is,
+        # so this is roughly an 8x saving on framing for a display nobody
+        # can read faster than their screen refreshes anyway.
+        self.declare_parameter('telemetry_rate_hz', 20.0)
+        # Occupancy grids are sent as deltas against what the browser
+        # already has -- see mapstream.py. These knobs exist to turn that
+        # off if it is ever suspected of lying.
+        self.declare_parameter('map_compression', True)
+        self.declare_parameter('map_patching', True)
+        self.declare_parameter('map_keyframe_sec', 30.0)
+        # 'u16mm' halves the scan feed for no visible difference; 'f32' is
+        # the original one-float-per-beam encoding.
+        self.declare_parameter('scan_encoding', protocol.SCAN_U16MM)
+        # Send every Nth beam. 1 = every beam (the default; the Hokuyo's
+        # 1081 beams at 2 bytes each are already cheap).
+        self.declare_parameter('scan_decimation', 1)
         self.declare_parameter('laser_offset_x', 0.33)
         self.declare_parameter('laser_offset_y', 0.0)
         # --- Drive intent (docs/drive-intent.md) ---
@@ -390,6 +411,10 @@ class DashboardNode(Node):
         self.joy_timeout_sec = float(self.get_parameter('joy_timeout_sec').value)
         self.stopwatch_update_rate_hz = float(
             self.get_parameter('stopwatch_update_rate_hz').value)
+        self.telemetry_rate_hz = max(
+            1.0, float(self.get_parameter('telemetry_rate_hz').value))
+        self.scan_encoding = str(self.get_parameter('scan_encoding').value)
+        self.scan_decimation = max(1, int(self.get_parameter('scan_decimation').value))
         self.host = self.get_parameter('host').value
         self.port = int(self.get_parameter('port').value)
         self.scan_broadcast_rate_hz = float(self.get_parameter('scan_broadcast_rate_hz').value)
@@ -415,12 +440,17 @@ class DashboardNode(Node):
         # race (worst case a just-connected tab's first frame is a few ms
         # stale, fixed by the very next broadcast); this is a read-only
         # display, not a control path, so it isn't worth a lock.
-        # (header dict, packed payload bytes) for the newest map, packed
-        # once and reused for every send. Replaced wholesale, never mutated
-        # in place, so a reader on the IOLoop thread gets either the old
-        # complete pair or the new one -- same discipline as
-        # _last_tuning_json below.
-        self._map_frame = None
+        # Turns whole occupancy grids into keyframes and patches, so the
+        # browser holds the map and the car only sends what changed.
+        self._map_streamer = MapStreamer(
+            compression=bool(self.get_parameter('map_compression').value),
+            patching=bool(self.get_parameter('map_patching').value),
+            keyframe_sec=float(self.get_parameter('map_keyframe_sec').value))
+        # Collects compact telemetry between flushes. Guarded by its own
+        # lock because both the rclpy thread (subscription callbacks) and
+        # the IOLoop thread (stopwatch controls from a browser) add to it.
+        self._batcher = TelemetryBatcher()
+        self._batch_lock = threading.Lock()
         self._last_scan_msg = None
         self._last_pose = None  # (x, y, yaw)
         self._last_pose_topic = None  # which pose_topics entry last delivered
@@ -481,6 +511,8 @@ class DashboardNode(Node):
         # stats timer's first tick actually gets broadcast.
         psutil.cpu_percent(interval=None)
         self.stats_timer = self.create_timer(self.stats_interval_sec, self.stats_callback)
+        self.telemetry_timer = self.create_timer(
+            1.0 / self.telemetry_rate_hz, self._flush_telemetry)
 
         self._setup_tuning()
 
@@ -499,25 +531,32 @@ class DashboardNode(Node):
     # ------------------------------------------------------------------------
 
     def map_callback(self, msg: OccupancyGrid):
-        # Packing the grid is by far the most expensive thing this node
-        # does -- a 2048x2048 map is 4.2 million cells -- so it happens
-        # exactly once here, not once per connected browser, and not at all
-        # while nobody is watching.
-        if not self._has_clients() and self._map_frame is not None:
-            # Keep the previous frame rather than packing a new one: a tab
-            # that connects later gets a fresh map from the next /map
-            # message anyway (slam_toolbox republishes every
-            # map_update_interval), and map_server latches a static one.
+        # The most expensive thing this node handles by far: a 2048x2048
+        # grid is 4.2 million cells, republished by slam_toolbox every few
+        # seconds for as long as anyone is driving. MapStreamer turns that
+        # into a patch of just what changed -- measured at ~200 bytes
+        # against 4MB -- or into nothing at all when the grid is identical.
+        if not self._has_clients() and self._map_streamer.has_map():
+            # A tab that connects later is caught up by current_keyframe();
+            # there is no reason to diff grids nobody will see.
             return
-        header = protocol.map_header(msg)
-        payload = protocol.map_cells(msg)
-        if self._map_frame is not None and self._map_frame[1] == payload:
-            # slam_toolbox republishes the whole grid on its own timer
-            # whether or not anything in it changed; a parked car would
-            # otherwise re-send 4MB every few seconds to say nothing.
+        info = msg.info
+        orientation = info.origin.orientation
+        geometry = MapGeometry(
+            info.width, info.height, info.resolution,
+            info.origin.position.x, info.origin.position.y,
+            protocol.quaternion_to_yaw(
+                orientation.x, orientation.y, orientation.z, orientation.w))
+        try:
+            frame = self._map_streamer.update(protocol.map_cells(msg), geometry)
+        except ValueError as exc:
+            # A grid whose data does not match its own declared size. Drop
+            # it rather than shipping something the browser would paint as
+            # garbage; the next /map message is a few seconds away.
+            self.get_logger().warn(f'ignoring a malformed /map message: {exc}')
             return
-        self._map_frame = (header, payload)
-        self._broadcast(header, payload)
+        if frame is not None:
+            self._broadcast(*frame)
 
     def scan_callback(self, msg: LaserScan):
         self._last_scan_msg = msg
@@ -533,8 +572,10 @@ class DashboardNode(Node):
         if not self._has_clients():
             return
         self._broadcast(
-            protocol.scan_header(msg, self.laser_offset_x, self.laser_offset_y),
-            protocol.scan_ranges(msg))
+            protocol.scan_header(
+                msg, self.laser_offset_x, self.laser_offset_y,
+                self.scan_encoding, self.scan_decimation),
+            protocol.scan_payload(msg, self.scan_encoding, self.scan_decimation))
 
     def pose_callback(self, msg: PoseStamped, topic: str = ''):
         q = msg.pose.orientation
@@ -543,13 +584,11 @@ class DashboardNode(Node):
         if topic != self._last_pose_topic:
             self._last_pose_topic = topic
             self.get_logger().info(f"Pose display is now following '{topic}'.")
-        if self._has_clients():
-            self._broadcast(protocol.pose_message(*self._last_pose))
+        self._queue(protocol.pose_message(*self._last_pose))
 
     def drive_callback(self, msg: AckermannDriveStamped):
         self._last_drive = (msg.drive.speed, msg.drive.steering_angle)
-        if self._has_clients():
-            self._broadcast(protocol.drive_message(*self._last_drive))
+        self._queue(protocol.drive_message(*self._last_drive))
 
     def intent_callback(self, msg: String):
         """Forward one driving node's intent to every browser tab.
@@ -577,13 +616,16 @@ class DashboardNode(Node):
                     f'{problem}')
             return
         self._last_intent = payload
-        if self._has_clients():
-            self._broadcast(protocol.intent_message(payload))
+        # Two 16-point paths are most of an intent message's ~1.4kB, and at
+        # 18Hz that was the second largest feed on the link. The commanded
+        # path is dropped only while it is indistinguishable from the
+        # desired one, so the dashed ghost still appears exactly when the
+        # shaping is doing something worth seeing.
+        self._queue(protocol.intent_message(protocol.thin_intent_payload(payload)))
 
     def odom_callback(self, msg: Odometry):
         self._last_speed = msg.twist.twist.linear.x
-        if self._has_clients():
-            self._broadcast(protocol.speed_message(self._last_speed))
+        self._queue(protocol.speed_message(self._last_speed))
 
     def joy_callback(self, msg: Joy):
         with self._stopwatch_lock:
@@ -595,12 +637,8 @@ class DashboardNode(Node):
             snapshot = self._stopwatch.snapshot(time.monotonic())
         return protocol.stopwatch_message(**snapshot)
 
-    def _broadcast_stopwatch(self):
-        self._broadcast(self._stopwatch_message())
-
     def stopwatch_callback(self):
-        if self._has_clients():
-            self._broadcast_stopwatch()
+        self._queue(self._stopwatch_message())
 
     def handle_stopwatch_control(self, action, enabled=None):
         """Handle dashboard-local controls on Tornado's IOLoop thread."""
@@ -612,7 +650,7 @@ class DashboardNode(Node):
                 self._stopwatch.reset(now)
             else:
                 return
-        self._broadcast_stopwatch()
+        self._queue(self._stopwatch_message())
 
     def stats_callback(self):
         """Runs on a timer (rclpy spin thread, not per-message) -- cheap
@@ -632,8 +670,7 @@ class DashboardNode(Node):
         # call*, so skipping ticks would make the first number a browser
         # sees an average over however long the tab was closed. Only the
         # broadcast is skipped.
-        if self._has_clients():
-            self._broadcast(protocol.stats_message(*self._last_stats))
+        self._queue(protocol.stats_message(*self._last_stats))
 
     # ------------------------------------------------------------------------
     # Live parameter tuning.
@@ -999,6 +1036,35 @@ class DashboardNode(Node):
     # Bridging ROS callbacks (rclpy thread) -> the Tornado IOLoop thread.
     # ------------------------------------------------------------------------
 
+    def _queue(self, message: dict):
+        """Hold one compact telemetry message for the next batch tick.
+
+        Called from the rclpy thread by every subscription callback, and
+        from the IOLoop thread when a browser works the stopwatch controls
+        -- hence the lock. Skipped entirely with nobody watching, same as
+        _broadcast(): a newly connected tab is caught up by
+        send_initial_state() rather than by whatever happened to still be
+        sitting in this queue.
+        """
+        if not self._has_clients():
+            return
+        with self._batch_lock:
+            self._batcher.add(message)
+
+    def _flush_telemetry(self):
+        """Send everything queued since the last tick as one frame."""
+        if not self._has_clients():
+            # Nothing to send to, and nothing should be accumulating --
+            # drop it so a tab connecting later is not handed telemetry
+            # describing a moment that has long passed.
+            with self._batch_lock:
+                self._batcher.clear()
+            return
+        with self._batch_lock:
+            batch = self._batcher.flush()
+        if batch is not None:
+            self._broadcast(batch)
+
     def _has_clients(self) -> bool:
         """Is anyone actually watching?
 
@@ -1056,15 +1122,21 @@ class DashboardNode(Node):
         """Runs on the IOLoop thread (called from WebSocketHandler.open) --
         catches a freshly connected browser tab up on whatever this node
         already knows, instead of leaving it blank until the next update."""
-        map_frame = self._map_frame  # read once -- replaced wholesale, never mutated
+        # The map as it stands *now*, carrying the sequence number the
+        # next patch will follow on from -- so this tab is immediately in
+        # step with every other one. See MapStreamer.current_keyframe().
+        map_frame = self._map_streamer.current_keyframe()
         if map_frame is not None:
             header, payload = map_frame
             client.write_message(json.dumps(header))
             client.write_message(payload, binary=True)
         if self._last_scan_msg is not None:
-            client.write_message(json.dumps(
-                protocol.scan_header(self._last_scan_msg, self.laser_offset_x, self.laser_offset_y)))
-            client.write_message(protocol.scan_ranges(self._last_scan_msg), binary=True)
+            client.write_message(json.dumps(protocol.scan_header(
+                self._last_scan_msg, self.laser_offset_x, self.laser_offset_y,
+                self.scan_encoding, self.scan_decimation)))
+            client.write_message(protocol.scan_payload(
+                self._last_scan_msg, self.scan_encoding, self.scan_decimation),
+                binary=True)
         if self._last_pose is not None:
             client.write_message(json.dumps(protocol.pose_message(*self._last_pose)))
         if self._last_drive is not None:
@@ -1072,7 +1144,8 @@ class DashboardNode(Node):
         if self._last_speed is not None:
             client.write_message(json.dumps(protocol.speed_message(self._last_speed)))
         if self._last_intent is not None:
-            client.write_message(json.dumps(protocol.intent_message(self._last_intent)))
+            client.write_message(json.dumps(protocol.intent_message(
+                protocol.thin_intent_payload(self._last_intent))))
         if self._last_stats is not None:
             client.write_message(json.dumps(protocol.stats_message(*self._last_stats)))
         client.write_message(json.dumps(self._stopwatch_message()))

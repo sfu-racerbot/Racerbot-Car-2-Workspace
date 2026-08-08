@@ -17,6 +17,8 @@
   <depend>ament_index_python</depend>
   <depend>python3-tornado</depend>
   <depend>python3-psutil</depend>
+  <!-- diffing occupancy grids for map patches, see mapstream.py -->
+  <depend>python3-numpy</depend>
 
   <test_depend>python3-pytest</test_depend>
 
