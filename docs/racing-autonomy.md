@@ -95,6 +95,186 @@ only the supervisor publishes to the real `/drive`. The generated map, pose
 graph, raw path, and profiled path are saved under
 `~/.ros/racerbot_auto/<timestamp>/`. See [operations](operations.md#automatic-map--raceline--race-recommended-for-a-new-course) for usage and overrides.
 
+### What a recorded lap actually looks like
+
+**A live SLAM pose is not a trajectory, and for a long time this pipeline
+treated it as one.** `slam_toolbox` re-optimises its pose graph
+continuously; every correction moves `map->odom`, which moves the car's
+map-frame pose without the car having moved. Recorded verbatim, those
+corrections become *geometry*.
+
+Measured on the three laps this car has actually recorded
+(`~/.ros/racerbot_auto`, 2026-07-27), against a steering rack that reaches
+14.9 deg:
+
+| | 195630 | 200103 | 202458 |
+|---|---:|---:|---:|
+| revolutions in the "lap" | 1.98 | 1.96 | 1.98 |
+| median heading change per 0.15m sample | 10.1 deg | 8.8 deg | 15.5 deg |
+| 95th-percentile steering demanded | 27.2 deg | 29.7 deg | 30.5 deg |
+| peak steering demanded | 35.7 deg | 43.3 deg | 46.7 deg |
+| waypoints past the rack limit | 33.5% | 34.3% | 32.5% |
+| start/finish seam heading mismatch | 34.8 deg | 38.6 deg | 110.1 deg |
+
+Every racing line this car ever generated was physically unfollowable for
+a third of its length, and the seam -- the first thing pure pursuit drives,
+because closure is *detected* at the seam -- was a corner up to 110 degrees
+wide. `smooth_path(half_window=3)` was the only cleanup, and it is nowhere
+near enough for that.
+
+Four separate causes, all now fixed:
+
+1. **Every lap was two laps.** `minimum_lap_distance` was `20.0`, longer
+   than the roughly 15m loop this car is driven on, so the closure gate
+   could not open until the car had been round twice. Two overlapping
+   passes are not a closed line: it doubles back on itself, so
+   `find_nearest_index` can jump between passes and the three-point
+   curvature estimate is meaningless. Closure is now gated on accumulated
+   yaw (`minimum_lap_turn_deg`, 300) -- by the turning-tangent theorem one
+   lap of a closed circuit is 360 degrees of turning *whatever its size*,
+   so unlike a distance in metres it does not have to be told how big the
+   course is. `minimum_lap_distance` drops to `5.0` as a sanity floor.
+2. **Localisation corrections were recorded as driving.** A map-frame pose
+   that moves more than `max_pose_jump_m` (0.12m, i.e. 4.8 m/s at 40Hz)
+   between control ticks is SLAM correcting itself. `LapRecorder` now
+   applies that correction to the *already recorded* points instead --
+   which is what a correction means: the whole map moved, including the
+   part already driven. The recorded shape stays exactly as driven, and
+   the start pose the closure test measures against stays attached to the
+   same piece of track.
+3. **Nothing cleaned the line up.** `pure_pursuit/recorded_path.py` now
+   trims to one revolution, resamples to uniform spacing, and low-passes
+   the closed loop *in space*, discarding wiggles shorter than the car's
+   own turning circle -- anything tighter is not something the car drove.
+   (A Fourier low-pass, not repeated averaging: repeated averaging of a
+   closed curve is curve-shortening flow and collapses the loop to a
+   point. It was tried first, and reduced a 30m lap to a 0.0m dot while
+   reporting zero curvature, because a point is very feasible.)
+4. **Nothing checked the result.** The supervisor now refuses to hand
+   pure pursuit a line needing more than `profile_reject_ratio` times the
+   rack limit, or needing more than the rack has over more than
+   `profile_reject_fraction` of the lap, and says so with numbers. A line
+   the rack cannot follow does not degrade gracefully -- it saturates the
+   steering, runs wide, and latches on the emergency stop.
+5. **Nothing checked the line against the map.** This one only showed up
+   once the other four were fixed and the car was actually racing.
+   Filtering a recorded lap rounds its corners *inward*, toward the chord
+   and therefore toward the wall -- `racing_math.smooth_path`'s own
+   docstring says so, and calls it "a conservative direction for the
+   velocity profile to err in", which it is, and the exact opposite of
+   conservative for the *geometry* when the corner is already near the
+   car's turning circle. A measured simulator run finished with the
+   finished line **0.05m from a wall** -- the car's half-width alone is
+   0.155m, so the body was inside it -- with peak curvature, seam error
+   and deviation all reporting healthy. The supervisor now subscribes to
+   `/map`, builds a clearance field from SLAM's own grid, and makes
+   "stays `profile_wall_clearance` (0.20m -- the car's own half-width plus
+   a little) from a wall" a constraint on which filter cutoff is chosen,
+   outranking curvature, because a line through a wall is not a slower
+   racing line.
+
+   The requirement is capped by **what the driven line itself achieved**,
+   and that is not a softening: mapping with other cars on the track paints
+   them into the grid, so a moving opponent leaves a smear of occupied
+   cells across a line the ego demonstrably drove. The two-car scenario
+   produced exactly that -- a recorded line measuring 0.00m of clearance on
+   a lap the car had just completed twice without touching anything.
+   Refusing there would be refusing to believe the lap that happened. The
+   absolute requirement still catches the real failure, which is the
+   *cleanup* moving the line closer to a wall than driving ever took it,
+   and the log says when the cap was applied and why.
+
+On the same three recordings, the cleanup takes peak demand from 2.7-4.0x
+the rack down to 1.2-1.8x. On a clean simulated lap it produces a line
+needing 12.7 deg of the available 14.9, with **no** waypoint over the
+limit and a 3.8 deg seam.
+
+### Racing a course nobody has surveyed
+
+Two further defaults were wrong for this mode specifically, and both were
+found by racing the result rather than by reading it:
+
+- **`profile_max_brake` was `8.0`.** In `compute_velocity_profile` that is
+  a claim about how hard the car can *brake* -- the backward pass uses it
+  to decide how late the car may still be at speed approaching a corner --
+  not a command slew rate, which is what the identically named parameter
+  in `pure_pursuit.yaml` is. `gap_follow.yaml` is only willing to assume
+  `3.0` for this same car. At `8.0` the profile carried speed into the
+  first corner of the first simulated race and put the car in the wall;
+  it is now `3.0`.
+- **`profile_max_speed` was `4.0` with `profile_max_lateral_accel: 2.5`.**
+  That is the surveyed-track, hand-checked-raceline profile from
+  `pure_pursuit.yaml`, applied to a course discovered thirty seconds
+  earlier at 1 m/s. Now `2.0` and `1.2`. Both are still overridable, and
+  `auto_map_race_launch.py` takes a `supervisor_config:=` argument so a
+  particular course can have its own file without editing the packaged one.
+
+### How fast a mapped course can actually be raced, and why
+
+Not a grip question — a **width** question, and the two numbers that decide
+it were both measured:
+
+- the racing line comes from `gap_follow`, which drives about **0.25–0.35m
+  from the wall** at a corner, because `car_width/2 + safety_margin` puts
+  it there. Take the car's own 0.155m half-width out and roughly
+  **0.1–0.2m** is left over;
+- pure pursuit's cross-track error through a corner near this car's
+  turning circle measured **0.39–0.57m at 2.5–3.0 m/s**.
+
+Those do not both fit in a 1.8m corridor, and no amount of filtering adds
+room the driven line never had. The car maps such a course fine, generates
+a clean line for it (peak curvature well inside the rack, zero waypoints
+over the limit, a 0.6° seam) — and then runs wide at the first corner and
+touches the wall. **That is a true statement about the course, not a
+remaining defect.** A ~2.6m corridor absorbs the error; 1.8m does not.
+
+So: the defaults are set for the narrow case, and a course wide enough to
+carry more speed gets its own `supervisor_config:=` file. Sanity-check the
+trade with `tools/racerbot_sim/run_auto_map_validation.py --track
+indoor_oval` before assuming a tight course will race.
+
+### One more: the hard stop had no way out
+
+The racing controller's `emergency_obstacle` tier stopped the car and left
+it stopped. At zero speed nothing about the scene changes, so whatever put
+something inside the 0.40m safety cone keeps it there -- the stop ends the
+run wherever it fires, which in the first simulated race was four seconds
+after the handover, 0.38m from a wall, for the remaining eighty.
+
+`gap_follow` reached the same conclusion about its own forward reserve on
+2026-08-06 and answered it with `escape_creep_speed`. `pure_pursuit` now
+has the same answer, kept deliberately narrower: a 0.25m/s crawl, only
+toward an opening genuinely deeper than `emergency_escape_min_gap`, only
+while the whole body still has `emergency_escape_clearance` of room, and
+never ahead of the contact or stale-scan stops. `emergency_escape_speed:
+0.0` restores the old behaviour.
+
+### Still open: `off_racing_line` is a third latch
+
+Observed once during simulator validation, and not fixed here because
+unlike the other two its trigger is a *localisation* claim rather than a
+geometric one.
+
+`max_cross_track_error` (1.0m) stops the car when it is further than that
+from every waypoint -- "lost or kidnapped", and stopping is the right
+answer to that. But the stop is permanent by construction: at zero speed
+the pose does not change, so the cross-track error does not change, so the
+stop never clears. In the observed run the car had been tracking the line
+to 0.09m at 1.98m/s, went past 1.0m about five seconds later, and stayed
+stopped for the remaining seventy-five seconds of the racing window.
+
+Worth knowing, and worth investigating before a race: the same log line
+shows pure pursuit reporting `opponent tracked: gap=3.00m` in a **solo**
+run, so map-subtraction opponent detection was producing false positives on
+that fresh SLAM map, and a committed overtake offsets the target 0.35m
+sideways. A false overtake pushing the car off its own line is a plausible
+route to a genuine 1m cross-track error, and would be the thing to fix
+rather than the watchdog.
+
+All of this is exercised end to end by
+`tools/racerbot_sim/run_auto_map_validation.py` -- see
+[ros-simulator.md](ros-simulator.md).
+
 ## The five-phase pipeline
 
 ```mermaid

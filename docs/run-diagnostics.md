@@ -53,7 +53,7 @@ One timestamped directory per run under `~/.ros/racerbot_runs/`:
 | `probe.log` | `race_diag_node` stdout | Same, human-readable |
 | `bag/` | `ros2 bag record` | Everything, replayable offline |
 | `map.pgm` / `map.yaml` | `slam_toolbox` save | The map as SLAM saw it |
-| `raceline_*.csv` | `auto_map_race_node` | The line that was generated and driven |
+| `raceline_*.csv` | `auto_map_race_node` | The line that was generated and driven. `raceline_raw.csv` is the unmodified recording and is written even when the cleanup *refuses* the run, so a refusal can be plotted against the map |
 
 ### Why the probe exists at all
 

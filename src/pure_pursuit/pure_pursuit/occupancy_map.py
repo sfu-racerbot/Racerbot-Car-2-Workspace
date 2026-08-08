@@ -136,6 +136,29 @@ class OccupancyMap:
                    float(origin[0]), float(origin[1]),
                    inflate_cells=inflate_cells)
 
+    @classmethod
+    def from_grid_message(cls, data, width: int, height: int, resolution: float,
+                          origin_x: float, origin_y: float,
+                          occupied_threshold: int = 50,
+                          inflate_cells: int = 1) -> 'OccupancyMap':
+        """Build from a live `nav_msgs/OccupancyGrid`'s fields.
+
+        Takes the message's contents rather than the message, so this module
+        stays importable without ROS. The layout is already what this class
+        wants -- row-major with row 0 at the smallest world Y -- and only the
+        cell values need mapping: an OccupancyGrid carries -1 for unknown and
+        an occupancy probability 0-100 otherwise.
+
+        Unknown stays UNKNOWN, which this class blocks: mid-run, a SLAM map
+        has plenty of unobserved cells just beyond the walls, and treating
+        them as drivable is how a racing line ends up outside the track.
+        """
+        values = np.asarray(data, dtype=np.int16).reshape(int(height), int(width))
+        grid = np.where(values < 0, UNKNOWN,
+                        np.where(values >= occupied_threshold, OCCUPIED, FREE))
+        return cls(grid.astype(np.int8), resolution, origin_x, origin_y,
+                   inflate_cells=inflate_cells)
+
     def world_to_cell(self, x, y):
         """World (x, y) -> integer (col, row). Vectorized over arrays."""
         col = np.floor((np.asarray(x, dtype=np.float64) - self.origin_x)

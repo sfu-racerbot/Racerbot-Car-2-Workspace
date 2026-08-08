@@ -114,6 +114,13 @@
     intentReceivedAt: 0,
     intentLog: [],   // [{ state, severity, at, heldMs }] newest first
     showIntent: true,
+    // Binary frames whose length did not match the header that claimed
+    // them -- see handleBinary. Surfaced rather than swallowed, because
+    // the visible symptom is a map that has turned to garbage and there
+    // is otherwise nothing to tell you why.
+    desyncCount: 0,
+    desyncAt: 0,
+    desyncDetail: '',
   };
 
   // How the arrow is drawn. Half-width is proportional to the *planned*
@@ -142,8 +149,17 @@
   // Pending "what does the next binary frame mean" -- set when a JSON
   // header arrives, consumed the moment the binary payload right after
   // it does (the server always sends them as an immediate pair).
+  //
+  // One slot, so a header that never gets its binary points this at the
+  // wrong thing and every later payload is decoded as the wrong type.
+  // The header's `bytes` field is what makes that detectable; see
+  // handleBinary and protocol.py.
   let pendingBinaryType = null;
   let pendingHeader = null;
+  // Warn at most this often, so a broken link cannot flood the console.
+  const DESYNC_WARN_MS = 5000;
+  const DESYNC_BANNER_MS = 10000;
+  let lastDesyncWarnAt = 0;
 
   // ---------------------------------------------------------------------
   // View transform: world meters (map frame: +X right, +Y up, exactly as
@@ -162,6 +178,7 @@
     bodyPanX: 0,
     bodyPanY: 0,
     userAdjusted: false, // once the user pans/zooms, stop auto-fitting on new data
+    fittedToMap: false,  // a map has been framed at least once -- see maybeAutoFit
   };
 
   function worldToCanvas(wx, wy) {
@@ -268,14 +285,51 @@
     }
   }
 
-  function handleBinary(buffer) {
-    if (pendingBinaryType === 'map') {
-      applyMap(pendingHeader, new Int8Array(buffer));
-    } else if (pendingBinaryType === 'scan') {
-      applyScan(pendingHeader, new Float32Array(buffer));
+  function noteDesync(detail) {
+    state.desyncCount += 1;
+    state.desyncAt = performance.now();
+    state.desyncDetail = detail;
+    if (state.desyncAt - lastDesyncWarnAt >= DESYNC_WARN_MS) {
+      lastDesyncWarnAt = state.desyncAt;
+      console.warn(`dashboard: dropped a binary frame -- ${detail} `
+        + `(${state.desyncCount} so far)`);
     }
+    render();
+  }
+
+  function handleBinary(buffer) {
+    // Consume the pending slot *first*, whatever happens next. Leaving a
+    // stale header in it is precisely the failure being guarded against:
+    // the next payload would then be decoded as the previous type, and a
+    // 1081-beam scan read as occupancy cells is 4324 bytes against an
+    // 80000-cell header -- every read past the end is undefined, every
+    // colour computes to NaN, and the map paints as garbage instead of
+    // failing.
+    const header = pendingHeader;
+    const type = pendingBinaryType;
     pendingBinaryType = null;
     pendingHeader = null;
+
+    if (!header) {
+      noteDesync('binary frame with no header before it');
+      return;
+    }
+    // `bytes` is what the server says must follow. Older servers do not
+    // send it; fall back to the type's own arithmetic rather than
+    // trusting the pairing blindly.
+    const expected = typeof header.bytes === 'number'
+      ? header.bytes
+      : (type === 'map' ? header.width * header.height : 4 * header.count);
+    if (buffer.byteLength !== expected) {
+      noteDesync(`${type} payload is ${buffer.byteLength} bytes, header says ${expected}`);
+      return;
+    }
+
+    if (type === 'map') {
+      applyMap(header, new Int8Array(buffer));
+    } else if (type === 'scan') {
+      applyScan(header, new Float32Array(buffer));
+    }
     maybeAutoFit();
     render();
   }
@@ -316,6 +370,13 @@
   // ---------------------------------------------------------------------
   function applyMap(header, cells) {
     const { width, height, resolution, origin_x: originX, origin_y: originY } = header;
+    // Belt and braces with handleBinary's length check: this loop indexes
+    // width*height entries and an undefined read turns every colour into
+    // NaN, which canvas silently paints as black rather than throwing.
+    if (!(width > 0 && height > 0) || cells.length < width * height) {
+      noteDesync(`map payload holds ${cells.length} cells, header says ${width * height}`);
+      return;
+    }
     const off = document.createElement('canvas');
     off.width = width;
     off.height = height;
@@ -369,14 +430,49 @@
   // arrives -- but only until the user manually pans/zooms, so this never
   // fights their input.
   // ---------------------------------------------------------------------
+  // Fraction of the shorter canvas dimension kept as a border when fitting,
+  // and how much of it a growing map may eat before the view is re-fitted.
+  // Re-fitting on every map instead was measurably the worst thing on this
+  // screen during a mapping run: slam_toolbox resizes and re-origins its
+  // grid constantly as the map grows -- 27 map messages in 130 seconds,
+  // shrinking as often as growing -- and re-deriving centre and zoom from
+  // each one moved the whole picture by up to 3.6m and rescaled it by up to
+  // 35%, sixteen times, while the map itself was perfectly good. A viewer
+  // reasonably reads that as the map being glitchy. It is the camera.
+  const FIT_MARGIN = 1.15;
+
+  function mapWorldExtent() {
+    const { width, height, resolution, originX, originY } = state.map;
+    return {
+      minX: originX,
+      maxX: originX + width * resolution,
+      minY: originY,
+      maxY: originY + height * resolution,
+    };
+  }
+
+  function extentIsVisible(extent) {
+    const halfWidth = canvas.width / (2 * view.scale);
+    const halfHeight = canvas.height / (2 * view.scale);
+    return (extent.minX >= view.centerX - halfWidth
+      && extent.maxX <= view.centerX + halfWidth
+      && extent.minY >= view.centerY - halfHeight
+      && extent.maxY <= view.centerY + halfHeight);
+  }
+
   function maybeAutoFit() {
     if (view.userAdjusted) return;
     if (state.map) {
-      const { width, height, resolution, originX, originY } = state.map;
-      view.centerX = originX + (width * resolution) / 2;
-      view.centerY = originY + (height * resolution) / 2;
-      const spanMeters = Math.max(width, height) * resolution;
-      view.scale = Math.min(canvas.width, canvas.height) / (spanMeters * 1.15);
+      const extent = mapWorldExtent();
+      // Grow to fit, never twitch. Once the map is framed, a grid that
+      // resizes by a few cells changes nothing the viewer needs to see.
+      if (view.fittedToMap && extentIsVisible(extent)) return;
+      view.centerX = (extent.minX + extent.maxX) / 2;
+      view.centerY = (extent.minY + extent.maxY) / 2;
+      const spanMeters = Math.max(extent.maxX - extent.minX,
+                                  extent.maxY - extent.minY);
+      view.scale = Math.min(canvas.width, canvas.height) / (spanMeters * FIT_MARGIN);
+      view.fittedToMap = true;
     } else if (state.pose) {
       view.centerX = state.pose.x;
       view.centerY = state.pose.y;
@@ -398,6 +494,16 @@
       modeBanner.textContent = mapRelative ? '' : 'map loaded -- waiting for a localization pose (RViz "2D Pose Estimate"?)';
     } else {
       modeBanner.textContent = 'no map yet -- showing raw LIDAR relative to the car';
+    }
+
+    // Last, so it wins: a dropped frame is the thing most likely to be
+    // making the picture wrong, and "the map looks glitchy" with nothing
+    // on screen to explain it is exactly the situation this avoids.
+    if (state.desyncCount > 0
+        && performance.now() - state.desyncAt < DESYNC_BANNER_MS) {
+      modeBanner.textContent =
+        `link problem: dropped ${state.desyncCount} corrupted frame(s) `
+        + `-- ${state.desyncDetail}. The picture below may be stale.`;
     }
 
     if (state.scan) {

@@ -75,6 +75,8 @@ How the car's software is put together: every node, every topic, and how they co
 
 Run **exactly one** of these at a time — `Ctrl+C` whichever is currently running before starting a different one, rather than stacking them in additional terminals. Nothing stops you from running two at once, but that isn't "blending" them: per the priority table just below, `/teleop` always beats `/drive` while it's live, so a second control layer just gets silently masked, not mixed in.
 
+The whole automatic composition can be run without the car -- the real launch file, the real SLAM, the real dashboard, over a simulated LiDAR and VESC: see [ros-simulator.md](ros-simulator.md).
+
 The automatic composition is the deliberate exception *inside one launch*: gap follow publishes only to `/auto_map/drive`, pure pursuit only to `/auto_race/drive`, and `auto_map_race_node` forwards exactly one of those to the real `/drive`. Both child controllers can run without competing at the mux.
 
 ### `gap_follow` and corridor centering: two questions, not one

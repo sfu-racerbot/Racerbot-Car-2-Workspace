@@ -19,6 +19,7 @@ Start here if you're new to the car or the codebase:
 | [docs/architecture.md](docs/architecture.md) | The full node/topic graph, what talks to what, and the safety/priority model — **read this before writing any driving code** |
 | [docs/racing-autonomy.md](docs/racing-autonomy.md) | The map-based race stack (SLAM → localization → recorded racing line → curvature-paced velocity profile → pure pursuit control) — the algorithm, the math, and how to tune it |
 | [docs/simulator.md](docs/simulator.md) | Reproducible F1TENTH Gym setup, headless solo/multi-car validation commands, current results, and simulation limitations |
+| [docs/ros-simulator.md](docs/ros-simulator.md) | The same physics behind the *real ROS topics*, so the whole stack — SLAM, the launch files, the map→race handover, the dashboard — can be run and validated without the car. Includes the interlock that stops it running beside real hardware |
 | [docs/sim-fidelity-audit.md](docs/sim-fidelity-audit.md) | How closely the simulator matches this physical car — measured divergences (grip, braking, steering, localization), what they mean for tuning, and a prioritized plan to close them |
 | [docs/writing-your-own-node.md](docs/writing-your-own-node.md) | The full contract for driving code specifically, using `gap_follow` as a worked template |
 | [docs/drive-intent.md](docs/drive-intent.md) | The intent arrow and decision panel: what the driving algorithm is *trying* to do and why, the `/drive_intent` schema, and the porting guide for the `racerbot_a`/`racerbot_b` codebases |
@@ -48,6 +49,7 @@ This file stays a short quick-start; the docs above are the full reference.
 | `drive_intent` | local package | shared schema and trajectory prediction for `/drive_intent` — what a driving algorithm is trying to do, and why. Pure Python (no `rclpy`), plus a single-header C++ port for teammates' codebases. Detail: [docs/drive-intent.md](docs/drive-intent.md) |
 | `web_dashboard` | local package | live browser dashboard of the map/LIDAR/pose over a WebSocket, plus a panel for tuning the driving nodes' parameters live — not an autonomy node, publishes to no topic, safe to run alongside anything else. Workflow: [docs/web-dashboard.md](docs/web-dashboard.md); code detail: [src/web_dashboard/README.md](src/web_dashboard/README.md) |
 | `racerbot_launch` | local package | launch glue not owned by any single driver repo (SLAM, one-command autonomous map→race, saved-map race-day localization, and cameras) |
+| `racerbot_sim` | local package | F1TENTH Gym behind the car's own topics: stands in for the LiDAR, VESC and joystick so the real driving stack runs unchanged above it. Refuses to publish while the real drivers are on the graph. Detail: [docs/ros-simulator.md](docs/ros-simulator.md) |
 | `usb_cam_stream` | local package | live MJPEG video stream from a USB webcam, served over plain HTTP for viewing in any browser. Detail: [docs/usb-camera-livestream.md](docs/usb-camera-livestream.md), [src/usb_cam_stream/README.md](src/usb_cam_stream/README.md) |
 
 `slam_toolbox` is installed system-wide via apt (`ros-jazzy-slam-toolbox`), not vendored in `src/`.

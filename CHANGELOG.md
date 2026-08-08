@@ -6,6 +6,183 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-08-08 — The automatic map-to-race path, and a simulator that can see it
+
+### racerbot_sim (new package)
+
+- F1TENTH Gym behind the car's real topics. `gym_bridge_node` replaces
+  `urg_node` and the whole VESC chain: it consumes `/ackermann_cmd` and
+  publishes `/scan` (1081 beams over 270°, matching the Hokuyo UST-10LX),
+  `/odom`, and the `odom->base_link` transform. `sim_joy_node` replaces the
+  physical F710 with a synthetic LB hold. `sim_bringup_launch.py` mirrors
+  `bringup_launch.py`, keeping the real `ackermann_mux` and the real static
+  `base_link->laser` transform, and `sim_auto_map_race_launch.py` *includes*
+  `racerbot_launch`'s own `auto_map_race_launch.py` rather than copying it,
+  so what is validated is the launch file people run.
+- Odometry is dead-reckoned from wheel speed and the *commanded* servo angle,
+  exactly as `vesc_to_odom` does, so it drifts the way the car's does.
+  Ground truth is published separately on `/sim/ground_truth_pose` in an
+  unconnected frame, for scoring only.
+- **Hard interlock against real hardware.** Neither node publishes anything
+  while `vesc_driver_node`, `ackermann_to_vesc_node`, `vesc_to_odom_node`,
+  `urg_node` or `joy` is on the ROS graph, re-checked continuously so
+  bringing the car up after the simulator silences the simulator too. A
+  synthetic `/joy` holding LB defeats the workspace safety policy by design,
+  and a second `/scan` publisher is its own hazard.
+- Room-sized generated tracks (`indoor_oval`, `indoor_tight`, `indoor_wide`),
+  because the official 300m+ circuits make one automatic-mode run over twenty
+  minutes long, and a validation nobody runs is how the automatic mode got
+  into the state it was in.
+- `tools/racerbot_sim/run_auto_map_validation.py` runs the whole composition
+  solo, with a parked car, and in traffic, and exits non-zero if any scenario
+  fails to reach racing or touches anything. All three pass
+  (`docs/auto-map-sim-results.json`, seed 12345): 138.7m, 29.7m and 83.1m
+  raced in ~80s each, zero wall contact and zero car-to-car contact.
+  `tools/racerbot_sim/capture_dashboard.py` renders what the web dashboard is
+  drawing as a PNG, from the terminal.
+- Found along the way: in the pinned Gym revision, **wall collisions never
+  fire** with this workspace's vehicle parameters, because `side_distances`
+  computes to all zeros and the test reduces to "did a beam return under
+  5mm" against a 0.05m `range_min`. `tools/f1tenth_sim/run_validation.py`'s
+  "no collision" column has therefore always meant "not detected".
+  `racerbot_sim` samples the padded body against the occupancy grid instead.
+
+### web_dashboard
+
+- **The map was not glitchy; the camera was.** The view auto-framed the map
+  by re-deriving centre and zoom from *every* `/map` message, and
+  slam_toolbox resizes and re-origins its grid constantly as the map grows,
+  shrinking as often as growing. Measured over 130s of mapping: 27 map
+  messages, **18 view disturbances, the picture sliding up to 3.6m and
+  rescaling by up to 36%** while the map itself was fine. It now frames the
+  map once and re-fits only when the map no longer fits on screen — the
+  same run gives **2**, both of them the map genuinely growing.
+- Map and scan headers now carry `bytes`, and the browser drops any binary
+  frame whose length disagrees rather than painting it. The browser holds
+  one "what does the next binary mean" slot, so a header that never got its
+  binary made every later payload decode as the wrong type — a 1081-beam
+  scan read as occupancy cells is 4324 bytes against an 80000-cell header,
+  every read past the end undefined, every colour NaN, and the map paints
+  as garbage rather than failing. `applyMap` also refuses a short payload
+  outright, dropped frames are counted in the mode banner, and
+  `_send_to_all` now drops a client whose pair it could not complete (it
+  caught only `WebSocketClosedError` before) so that browser reconnects and
+  resynchronises instead of decoding everything wrongly from then on.
+  Across ~7,500 binary frames of validation **zero** failed the check, so
+  this is a guard against an unobserved failure, not a fix for a seen one.
+- `tools/racerbot_sim/capture_dashboard.py` renders what the dashboard is
+  drawing as a PNG from the terminal, and doubles as its test instrument:
+  `--seconds`/`--interval` watches a whole run, validates every frame, and
+  exits non-zero if any failed. It also replays both view-fitting policies
+  over the recorded map sequence, which is where the numbers above come
+  from.
+
+### pure_pursuit — the recorded racing line
+
+- New `recorded_path.py`: trims a recording to one revolution, resamples it
+  to uniform spacing, and low-passes the closed loop in space, discarding
+  features shorter than the car's own 1.22m turning circle. Reports peak
+  curvature against the steering rack, the seam heading error, and how far
+  the cleanup moved the line off the one actually driven.
+- `auto_map_race_node` now **refuses** to hand pure pursuit a line needing
+  more than `profile_reject_ratio` (1.5) times the rack limit, or needing
+  more than the rack has over more than `profile_reject_fraction` (0.25) of
+  the lap, and says so with numbers. Every racing line this car had ever
+  generated demanded more steering than the rack has on a third of its
+  waypoints, peaking at 47° against a 14.9° limit.
+- The supervisor now subscribes to `/map` and checks the finished line
+  against SLAM's own occupancy grid, because filtering a recorded lap
+  rounds its corners *inward*, toward the wall, and on a course whose
+  corners are near the car's 1.22m turning circle that is the direction
+  that hurts: a measured run finished with the line 0.05m from a wall --
+  under the car's own 0.155m half-width -- while curvature, seam error and
+  deviation all read healthy. Clearance outranks curvature when choosing
+  the filter cutoff. The requirement is capped by the driven line's own
+  clearance, because mapping with traffic paints the other cars into the
+  grid -- the two-car scenario produced a recorded line measuring 0.00m of
+  clearance on a lap the ego had just driven twice without touching
+  anything, and refusing there would be refusing to believe the lap that
+  happened. `OccupancyMap.from_grid_message` is new, and stays ROS-free by
+  taking the message's fields rather than the message.
+- **New parameters** in `auto_map_race.yaml`: `minimum_lap_turn_deg` (300),
+  `max_pose_jump_m` (0.12), `profile_max_steering_angle`, `profile_wheelbase`,
+  `map_save_retries`, `map_save_retry_delay_sec`,
+  `profile_min_feature_wavelength`, `profile_curvature_margin`,
+  `profile_max_deviation`, `profile_reject_ratio`, `profile_reject_fraction`,
+  `map_topic`, `profile_wall_clearance` (0.30), and
+  `profile_map_occupied_threshold`.
+  **Removed**: `profile_smoothing_window` (replaced by the above).
+- **Changed defaults**: `minimum_lap_distance` 20.0 → 5.0 (it was longer than
+  the loop this car is driven on, so closure could not fire until the car had
+  been round *twice*, and every recorded line was two overlapping laps);
+  `profile_max_brake` 8.0 → 3.0 (it is a braking-authority assumption in the
+  velocity profile, not a slew rate, and 8.0 was 2.7× what `gap_follow.yaml`
+  will assume for the same car); `profile_max_speed` 4.0 → 2.0 and
+  `profile_max_lateral_accel` 2.5 → 1.2 (that was the surveyed-track profile,
+  applied to a course discovered thirty seconds earlier at 1 m/s). What sets
+  that ceiling is width, not grip: the line comes from `gap_follow`, which
+  drives 0.25-0.35m from a corner's wall, and pure pursuit's cross-track
+  error through a corner near this car's turning circle measured 0.39-0.57m
+  at 2.5-3.0 m/s. On a 1.8m indoor corridor those do not both fit, at any
+  speed where the error exceeds the room.
+- `closure_distance` 0.75 → 1.5. That gate existed to keep the start/finish
+  seam short, because the seam used to be a naked chord from the last
+  recorded point to the first; `recorded_path` now trims and resamples it
+  instead, so the gate can be what it should always have been -- "did the
+  car come back past its start". 0.75m was also simply unachievable for a
+  reactive controller weaving around traffic: the two-car scenario drove
+  413m and 3726 degrees of turning -- ten laps -- passing 6.5m wide of its
+  start every time, without ever closing. The progress log now warns
+  explicitly once two laps of turning have gone by with no closure, instead
+  of leaving that to be inferred from two numbers.
+- `LapRecorder` now absorbs SLAM pose corrections into the already-recorded
+  path instead of recording them as geometry, and counts them in the progress
+  log. Closure is gated on accumulated yaw, which does not need to know how
+  big the course is.
+
+### pure_pursuit — saving the map
+
+- The occupancy-map save is retried (`map_save_retries`, 3, spaced
+  `map_save_retry_delay_sec`). slam_toolbox runs nav2's `map_saver` inline
+  and `map_saver` gives up after ~2s if no `/map` arrives, while `/map` is
+  only republished every `map_update_interval` (5s) — so whether the save
+  works is a race against when the request lands, and the same run fails or
+  succeeds with nothing else different. A retry lands in a different part of
+  the window; if all attempts fail the run still continues and says the pose
+  graph can be turned back into a map with `deserialize_map`. The handover
+  gate deliberately does not treat a save as settled while a retry is due.
+
+### pure_pursuit — the reactive safety net
+
+- The `emergency_obstacle` hard stop is no longer a latch. A stopped car
+  cannot clear its own safety cone, so the stop, on its own, ended the run
+  wherever it fired. It now crawls toward a genuine opening at
+  `emergency_escape_speed` (0.25 m/s) when the whole body still has
+  `emergency_escape_clearance` (0.10m) of room and a gap deeper than
+  `emergency_escape_min_gap` (0.8m) exists. The contact and stale-scan stops
+  still win outright; `emergency_escape_speed: 0.0` restores the old
+  behaviour. Same reasoning as `gap_follow`'s `escape_creep_speed`.
+
+### racerbot_launch
+
+- `auto_map_race_launch.py` takes `supervisor_config:=`, so a course can have
+  its own racing profile without editing the packaged config.
+
+### Tests
+
+- `test_overtakes_toward_the_*` asserted the *sign* of a steering command
+  that back-to-back `control_loop()` calls left pinned within a thousandth
+  of a radian of zero -- `max_steering_rate` permits about 0.0001 rad per
+  microsecond-long tick, so the sign was scheduler noise, and a few extra
+  microseconds of work per tick flipped it. They now give the slew limiter a
+  realistic time step (the idiom already used by
+  `test_shaped_speed_ramps_up_to_the_profiled_speed`) and assert the pass
+  side as a comparison between passing left and passing right, which is what
+  the claim actually is: the 0.35m offset applied 4m ahead is about five
+  degrees of bearing, a nudge on top of the racing line's own curvature
+  rather than a replacement for it, so on that fixture's track both passes
+  come out positive.
+
 ## 2026-07-25 — Runtime autonomy decision logging
 
 ### gap_follow and pure_pursuit

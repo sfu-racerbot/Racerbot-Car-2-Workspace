@@ -331,6 +331,40 @@ solo lap time cannot simply be bought by raising this. `6.0` passes across
 seeds 12345/777/2024 (92.2/92.7/92.0 s), but it is one step from the cliff:
 **re-run `--scenario traffic` after any change to it.**
 
+## The ROS-level simulator is a separate thing
+
+This harness has no ROS in it at all, by design. That makes it fast and
+deterministic and blind to an entire class of failure: SLAM, TF, launch
+files, topic wiring, and handovers between nodes. Every defect found in
+`auto_map_race_launch.py` on 2026-08-08 was in that class.
+
+`racerbot_sim` ([docs/ros-simulator.md](ros-simulator.md)) puts the same
+F1TENTH Gym physics behind the car's real topics and runs the real launch
+files over it. Use this harness to tune a control law; use that one to
+prove a launch file works.
+
+### Wall collisions in this harness do not fire
+
+Worth knowing before trusting the `collision` column above. In the pinned
+Gym revision the wall check is `raw_scan - side_distances <= 0.005`, where
+`side_distances` is the distance from the LiDAR to the body edge along
+each beam. With the vehicle parameters this file sets
+(`collision_body_center_x = WHEELBASE/2`), the ST model's own `-lr` offset
+cancels it exactly, putting the collision rectangle on `base_link` -- and
+the LiDAR at `+0.33m` then sits 0.04m *outside* that rectangle, so
+`_ray_to_rect_distance_vec` returns 0 for every beam. The test becomes
+"did a beam return less than 5mm", which it cannot: `range_min` is 0.05m.
+
+Measured directly: a car commanded straight into a wall at 1 m/s reports
+`collision=False` for the whole run and drives off the edge of the map.
+
+The scenarios above still fail on the criteria that do work -- lap
+completion, cross-track error, stop counts, TTC braking -- and the
+controllers were tuned against those. But "No" in the collision column
+means "not detected", not "did not happen". `racerbot_sim` samples the
+padded body against the occupancy grid directly instead, and
+`tools/racerbot_sim/run_auto_map_validation.py` gates on that.
+
 ## Optional official ROS bridge
 
 The official [`f1tenth_gym_ros`](https://github.com/f1tenth/f1tenth_gym_ros)

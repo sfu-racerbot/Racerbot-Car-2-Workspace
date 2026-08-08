@@ -6,3 +6,4 @@ __pycache__/
 .claude/
 .sim/
 .venv-f1tenth/
+.pytest_cache/

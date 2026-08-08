@@ -191,6 +191,15 @@ class PurePursuitNode(Node):
         self.declare_parameter('enable_lidar_safety', True)
         self.declare_parameter('safety_fov_deg', 60.0)
         self.declare_parameter('emergency_stop_distance', 0.4)
+        # --- Escape from the hard stop (see _reactive_override tier 1) ---
+        # A hard stop with no way out is not a safe state, it is a stuck one:
+        # at zero speed nothing about the scene changes, so the obstacle that
+        # stopped the car never leaves the cone. gap_follow_node solved the
+        # identical deadlock with escape_creep_speed; this is the same idea
+        # for the race controller. 0.0 restores the old latching behaviour.
+        self.declare_parameter('emergency_escape_speed', 0.25)
+        self.declare_parameter('emergency_escape_min_gap', 0.8)
+        self.declare_parameter('emergency_escape_clearance', 0.10)
         self.declare_parameter('scan_timeout_sec', 0.5)
         # --- Deadman button (workspace policy, see docs/architecture.md) ---
         self.declare_parameter('enable_deadman', True)
@@ -296,6 +305,12 @@ class PurePursuitNode(Node):
         self.enable_lidar_safety = bool(self.get_parameter('enable_lidar_safety').value)
         self.safety_fov_deg = float(self.get_parameter('safety_fov_deg').value)
         self.emergency_stop_distance = float(self.get_parameter('emergency_stop_distance').value)
+        self.emergency_escape_speed = float(
+            self.get_parameter('emergency_escape_speed').value)
+        self.emergency_escape_min_gap = float(
+            self.get_parameter('emergency_escape_min_gap').value)
+        self.emergency_escape_clearance = float(
+            self.get_parameter('emergency_escape_clearance').value)
         self.scan_timeout_sec = float(self.get_parameter('scan_timeout_sec').value)
         self.enable_deadman = bool(self.get_parameter('enable_deadman').value)
         self.joy_topic = self.get_parameter('joy_topic').value
@@ -1253,6 +1268,63 @@ class PurePursuitNode(Node):
         window = np.nan_to_num(window, nan=0.0, posinf=self.max_range, neginf=0.0)
         return np.clip(window, 0.0, self.max_range)
 
+    def _emergency_escape(self, scan, body_clearance: float, closest: float):
+        """Crawl toward a real opening instead of latching at a hard stop.
+
+        Returns a `_reactive_override` tuple, or None to let the caller stop.
+
+        The hard stop above is correct about the danger and wrong about the
+        remedy. Zero speed does not clear the cone -- nothing moves, so the
+        car sits there until a human picks it up. On 2026-08-08 that is
+        exactly how a simulated auto-map race ended: pure pursuit took over,
+        ran wide on its first corner, stopped 0.38m from a wall, and stayed
+        there for the rest of the run.
+
+        gap_follow_node reached the same conclusion about its own forward
+        reserve and answers it with `escape_creep_speed`. This is the same
+        answer, kept deliberately narrower:
+
+        * it is a crawl (`emergency_escape_speed`, 0.25m/s), not a drive;
+        * it only moves toward a gap that is really there -- deeper than
+          `emergency_escape_min_gap` in the wider avoidance cone -- and
+          never guesses a direction;
+        * it needs `emergency_escape_clearance` of room around the whole
+          body, measured over every beam, so a car wedged against something
+          the forward cone cannot see still stops; and
+        * the contact tier above still wins outright, and so does a
+          stale/missing scan.
+
+        Set `emergency_escape_speed` to 0.0 to restore the old behaviour.
+        """
+        if self.emergency_escape_speed <= 0.0:
+            return None
+        if body_clearance <= self.emergency_escape_clearance:
+            return None
+
+        lo_idx, hi_idx = self._fov_indices(scan, self.avoidance_fov_deg)
+        window = self._sanitized_window(scan, lo_idx, hi_idx)
+        if window.size == 0:
+            return None
+        gap_start, gap_end = racing_math.find_best_gap(
+            window, self.emergency_escape_min_gap)
+        if gap_start is None:
+            return None
+
+        target_idx = lo_idx + (gap_start + gap_end) // 2
+        angle = scan.angle_min + target_idx * scan.angle_increment
+        angle = float(np.clip(angle, -self.max_steering_angle, self.max_steering_angle))
+        return (
+            angle,
+            self.emergency_escape_speed,
+            'emergency_escape',
+            f"closest valid return in the {self.safety_fov_deg:.1f}deg safety cone is "
+            f"{closest:.2f}m, inside the {self.emergency_stop_distance:.2f}m emergency "
+            f"threshold, but the body still has {body_clearance:.3f}m all round and a "
+            f"{self.emergency_escape_min_gap:.2f}m opening exists at "
+            f"{math.degrees(angle):+.1f}deg -- crawling out at "
+            f"{self.emergency_escape_speed:.2f}m/s rather than latching stopped",
+        )
+
     def _reactive_override(self, allow_avoidance: bool = True):
         """The reactive LIDAR safety net -- independent of the racing
         line and the overtake logic above, and always has the final say.
@@ -1267,7 +1339,10 @@ class PurePursuitNode(Node):
              (treated the same as "too close" -- a safety net that's
              gone blind isn't a safety net) -- hard stop, steering left
              alone so the wheels stay pointed to resume the line once
-             clear.
+             clear. If the body still has room and there is a real
+             opening to aim at, _emergency_escape crawls out of it
+             instead: a stopped car cannot clear its own cone, so the
+             hard stop on its own ends the run wherever it fires.
           2. Something is inside avoidance_trigger_distance in a wider
              cone (but outside the hard-stop distance) -- steer at the
              best gap instead of stopping, at a capped cautious speed,
@@ -1316,6 +1391,9 @@ class PurePursuitNode(Node):
 
         emergency_closest = self._closest_in_cone(scan, self.safety_fov_deg)
         if emergency_closest < self.emergency_stop_distance:
+            escape = self._emergency_escape(scan, body_clearance, emergency_closest)
+            if escape is not None:
+                return escape
             return (
                 None,
                 0.0,

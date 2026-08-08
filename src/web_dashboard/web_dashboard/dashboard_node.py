@@ -972,16 +972,29 @@ class DashboardNode(Node):
     def _send_to_all(self, header: dict, binary_payload):
         """Runs on the IOLoop thread (via add_callback) -- only safe place
         to touch WebSocket connections."""
+        text = json.dumps(header)
         dead = []
         for client in list(self.ws_clients):
             try:
-                client.write_message(json.dumps(header))
+                client.write_message(text)
                 if binary_payload is not None:
                     client.write_message(binary_payload, binary=True)
-            except tornado.websocket.WebSocketClosedError:
+            except Exception:  # noqa: BLE001
+                # Any failure, not just WebSocketClosedError. A header that
+                # went out without the binary that explains it leaves that
+                # browser's "what does the next binary mean" slot pointing
+                # at the wrong thing, and it decodes the *next* payload as
+                # the wrong type from then on -- a scan read as occupancy
+                # cells paints the map as garbage. Dropping the client makes
+                # it reconnect and resynchronise, which is the only honest
+                # recovery from a half-sent pair.
                 dead.append(client)
         for client in dead:
             self.ws_clients.discard(client)
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def send_initial_state(self, client: DashboardWebSocket):
         """Runs on the IOLoop thread (called from WebSocketHandler.open) --

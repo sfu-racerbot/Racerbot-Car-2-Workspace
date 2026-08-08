@@ -148,3 +148,38 @@ def test_stats_message_allows_missing_temp_and_wifi():
     msg = protocol.stats_message(cpu_percent=10.0, mem_percent=20.0, cpu_temp_c=None, uptime_s=0.0)
     assert msg['cpu_temp_c'] is None
     assert msg['wifi_dbm'] is None
+
+
+# ---------------------------------------------------------------------------
+# The binary frames say how long they are.
+# ---------------------------------------------------------------------------
+
+def test_map_header_declares_its_payload_length():
+    """The browser holds one "what does the next binary mean" slot, so a
+    header that never gets its binary points it at the wrong thing and the
+    *next* payload is decoded as the previous type. A 1081-beam scan read
+    as occupancy cells is 4324 bytes against an 80000-cell header: every
+    read past the end is undefined, every colour computes to NaN, and the
+    map paints as garbage rather than failing. `bytes` is what makes that
+    detectable -- see web/dashboard.js handleBinary.
+    """
+    msg = _fake_occupancy_grid(width=334, height=239)
+    header = protocol.map_header(msg)
+    assert header['bytes'] == 334 * 239
+    assert len(protocol.map_cells(msg)) == header['bytes']
+
+
+def test_scan_header_declares_its_payload_length():
+    msg = _fake_laser_scan([1.0] * 1081)
+    header = protocol.scan_header(msg)
+    assert header['bytes'] == 4 * 1081
+    assert len(protocol.scan_ranges(msg)) == header['bytes']
+
+
+def test_a_scan_payload_is_not_the_length_of_a_map_payload():
+    """The two are wildly different sizes, which is what makes a length
+    check a complete defence against mis-pairing rather than a heuristic."""
+    scan = _fake_laser_scan([1.0] * 1081)
+    grid = _fake_occupancy_grid(width=334, height=239)
+    assert protocol.scan_header(scan)['bytes'] != protocol.map_header(grid)['bytes']
+    assert len(protocol.scan_ranges(scan)) != len(protocol.map_cells(grid))

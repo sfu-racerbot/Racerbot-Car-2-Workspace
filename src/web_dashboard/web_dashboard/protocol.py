@@ -18,6 +18,7 @@ comfortably in JSON):
          unknown, 0 free, 100 occupied), one byte per cell.
   SCAN:  {"type": "scan", ...metadata...} -> binary: float32 ranges,
          little-endian, one 4-byte value per LaserScan.ranges entry.
+
   POSE/DRIVE/SPEED/STOPWATCH/STATS: compact JSON only (no binary payload).
   INTENT: compact JSON only -- a driving node's own description of what it
          is trying to do, forwarded almost unchanged from /drive_intent.
@@ -27,6 +28,17 @@ Both binary payloads are laid out to match a JavaScript TypedArray
 byte-for-byte (Int8Array for the map, Float32Array for the scan), so the
 browser needs no parsing beyond `new Int8Array(buf)` / `new
 Float32Array(buf)` -- see web/dashboard.js.
+
+Both binary-carrying headers also declare `bytes`, the exact length of the
+frame that must follow. The browser holds a single "what does the next
+binary mean" slot, so a header that never gets its binary -- a write that
+fails between the two, a proxy that drops a frame -- leaves that slot
+pointing at the wrong thing, and the *next* binary is then decoded as the
+previous type. A 1081-beam scan payload read as occupancy cells is 4324
+bytes against an 80000-cell header: every read past the end is undefined,
+every colour computes to NaN, and the map paints as garbage rather than
+failing. `bytes` makes that detectable instead of silent -- see
+web/dashboard.js handleBinary.
 """
 
 import math
@@ -57,6 +69,9 @@ def map_header(msg) -> dict:
         'type': 'map',
         'width': int(info.width),
         'height': int(info.height),
+        # One signed byte per cell; see the module docstring on why the
+        # browser is told the length rather than trusting the pairing.
+        'bytes': int(info.width) * int(info.height),
         'resolution': float(info.resolution),
         'origin_x': float(info.origin.position.x),
         'origin_y': float(info.origin.position.y),
@@ -89,6 +104,8 @@ def scan_header(msg, laser_offset_x: float = 0.0, laser_offset_y: float = 0.0) -
     """
     return {
         'type': 'scan',
+        # Four bytes per beam, for the same reason map_header carries it.
+        'bytes': 4 * len(msg.ranges),
         'angle_min': float(msg.angle_min),
         'angle_increment': float(msg.angle_increment),
         'range_min': float(msg.range_min),

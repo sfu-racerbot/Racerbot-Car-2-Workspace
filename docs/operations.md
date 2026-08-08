@@ -154,12 +154,80 @@ ros2 launch racerbot_launch auto_map_race_launch.py mapping_laps:=1
 
 # Hardware stack is already running in another terminal
 ros2 launch racerbot_launch auto_map_race_launch.py include_bringup:=false
+
+# Race a particular course to its own limits, without editing the packaged
+# config: copy auto_map_race.yaml, change profile_max_speed /
+# profile_max_lateral_accel, and point the launch at it
+ros2 launch racerbot_launch auto_map_race_launch.py \
+    supervisor_config:=$HOME/my_course.yaml
 ```
 
 Releasing LB stops the selected controller immediately but does not erase the
 map or recorded progress. The first real run still follows the wheels-off-ground
 and low-speed ladder; simulator validation does not sign off physical grip or
 SLAM quality. See [simulator.md](simulator.md) for the validation evidence.
+
+#### Reading the terminal while it maps
+
+The supervisor prints one line a second. The parts that tell you whether it
+is going to work:
+
+```
+lap 1/2: samples=168, distance=27.2/5.0m, turn=341/300deg, elapsed=31.4/15.0s,
+departed=yes, start distance=0.43/0.75m, heading error=6.2/30.0deg,
+SLAM corrections absorbed=6
+```
+
+- **`turn`** is the gate that actually decides a lap is a lap: 360 degrees
+  of accumulated yaw is one revolution of a closed circuit whatever size it
+  is. If this climbs past 300 and the lap does not close, the car is not
+  getting back within `closure_distance` of where it started.
+- **`SLAM corrections absorbed`** counts how many times the map-frame pose
+  jumped further than the car could have moved. A handful over a lap is
+  normal and they are now applied to the recorded path rather than recorded
+  *as* path. Dozens means SLAM is struggling — check the map in the
+  dashboard before trusting anything downstream.
+
+Then, once, at the handover:
+
+```
+Recorded lap cleaned up: 180 points over 27.1m (from 164 recorded, 164 after
+trimming to one lap); kept 18 harmonics (nothing shorter than 1.50m), moving
+the line at most 0.03m off the recorded one; peak curvature 0.696/m of the
+0.821/m the rack can reach (needs 12.7deg steering, limit 14.9deg) on 0.0% of
+waypoints; seam heading error 3.8deg; closest wall 0.62m, needs 0.30m
+```
+
+That is the whole verdict on the racing line. Two numbers matter:
+
+- **`% of waypoints` past the rack limit** — should be 0. Anything much
+  above that and the car will understeer where it cannot steer harder.
+- **`closest wall`** — must clear the number after it. This is the finished
+  line measured against SLAM's own map, and it is the check that catches
+  the line being *rounded into a wall*: filtering a recorded lap pulls its
+  corners inward, and on a tight course inward is where the wall is.
+  "not checked (no map)" means `/map` never arrived — treat the run as
+  unverified.
+
+If the run refuses with *"Refusing to hand it to pure pursuit"*, the message
+says which of the two failed and by how much, and `raceline_raw.csv` is
+still written so it can be plotted against the saved map. Usual causes, in
+order: a course with a corner tighter than this car's 1.22m turning circle,
+or a smeared map. See
+[racing-autonomy.md](racing-autonomy.md#what-a-recorded-lap-actually-looks-like).
+
+#### Trying it without the car
+
+The whole composition runs against the simulator, including the dashboard:
+
+```bash
+ros2 launch racerbot_sim sim_auto_map_race_launch.py dashboard:=true
+tools/racerbot_sim/run_auto_map_validation.py --scenario all
+```
+
+See [ros-simulator.md](ros-simulator.md). This is the fastest way to check a
+change to any part of the automatic path, and the only thing that exercises
+the launch wiring rather than the control math.
 
 ### Manual/reusable saved-map workflow
 

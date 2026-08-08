@@ -257,6 +257,63 @@ The fullscreen button and the mouse cursor both fade out after ~2.5s of no
 input, so neither ends up baked into a recording; any mouse movement or
 keypress brings them back.
 
+## "The map looks glitchy"
+
+Two different things produce that complaint and they have opposite fixes,
+so measure before changing anything:
+
+```bash
+# Connect for a whole run, validate every frame, write a picture per phase
+tools/racerbot_sim/capture_dashboard.py --seconds 280 --interval 40 \
+    --output /tmp/run.png --report /tmp/run.json
+```
+
+It exits non-zero if any binary frame failed its length check, and its
+report separates the two causes.
+
+**1. The view moving, not the map.** The dashboard frames the map
+automatically until you pan or zoom. It used to re-derive centre and zoom
+from *every* `/map` message, and `slam_toolbox` resizes and re-origins its
+grid constantly as the map grows -- shrinking as often as growing. Measured
+over 130s of mapping: 27 map messages, **18 view disturbances, the picture
+sliding up to 3.6m and rescaling by up to 36%**, while the map itself was
+perfectly good. It now frames the map once and re-fits only when the map no
+longer fits on screen: the same run gives **2**, both of them the map
+genuinely growing. If you want it to stop moving entirely, pan or zoom once
+-- that latches `userAdjusted` and auto-fit never runs again.
+
+**2. The map really is bad.** Thick, doubled or fuzzy walls are
+`slam_toolbox` smearing scans over a drifting odometry estimate, and the
+dashboard is telling the truth. Reproduced deliberately with an 18%
+odometry scale error: the walls come out visibly thickened and the inner
+island's edge becomes a dotted band. That is a calibration problem
+([odom-calibration.md](odom-calibration.md)), not a display one. The
+supervisor's `SLAM corrections absorbed=` counter in the mapping log is the
+matching number -- a handful per lap is normal, dozens is not.
+
+**3. Two stacks running at once.** Worth ruling out first, because it looks
+worse than either: a leftover launch publishing a second `/map` and a
+second pose makes the dashboard alternate between two unrelated worlds,
+frame to frame. `ros2 node list | grep slam` should show exactly one.
+
+### Frame corruption, and why it is now impossible to miss
+
+Every map and scan travels as a JSON header immediately followed by one
+binary frame, and the browser holds a single "what does the next binary
+mean" slot. A header that never gets its binary leaves that slot pointing
+at the wrong thing, and the *next* payload is decoded as the previous type.
+A 1081-beam scan read as occupancy cells is 4324 bytes against an
+80000-cell header: every read past the end is undefined, every colour
+computes to NaN, and the map paints as garbage rather than failing.
+
+Both headers now declare `bytes`, the browser checks it and drops the frame
+rather than painting it, the count appears in the mode banner, and the
+server drops any client whose pair it could not complete so it reconnects
+and resynchronises. Across the validation runs above -- roughly 7,500
+binary frames -- **zero** frames failed that check, so this is a guard
+against a failure that has not been observed rather than a fix for one that
+has. It costs one integer per header.
+
 ## Running it
 
 Dashboard by itself — map/scan/pose, no camera:

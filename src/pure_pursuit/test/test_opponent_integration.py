@@ -45,6 +45,31 @@ def profiled_csv(tmp_path_factory):
 
 
 @pytest.fixture
+def node_factory(profiled_csv):
+    """Build more than one identically configured node in one context.
+
+    Needed by the pass-side tests, which are comparisons: "steers further
+    right *than it would have* without the opponent" is the claim, and a
+    comparison needs a baseline run from the same starting state.
+    """
+    rclpy.init(args=['--ros-args',
+                     '-p', f'waypoints_file:={profiled_csv}',
+                     '-p', 'enable_deadman:=false',
+                     '-p', 'drive_topic:=/test_only/drive'])
+    built = []
+
+    def make():
+        node = PurePursuitNode()
+        built.append(node)
+        return node
+
+    yield make
+    for node in built:
+        node.destroy_node()
+    rclpy.shutdown()
+
+
+@pytest.fixture
 def node(profiled_csv):
     """A real PurePursuitNode against the profiled example track, in its
     own rclpy context per test (parameter overrides -- like the profiled
@@ -98,6 +123,23 @@ def _car_ahead_scan(car_range=2.0, left_room=9.9, right_room=9.6):
     for i in range(center - 65, center - 15):
         scan.ranges[i] = right_room
     return scan, center
+
+
+def _one_command_interval(node):
+    """Make the next control_loop() integrate a realistic time step.
+
+    Back-to-back control_loop() calls are microseconds apart, and
+    max_steering_rate (1.0 rad/s) then permits about 0.0001 rad of steering
+    change per call. Four of those leaves the command within a thousandth
+    of a radian of zero, and a test asserting its *sign* is really
+    asserting how long each call took -- which flips with machine load.
+    Rewinding last_command_time by one command_slew_max_dt gives the slew
+    limiter the same budget it gets on the car, so what is measured is the
+    pass-side decision rather than the scheduler. (Same idiom as
+    test_shaped_speed_ramps_up_to_the_profiled_speed.)
+    """
+    node.last_command_time = node.get_clock().now() - Duration(
+        seconds=node.command_slew_max_dt)
 
 
 def _capture_published(node):
@@ -155,31 +197,64 @@ def test_missing_lidar_stop_has_a_diagnostic_reason(node):
     assert node.last_decision_state == 'lidar_scan_missing'
 
 
-def test_overtakes_toward_the_more_open_side(node):
+def _drive_four_ticks(node, scan):
+    """Four control ticks from the same start, returning the last command."""
     published = _capture_published(node)
-    scan, _center = _car_ahead_scan(left_room=9.9, right_room=9.6)
     node.scan_callback(scan)
     for step in range(4):
         _set_pose(node, -1.5 + step * 0.2, -1.2, 0.0)
+        _one_command_interval(node)
         node.control_loop()
-    last = published[-1]
+    return published[-1]
+
+
+def test_overtakes_toward_the_more_open_side(node_factory):
+    node = node_factory()
+    scan, _center = _car_ahead_scan(left_room=9.9, right_room=9.6)
+    _drive_four_ticks(node, scan)
     assert node.overtake_active is True
     assert node.overtake_side == 1  # more open on the left -> pass left
-    assert last.drive.steering_angle > 0.0
     assert node.last_decision_state == 'overtake_left'
 
 
-def test_overtakes_toward_the_right_when_thats_more_open(node):
-    published = _capture_published(node)
+def test_overtakes_toward_the_right_when_thats_more_open(node_factory):
+    node = node_factory()
     scan, _center = _car_ahead_scan(left_room=9.6, right_room=9.9)
-    node.scan_callback(scan)
-    for step in range(4):
-        _set_pose(node, -1.5 + step * 0.2, -1.2, 0.0)
-        node.control_loop()
-    last = published[-1]
+    _drive_four_ticks(node, scan)
     assert node.overtake_active is True
     assert node.overtake_side == -1
-    assert last.drive.steering_angle < 0.0
+    assert node.last_decision_state == 'overtake_right'
+
+
+def test_the_chosen_pass_side_actually_moves_the_steering_that_way(node_factory):
+    """Passing right must steer further right than passing left, from the
+    same pose against the same opponent.
+
+    Stated as a comparison between the two sides rather than as the sign of
+    either one. The overtake offsets a point `overtake_lookahead_distance`
+    (4m) ahead by `overtake_lateral_offset` (0.35m), which is about five
+    degrees of bearing -- a nudge on top of whatever the racing line is
+    already doing over those four metres, not a replacement for it. On this
+    fixture's track the line's own curvature is the larger term, so *both*
+    passes come out with a positive steering angle and an assertion on the
+    sign of one of them is an assertion about the test track.
+
+    It used to pass anyway: back-to-back control_loop() calls are
+    microseconds apart, max_steering_rate then allowed about 0.0001 rad of
+    change per call, and the command stayed pinned near zero where its sign
+    was noise. Adding a few microseconds of work per tick flipped it.
+    """
+    left_node = node_factory()
+    left_scan, _ = _car_ahead_scan(left_room=9.9, right_room=9.6)
+    left = _drive_four_ticks(left_node, left_scan)
+
+    right_node = node_factory()
+    right_scan, _ = _car_ahead_scan(left_room=9.6, right_room=9.9)
+    right = _drive_four_ticks(right_node, right_scan)
+
+    assert left_node.overtake_side == 1
+    assert right_node.overtake_side == -1
+    assert right.drive.steering_angle < left.drive.steering_angle
 
 
 def _set_odom(node, speed):
@@ -290,10 +365,17 @@ def test_hard_stop_overrides_an_active_overtake(node):
     assert node.last_decision_state == 'body_contact'
 
 
-def test_forward_cone_hard_stop_still_fires_outside_the_footprint_tier(node):
-    """The two hard-stop tiers are distinct: an obstacle close enough for
-    the forward cone but not touching the body must still stop the car,
-    and must report as emergency_obstacle rather than body_contact."""
+def test_forward_cone_obstacle_crawls_out_rather_than_latching(node):
+    """An obstacle inside the forward cone with an open track beside it is
+    escaped at a crawl, not sat next to forever.
+
+    A hard stop cannot clear its own safety cone: at zero speed nothing
+    about the scene changes, so whatever stopped the car keeps stopping it.
+    That ended a simulated auto-map race on 2026-08-08 -- pure pursuit ran
+    wide on its first corner, stopped 0.38m from a wall, and stayed there.
+    The classification must still be its own tier, distinct from
+    body_contact, and the speed must still be a crawl rather than a drive.
+    """
     published = _capture_published(node)
     _set_pose(node, -1.5, -1.2, 0.0)
     scan = _clear_scan()
@@ -303,8 +385,48 @@ def test_forward_cone_hard_stop_still_fires_outside_the_footprint_tier(node):
     scan.ranges[center] = 0.30
     node.scan_callback(scan)
     node.control_loop()
+    assert node.last_decision_state == 'emergency_escape'
+    assert published[-1].drive.speed == pytest.approx(node.emergency_escape_speed)
+    assert published[-1].drive.speed <= 0.3, 'the escape is a crawl, not a drive'
+
+
+def test_forward_cone_hard_stop_still_fires_with_nowhere_to_go(node):
+    """With no opening wide enough to crawl toward, the hard stop stands.
+
+    The escape above is allowed to move the car only because there is
+    somewhere to move it to. Boxed in, the node must fall back to the
+    original behaviour and report emergency_obstacle.
+    """
+    published = _capture_published(node)
+    _set_pose(node, -1.5, -1.2, 0.0)
+    scan = _clear_scan()
+    # A wall right across the avoidance cone: inside the emergency distance
+    # ahead, and nothing anywhere near emergency_escape_min_gap to aim at.
+    scan.ranges = [0.30] * len(scan.ranges)
+    node.scan_callback(scan)
+    node.control_loop()
     assert published[-1].drive.speed == 0.0
-    assert node.last_decision_state == 'emergency_obstacle'
+    assert node.last_decision_state in ('emergency_obstacle', 'body_contact')
+
+
+def test_emergency_escape_yields_to_the_body_contact_tier(node):
+    """Nearly touching means stop, not nudge -- whatever the cone shows.
+
+    emergency_escape_clearance sits above emergency_stop_clearance for
+    exactly this: a car with room to crawl may crawl; a car already against
+    something may not, even when the forward cone shows an open track to
+    aim at.
+    """
+    published = _capture_published(node)
+    _set_pose(node, -1.5, -1.2, 0.0)
+    scan = _clear_scan()
+    center = len(scan.ranges) // 2
+    # ~0.03m from the bodywork straight ahead, with the rest of the cone open.
+    scan.ranges[center] = 0.15
+    node.scan_callback(scan)
+    node.control_loop()
+    assert published[-1].drive.speed == 0.0
+    assert node.last_decision_state == 'body_contact'
 
 
 def test_wall_alongside_the_car_stops_it_although_the_forward_cone_is_clear(node):

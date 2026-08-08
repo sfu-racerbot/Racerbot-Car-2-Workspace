@@ -125,6 +125,21 @@ pure_pursuit_node:
     enable_lidar_safety: true
     safety_fov_deg: 60.0
     emergency_stop_distance: 0.4
+    # Escape from that hard stop rather than latching in it. A stopped car
+    # cannot clear its own safety cone -- nothing about the scene changes at
+    # zero speed -- so the stop above, on its own, ends the run wherever it
+    # fires. gap_follow has had escape_creep_speed for exactly this since the
+    # 2026-08-06 run; this is the same idea, kept narrower: a crawl, only
+    # toward an opening that is genuinely there, and only while the whole
+    # body still has room. Contact and stale-scan stops still win outright.
+    # Set emergency_escape_speed to 0.0 for the old latching behaviour.
+    emergency_escape_speed: 0.25
+    # The opening has to be a real one, not the least-bad direction.
+    emergency_escape_min_gap: 0.8
+    # Minimum clearance around the entire body (every beam, not the cone)
+    # before crawling is allowed at all. Above emergency_stop_clearance, so
+    # a car that is nearly touching stops instead of nudging.
+    emergency_escape_clearance: 0.10
     scan_timeout_sec: 0.5
     max_range: 10.0   # range readings beyond this (and inf/NaN) are clipped/filled before any math touches them
 
