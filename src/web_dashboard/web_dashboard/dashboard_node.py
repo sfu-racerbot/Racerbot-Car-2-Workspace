@@ -415,7 +415,12 @@ class DashboardNode(Node):
         # race (worst case a just-connected tab's first frame is a few ms
         # stale, fixed by the very next broadcast); this is a read-only
         # display, not a control path, so it isn't worth a lock.
-        self._last_map_msg = None
+        # (header dict, packed payload bytes) for the newest map, packed
+        # once and reused for every send. Replaced wholesale, never mutated
+        # in place, so a reader on the IOLoop thread gets either the old
+        # complete pair or the new one -- same discipline as
+        # _last_tuning_json below.
+        self._map_frame = None
         self._last_scan_msg = None
         self._last_pose = None  # (x, y, yaw)
         self._last_pose_topic = None  # which pose_topics entry last delivered
@@ -494,8 +499,25 @@ class DashboardNode(Node):
     # ------------------------------------------------------------------------
 
     def map_callback(self, msg: OccupancyGrid):
-        self._last_map_msg = msg
-        self._broadcast(protocol.map_header(msg), protocol.map_cells(msg))
+        # Packing the grid is by far the most expensive thing this node
+        # does -- a 2048x2048 map is 4.2 million cells -- so it happens
+        # exactly once here, not once per connected browser, and not at all
+        # while nobody is watching.
+        if not self._has_clients() and self._map_frame is not None:
+            # Keep the previous frame rather than packing a new one: a tab
+            # that connects later gets a fresh map from the next /map
+            # message anyway (slam_toolbox republishes every
+            # map_update_interval), and map_server latches a static one.
+            return
+        header = protocol.map_header(msg)
+        payload = protocol.map_cells(msg)
+        if self._map_frame is not None and self._map_frame[1] == payload:
+            # slam_toolbox republishes the whole grid on its own timer
+            # whether or not anything in it changed; a parked car would
+            # otherwise re-send 4MB every few seconds to say nothing.
+            return
+        self._map_frame = (header, payload)
+        self._broadcast(header, payload)
 
     def scan_callback(self, msg: LaserScan):
         self._last_scan_msg = msg
@@ -508,6 +530,8 @@ class DashboardNode(Node):
         if now - self._last_scan_broadcast_time < min_period:
             return
         self._last_scan_broadcast_time = now
+        if not self._has_clients():
+            return
         self._broadcast(
             protocol.scan_header(msg, self.laser_offset_x, self.laser_offset_y),
             protocol.scan_ranges(msg))
@@ -519,11 +543,13 @@ class DashboardNode(Node):
         if topic != self._last_pose_topic:
             self._last_pose_topic = topic
             self.get_logger().info(f"Pose display is now following '{topic}'.")
-        self._broadcast(protocol.pose_message(*self._last_pose))
+        if self._has_clients():
+            self._broadcast(protocol.pose_message(*self._last_pose))
 
     def drive_callback(self, msg: AckermannDriveStamped):
         self._last_drive = (msg.drive.speed, msg.drive.steering_angle)
-        self._broadcast(protocol.drive_message(*self._last_drive))
+        if self._has_clients():
+            self._broadcast(protocol.drive_message(*self._last_drive))
 
     def intent_callback(self, msg: String):
         """Forward one driving node's intent to every browser tab.
@@ -551,11 +577,13 @@ class DashboardNode(Node):
                     f'{problem}')
             return
         self._last_intent = payload
-        self._broadcast(protocol.intent_message(payload))
+        if self._has_clients():
+            self._broadcast(protocol.intent_message(payload))
 
     def odom_callback(self, msg: Odometry):
         self._last_speed = msg.twist.twist.linear.x
-        self._broadcast(protocol.speed_message(self._last_speed))
+        if self._has_clients():
+            self._broadcast(protocol.speed_message(self._last_speed))
 
     def joy_callback(self, msg: Joy):
         with self._stopwatch_lock:
@@ -571,7 +599,8 @@ class DashboardNode(Node):
         self._broadcast(self._stopwatch_message())
 
     def stopwatch_callback(self):
-        self._broadcast_stopwatch()
+        if self._has_clients():
+            self._broadcast_stopwatch()
 
     def handle_stopwatch_control(self, action, enabled=None):
         """Handle dashboard-local controls on Tornado's IOLoop thread."""
@@ -598,7 +627,13 @@ class DashboardNode(Node):
             time.time() - psutil.boot_time(),
             _read_wifi_signal_dbm(),
         )
-        self._broadcast(protocol.stats_message(*self._last_stats))
+        # Sampled even with nobody watching, deliberately: psutil's
+        # cpu_percent(interval=None) reports usage *since the previous
+        # call*, so skipping ticks would make the first number a browser
+        # sees an average over however long the tab was closed. Only the
+        # broadcast is skipped.
+        if self._has_clients():
+            self._broadcast(protocol.stats_message(*self._last_stats))
 
     # ------------------------------------------------------------------------
     # Live parameter tuning.
@@ -964,9 +999,30 @@ class DashboardNode(Node):
     # Bridging ROS callbacks (rclpy thread) -> the Tornado IOLoop thread.
     # ------------------------------------------------------------------------
 
+    def _has_clients(self) -> bool:
+        """Is anyone actually watching?
+
+        Read from the rclpy thread; `ws_clients` is only ever mutated on the
+        IOLoop thread. Reading a set's truthiness across threads is safe
+        under the GIL, and the race is benign in the one direction it can
+        go: a browser that connects a moment after a skipped update gets the
+        complete current picture from send_initial_state() anyway, which is
+        exactly what makes skipping safe rather than lossy.
+
+        This matters because this node is documented as safe to leave
+        running at all times, including during a race -- which is only
+        honest if an unwatched dashboard is close to free.
+        """
+        return bool(self.ws_clients)
+
     def _broadcast(self, header: dict, binary_payload: bytes = None):
         if self._loop is None:
             return  # web server hasn't started listening yet -- nothing to send to
+        if not self.ws_clients:
+            # Backstop for callers that didn't check _has_clients() first.
+            # The per-callback checks are what actually save the work --
+            # by the time we get here the payload has already been built.
+            return
         self._loop.add_callback(functools.partial(self._send_to_all, header, binary_payload))
 
     def _send_to_all(self, header: dict, binary_payload):
@@ -1000,9 +1056,11 @@ class DashboardNode(Node):
         """Runs on the IOLoop thread (called from WebSocketHandler.open) --
         catches a freshly connected browser tab up on whatever this node
         already knows, instead of leaving it blank until the next update."""
-        if self._last_map_msg is not None:
-            client.write_message(json.dumps(protocol.map_header(self._last_map_msg)))
-            client.write_message(protocol.map_cells(self._last_map_msg), binary=True)
+        map_frame = self._map_frame  # read once -- replaced wholesale, never mutated
+        if map_frame is not None:
+            header, payload = map_frame
+            client.write_message(json.dumps(header))
+            client.write_message(payload, binary=True)
         if self._last_scan_msg is not None:
             client.write_message(json.dumps(
                 protocol.scan_header(self._last_scan_msg, self.laser_offset_x, self.laser_offset_y)))
