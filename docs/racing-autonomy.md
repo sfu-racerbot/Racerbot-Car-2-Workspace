@@ -1037,14 +1037,40 @@ at speed, and the same scenario completes a clean lap with the pass done.
 Because of that coupling, the node **refuses to start** if
 `overtake_lookahead_distance` is less than `max_lookahead`.
 
-**Ending the overtake** happens once the ego car's own arc length is
+**Ending the overtake** happens once the ego car's own arc length is at least
 `overtake_clear_margin` meters past the opponent's *last known* position
+(`racing_math.track_lead_distance` -- a signed lead that takes the shorter way
+round the loop; see the warning below about using the wrapped gap here)
 -- deliberately not re-checked against a fresh detection every tick, since
 alongside or just past an opponent it commonly falls completely out of
 the forward LIDAR cone, and that must not look like "lost it, panic"
 rather than "passed it, done." If the tracked opponent goes stale
 (`opponent_lost_timeout_sec`, default 1s, with no update at all) with no
 overtake in progress, tracking is simply cleared -- nothing to react to.
+
+> **Two known defects in this logic, found in simulation on 2026-08-05.**
+>
+> The completion test used to compare `track_progress_gap` against
+> `total_length - overtake_clear_margin`. Because that gap wraps into
+> `[0, total_length)`, the comparison means "*at most* clear_margin past",
+> not "at least" -- it went true the instant the ego's nose edged in front,
+> with the two 0.535 m cars still fully overlapped, and the car cut back onto
+> the racing line and sideswiped the opponent 0.45 s later. Fixed by comparing
+> `racing_math.track_lead_distance(...) >= overtake_clear_margin`. Do not
+> reintroduce the wrapped gap here.
+>
+> The second defect: `pick_pass_side` returns whichever side is *more* open but
+> never asked whether that side had *enough* room, and a committed pass
+> disables the avoidance tier (`allow_avoidance=not self.overtake_active`). The
+> car would commit, steer 0.35 m into a wall, and only react at the 0.4 m
+> emergency stop -- measured forward clearance 0.19-0.34 m at contact. Now
+> guarded by `overtake_min_side_clearance` at commit time, plus a speed cap
+> during the pass computed from the *mapped* track edge
+> (`_static_closest_in_cone`). Do not compute that cap from the raw scan: the
+> nearest thing ahead during a pass is the car being passed, so the ego
+> throttles below the opponent and the pass becomes impossible.
+>
+> Floor-test the overtake before relying on it.
 
 **This always sits underneath the existing reactive safety net, never
 instead of it.** If an overtake maneuver (or anything else) brings the
@@ -1162,6 +1188,7 @@ file for inline comments too):
 | `overtake_trigger_gap` | `3.0` | Meters of *track distance*; start considering a pass this close |
 | `overtake_closing_margin` | `0.3` | m/s; must be closing at least this fast to attempt a pass |
 | `overtake_clear_margin` | `1.0` | Meters of track distance past the opponent before resuming the racing line |
+| `overtake_min_side_clearance` | `0.70` | Meters of room the passing side must have before the car will commit to a pass. `overtake_lateral_offset` + half the car width + margin |
 | `overtake_lateral_offset` | `0.35` | Meters; sideways nudge to the steering target while passing |
 | `overtake_lookahead_distance` | `4.0` | Meters of arc ahead the offset above is applied to, instead of the normal target. Must be >= `max_lookahead` — the node refuses to start otherwise |
 | `opponent_detection_mode` | `map` | Map subtraction by default; `heuristic` is the no-map fallback |

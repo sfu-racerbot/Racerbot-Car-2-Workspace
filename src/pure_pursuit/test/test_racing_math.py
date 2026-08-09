@@ -403,6 +403,130 @@ def test_track_progress_gap_wraps_around_finish_line():
     assert gap == pytest.approx(10.0)
 
 
+def test_track_lead_distance_is_negative_while_the_opponent_leads():
+    lead = racing_math.track_lead_distance(
+        ego_arc_length=10.0, other_arc_length=13.0, total_length=100.0)
+    assert lead == pytest.approx(-3.0)
+
+
+def test_track_lead_distance_is_positive_once_the_ego_is_past():
+    lead = racing_math.track_lead_distance(
+        ego_arc_length=13.0, other_arc_length=10.0, total_length=100.0)
+    assert lead == pytest.approx(3.0)
+
+
+def test_track_lead_distance_wraps_around_the_finish_line():
+    # Ego just past the line, opponent just short of it: the ego leads by
+    # 4 m, not by 96 m the long way round.
+    lead = racing_math.track_lead_distance(
+        ego_arc_length=2.0, other_arc_length=98.0, total_length=100.0)
+    assert lead == pytest.approx(4.0)
+
+
+def test_overtake_is_not_complete_while_the_cars_are_still_alongside():
+    """The bug this function exists to prevent.
+
+    With a 0.535 m car and a 1.0 m clear margin, an ego 0.2 m past the
+    opponent is still overlapping it. The wrapped gap reads 99.8 -- which
+    satisfies the natural-looking `gap > total - clear_margin` test and
+    ended the pass early, cutting the car back into the opponent.
+    """
+    clear_margin, total = 1.0, 100.0
+    ego, opponent = 50.2, 50.0
+
+    misleading_gap = racing_math.track_progress_gap(ego, opponent, total)
+    assert misleading_gap > total - clear_margin  # the old, wrong predicate
+
+    lead = racing_math.track_lead_distance(ego, opponent, total)
+    assert lead == pytest.approx(0.2)
+    assert lead < clear_margin  # still alongside: stay on the passing line
+
+    # A metre further on the pass really is finished.
+    assert racing_math.track_lead_distance(51.0, opponent, total) >= clear_margin
+
+
+def test_approaching_an_opponent_never_reads_as_a_finished_pass():
+    # Guards the naive fix: flipping the comparison would make every
+    # approach look complete, because the opponent 3 m ahead wraps to 97.
+    total, clear_margin = 100.0, 1.0
+    assert racing_math.track_lead_distance(10.0, 13.0, total) < clear_margin
+
+
+def _corridor_scan(left_m, right_m, num_beams=271):
+    """Ranges for a car centred in a straight corridor, +/-135 deg sweep."""
+    angle_min, angle_increment = -math.radians(135.0), math.radians(1.0)
+    ranges = []
+    for i in range(num_beams):
+        a = angle_min + i * angle_increment
+        wall = left_m if a > 0 else right_m
+        # Perpendicular distance d read at angle theta off the perpendicular.
+        off_perpendicular = abs(abs(a) - math.pi / 2.0)
+        if off_perpendicular >= math.radians(89.0):
+            ranges.append(20.0)
+        else:
+            ranges.append(wall / math.cos(off_perpendicular))
+    return np.array(ranges)
+
+
+def test_side_clearance_recovers_the_perpendicular_wall_distance():
+    scan = _corridor_scan(left_m=1.2, right_m=0.4)
+    left = racing_math.side_clearance(
+        scan, -math.radians(135.0), math.radians(1.0), side=1,
+        half_span=math.radians(30.0), range_min=0.05, range_max=25.0)
+    right = racing_math.side_clearance(
+        scan, -math.radians(135.0), math.radians(1.0), side=-1,
+        half_span=math.radians(30.0), range_min=0.05, range_max=25.0)
+    assert left == pytest.approx(1.2, abs=1e-6)
+    assert right == pytest.approx(0.4, abs=1e-6)
+
+
+def test_side_clearance_reports_infinity_when_nothing_is_in_range():
+    # Everything at range_max means "no return", not "a wall 25 m away".
+    scan = np.full(271, 25.0)
+    clearance = racing_math.side_clearance(
+        scan, -math.radians(135.0), math.radians(1.0), side=1,
+        half_span=math.radians(30.0), range_min=0.05, range_max=25.0)
+    assert clearance == math.inf
+
+
+def test_overtake_declined_when_the_chosen_side_is_a_wall():
+    """The defect this guards.
+
+    pick_pass_side always names a side, even one with no room. Passing needs
+    the 0.35 m offset plus half a 0.31 m car plus margin -- about 0.7 m. A
+    0.4 m gap is not a passing place.
+    """
+    scan = _corridor_scan(left_m=1.2, right_m=0.4)
+    common = dict(angle_min=-math.radians(135.0),
+                  angle_increment=math.radians(1.0),
+                  required_clearance=0.70, half_span=math.radians(30.0),
+                  range_min=0.05, range_max=25.0)
+    assert racing_math.overtake_side_has_room(scan, side=1, **common)
+    assert not racing_math.overtake_side_has_room(scan, side=-1, **common)
+
+
+def test_overtake_allowed_when_no_wall_is_seen_at_all():
+    # An open side is the easy case, not a missing measurement.
+    scan = np.full(271, 25.0)
+    assert racing_math.overtake_side_has_room(
+        scan, angle_min=-math.radians(135.0),
+        angle_increment=math.radians(1.0), side=1,
+        required_clearance=0.70, half_span=math.radians(30.0),
+        range_min=0.05, range_max=25.0)
+
+
+def test_braking_speed_limit_allows_stopping_short():
+    # v^2 = 2*a*(d - reserve): 2 m of usable room at 8 m/s^2 gives 5.66 m/s,
+    # so a 4 m/s ceiling is untouched; 0.5 m of room is not.
+    assert racing_math.braking_speed_limit(2.4, 0.4, 8.0, 4.0) == pytest.approx(4.0)
+    assert racing_math.braking_speed_limit(0.9, 0.4, 8.0, 4.0) == pytest.approx(
+        math.sqrt(2.0 * 8.0 * 0.5))
+
+
+def test_braking_speed_limit_leaves_top_speed_alone_when_nothing_is_seen():
+    assert racing_math.braking_speed_limit(math.inf, 0.4, 8.0, 4.0) == 4.0
+
+
 def test_lateral_offset_point_moves_left_on_a_straight_segment():
     xy = np.array([[0.0, 0.0], [1.0, 0.0]])  # heading due +X
     x, y = racing_math.lateral_offset_point(xy, index=0, next_index=1, offset=0.5)

@@ -62,6 +62,7 @@ After that, follow whichever branch below matches what you're doing.
 | [simulator.md](simulator.md) | The no-ROS simulator that tests controller *math* directly. |
 | [ros-simulator.md](ros-simulator.md) | The same physics behind the real ROS topics, so whole launch files can be validated without the car. Includes the interlock that stops it running beside real hardware. |
 | [sim-fidelity-audit.md](sim-fidelity-audit.md) | How closely the simulator matches this physical car, and where it doesn't. Read before trusting a simulator result. |
+| [../tools/f1tenth_sim/README.md](../tools/f1tenth_sim/README.md) | Our fidelity layer over stock F1TENTH Gym — this car's real parameters, a friction circle, the real servo, and collision detection that actually fires. What it changed, and what it then found. |
 
 ## Look something up
 

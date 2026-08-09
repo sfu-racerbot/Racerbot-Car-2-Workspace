@@ -247,6 +247,7 @@ class PurePursuitNode(Node):
         self.declare_parameter('overtake_closing_margin', 0.3)
         self.declare_parameter('overtake_clear_margin', 1.0)
         self.declare_parameter('overtake_lateral_offset', 0.35)
+        self.declare_parameter('overtake_min_side_clearance', 0.70)
         self.declare_parameter('overtake_lookahead_distance', 4.0)
         self.declare_parameter('overtake_max_blind_sec', 3.0)
         self.declare_parameter('laser_offset_x', 0.33)
@@ -349,6 +350,8 @@ class PurePursuitNode(Node):
         self.overtake_closing_margin = float(self.get_parameter('overtake_closing_margin').value)
         self.overtake_clear_margin = float(self.get_parameter('overtake_clear_margin').value)
         self.overtake_lateral_offset = float(self.get_parameter('overtake_lateral_offset').value)
+        self.overtake_min_side_clearance = float(
+            self.get_parameter('overtake_min_side_clearance').value)
         self.overtake_lookahead_distance = float(
             self.get_parameter('overtake_lookahead_distance').value)
         self.overtake_max_blind_sec = float(self.get_parameter('overtake_max_blind_sec').value)
@@ -1255,6 +1258,40 @@ class PurePursuitNode(Node):
             return math.inf
         return float(np.min(candidates))
 
+    def _static_closest_in_cone(self, scan: LaserScan, fov_deg: float):
+        """Closest *wall* ahead, from the map alone, ignoring the live scan.
+
+        The mirror of _dynamic_closest_in_cone, and the distance a committed
+        overtake must respect. Using the raw scan there would be wrong: the
+        nearest thing in front during a pass is the car being passed, so a
+        raw-scan speed cap throttles the ego below the opponent's speed and
+        makes the pass mathematically impossible -- which is exactly why
+        avoidance is suppressed mid-pass in the first place.
+
+        Returns None while map subtraction is unavailable, which the caller
+        must read as "cannot tell walls from traffic, so do not cap".
+        """
+        if (self.opponent_detection_mode != 'map' or self.map_ray_caster is None
+                or self.car_x is None or self.car_y is None or self.car_yaw is None):
+            return None
+
+        step = self.map_beam_step
+        sample_indices = np.arange(len(scan.ranges))[::step]
+        beam_angles = scan.angle_min + sample_indices * scan.angle_increment
+
+        cos_yaw, sin_yaw = math.cos(self.car_yaw), math.sin(self.car_yaw)
+        laser_x = self.car_x + self.laser_offset_x * cos_yaw - self.laser_offset_y * sin_yaw
+        laser_y = self.car_y + self.laser_offset_x * sin_yaw + self.laser_offset_y * cos_yaw
+        expected = self.map_ray_caster.expected_ranges(
+            laser_x, laser_y, self.car_yaw, beam_angles)
+
+        in_cone = np.abs(beam_angles) <= math.radians(fov_deg) / 2.0
+        candidates = np.asarray(expected, dtype=np.float64)[in_cone]
+        candidates = candidates[np.isfinite(candidates) & (candidates > scan.range_min)]
+        if candidates.size == 0:
+            return math.inf
+        return float(np.min(candidates))
+
     def _sanitized_window(self, scan: LaserScan, lo_idx: int, hi_idx: int) -> np.ndarray:
         """Ranges in [lo_idx, hi_idx], NaN/inf *replaced* (not removed) so
         the array's length and index positions still line up with the
@@ -1412,12 +1449,40 @@ class PurePursuitNode(Node):
                 "generic obstacle avoidance is disabled",
             )
         if not allow_avoidance:
+            # Steering stays with the pass -- swerving away mid-overtake is
+            # what the suppression exists to prevent, and turning back while
+            # still alongside is its own collision. But suppressing the
+            # *steering* tier is no reason to keep full speed at a closing
+            # obstacle: without this the car ran at the racing-line speed
+            # until the 0.4 m emergency stop and slammed to a halt, which is
+            # how it ends up parked against a barrier mid-pass. Cap the speed
+            # so it could still stop short, and let it drive the passing line
+            # at whatever that allows.
+            pass_clearance = self._static_closest_in_cone(
+                scan, self.avoidance_fov_deg)
+            pass_speed = self.max_speed if pass_clearance is None else (
+                racing_math.braking_speed_limit(
+                    pass_clearance,
+                    self.emergency_stop_distance,
+                    self.max_braking_decel,
+                    self.max_speed,
+                ))
+            if pass_speed >= self.max_speed:
+                return (
+                    None,
+                    None,
+                    None,
+                    f"LIDAR hard-stop cone clear (closest={emergency_closest:.2f}m); "
+                    "generic avoidance suppressed during the committed overtake",
+                )
             return (
                 None,
-                None,
+                pass_speed,
                 None,
                 f"LIDAR hard-stop cone clear (closest={emergency_closest:.2f}m); "
-                "generic avoidance suppressed during the committed overtake",
+                "generic avoidance suppressed during the committed overtake, "
+                f"speed capped to {pass_speed:.2f}m/s by {pass_clearance:.2f}m "
+                "of forward clearance to the mapped track edge",
             )
 
         dynamic_closest = self._dynamic_closest_in_cone(scan, self.avoidance_fov_deg)
@@ -1613,8 +1678,38 @@ class PurePursuitNode(Node):
                     f"closing={closing_rate:.2f}m/s; no overtake because "
                     + ', '.join(reasons))
                 return None
+            side = racing_math.pick_pass_side(ranges, start_idx, end_idx)
+            # pick_pass_side only says which side is *more* open, and always
+            # names one. Committing without checking it is open *enough*
+            # steers the car overtake_lateral_offset into a wall with the
+            # avoidance tier suppressed for the whole pass, leaving only the
+            # emergency stop -- which is how the car ends up parked against a
+            # barrier mid-overtake. Declining to pass is always available.
+            side_scan = self.last_scan
+            if side_scan is not None and not racing_math.overtake_side_has_room(
+                    ranges, side_scan.angle_min, side_scan.angle_increment,
+                    side, self.overtake_min_side_clearance,
+                    math.radians(30.0), max(side_scan.range_min, 1e-3),
+                    self.max_range):
+                room = racing_math.side_clearance(
+                    ranges, side_scan.angle_min, side_scan.angle_increment,
+                    side, math.radians(30.0), max(side_scan.range_min, 1e-3),
+                    self.max_range)
+                self.last_opponent_status = (
+                    f"opponent tracked: gap={gap_ahead:.2f}m, "
+                    f"closing={closing_rate:.2f}m/s; no overtake because the "
+                    f"{'left' if side > 0 else 'right'} side has only "
+                    f"{room:.2f}m of room "
+                    f"(< {self.overtake_min_side_clearance:.2f}m needed)")
+                self.get_logger().info(
+                    f"overtake declined: {'left' if side > 0 else 'right'} side "
+                    f"has {room:.2f}m of room, need "
+                    f"{self.overtake_min_side_clearance:.2f}m -- following instead.",
+                    throttle_duration_sec=2.0,
+                )
+                return None
             self.overtake_active = True
-            self.overtake_side = racing_math.pick_pass_side(ranges, start_idx, end_idx)
+            self.overtake_side = side
             self.last_opponent_status = (
                 f"overtake active: opponent gap={gap_ahead:.2f}m, "
                 f"closing={closing_rate:.2f}m/s, passing "
@@ -1650,19 +1745,27 @@ class PurePursuitNode(Node):
                     f"> {self.overtake_max_blind_sec:.2f}s limit")
                 return None
             predicted_arc = self.opponent.predicted_arc_length(now_sec, self.total_track_length)
-            gap_ahead = racing_math.track_progress_gap(
+            # Signed lead, not the wrapped gap. track_progress_gap can only
+            # say "somewhere ahead within one lap", so the natural-looking
+            # test `gap > total - clear_margin` actually means "at most
+            # clear_margin past" -- satisfied the moment the ego's nose edges
+            # in front, with the cars still overlapping side by side. The car
+            # then cut straight back onto the racing line and sideswiped the
+            # opponent (reproduced in simulation, contact 0.45 s after the
+            # pass was declared complete). See racing_math.track_lead_distance.
+            lead = racing_math.track_lead_distance(
                 ego_arc_length, predicted_arc, self.total_track_length)
-            if gap_ahead > self.total_track_length - self.overtake_clear_margin:
+            if lead >= self.overtake_clear_margin:
                 self.get_logger().info("overtake: clear of the opponent -- back to the racing line.",
                                        throttle_duration_sec=1.0)
                 self.overtake_active = False
                 self.last_opponent_status = (
-                    f"overtake complete: ego is at least "
-                    f"{self.overtake_clear_margin:.2f}m past the predicted opponent position")
+                    f"overtake complete: ego is {lead:.2f}m past the predicted "
+                    f"opponent position (>= {self.overtake_clear_margin:.2f}m)")
                 return None
             self.last_opponent_status = (
                 f"overtake active: passing {'left' if self.overtake_side > 0 else 'right'}, "
-                f"opponent unseen for {blind_sec:.2f}s, wrapped track gap={gap_ahead:.2f}m")
+                f"opponent unseen for {blind_sec:.2f}s, ego lead={lead:.2f}m")
 
         # Deliberately *not* the normal steering target: offsetting a target
         # only max_lookahead away demands a sharp turn to reach the passing

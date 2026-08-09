@@ -468,11 +468,49 @@ def test_overtake_resolves_once_ego_is_past_the_opponent(node):
     # Opponent now out of view (behind the car, as it would be after a
     # real pass) -- resolution must use the last tracked position, not
     # wait for opponent_lost_timeout_sec to just give up.
+    #
+    # x=2.7 puts the ego 1.20 m past the dead-reckoned opponent, which
+    # clears overtake_clear_margin (1.0 m). Note the opponent's tracked
+    # arc advances with the ego here -- the same scan is replayed while
+    # the ego moves, so it keeps being re-seen 2.4 m ahead -- which is
+    # why this is 1.20 m of lead and not the 4.2 m the ego travelled.
+    # Do not pull this back toward the opponent to make the pass resolve
+    # sooner: completion measures real track lead now, and a smaller
+    # number is a car rejoining the racing line across an opponent it
+    # has not cleared. See the test below.
+    node.scan_callback(_clear_scan())
+    _set_pose(node, 2.7, -1.2, 0.0)
+    for _ in range(3):
+        node.control_loop()
+    assert node.overtake_active is False
+
+
+def test_overtake_stays_active_while_the_cars_still_overlap(node):
+    """The completion-test defect, at the node level.
+
+    track_progress_gap wraps into [0, total), so the old test
+    (gap_ahead > total - clear_margin) read as "at least 1 m past" but
+    meant "at most 1 m past" -- true the instant the ego's nose edged
+    ahead. The car then steered back onto the racing line across a
+    0.535 m opponent it had not yet passed. test_racing_math.py pins the
+    arithmetic; this pins the node actually using it.
+    """
+    scan, _center = _car_ahead_scan()
+    node.scan_callback(scan)
+    for step in range(4):
+        _set_pose(node, -1.5 + step * 0.2, -1.2, 0.0)
+        node.control_loop()
+    assert node.overtake_active is True
+
+    # 0.15 m of track lead: the nose is barely in front, and two 0.535 m
+    # bodies at 0.15 m centre-to-centre are almost entirely overlapping.
+    # The old completion test ended the pass right here.
     node.scan_callback(_clear_scan())
     _set_pose(node, 1.5, -1.2, 0.0)
     for _ in range(3):
         node.control_loop()
-    assert node.overtake_active is False
+    assert node.overtake_active is True, (
+        "resumed the racing line while still alongside the opponent")
 
 
 def test_recovers_after_a_localization_jump(node):

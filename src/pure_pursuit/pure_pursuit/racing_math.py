@@ -760,6 +760,102 @@ def track_progress_gap(ego_arc_length: float, other_arc_length: float, total_len
     return float((other_arc_length - ego_arc_length) % total_length)
 
 
+def track_lead_distance(ego_arc_length: float, other_arc_length: float,
+                        total_length: float) -> float:
+    """How far the ego car is *past* another point, as a signed distance.
+
+    Positive means the ego is ahead by that many meters; negative means the
+    other point is still ahead of the ego. Unlike track_progress_gap, which
+    wraps everything into [0, total_length) and so cannot tell "3 m behind"
+    from "all but 3 m ahead", this picks the shorter way round -- which is
+    the only sensible reading for two cars racing near each other.
+
+    This distinction caused a real collision. Asking track_progress_gap
+    whether a pass is finished invites `gap > total_length - clear_margin`,
+    which looks like "at least clear_margin past" and in fact means "at
+    most clear_margin past" -- true the instant the ego's nose edges in
+    front, while the two cars are still side by side. Compare against this
+    function instead: `track_lead_distance(...) >= clear_margin`.
+    """
+    if total_length <= 0.0:
+        return 0.0
+    half = total_length / 2.0
+    behind = (other_arc_length - ego_arc_length + half) % total_length - half
+    return float(-behind)
+
+
+def side_clearance(ranges: np.ndarray, angle_min: float, angle_increment: float,
+                   side: int, half_span: float, range_min: float,
+                   range_max: float) -> float:
+    """Perpendicular distance to the wall on one side of the car.
+
+    Mirrors gap_logic.side_wall_distance (the two packages deliberately keep
+    separate copies of their framework-free helpers). The *minimum* valid
+    range in a window centred on the side beam is the correct estimator, not
+    a conservative fudge: a beam striking a locally straight wall at angle
+    theta off the perpendicular reads d/cos(theta), minimised exactly at the
+    perpendicular, so the window recovers the true perpendicular distance
+    even with the car yawed relative to the wall.
+
+    ``side`` is +1 for the left wall, -1 for the right. Returns ``inf`` when
+    no beam in the window came back usable, which callers must read as "no
+    wall seen here", not "very far away".
+    """
+    values = np.asarray(ranges, dtype=np.float64)
+    if not math.isfinite(half_span) or half_span <= 0.0:
+        raise ValueError('half_span must be finite and positive')
+    angles = angle_min + np.arange(values.size, dtype=np.float64) * angle_increment
+    # A reading at exactly range_max is "nothing out there", not a wall; the
+    # node clips inf to max_range before this ever sees it.
+    valid = np.isfinite(values) & (values > range_min) & (values < range_max)
+    inside = valid & (np.abs(angles - side * (math.pi / 2.0)) <= half_span)
+    if not np.any(inside):
+        return math.inf
+    return float(np.min(values[inside]))
+
+
+def overtake_side_has_room(ranges: np.ndarray, angle_min: float,
+                           angle_increment: float, side: int,
+                           required_clearance: float, half_span: float,
+                           range_min: float, range_max: float) -> bool:
+    """Is there physically room to sit ``required_clearance`` off the line?
+
+    pick_pass_side answers "which side is *more* open", and always names one.
+    It never asks whether that side is open *enough*. Without this check the
+    car commits to a pass, steers overtake_lateral_offset toward a wall with
+    the avoidance tier suppressed for the duration, and only reacts at the
+    emergency-stop distance -- measured stopping dead with 0.19-0.34 m of
+    forward clearance, which is where the traffic scenario deadlocks.
+
+    Seeing no wall at all on that side counts as room: an open side is the
+    easy case, not a missing measurement.
+    """
+    if required_clearance <= 0.0:
+        return True
+    clearance = side_clearance(ranges, angle_min, angle_increment, side,
+                               half_span, range_min, range_max)
+    return clearance >= required_clearance
+
+
+def braking_speed_limit(clearance: float, reserve_distance: float,
+                        max_braking_decel: float, max_speed: float) -> float:
+    """Speed ceiling that still allows stopping short: v^2 <= 2*a*(d - reserve).
+
+    Mirrors gap_logic.braking_speed_limit. Infinite clearance means nothing
+    was seen, so the configured top speed stands.
+    """
+    if clearance == math.inf:
+        return max_speed
+    if not all(math.isfinite(value) for value in (
+            clearance, reserve_distance, max_braking_decel, max_speed)):
+        raise ValueError('braking speed-limit inputs must be finite')
+    if reserve_distance < 0.0 or max_braking_decel <= 0.0 or max_speed < 0.0:
+        raise ValueError(
+            'reserve_distance/max_speed must be non-negative and braking decel positive')
+    usable_distance = max(0.0, clearance - reserve_distance)
+    return min(max_speed, math.sqrt(2.0 * max_braking_decel * usable_distance))
+
+
 def lateral_offset_point(xy: np.ndarray, index: int, next_index: int, offset: float):
     """A point `offset` meters to the *left* of waypoint `index` (negative
     offset = right), measured perpendicular to the track's local
