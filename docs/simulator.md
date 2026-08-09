@@ -1,5 +1,9 @@
 # F1TENTH Gym simulation and validation
 
+> **Who this is for:** anyone who wants to test controller *math* quickly, with no ROS and no car.
+> **Read first:** nothing. See [ros-simulator.md](ros-simulator.md) for the other simulator, which tests the ROS wiring instead.
+> **You'll be able to:** run headless solo and multi-car validation, and know what those results do and don't prove.
+
 This workspace includes a reproducible, headless validation harness for
 `gap_follow` and `pure_pursuit`. It uses the official F1TENTH Gym vehicle
 dynamics, LiDAR ray casting, map collision checks, and multi-agent collision

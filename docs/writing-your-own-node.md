@@ -1,5 +1,9 @@
 # Writing your own node
 
+> **Who this is for:** anyone writing code that can move the car. **This is a safety contract, not a style guide.**
+> **Read first:** [architecture.md](architecture.md) for the safety model, then [adding-your-own-code.md](adding-your-own-code.md) for where the code goes.
+> **You'll be able to:** write a driving node that meets the workspace's mandatory deadman requirement, and test it in the right order.
+
 How to add your own driving code to this car. This doc covers driving code specifically — if you're not sure whether what you're building even counts as "driving code," see [adding-your-own-code.md](adding-your-own-code.md) first, which covers both categories and where the line is. Read [architecture.md](architecture.md) first if you haven't — specifically the safety model section, since it changes how you actually get your code to drive.
 
 ## The interface contract

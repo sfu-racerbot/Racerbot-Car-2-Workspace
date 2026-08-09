@@ -1,5 +1,9 @@
 # ROS-level simulator (`racerbot_sim`)
 
+> **Who this is for:** anyone who wants to run the real driving stack — launch files, SLAM, the dashboard — without the physical car.
+> **Read first:** [concepts.md](concepts.md), and [simulator.md](simulator.md) for the other, simpler simulator and how the two differ.
+> **You'll be able to:** run and validate whole launch files against simulated physics, and understand the interlock that stops this running beside real hardware.
+
 `tools/f1tenth_sim/run_validation.py` ([docs/simulator.md](simulator.md))
 calls the controllers' *math* directly and skips ROS entirely. That is the
 right shape for tuning a control law. It is the wrong shape for the way

@@ -1,5 +1,10 @@
 # Racing autonomy: SLAM, localization, and a pure-pursuit race controller
 
+> **Who this is for:** anyone running, tuning, or trying to understand the map-based race stack. It's the biggest doc here, and it opens with a plain-language summary — read that even if you skip the rest.
+> **Read first:** [operations.md](operations.md#racing-with-the-pure-pursuit-stack) for how to actually run it, and [architecture.md](architecture.md) for the safety model.
+> **You'll be able to:** explain every stage from SLAM to steering command, and tune the stack without guessing.
+> **Time:** an hour to read properly. Sections marked as deep dives can be skipped on a first pass.
+
 This is the algorithm reference for the `pure_pursuit` package: a map-based
 race stack built on top of this car's existing SLAM (`slam_toolbox`) and
 localization (`particle_filter`) packages. Read

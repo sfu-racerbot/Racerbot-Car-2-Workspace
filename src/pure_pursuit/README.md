@@ -1,5 +1,9 @@
 # `pure_pursuit`
 
+> **Who this is for:** someone reading or changing this package's code.
+> **Read first:** [docs/architecture.md](../../docs/architecture.md) for the safety model — this package can move the car — then [docs/racing-autonomy.md](../../docs/racing-autonomy.md) for the end-to-end workflow.
+> **What's in it:** the controller code, the math, and every parameter.
+
 Map-based race controller: given a saved (x, y, speed) racing line and a live localization pose, computes steering + speed every control tick via the Pure Pursuit algorithm. This file documents the code, the math, and every parameter in detail. For the end-to-end workflow (mapping → localizing → recording a lap → generating the profile → racing) and the full derivations/diagrams, see [docs/racing-autonomy.md](../../docs/racing-autonomy.md); for running it, see [docs/operations.md](../../docs/operations.md#racing-with-the-pure-pursuit-stack).
 
 ## Files

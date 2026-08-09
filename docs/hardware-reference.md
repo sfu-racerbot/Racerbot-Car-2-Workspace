@@ -1,5 +1,9 @@
 # Hardware reference
 
+> **Who this is for:** anyone who needs an exact value — a port, an address, a config constant — for this specific car.
+> **Read first:** nothing. This is a lookup table, not a tutorial.
+> **What's in it:** VESC, LiDAR, joystick and network specifics, plus the gotchas that look like bugs and aren't.
+
 Physical connections, addresses, and config values for this specific car. Everything here is what's actually configured on this machine, verified against the live hardware — not generic F1TENTH/roboracer defaults.
 
 ## Compute

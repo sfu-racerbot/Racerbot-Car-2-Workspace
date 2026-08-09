@@ -1,5 +1,9 @@
 # `web_dashboard`
 
+> **Who this is for:** someone reading or changing this package's code.
+> **Read first:** [docs/web-dashboard.md](../../docs/web-dashboard.md) for what the dashboard shows and how to run it.
+> **What's in it:** the server, the wire protocol, and the browser side. Subscribes only — but note the live tuning panel's `set_parameters` path.
+
 Live browser dashboard: streams the SLAM/localization map, proximity-colored
 LIDAR, pose, measured speed, selected steering command, LB state, and a shared
 stopwatch to any web browser over a WebSocket. This file documents the code in

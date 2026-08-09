@@ -1,5 +1,9 @@
 # `usb_cam_stream`
 
+> **Who this is for:** someone reading or changing this package's code.
+> **Read first:** [docs/usb-camera-livestream.md](../../docs/usb-camera-livestream.md) for setup and the security note.
+> **What's in it:** how the MJPEG server works and what it exposes.
+
 Serves a camera as a live MJPEG video stream over plain HTTP — open
 `http://<car-ip>:9090/` in any browser to watch, no ROS install or plugins
 needed on the viewing device. Two frame sources, one node: a USB webcam

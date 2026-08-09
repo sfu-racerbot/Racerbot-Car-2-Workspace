@@ -1,5 +1,10 @@
 # Concepts: ROS2, colcon, and this workspace
 
+> **Who this is for:** anyone new to ROS2, colcon, or this workspace. If `source`, `colcon build` or `ros2 launch` are unfamiliar, start here.
+> **Read first:** [glossary.md](glossary.md) — skim it, then come back.
+> **You'll be able to:** explain what each command actually does, why every terminal needs sourcing, and what each top-level folder holds.
+> **Time:** about 20 minutes.
+
 This doc is for questions like "what actually *is* a workspace" and "why do I have to do this every time" — the stuff that's easy to cargo-cult from the README's quick-start without understanding. If you already know ROS2/colcon, skip this; everything else in `docs/` assumes the concepts here.
 
 ## What `ros2 launch` actually does

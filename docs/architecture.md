@@ -1,5 +1,10 @@
 # Architecture
 
+> **Who this is for:** anyone about to write or run code that can move the car. **Required reading before driving code.**
+> **Read first:** [concepts.md](concepts.md) for what nodes and topics are, and [glossary.md](glossary.md) for the vocabulary.
+> **You'll be able to:** read the node/topic graph, explain why driving needs two launch files, and state the safety rules and their reasons.
+> **Time:** about 30 minutes.
+
 How the car's software is put together: every node, every topic, and how they connect. Everything communicates over ROS2 Jazzy topics — there is no shared memory or direct function calls between packages, so this topic map *is* the system.
 
 ## The node graph

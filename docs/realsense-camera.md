@@ -1,5 +1,9 @@
 # RealSense D435i: color + depth over ROS2
 
+> **Who this is for:** anyone setting up or using the Intel RealSense D435i on this car.
+> **Read first:** nothing, though [operations.md](operations.md) covers the normal bringup this sits alongside.
+> **You'll be able to:** get color and depth streams over ROS2, and know which IMU limitation to expect on this hardware.
+
 Publishes the Intel RealSense D435i's color and depth streams as ROS2
 topics, low-res/low-fps so it doesn't compete with the LiDAR/SLAM/
 localization/pure_pursuit stack already running on this Jetson. This is a

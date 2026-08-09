@@ -1,5 +1,9 @@
 # `drive_intent`
 
+> **Who this is for:** someone about to read or change this package's code.
+> **Read first:** [docs/drive-intent.md](../../docs/drive-intent.md) for what `/drive_intent` is for and the safety contract for publishing it.
+> **What's in it:** the shared schema, the trajectory prediction, and the C++ port.
+
 Shared schema and trajectory prediction for `/drive_intent`: the topic on
 which a driving node says **what it is trying to do, and why**, so the
 [web dashboard](../web_dashboard/README.md) can draw an intent arrow and a

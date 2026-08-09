@@ -1,5 +1,9 @@
 # race_diagnostics
 
+> **Who this is for:** someone reading or changing this package's code.
+> **Read first:** [docs/run-diagnostics.md](../../docs/run-diagnostics.md) for the recording and analysis workflow.
+> **What's in it:** the recorder and analyzer internals. Read-only — this package publishes to no topic and cannot move the car.
+
 Read-only run recorder and post-run analyzer for this car's driving stack.
 
 **This package only ever subscribes.** It publishes to no topic and cannot

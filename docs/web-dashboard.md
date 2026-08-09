@@ -1,5 +1,9 @@
 # Live web dashboard: see what the car sees
 
+> **Who this is for:** anyone who wants to see what the car sees, or tune a driving node's parameters while it runs.
+> **Read first:** [operations.md](operations.md) so you can bring the car up. Safe to run alongside anything — it publishes to no topic.
+> **You'll be able to:** watch map, LiDAR and pose live in a browser, and adjust driving parameters without a rebuild.
+
 `web_dashboard` streams the car's SLAM/localization map, proximity-colored
 LIDAR, pose, measured `/odom` speed, selected `/ackermann_cmd` steering, LB
 state/stopwatch, and coarse system health (CPU/mem/temp/WiFi/uptime) live over

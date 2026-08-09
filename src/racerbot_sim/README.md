@@ -1,5 +1,9 @@
 # racerbot_sim
 
+> **Who this is for:** someone reading or changing this package's code.
+> **Read first:** [docs/ros-simulator.md](../../docs/ros-simulator.md) for how to run it and what it's for.
+> **What's in it:** the gym bridge, the forged sensor/joystick nodes, and the interlock that refuses to run beside real hardware.
+
 F1TENTH Gym behind the car's own ROS topics, so the real driving stack can
 be run and validated without the car.
 

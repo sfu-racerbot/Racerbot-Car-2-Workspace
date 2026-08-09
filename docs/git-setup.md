@@ -1,5 +1,9 @@
 # Git setup / version control
 
+> **Who this is for:** anyone cloning this repo fresh, or about to pull upstream changes into a vendored package.
+> **Read first:** nothing, though [concepts.md](concepts.md) explains what the `src/` packages are.
+> **You'll be able to:** tell submodules from vendored code, update either safely, and avoid clobbering this workspace's local fixes.
+
 How this workspace is versioned, what's a real git submodule vs. a plain vendored copy, and what to check before pulling upstream updates. Read this before touching `.gitmodules`, running any `git submodule` command, or updating any package listed below.
 
 ## Remote

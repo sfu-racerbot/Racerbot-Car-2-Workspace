@@ -1,5 +1,9 @@
 # Drive intent: showing what the algorithm is trying to do, and why
 
+> **Who this is for:** anyone adding intent publishing to a driving node, or trying to read the dashboard's decision panel.
+> **Read first:** [architecture.md](architecture.md) — this is a diagnostic published *from* driving code, so the safety model matters.
+> **You'll be able to:** publish `/drive_intent` from your own node without putting the control path at risk.
+
 The [web dashboard](web-dashboard.md) draws a curved arrow ahead of the
 car showing where the driving algorithm **intends** to go, and a panel
 explaining **why** it is making the decision it is making right now.

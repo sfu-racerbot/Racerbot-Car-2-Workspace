@@ -1,5 +1,9 @@
 # racerbot-ws
 
+> **Who this is for:** anyone landing on this repo — new team members included. No ROS2 or robotics experience assumed.
+> **Read first:** nothing. For a guided path into the docs, go to [docs/README.md](docs/README.md).
+> **What's in it:** what this repo is, what's in `src/`, and how to build and drive the car.
+
 ROS2 Jazzy workspace for the team's roboracer/F1TENTH car (Jetson Orin Nano Super, JetPack 7.2, Ubuntu 24.04).
 
 Recent changes to the team's own packages are logged in [CHANGELOG.md](CHANGELOG.md) — check it after pulling to see what changed and whether anything still needs on-car validation.

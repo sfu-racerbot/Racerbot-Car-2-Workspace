@@ -1,5 +1,9 @@
 # Troubleshooting
 
+> **Who this is for:** anyone whose car, build, or launch isn't doing what it should.
+> **Read first:** nothing — come straight here when something breaks.
+> **What's in it:** real problems hit during bring-up, how each was diagnosed, and the fix.
+
 Real issues hit while bringing this car up, in the order you're likely to hit them, with how they were actually diagnosed — not just the fix, so you can apply the same method to whatever's different next time.
 
 ## Nothing happens when holding LB

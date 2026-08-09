@@ -1,5 +1,9 @@
 # `gap_follow`
 
+> **Who this is for:** someone reading or changing this package's code. It's also the reference template for any new driving node.
+> **Read first:** [docs/architecture.md](../../docs/architecture.md) for the safety model — this package can move the car.
+> **What's in it:** the follow-the-gap algorithm as implemented, every parameter, and the mandatory deadman pattern to copy.
+
 Reactive "follow-the-gap" autonomy: no map, no localization, no memory of the track — every LIDAR scan is looked at fresh and the car steers into the biggest safe opening it currently sees. This file documents the algorithm and code in detail; for the broader workspace context (safety model, how to run it, how to write your own node) see [docs/architecture.md](../../docs/architecture.md), [docs/operations.md](../../docs/operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node), and [docs/writing-your-own-node.md](../../docs/writing-your-own-node.md).
 
 ## Files

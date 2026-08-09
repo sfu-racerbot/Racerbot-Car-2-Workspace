@@ -1,5 +1,9 @@
 # USB webcam livestream
 
+> **Who this is for:** anyone who wants to watch a USB webcam feed from the car in a browser.
+> **Read first:** nothing.
+> **You'll be able to:** serve live MJPEG video over plain HTTP and view it from any machine on the network.
+
 `usb_cam_stream` captures a USB webcam and serves it as a live MJPEG video
 stream over plain HTTP — open a browser on any device on the network and
 watch, with no RViz, no ROS install, no plugins, and no login needed on
