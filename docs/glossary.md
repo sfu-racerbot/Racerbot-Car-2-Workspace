@@ -28,7 +28,7 @@ One piece of data on a topic, with a fixed shape. A `LaserScan` message holds on
 
 ### Package
 
-One folder of related code that ROS2 builds and runs as a unit. Everything in `src/` is a package. See [concepts.md](concepts.md#anatomy-of-a-package-using-gap_follow-as-the-example) for what's inside one.
+One folder of related code that ROS2 builds and runs as a unit. Everything in `src/` is a package. See [concepts.md](concepts.md#anatomy-of-a-package) for what's inside one.
 
 ### Workspace
 

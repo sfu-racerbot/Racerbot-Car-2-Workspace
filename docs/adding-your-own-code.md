@@ -47,7 +47,7 @@ src/your_package_name/
     └── your_node.yaml              # parameter values — tune behavior here, not in the code
 ```
 
-See [concepts.md](concepts.md#anatomy-of-a-package-using-gap_follow-as-the-example) for what each of these files is actually for and why `ament_python` needs them. Concretely:
+See [concepts.md](concepts.md#anatomy-of-a-package) for what each of these files is actually for and why `ament_python` needs them. Concretely:
 
 - **`package.xml`** — declare every ROS/Python dependency you actually import (`rclpy` always; `sensor_msgs`, `ackermann_msgs`, `nav_msgs`, `geometry_msgs` as needed; a system Python library like `python3-tornado` if you use one — `rosdep`/`colcon` read this to know what to install).
 - **Parameters, not hardcoded constants.** Topic names and every tuning knob should be `declare_parameter(...)` calls with sane defaults, loaded from your `config/your_node.yaml` at launch — this is what lets someone retarget or tune your node without editing code. See any existing node's `__init__` for the pattern.

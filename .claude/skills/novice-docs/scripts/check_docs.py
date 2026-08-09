@@ -78,10 +78,16 @@ GLOSS_PATTERNS = [
     r"\bwhich is\b",
     r"\bstands for\b",
     r"\bin other words\b",
+    r"\bis called\b",
+    r"\bare called\b",
+    r"\brefers to\b",
+    r"\bworks like\b",
 ]
 
 # Commands where "did that work?" is a real question for a beginner.
 RUNNY_COMMAND = re.compile(r"^\s*(ros2\s+(launch|run)|colcon\s+build)\b")
+
+PLACEHOLDER = re.compile(r"<[a-z_][a-z0-9_.-]*>", re.I)
 
 TERMINAL_LABEL = re.compile(r"terminal\s*\d|\*\*terminal\b", re.I)
 SUCCESS_SIGNAL = re.compile(
@@ -254,7 +260,11 @@ def sentences(text: str) -> list[str]:
     """Rough sentence split -- good enough to spot a runaway sentence."""
     protected = re.sub(_ABBREV + r"\.", lambda m: m.group(0).replace(".", "\0"),
                        text, flags=re.I)
-    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z`*\[(])", protected)
+    # Split on markup, not after it has been stripped: a sentence may open with
+    # `a_code_identifier`, and a bold run may close after the full stop
+    # ("...the ladder.** Simulator..."), so allow trailing markers before the
+    # space and any word character or marker after it.
+    parts = re.split(r"(?<=[.!?])[*`_\"')\]]*\s+(?=[`*_\[(A-Za-z0-9])", protected)
     return [p.replace("\0", ".").strip() for p in parts if p.strip()]
 
 
@@ -264,16 +274,17 @@ def check_long_paragraphs(lines: list[str], kinds: list[str], rep: FileReport) -
         if kind != "prose":
             continue
 
-        text = LINK_RE.sub(lambda m: m.group(1), line)
-        text = re.sub(r"^\s*>\s?", "", text)
-        # Emphasis/code markers aren't read, and '**' straddling a full stop
-        # ("...ladder.** Simulator...") hides the sentence boundary.
-        text = re.sub(r"[*`_]", "", text).strip()
+        raw = LINK_RE.sub(lambda m: m.group(1), line)
+        raw = re.sub(r"^\s*>\s?", "", raw)
+        # Emphasis and code markers aren't read, so they don't count toward
+        # length -- but they must survive until after the sentence split.
+        text = re.sub(r"[*`_]", "", raw).strip()
         length = len(text)
         if not length:
             continue
 
-        longest = max((len(s) for s in sentences(text)), default=0)
+        longest = max((len(re.sub(r"[*`_]", "", s)) for s in sentences(raw)),
+                      default=0)
 
         if longest > SENTENCE_LIMIT:
             rep.add(i + 1, "warn", "dense",
@@ -287,6 +298,21 @@ def check_long_paragraphs(lines: list[str], kinds: list[str], rep: FileReport) -
                     f"(standard.md#2-one-idea-per-paragraph).")
 
 
+def end_of_header_block(lines: list[str], kinds: list[str]) -> int:
+    """First line index past the '# Title' and its '> Who this is for' block."""
+    h1 = next((i for i, k in enumerate(kinds) if k == "heading"
+               and lines[i].strip().startswith("# ")), None)
+    if h1 is None:
+        return 0
+
+    i = h1 + 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    while i < len(lines) and lines[i].strip().startswith(">"):
+        i += 1
+    return i
+
+
 def check_jargon(path: Path, lines: list[str], kinds: list[str],
                  rep: FileReport) -> None:
     """Flag robotics/ROS terms used before they're explained."""
@@ -295,6 +321,7 @@ def check_jargon(path: Path, lines: list[str], kinds: list[str],
 
     prose_idx = [i for i, k in enumerate(kinds)
                  if k in ("prose", "table", "heading", "html")]
+    prose_idx = [i for i in prose_idx if i >= end_of_header_block(lines, kinds)]
 
     for term in JARGON:
         pattern = re.compile(r"\b" + re.escape(term) + r"\b",
@@ -365,6 +392,9 @@ def check_command_blocks(lines: list[str], kinds: list[str],
 
         body = lines[start + 1:end]
         runnable = [b for b in body if RUNNY_COMMAND.match(b)]
+        # `ros2 run <package> <executable>` is showing the shape of a command,
+        # not giving one. "How do you know it worked?" doesn't apply.
+        runnable = [b for b in runnable if not PLACEHOLDER.search(b)]
         if not runnable:
             i = end + 1
             continue
