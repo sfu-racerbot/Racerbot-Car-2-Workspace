@@ -3,7 +3,8 @@ install/
 log/
 __pycache__/
 *.pyc
-.claude/
+.claude/*
+!.claude/skills/
 .sim/
 .venv-f1tenth/
 .pytest_cache/

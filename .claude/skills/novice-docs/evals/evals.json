@@ -1,0 +1,52 @@
+{
+  "skill_name": "novice-docs",
+  "notes": "Baseline checker findings on the repo before any skill-driven work: 186 dense paragraphs, 166 unglossed jargon terms, 48 unlabeled command blocks, 28 missing header blocks, 0 broken links, no docs index.",
+  "evals": [
+    {
+      "id": 0,
+      "name": "rewrite-dense-procedural-doc",
+      "prompt": "New club members keep getting lost in docs/operations.md — half of them have never used ROS before. Can you make it something a first-year could actually follow?",
+      "expected_output": "operations.md rewritten: header block added, dense paragraphs split, jargon glossed at first use, terminal labels and success signals on command blocks, safety content preserved or sharpened, no commands/values altered, no content deleted.",
+      "files": ["docs/operations.md"],
+      "assertions": [
+        "Adds a header block with 'Who this is for' and 'Read first' immediately after the H1",
+        "Reduces the count of >200-character prose paragraphs in operations.md",
+        "Adds terminal labels to multi-terminal command blocks",
+        "Adds a success signal ('Working when' or equivalent) to at least the bringup/launch commands",
+        "Does not change any command string, parameter name, or numeric value",
+        "Does not delete the LB deadman safety warnings, and does not soften them into advice",
+        "File does not shrink in total information (no sections silently dropped)"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "build-index-and-reading-order",
+      "prompt": "our docs folder has 20 files in it and every new member asks the same question: where do i even start. sort that out",
+      "expected_output": "docs/README.md created as canonical index with a numbered 'start here' path, a full list grouped by reader intent, and the top-level README pointing at it rather than duplicating the table.",
+      "files": [],
+      "assertions": [
+        "Creates docs/README.md",
+        "Contains a numbered 'start here' reading path of roughly 5-7 steps",
+        "Groups the remaining docs by what the reader is trying to do, not alphabetically",
+        "Every file in docs/ is reachable from the index",
+        "Does not rename or move any existing doc file",
+        "Top-level README.md links to the new index rather than keeping a duplicate table"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "rewrite-package-readme",
+      "prompt": "src/racerbot_sim/README.md assumes you already know how the whole stack works. rewrite it for someone who just joined and has never run a simulator.",
+      "expected_output": "Package README rewritten to the package-README shape: header block, one-sentence purpose, what it does in plain language, files table, parameters, running it with success signals, and the hardware interlock explained as a safety item.",
+      "files": ["src/racerbot_sim/README.md"],
+      "assertions": [
+        "Adds a header block with 'Who this is for' and 'Read first'",
+        "Opens with one plain-language sentence on what the package does",
+        "Glosses simulator/ROS jargon at first use or links a glossary",
+        "Command blocks get success signals",
+        "Explains the real-driver interlock and why it exists, without weakening it",
+        "Links to docs/ros-simulator.md instead of restating the workflow"
+      ]
+    }
+  ]
+}
