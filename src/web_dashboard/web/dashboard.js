@@ -1980,7 +1980,13 @@
     // Cache-bust: without this, a browser that already failed to load
     // this exact URL once may just replay the cached failure instead of
     // actually retrying the connection.
-    cameraFeed.src = `http://${location.hostname}:${CAMERA_PORT}/stream?_=${Date.now()}`;
+    // The preview tier -- small and cheap. This inset is at most 220 CSS
+    // pixels wide, and it used to be fed a 1280x720 stream: roughly 34x
+    // more picture than it could ever show, at 12-18 Mbit/s, competing
+    // with this dashboard's own telemetry for the same WiFi link. The
+    // recording view (camera.js) asks for the full tier instead.
+    cameraFeed.src =
+      `http://${location.hostname}:${CAMERA_PORT}/stream?tier=preview&_=${Date.now()}`;
   }
 
   cameraFeed.addEventListener('load', () => {

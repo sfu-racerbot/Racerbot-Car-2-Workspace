@@ -132,7 +132,12 @@
   }
 
   function tryCameraConnect() {
-    cameraFeed.src = `http://${location.hostname}:${CAMERA_PORT}/stream?_=${Date.now()}`;
+    // The full tier: this view exists to be screen-recorded, so it wants
+    // the camera's real resolution and quality. The dashboard's little
+    // inset asks for the preview tier instead -- see
+    // usb_cam_stream/camera_stream_node.py.
+    cameraFeed.src =
+      `http://${location.hostname}:${CAMERA_PORT}/stream?tier=full&_=${Date.now()}`;
   }
 
   cameraFeed.addEventListener('load', () => {
