@@ -1,5 +1,10 @@
 # Guided odometry calibration
 
+> **Who this is for:** anyone whose car reports the wrong distance travelled, or whose steering angle doesn't match reality.
+> **Read first:** [operations.md](operations.md) — you need to be able to bring the car up and drive it first.
+> **You'll be able to:** calibrate VESC speed odometry with a tape measure, using a browser wizard.
+> **Time:** about 30 minutes with the car.
+
 The workspace includes a local, read-only Web wizard for tape-measure
 calibration of VESC speed odometry and optional steering conversion.
 

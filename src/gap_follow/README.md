@@ -1,5 +1,9 @@
 # `gap_follow`
 
+> **Who this is for:** someone reading or changing this package's code. It's also the reference template for any new driving node.
+> **Read first:** [docs/architecture.md](../../docs/architecture.md) for the safety model — this package can move the car.
+> **What's in it:** the follow-the-gap algorithm as implemented, every parameter, and the mandatory deadman pattern to copy.
+
 Reactive "follow-the-gap" autonomy: no map, no localization, no memory of the track — every LIDAR scan is looked at fresh and the car steers into the biggest safe opening it currently sees. This file documents the algorithm and code in detail; for the broader workspace context (safety model, how to run it, how to write your own node) see [docs/architecture.md](../../docs/architecture.md), [docs/operations.md](../../docs/operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node), and [docs/writing-your-own-node.md](../../docs/writing-your-own-node.md).
 
 ## Files
@@ -112,7 +116,7 @@ made TTC brake for the very wall it was negotiating, which then fought the
 escape creep to a standstill mid-corner. Straight-line travel is the
 zero-curvature case of the same test.
 
-Beams with no positive closing speed have infinite TTC, so a close wall exactly beside the car does not create the old closest-range corner false positive. When fresh odometry is effectively zero (at or below `ttc_command_fallback_max_odom_speed`, 0.10m/s), TTC uses the larger of odometry and the latest drive command when that command is positive and no older than `ttc_command_speed_timeout_sec` (0.5s). Once odometry reports meaningful motion, TTC uses measured speed. This catches a stuck-zero/lagging reading without treating full requested speed as instantaneous in a healthy tight corner. A zero brake command supersedes the prior positive command, preventing stale intent from latching the stop. If minimum TTC is at or below `ttc_threshold_sec` (0.5s), the node publishes zero speed and logs `STOP [ttc_brake]`. Invalid LiDAR beams are excluded from all three checks.
+Beams with no positive closing speed have infinite TTC, so a close wall exactly beside the car does not create the old closest-range corner false positive. When fresh odometry is effectively zero (at or below `ttc_command_fallback_max_odom_speed`, 0.10m/s), TTC uses the larger of odometry and the latest drive command when that command is positive and no older than `ttc_command_speed_timeout_sec` (0.5s). Once odometry reports meaningful motion, TTC uses measured speed. This catches a stuck-zero/lagging reading without treating full requested speed as instantaneous in a healthy tight corner. A zero brake command supersedes the prior positive command, preventing stale intent from latching the stop. If minimum TTC is at or below `ttc_threshold_sec` (0.35s), the node publishes zero speed and logs `STOP [ttc_brake]`. The brake is only armed above `ttc_min_brake_speed` (0.6m/s): TTC is clearance divided by closing speed, so a crawling car reaches the threshold on a few centimetres of clearance -- precisely the state of a car that has already eased up to the inside of a corner, where braking removes the only motion that would clear it. Below that speed the clearance layers own the car instead, and they are the ones built to escape: `emergency_stop_clearance` still stops on contact and the forward reserve still creeps toward a visible exit. Invalid LiDAR beams are excluded from all three checks.
 
 ### 4. Extend obstacle edges by the car's physical clearance (disparity extender)
 
@@ -156,7 +160,7 @@ $$\text{score} = \text{width} \times \overline{\text{depth}}$$
 
 **Why not just pick the widest gap?** A shallow dead end can subtend a wider angle than a genuinely open corridor. Scoring by `width × average_depth` rewards useful depth.
 
-The former implementation stopped whenever no run remained continuously deeper than 2.0m. A blind 90-degree corner can be physically wide enough while hiding everything beyond the turn, so that rule created `no_safe_gap` immediately before turn-in. The new second pass accepts `fallback_min_gap_distance` (0.8m) and caps speed at `corner_speed` (0.5m/s). It still uses the inflated scan and `min_centerline_gap_width`, so a boxed-in scene still stops.
+The former implementation stopped whenever no run remained continuously deeper than 2.0m. A blind 90-degree corner can be physically wide enough while hiding everything beyond the turn, so that rule created `no_safe_gap` immediately before turn-in. The new second pass accepts `fallback_min_gap_distance` (0.8m) and caps speed at `corner_speed` (0.8m/s). That cap governs most of a lap in a tight room -- a measured run spent roughly four of every five driving ticks in this fallback -- so it, not `max_speed`, is the knob that sets the pace through corners. It still uses the inflated scan and `min_centerline_gap_width`, so a boxed-in scene still stops.
 
 Obstacle inflation has already removed `car_width / 2 + safety_margin` from both sides of every edge. The old candidate filter required another `car_width + safety_margin` after inflation, effectively demanding roughly a 0.9m raw opening for a 0.31m car. `min_centerline_gap_width` now checks only the small corridor remaining for candidate center points, eliminating that double-padding.
 
@@ -271,10 +275,10 @@ cases. Command shaping only ever applies to a normal drive command.
 | `car_width` / `car_length` | `0.31` / `0.58` m | Deliberately padded from the Traxxas body (0.281 × 0.535m) |
 | `wheelbase` | `0.324` m | Published Traxxas rear-to-front axle distance; also centers the padded body from rear-axle `base_link` |
 | `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` m | Estimated LiDAR origin relative to `base_link`; measure x to finalize |
-| `safety_margin` / `disparity_threshold` | `0.10` / `0.4` m | Edge inflation clearance and range-jump threshold |
+| `safety_margin` / `disparity_threshold` | `0.18` / `0.4` m | Edge inflation clearance and range-jump threshold |
 | `min_centerline_gap_width` | `0.10` m | Minimum center corridor remaining after obstacle inflation |
 | `min_gap_distance` / `fallback_min_gap_distance` | `2.0` / `0.8` m | Preferred depth and tight-corner fallback depth |
-| `max_speed` / `min_speed` / `corner_speed` | `2.0` / `0.8` / `0.5` m/s | Normal speed range and fallback cap |
+| `max_speed` / `min_speed` / `corner_speed` | `2.5` / `0.8` / `0.8` m/s | Normal speed range and fallback cap |
 | `max_steering_angle` | `0.26` rad (~15°) | Hard command clamp — the symmetric envelope this car's servo can actually reach |
 | `steering_gain` | `1.0` | Steering per radian of gap bearing, before the `max_steering_angle` clip. `1.0` points the wheels at the gap. Raise only if the car is slow to leave a wall; too high weaves |
 | `max_lateral_accel` | `1.0` m/s² | Cornering speed ceiling: $v \le \sqrt{a_{lat}/\|\kappa\|}$ |
@@ -312,7 +316,8 @@ visible opening does not do. If the course has square 1 m corners, that is a
 planner/route problem, not something to tune out of this node, and the honest
 options are to round the corner, widen it, or drive it under `pure_pursuit` on
 a recorded line.
-| `enable_ttc` / `ttc_threshold_sec` | `true` / `0.5s` | Enable iTTC braking and set its trigger |
+| `enable_ttc` / `ttc_threshold_sec` | `true` / `0.35s` | Enable iTTC braking and set its trigger |
+| `ttc_min_brake_speed` | `0.6m/s` | Speed below which the TTC brake is not armed at all; the clearance stops and the forward-reserve creep still run |
 | `ttc_min_closing_speed` / `odom_timeout_sec` | `0.05m/s` / `0.5s` | Ignore negligible closing rates; fail closed on stale odometry |
 | `ttc_command_speed_timeout_sec` | `0.5s` | Freshness limit for a latest positive command used as TTC backup |
 | `ttc_command_fallback_max_odom_speed` | `0.10m/s` | Use command backup only while fresh odometry is effectively zero |

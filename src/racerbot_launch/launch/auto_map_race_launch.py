@@ -28,6 +28,14 @@ def generate_launch_description():
     output_directory_arg = DeclareLaunchArgument(
         'output_directory', default_value='~/.ros/racerbot_auto',
         description='Parent directory for generated map, pose graph, and raceline files.')
+    supervisor_config_arg = DeclareLaunchArgument(
+        'supervisor_config',
+        default_value=os.path.join(
+            get_package_share_directory('pure_pursuit'), 'config', 'auto_map_race.yaml'),
+        description=(
+            'Parameter file for auto_map_race_node. Point it at a copy to race a '
+            'tight course more slowly (profile_max_speed / profile_max_lateral_accel) '
+            'without editing the packaged config.'))
 
     bringup = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
@@ -43,8 +51,6 @@ def generate_launch_description():
         get_package_share_directory('gap_follow'), 'config', 'gap_follow.yaml')
     pure_config = os.path.join(
         get_package_share_directory('pure_pursuit'), 'config', 'pure_pursuit.yaml')
-    supervisor_config = os.path.join(
-        get_package_share_directory('pure_pursuit'), 'config', 'auto_map_race.yaml')
 
     mapping_controller = Node(
         package='gap_follow',
@@ -75,7 +81,7 @@ def generate_launch_description():
         executable='auto_map_race_node',
         name='auto_map_race_node',
         output='screen',
-        parameters=[supervisor_config, {
+        parameters=[LaunchConfiguration('supervisor_config'), {
             'mapping_laps': LaunchConfiguration('mapping_laps'),
             'output_directory': LaunchConfiguration('output_directory'),
         }],
@@ -87,6 +93,7 @@ def generate_launch_description():
         mapping_min_speed_arg,
         mapping_laps_arg,
         output_directory_arg,
+        supervisor_config_arg,
         bringup,
         slam,
         mapping_controller,

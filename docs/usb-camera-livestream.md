@@ -1,5 +1,9 @@
 # USB webcam livestream
 
+> **Who this is for:** anyone who wants to watch a USB webcam feed from the car in a browser.
+> **Read first:** nothing.
+> **You'll be able to:** serve live MJPEG video over plain HTTP and view it from any machine on the network.
+
 `usb_cam_stream` captures a USB webcam and serves it as a live MJPEG video
 stream over plain HTTP — open a browser on any device on the network and
 watch, with no RViz, no ROS install, no plugins, and no login needed on
@@ -137,6 +141,46 @@ In this mode `device`/`width`/`height`/`capture_fps` are unused — the
 publishing node owns the capture settings; `stream_fps`/`jpeg_quality`/
 `host`/`port` still apply as normal.
 
+## Two streams, not one
+
+The camera serves two endpoints, because it has two viewers with opposite
+needs:
+
+| URL | What it is | Who uses it |
+|---|---|---|
+| `http://<car-ip>:9090/stream` | **preview** — small and cheap (`preview_width`, default 480) | the dashboard's camera inset |
+| `http://<car-ip>:9090/stream?tier=full` | **full** — the camera's own resolution and high quality | the recording view (`camera.html`), and you, watching directly |
+
+This used to be a single 1280×720 stream at quality 80 serving both. The
+dashboard's inset is at most **220 CSS pixels wide**, so the car was
+encoding and transmitting roughly 34× more picture than that panel could
+ever display — 12–18 Mbit/s, over the same WiFi link the dashboard's own
+telemetry needed. That is most of why both used to feel laggy.
+
+Each tier is encoded once and shared by everyone watching it, and **a tier
+nobody is watching is never encoded at all** — a dashboard whose camera
+panel no one is looking at costs the Jetson nothing.
+
+### Why the picture used to look soft
+
+The capture path asks the camera for MJPEG, which every UVC webcam
+produces in hardware. OpenCV then silently *decodes* that to BGR inside
+`.read()`, and this node used to *re-encode* it to JPEG at quality 80 — a
+second lossy generation on top of the camera's own. With `passthrough`
+enabled (the default) the camera's JPEG is served exactly as it came, so
+the full tier is sharper *and* costs almost no CPU. Support for that
+depends on the OpenCV/V4L2 build, so it is probed once when the camera
+opens; the startup log says which mode it settled on:
+
+```
+CAMERA [opened] device='/dev/video0', negotiated 1280x720@30.0fps,
+passing the camera JPEG through untouched; waiting for first frame
+```
+
+If it says `decoding and re-encoding frames` instead, passthrough was not
+available and the old behaviour applies. Raising `full_quality` is then
+the lever for sharpness.
+
 ## Parameter reference
 
 All in `src/usb_cam_stream/config/usb_cam_stream.yaml`:
@@ -149,8 +193,13 @@ All in `src/usb_cam_stream/config/usb_cam_stream.yaml`:
 | `capture_fps` | `30` | Requested camera capture rate |
 | `host` | `0.0.0.0` | Listen on every network interface — see [security note](#security-note) |
 | `port` | `9090` | Web server port — **not** `8080`, which `web_dashboard` already uses on this car |
-| `stream_fps` | `15.0` | How often each connected browser is sent a new frame — independent of `capture_fps`, keeps WiFi/CPU load down since a browser doesn't need every captured frame |
-| `jpeg_quality` | `80` | `0`–`100` JPEG re-encode quality — higher costs more bandwidth/CPU per frame |
+| `stream_fps` | `30.0` | Upper bound on how often one viewer is sent a frame. Frames are pushed as soon as they exist rather than polled for, so this is a cap rather than a rate |
+| `preview_width` | `480` | Width of the small tier that the dashboard's camera inset uses |
+| `preview_quality` | `65` | JPEG quality for the preview tier |
+| `full_width` | `0` | Width of the full tier. `0` = whatever the camera is producing |
+| `full_quality` | `90` | JPEG quality for the full tier — high, precisely because the small tier carries the routine traffic |
+| `passthrough` | `true` | Serve the camera's own MJPEG untouched instead of decoding and re-encoding it. Probed at startup, falls back automatically, and logs which mode is in use |
+| `jpeg_quality` | *(deprecated)* | Old single quality knob. If set, it is applied to both tiers and logs a warning |
 | `frame_timeout_sec` | `2.0` s | Warn when the selected source has not produced a newly encoded frame for this long |
 | `status_log_period_sec` | `5.0` s | Repeat the unchanged stream state in the launch terminal (`0.0` = transitions only) |
 

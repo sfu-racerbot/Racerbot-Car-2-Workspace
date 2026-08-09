@@ -13,17 +13,58 @@ web_dashboard_node:
     drive_topic: /ackermann_cmd  # selected command after ackermann_mux
     odom_topic: /odom            # measured longitudinal speed
     joy_topic: /joy              # read-only LB state for the stopwatch
+    # What the running driving node says it is *trying* to do -- the intent
+    # arrow and the decision panel. Still just another subscription; this
+    # dashboard publishes to no topic. See docs/drive-intent.md.
+    intent_topic: /drive_intent
+    # Malformed intent messages are reported at most this often. A publisher
+    # getting the schema wrong is usually getting it wrong at 20Hz, and the
+    # flood would bury the driving logs beside it.
+    intent_warn_period_sec: 5.0
     deadman_button: 4            # Logitech F710 LB in XInput mode
     joy_timeout_sec: 0.5         # same freshness limit as the driving nodes
-    stopwatch_update_rate_hz: 10.0
+    # The browser runs the clock between updates (it interpolates from the
+    # last snapshot), so this only has to be often enough to correct drift
+    # and to carry LB press/release promptly.
+    stopwatch_update_rate_hz: 4.0
 
     # --- Web server ---
     host: 0.0.0.0   # listen on every interface -- see docs/web-dashboard.md's security note
     port: 8080
 
     # --- Bandwidth ---
+    # See docs/web-dashboard.md "What this costs the car" for the measured
+    # before/after. The short version: this dashboard used to push ~900 kB/s
+    # over WiFi while the car was being driven around, almost all of it the
+    # occupancy grid being re-sent in full every few seconds, and that is
+    # what made everything else on the link feel laggy.
     scan_broadcast_rate_hz: 10.0   # /scan itself runs ~40Hz; no browser needs to redraw that often
     stats_interval_sec: 1.0        # how often CPU/mem/temp/uptime are sampled and broadcast
+
+    # Pose, command, speed, intent, stopwatch and system stats are collected
+    # and sent as ONE frame at this rate rather than one frame each. Their
+    # inputs run at 32-44Hz apiece (~155 frames/s in total) and a WebSocket
+    # frame costs roughly the same however small it is, so this is about an
+    # 8x saving on framing alone. 20Hz is already faster than a screen
+    # refreshes; raising it buys nothing a person can see.
+    telemetry_rate_hz: 20.0
+
+    # The map is sent as changes rather than in full -- a keyframe when a
+    # browser connects or the grid is resized, then just the rectangle of
+    # cells that actually moved (measured: ~200 bytes against 4MB). Set
+    # map_patching false to go back to whole grids if a patch is ever
+    # suspected of painting the map wrong; map_compression false sends them
+    # uncompressed as well.
+    map_compression: true
+    map_patching: true
+    map_keyframe_sec: 30.0   # resend the whole grid this often, so a client cannot stay wrong
+
+    # 'u16mm' sends each beam as a uint16 of millimetres: half the bytes of
+    # 'f32', and far below both a screen pixel and the LIDAR's own accuracy.
+    # scan_decimation sends only every Nth beam -- 1 (every beam) is the
+    # default because at 2 bytes each the scan is no longer the problem.
+    scan_encoding: u16mm
+    scan_decimation: 1
 
     # --- LIDAR mounting offset from base_link, used to place scan points
     # correctly relative to the car's pose (see docs/hardware-reference.md) ---

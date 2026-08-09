@@ -1,5 +1,9 @@
 # RealSense D435i: color + depth over ROS2
 
+> **Who this is for:** anyone setting up or using the Intel RealSense D435i on this car.
+> **Read first:** nothing, though [operations.md](operations.md) covers the normal bringup this sits alongside.
+> **You'll be able to:** get color and depth streams over ROS2, and know which IMU limitation to expect on this hardware.
+
 Publishes the Intel RealSense D435i's color and depth streams as ROS2
 topics, low-res/low-fps so it doesn't compete with the LiDAR/SLAM/
 localization/pure_pursuit stack already running on this Jetson. This is a
@@ -73,6 +77,17 @@ fails). Full detail:
 [usb-camera-livestream.md](usb-camera-livestream.md#image_topic-mode-streaming-a-ros-image-topic-instead).
 The stream is also directly viewable at `http://<car-ip>:9090/` without
 the dashboard.
+
+Two things about this mode are worth knowing. It serves the same
+[two tiers](usb-camera-livestream.md#two-streams-not-one) as the webcam
+mode — a small `/stream` for the dashboard inset and
+`/stream?tier=full` for the recording view — but `passthrough` does
+nothing here: frames arrive from the topic already decoded, so there is no
+camera JPEG to pass through and every frame is encoded from scratch. And
+the subscription deliberately uses sensor QoS with a queue depth of 1. The
+default depth of 10 meant up to ten already-stale frames sat queued ahead
+of the current one, which on a 30fps camera is a third of a second of pure
+latency spent on frames nobody would ever see.
 
 ## Known limitation: no IMU on this backend
 

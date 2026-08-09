@@ -10,8 +10,35 @@ usb_cam_stream_node:
     # --- Web server ---
     host: 0.0.0.0   # listen on every interface -- see docs/usb-camera-livestream.md's security note
     port: 9090      # 8080 is already used by web_dashboard on this car
-    stream_fps: 15.0   # how often a connected browser is sent a new frame, independent of capture_fps
-    jpeg_quality: 80   # 0-100 -- higher = better quality, more bandwidth/CPU
+    # Upper bound on how often any one viewer is sent a frame. Frames are
+    # pushed as soon as they exist rather than polled for, so this is a cap
+    # rather than a rate -- and with the preview tier being small there is
+    # no longer a reason to keep it far below capture_fps.
+    stream_fps: 30.0
+
+    # --- Two stream tiers, because there are two viewers with opposite
+    # needs (see docs/usb-camera-livestream.md). Each is encoded once and
+    # shared; a tier nobody is watching is not encoded at all.
+    #
+    #   /stream              preview -- the dashboard's camera inset, which
+    #                        is at most 220 CSS pixels wide
+    #   /stream?tier=full    full -- the recording view, and anyone looking
+    #                        at the raw feed
+    #
+    # This used to be one 1280x720 stream for both, which meant sending
+    # roughly 34x more picture than the inset could show, at 12-18 Mbit/s,
+    # over the same WiFi the dashboard needs.
+    preview_width: 480     # generous for a 220px panel even on a retina screen
+    preview_quality: 65
+    full_width: 0          # 0 = whatever the camera is producing
+    full_quality: 90       # high, precisely because the small tier carries the traffic
+
+    # Serve the camera's own MJPEG untouched instead of decoding it and
+    # re-encoding it. That second compression generation is what made the
+    # picture look soft, and skipping it is also nearly free. Probed at
+    # startup; falls back automatically, and logs which mode is in use.
+    # Set false if a particular camera or OpenCV build misbehaves.
+    passthrough: true
 
     # --- Terminal diagnostics ---
     frame_timeout_sec: 2.0      # warn if no newly encoded frame arrives for this long

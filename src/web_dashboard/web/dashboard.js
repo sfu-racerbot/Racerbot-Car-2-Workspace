@@ -44,8 +44,26 @@
     drive: document.getElementById('dot-drive'),
     stats: document.getElementById('dot-stats'),
   };
+  const intentSection = document.getElementById('intent-section');
+  const intentDot = document.getElementById('dot-intent');
+  const intentState = document.getElementById('intent-state');
+  const intentNode = document.getElementById('intent-node');
+  const intentReason = document.getElementById('intent-reason');
+  const intentSpeeds = document.getElementById('intent-speeds');
+  const intentSteering = document.getElementById('intent-steering');
+  const intentFactors = document.getElementById('intent-factors');
+  const intentLog = document.getElementById('intent-log');
+  const intentToggle = document.getElementById('intent-toggle');
+
   const modeBanner = document.getElementById('mode-banner');
   const resetViewBtn = document.getElementById('reset-view');
+
+  if (intentToggle) {
+    intentToggle.addEventListener('change', () => {
+      state.showIntent = intentToggle.checked;
+      scheduleRender();
+    });
+  }
 
   const overlay = document.getElementById('overlay');
 
@@ -86,13 +104,62 @@
     stats: null, // { cpuPercent, memPercent, cpuTempC, uptimeS, wifiDbm, receivedAt }
     tuning: null, // { enabled, allowSave, nodes: [...] } -- see protocol.tuning_state_message
     tuningArmed: false, // server-confirmed, never assumed from the checkbox
+    // What the driving node says it is *trying* to do -- see
+    // docs/drive-intent.md. `intent` is the raw schema payload; `reason`
+    // is held separately because the car only re-sends the (sometimes
+    // expensive) explanation on state changes and on a slow period, so
+    // most messages deliberately arrive without one.
+    intent: null,
+    intentReason: '',
+    intentReceivedAt: 0,
+    intentLog: [],   // [{ state, severity, at, heldMs }] newest first
+    showIntent: true,
+    // Binary frames whose length did not match the header that claimed
+    // them -- see handleBinary. Surfaced rather than swallowed, because
+    // the visible symptom is a map that has turned to garbage and there
+    // is otherwise nothing to tell you why.
+    desyncCount: 0,
+    desyncAt: 0,
+    desyncDetail: '',
   };
+
+  // How the arrow is drawn. Half-width is proportional to the *planned*
+  // speed at each sample, which is what makes "wider = faster" readable at
+  // a glance; the clamps keep a crawl visible and stop a 6m/s straight
+  // from covering the track.
+  const INTENT_HALF_WIDTH_PER_MPS = 0.07; // meters of half-width per m/s
+  const INTENT_MIN_HALF_WIDTH = 0.04;     // meters
+  const INTENT_MAX_HALF_WIDTH = 0.35;     // meters
+  // Older than this and the arrow is a claim about a moment that has
+  // passed; it fades rather than disappearing, so "the publisher died"
+  // and "the car is stopped" stay visually distinct.
+  const INTENT_STALE_MS = 1000;
+  const INTENT_LOG_LIMIT = 20;
+
+  const INTENT_COLORS = {
+    drive:   { fill: 'rgba(63, 185, 80, 0.28)',  edge: 'rgba(63, 185, 80, 0.90)',  ink: '#3fb950' },
+    caution: { fill: 'rgba(210, 153, 34, 0.30)', edge: 'rgba(210, 153, 34, 0.92)', ink: '#d29922' },
+    stop:    { fill: 'rgba(248, 81, 73, 0.28)',  edge: 'rgba(248, 81, 73, 0.92)',  ink: '#f85149' },
+  };
+
+  function intentColors(severity) {
+    return INTENT_COLORS[severity] || INTENT_COLORS.caution;
+  }
 
   // Pending "what does the next binary frame mean" -- set when a JSON
   // header arrives, consumed the moment the binary payload right after
   // it does (the server always sends them as an immediate pair).
+  //
+  // One slot, so a header that never gets its binary points this at the
+  // wrong thing and every later payload is decoded as the wrong type.
+  // The header's `bytes` field is what makes that detectable; see
+  // handleBinary and protocol.py.
   let pendingBinaryType = null;
   let pendingHeader = null;
+  // Warn at most this often, so a broken link cannot flood the console.
+  const DESYNC_WARN_MS = 5000;
+  const DESYNC_BANNER_MS = 10000;
+  let lastDesyncWarnAt = 0;
 
   // ---------------------------------------------------------------------
   // View transform: world meters (map frame: +X right, +Y up, exactly as
@@ -111,6 +178,7 @@
     bodyPanX: 0,
     bodyPanY: 0,
     userAdjusted: false, // once the user pans/zooms, stop auto-fitting on new data
+    fittedToMap: false,  // a map has been framed at least once -- see maybeAutoFit
   };
 
   function worldToCanvas(wx, wy) {
@@ -168,19 +236,28 @@
   }
 
   function handleHeader(header) {
-    if (header.type === 'map' || header.type === 'scan') {
+    if (header.type === 'batch') {
+      // One frame carrying everything that happened in the last tick --
+      // see web_dashboard/batching.py. Each item is exactly the message it
+      // would have been on its own, so every handler below is reused as-is
+      // rather than duplicated for the batched case.
+      const items = header.items || [];
+      for (let i = 0; i < items.length; i++) handleHeader(items[i]);
+      return;
+    }
+    if (header.type === 'map' || header.type === 'map_patch' || header.type === 'scan') {
       pendingBinaryType = header.type;
       pendingHeader = header;
     } else if (header.type === 'pose') {
       state.pose = { x: header.x, y: header.y, yaw: header.yaw, receivedAt: performance.now() };
       maybeAutoFit();
-      render();
+      scheduleRender();
     } else if (header.type === 'drive') {
       state.drive = { speed: header.speed, steeringAngle: header.steering_angle, receivedAt: performance.now() };
-      updateStatusText();
+      scheduleRender();
     } else if (header.type === 'speed') {
       state.speed = { speed: header.speed, receivedAt: performance.now() };
-      updateStatusText();
+      scheduleRender();
     } else if (header.type === 'stopwatch') {
       state.stopwatch = {
         elapsedS: header.elapsed_s,
@@ -191,7 +268,10 @@
         buttonAvailable: header.button_available,
         receivedAt: performance.now(),
       };
-      updateStatusText();
+      scheduleRender();
+    } else if (header.type === 'intent') {
+      applyIntent(header.intent);
+      scheduleRender();
     } else if (header.type === 'tuning') {
       state.tuning = { enabled: header.enabled, allowSave: header.allow_save, nodes: header.nodes || [] };
       renderTuning();
@@ -210,20 +290,125 @@
         wifiDbm: header.wifi_dbm,
         receivedAt: performance.now(),
       };
-      updateStatusText();
+      scheduleRender();
     }
   }
 
-  function handleBinary(buffer) {
-    if (pendingBinaryType === 'map') {
-      applyMap(pendingHeader, new Int8Array(buffer));
-    } else if (pendingBinaryType === 'scan') {
-      applyScan(pendingHeader, new Float32Array(buffer));
+  function noteDesync(detail) {
+    state.desyncCount += 1;
+    state.desyncAt = performance.now();
+    state.desyncDetail = detail;
+    if (state.desyncAt - lastDesyncWarnAt >= DESYNC_WARN_MS) {
+      lastDesyncWarnAt = state.desyncAt;
+      console.warn(`dashboard: dropped a binary frame -- ${detail} `
+        + `(${state.desyncCount} so far)`);
     }
+    scheduleRender();
+  }
+
+  function handleBinary(buffer) {
+    // Consume the pending slot *first*, whatever happens next. Leaving a
+    // stale header in it is precisely the failure being guarded against:
+    // the next payload would then be decoded as the previous type, and a
+    // 1081-beam scan read as occupancy cells is 4324 bytes against an
+    // 80000-cell header -- every read past the end is undefined, every
+    // colour computes to NaN, and the map paints as garbage instead of
+    // failing.
+    const header = pendingHeader;
+    const type = pendingBinaryType;
     pendingBinaryType = null;
     pendingHeader = null;
+
+    if (!header) {
+      noteDesync('binary frame with no header before it');
+      return;
+    }
+    // `bytes` is what the server says must follow. Older servers do not
+    // send it; fall back to the type's own arithmetic rather than
+    // trusting the pairing blindly.
+    const expected = typeof header.bytes === 'number'
+      ? header.bytes
+      : (type === 'map' ? header.width * header.height : 4 * header.count);
+    if (buffer.byteLength !== expected) {
+      noteDesync(`${type} payload is ${buffer.byteLength} bytes, header says ${expected}`);
+      return;
+    }
+
+    if (type === 'map' || type === 'map_patch') {
+      queueMapFrame(type, header, buffer);
+      return; // the chain re-renders once the frame has actually landed
+    }
+    if (type === 'scan') {
+      applyScan(header, buffer);
+    }
     maybeAutoFit();
-    render();
+    scheduleRender();
+  }
+
+  // ---------------------------------------------------------------------
+  // Map frames arrive as a keyframe (the whole grid) followed by patches
+  // (just the rectangle that changed) -- see web_dashboard/mapstream.py.
+  // Decoding one is asynchronous, because inflating is, and patches MUST be
+  // applied in the order the car sent them: applying two out of order would
+  // leave the map quietly wrong rather than visibly broken. So every map
+  // frame goes through one promise chain, which serialises them no matter
+  // how the inflates interleave.
+  // ---------------------------------------------------------------------
+  let mapChain = Promise.resolve();
+
+  function queueMapFrame(type, header, buffer) {
+    mapChain = mapChain
+      .then(() => applyMapFrame(type, header, buffer))
+      .then(() => { maybeAutoFit(); scheduleRender(); })
+      .catch((err) => {
+        noteDesync(`could not decode a ${type} frame -- ${err && err.message ? err.message : err}`);
+      });
+  }
+
+  // Whether this browser can inflate at all. DecompressionStream is in
+  // every current browser (Chrome 80+, Firefox 113+, Safari 16.4+), but a
+  // silently blank map on an older one would be a miserable thing to
+  // debug, so it is detected and reported rather than assumed.
+  const CAN_INFLATE = typeof DecompressionStream === 'function';
+  let warnedAboutInflate = false;
+
+  async function decodePayload(header, buffer) {
+    const expected = header.raw_bytes;
+    if (header.encoding !== 'deflate') {
+      const raw = new Uint8Array(buffer);
+      if (typeof expected === 'number' && raw.length !== expected) {
+        throw new Error(`payload is ${raw.length} bytes, header says ${expected}`);
+      }
+      return raw;
+    }
+    if (!CAN_INFLATE) {
+      if (!warnedAboutInflate) {
+        warnedAboutInflate = true;
+        console.error(
+          'dashboard: this browser has no DecompressionStream, so the '
+          + 'compressed map cannot be drawn. Set map_compression: false in '
+          + 'web_dashboard.yaml, or use a newer browser.');
+      }
+      throw new Error('this browser cannot inflate the map (set map_compression: false)');
+    }
+    const stream = new Blob([buffer]).stream()
+      .pipeThrough(new DecompressionStream('deflate'));
+    const raw = new Uint8Array(await new Response(stream).arrayBuffer());
+    if (typeof expected === 'number' && raw.length !== expected) {
+      throw new Error(`inflated to ${raw.length} bytes, header says ${expected}`);
+    }
+    return raw;
+  }
+
+  async function applyMapFrame(type, header, buffer) {
+    const raw = await decodePayload(header, buffer);
+    // Int8 view over the same bytes: occupancy values are signed (-1 is
+    // 'unknown'), and the palette below is indexed by the raw byte anyway.
+    if (type === 'map') {
+      applyMap(header, raw);
+    } else {
+      applyMapPatch(header, raw);
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -260,44 +445,133 @@
   // just scale/position that image with a single fast drawImage() call
   // every frame instead of redrawing every cell every frame.
   // ---------------------------------------------------------------------
+  // A 256-entry palette indexed by the RAW BYTE of each cell, so colouring
+  // is one lookup and one 32-bit store per cell instead of a branch and
+  // four byte stores. That matters: a 2048x2048 keyframe is 4.2 million
+  // cells, and this runs on whatever laptop or phone is watching.
+  //
+  // Indexing by the raw byte is what removes the branch. Occupancy values
+  // are signed: 0..100 are probabilities and -1 is "unknown", which as a
+  // byte is 255. So bytes 0..100 take the gradient, 101..127 clamp to
+  // occupied (out of spec, but that is what the old code did with them),
+  // and 128..255 -- every negative value -- are unknown.
+  const LITTLE_ENDIAN = (() => {
+    const probe = new ArrayBuffer(4);
+    new Uint32Array(probe)[0] = 0x01020304;
+    return new Uint8Array(probe)[0] === 0x04;
+  })();
+
+  const MAP_PALETTE = (() => {
+    const lut = new Uint32Array(256);
+    const pack = (r, g, b, a) => (LITTLE_ENDIAN
+      ? ((a * 16777216) + (b * 65536) + (g * 256) + r)
+      : ((r * 16777216) + (g * 65536) + (b * 256) + a)) >>> 0;
+    const unknown = pack(MAP_UNKNOWN_RGBA[0], MAP_UNKNOWN_RGBA[1],
+                         MAP_UNKNOWN_RGBA[2], MAP_UNKNOWN_RGBA[3]);
+    for (let byte = 0; byte < 256; byte++) {
+      if (byte > 127) { lut[byte] = unknown; continue; } // negative int8
+      const t = Math.min(byte, 100) / 100;               // 0 free -> 1 occupied
+      lut[byte] = pack(
+        Math.round(MAP_FREE_RGB[0] + (MAP_OCCUPIED_RGB[0] - MAP_FREE_RGB[0]) * t),
+        Math.round(MAP_FREE_RGB[1] + (MAP_OCCUPIED_RGB[1] - MAP_FREE_RGB[1]) * t),
+        Math.round(MAP_FREE_RGB[2] + (MAP_OCCUPIED_RGB[2] - MAP_FREE_RGB[2]) * t),
+        255);
+    }
+    return lut;
+  })();
+
+  // OccupancyGrid.data is row-major with row 0 at the *bottom* of the map
+  // (smallest world Y); a plain <canvas> image has row 0 at the *top*.
+  // Flipping rows here, once, means everywhere else in this file can treat
+  // "top of the map image" as "largest world Y" without re-deriving it.
+  // Patches arrive in the same grid coordinates, so they flip the same way
+  // -- see applyMapPatch.
+  function paintCells(target, cells, width, height) {
+    const words = new Uint32Array(target.data.buffer);
+    for (let row = 0; row < height; row++) {
+      const src = (height - 1 - row) * width;
+      const dst = row * width;
+      for (let col = 0; col < width; col++) {
+        words[dst + col] = MAP_PALETTE[cells[src + col]];
+      }
+    }
+  }
+
   function applyMap(header, cells) {
     const { width, height, resolution, origin_x: originX, origin_y: originY } = header;
+    // Belt and braces with handleBinary's length check: this indexes
+    // width*height entries and a read past the end would paint garbage
+    // rather than throwing.
+    if (!(width > 0 && height > 0) || cells.length < width * height) {
+      noteDesync(`map payload holds ${cells.length} cells, header says ${width * height}`);
+      return;
+    }
     const off = document.createElement('canvas');
     off.width = width;
     off.height = height;
     const octx = off.getContext('2d');
     const img = octx.createImageData(width, height);
-
-    // OccupancyGrid.data is row-major with row 0 at the *bottom* of the
-    // map (smallest world Y); a plain <canvas> image has row 0 at the
-    // *top*. Flipping rows here, once, means everywhere else in this
-    // file can treat "top of the map image" as "largest world Y" without
-    // re-deriving that each time it's needed.
-    for (let row = 0; row < height; row++) {
-      const srcRow = height - 1 - row;
-      for (let col = 0; col < width; col++) {
-        const value = cells[srcRow * width + col];
-        const p = (row * width + col) * 4;
-        if (value < 0) {
-          img.data[p] = MAP_UNKNOWN_RGBA[0];
-          img.data[p + 1] = MAP_UNKNOWN_RGBA[1];
-          img.data[p + 2] = MAP_UNKNOWN_RGBA[2];
-          img.data[p + 3] = MAP_UNKNOWN_RGBA[3];
-        } else {
-          const t = Math.min(value, 100) / 100; // 0 free -> 1 occupied
-          img.data[p] = Math.round(MAP_FREE_RGB[0] + (MAP_OCCUPIED_RGB[0] - MAP_FREE_RGB[0]) * t);
-          img.data[p + 1] = Math.round(MAP_FREE_RGB[1] + (MAP_OCCUPIED_RGB[1] - MAP_FREE_RGB[1]) * t);
-          img.data[p + 2] = Math.round(MAP_FREE_RGB[2] + (MAP_OCCUPIED_RGB[2] - MAP_FREE_RGB[2]) * t);
-          img.data[p + 3] = 255;
-        }
-      }
-    }
+    paintCells(img, cells, width, height);
     octx.putImageData(img, 0, 0);
 
-    state.map = { width, height, resolution, originX, originY, canvas: off, receivedAt: performance.now() };
+    state.map = {
+      width, height, resolution, originX, originY,
+      canvas: off, ctx: octx,
+      seq: typeof header.seq === 'number' ? header.seq : null,
+      receivedAt: performance.now(),
+    };
   }
 
-  function applyScan(header, ranges) {
+  // Just the rectangle that changed, blitted into the image we already
+  // hold. This is what lets the car send ~200 bytes instead of 4MB while it
+  // is mapping, and it is the clearest case of the browser rather than the
+  // car doing the work of keeping a map picture current.
+  function applyMapPatch(header, cells) {
+    const map = state.map;
+    if (!map) return; // no keyframe yet; the next one brings everything
+    const { x, y, w, h, seq } = header;
+
+    // A patch describes a change from one exact grid to the next. Applied
+    // to anything else it would leave the map quietly, plausibly wrong --
+    // so on any gap we stop applying patches and wait for the keyframe the
+    // car sends every map_keyframe_sec.
+    if (map.seq === null || seq !== map.seq + 1) {
+      noteDesync(`map patch ${seq} does not follow frame ${map.seq}; waiting for a keyframe`);
+      return;
+    }
+    if (!(w > 0 && h > 0) || x < 0 || y < 0
+        || x + w > map.width || y + h > map.height) {
+      noteDesync(`map patch (${x},${y},${w},${h}) does not fit a ${map.width}x${map.height} map`);
+      return;
+    }
+    if (cells.length < w * h) {
+      noteDesync(`map patch holds ${cells.length} cells, header says ${w * h}`);
+      return;
+    }
+
+    const img = map.ctx.createImageData(w, h);
+    paintCells(img, cells, w, h);
+    // Grid rows [y, y+h) are image rows [height-y-h, height-y): paintCells
+    // flips the patch within itself, and this puts that flipped block at
+    // the mirrored offset.
+    map.ctx.putImageData(img, x, map.height - y - h);
+    map.seq = seq;
+    map.receivedAt = performance.now();
+  }
+
+  function applyScan(header, buffer) {
+    // 'u16mm' is millimetres in a uint16: half the bytes of float32, for a
+    // difference far below one screen pixel and below the LIDAR's own
+    // accuracy. 0 means "nothing came back", which the drawing code already
+    // discards because it is under every real scanner's range_min.
+    let ranges;
+    if (header.encoding === 'u16mm') {
+      const millimetres = new Uint16Array(buffer);
+      ranges = new Float32Array(millimetres.length);
+      for (let i = 0; i < millimetres.length; i++) ranges[i] = millimetres[i] / 1000;
+    } else {
+      ranges = new Float32Array(buffer);
+    }
     state.scan = {
       angleMin: header.angle_min,
       angleIncrement: header.angle_increment,
@@ -315,14 +589,49 @@
   // arrives -- but only until the user manually pans/zooms, so this never
   // fights their input.
   // ---------------------------------------------------------------------
+  // Fraction of the shorter canvas dimension kept as a border when fitting,
+  // and how much of it a growing map may eat before the view is re-fitted.
+  // Re-fitting on every map instead was measurably the worst thing on this
+  // screen during a mapping run: slam_toolbox resizes and re-origins its
+  // grid constantly as the map grows -- 27 map messages in 130 seconds,
+  // shrinking as often as growing -- and re-deriving centre and zoom from
+  // each one moved the whole picture by up to 3.6m and rescaled it by up to
+  // 35%, sixteen times, while the map itself was perfectly good. A viewer
+  // reasonably reads that as the map being glitchy. It is the camera.
+  const FIT_MARGIN = 1.15;
+
+  function mapWorldExtent() {
+    const { width, height, resolution, originX, originY } = state.map;
+    return {
+      minX: originX,
+      maxX: originX + width * resolution,
+      minY: originY,
+      maxY: originY + height * resolution,
+    };
+  }
+
+  function extentIsVisible(extent) {
+    const halfWidth = canvas.width / (2 * view.scale);
+    const halfHeight = canvas.height / (2 * view.scale);
+    return (extent.minX >= view.centerX - halfWidth
+      && extent.maxX <= view.centerX + halfWidth
+      && extent.minY >= view.centerY - halfHeight
+      && extent.maxY <= view.centerY + halfHeight);
+  }
+
   function maybeAutoFit() {
     if (view.userAdjusted) return;
     if (state.map) {
-      const { width, height, resolution, originX, originY } = state.map;
-      view.centerX = originX + (width * resolution) / 2;
-      view.centerY = originY + (height * resolution) / 2;
-      const spanMeters = Math.max(width, height) * resolution;
-      view.scale = Math.min(canvas.width, canvas.height) / (spanMeters * 1.15);
+      const extent = mapWorldExtent();
+      // Grow to fit, never twitch. Once the map is framed, a grid that
+      // resizes by a few cells changes nothing the viewer needs to see.
+      if (view.fittedToMap && extentIsVisible(extent)) return;
+      view.centerX = (extent.minX + extent.maxX) / 2;
+      view.centerY = (extent.minY + extent.maxY) / 2;
+      const spanMeters = Math.max(extent.maxX - extent.minX,
+                                  extent.maxY - extent.minY);
+      view.scale = Math.min(canvas.width, canvas.height) / (spanMeters * FIT_MARGIN);
+      view.fittedToMap = true;
     } else if (state.pose) {
       view.centerX = state.pose.x;
       view.centerY = state.pose.y;
@@ -331,7 +640,30 @@
 
   // ---------------------------------------------------------------------
   // Rendering
+  //
+  // Everything that changes state asks for a repaint through
+  // scheduleRender() rather than painting immediately. Updates arrive far
+  // faster than a screen can show them -- pose alone used to force a full
+  // canvas repaint 40 times a second, and a batch frame carries several
+  // updates that would each have triggered their own -- so they are
+  // coalesced into at most one repaint per animation frame.
+  //
+  // The other half of the win is free: requestAnimationFrame does not fire
+  // in a hidden tab, so a dashboard left open on a second monitor or a
+  // phone in someone's pocket stops drawing entirely while still tracking
+  // everything the car sends.
   // ---------------------------------------------------------------------
+  let renderPending = false;
+
+  function scheduleRender() {
+    if (renderPending) return;
+    renderPending = true;
+    requestAnimationFrame(() => {
+      renderPending = false;
+      render();
+    });
+  }
+
   function render() {
     resizeCanvasIfNeeded();
     ctx.fillStyle = '#0b0f14';
@@ -346,6 +678,16 @@
       modeBanner.textContent = 'no map yet -- showing raw LIDAR relative to the car';
     }
 
+    // Last, so it wins: a dropped frame is the thing most likely to be
+    // making the picture wrong, and "the map looks glitchy" with nothing
+    // on screen to explain it is exactly the situation this avoids.
+    if (state.desyncCount > 0
+        && performance.now() - state.desyncAt < DESYNC_BANNER_MS) {
+      modeBanner.textContent =
+        `link problem: dropped ${state.desyncCount} corrupted frame(s) `
+        + `-- ${state.desyncDetail}. The picture below may be stale.`;
+    }
+
     if (state.scan) {
       if (mapRelative && state.map) {
         drawBlindSpotMapRelative();
@@ -357,6 +699,13 @@
       // Map loaded but no pose yet: deliberately not drawing the scan --
       // plotting it without a pose would just be a guess dressed up as
       // data, and the banner above already explains why.
+    }
+
+    // Intent under the car icon, so the car always reads as the thing the
+    // arrow belongs to. Needs a body frame it can place: either a pose, or
+    // the robot-centric fallback that exists whenever there is no map.
+    if (state.intent && (mapRelative || !state.map)) {
+      drawIntent(mapRelative && !!state.map);
     }
 
     if (mapRelative) {
@@ -616,6 +965,340 @@
     ctx.restore();
   }
 
+  // ---------------------------------------------------------------------
+  // Drive intent: what the algorithm is *trying* to do (docs/drive-intent.md)
+  //
+  // Deliberately not derived from measured speed or heading -- those are
+  // already on screen, and the whole point of this overlay is to show the
+  // plan *before* the car acts it out, so a wrong plan can be caught while
+  // it is still only a plan.
+  //
+  // The car publishes in base_link, which is what lets the same arrow draw
+  // in robot-centric mode (no map, no pose, just /scan) and in map-relative
+  // mode without two code paths or a TF lookup in the browser.
+  // ---------------------------------------------------------------------
+  function applyIntent(payload) {
+    if (!payload || typeof payload !== 'object') return;
+    const previous = state.intent;
+    if (!previous || previous.state !== payload.state) {
+      const now = Date.now();
+      const head = state.intentLog[0];
+      if (head) head.heldMs = now - head.at;
+      state.intentLog.unshift({ state: payload.state, severity: payload.severity, at: now, heldMs: null });
+      state.intentLog.length = Math.min(state.intentLog.length, INTENT_LOG_LIMIT);
+      // A transition always carries its reason (the car guarantees that),
+      // so clearing here can never leave a transition unexplained -- and it
+      // stops the previous state's explanation from lingering under a new
+      // state label, which would be actively misleading.
+      state.intentReason = '';
+    }
+    if (typeof payload.reason === 'string') state.intentReason = payload.reason;
+    state.intent = payload;
+    state.intentReceivedAt = performance.now();
+  }
+
+  function intentAgeMs() {
+    return performance.now() - state.intentReceivedAt;
+  }
+
+  // Body frame (+X forward, +Y left) -> canvas, in whichever mode is live.
+  function bodyFrameProjector(mapRelative) {
+    if (mapRelative && state.pose) {
+      const cos = Math.cos(state.pose.yaw);
+      const sin = Math.sin(state.pose.yaw);
+      const px = state.pose.x;
+      const py = state.pose.y;
+      return (bx, by) => worldToCanvas(px + bx * cos - by * sin, py + bx * sin + by * cos);
+    }
+    return (bx, by) => bodyToCanvas(bx, by);
+  }
+
+  function intentHalfWidth(v) {
+    return Math.max(INTENT_MIN_HALF_WIDTH,
+      Math.min(INTENT_MAX_HALF_WIDTH, INTENT_HALF_WIDTH_PER_MPS * Math.abs(v)));
+  }
+
+  // Unit tangent at each sample: central difference where possible, so the
+  // ribbon's edges stay parallel to the path through a curve instead of
+  // kinking at every sample.
+  function pathTangents(pts) {
+    const out = [];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[Math.max(0, i - 1)];
+      const b = pts[Math.min(pts.length - 1, i + 1)];
+      let dx = b.x - a.x;
+      let dy = b.y - a.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-9) {
+        const prev = out[i - 1];
+        out.push(prev || { x: 1, y: 0 });
+      } else {
+        out.push({ x: dx / len, y: dy / len });
+      }
+    }
+    return out;
+  }
+
+  function polylineLength(pts) {
+    let total = 0;
+    for (let i = 1; i < pts.length; i++) {
+      total += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    }
+    return total;
+  }
+
+  // Cut `back` meters off the end of a polyline, returning the shortened
+  // path plus the point where it was cut. The arrow head occupies exactly
+  // that trimmed length, so the whole arrow -- head included -- is as long
+  // as the distance the plan actually covers, rather than overshooting it
+  // by the size of the head.
+  function trimTail(pts, back) {
+    if (pts.length < 2) return { body: pts.slice(), tip: pts[pts.length - 1] };
+    let remaining = back;
+    const body = pts.slice();
+    while (body.length >= 2) {
+      const last = body[body.length - 1];
+      const prev = body[body.length - 2];
+      const seg = Math.hypot(last.x - prev.x, last.y - prev.y);
+      if (seg >= remaining) {
+        const t = seg < 1e-9 ? 0 : (seg - remaining) / seg;
+        body[body.length - 1] = {
+          x: prev.x + (last.x - prev.x) * t,
+          y: prev.y + (last.y - prev.y) * t,
+          v: last.v,
+        };
+        return { body, tip: pts[pts.length - 1] };
+      }
+      remaining -= seg;
+      body.pop();
+    }
+    return { body, tip: pts[pts.length - 1] };
+  }
+
+  function drawIntent(mapRelative) {
+    const intent = state.intent;
+    if (!intent || !state.showIntent) return;
+    const project = bodyFrameProjector(mapRelative);
+    const colors = intentColors(intent.severity);
+    const stale = intentAgeMs() > INTENT_STALE_MS;
+
+    ctx.save();
+    if (stale) ctx.globalAlpha = 0.35;
+
+    drawIntentWedge(intent, project, colors);
+    // The ghost goes underneath: where it separates from the ribbon, the
+    // gap is the slew-rate and acceleration shaping between what the
+    // algorithm asked for and what actually went on the wire.
+    drawIntentGhost(intent, project);
+    drawIntentRibbon(intent, project, colors);
+    drawIntentTargets(intent, project, colors);
+
+    ctx.restore();
+  }
+
+  function drawIntentRibbon(intent, project, colors) {
+    const pts = intent.path || [];
+    if (polylineLength(pts) < 0.05) {
+      drawIntentHold(intent, project, colors);
+      return;
+    }
+
+    const tipHalfWidth = intentHalfWidth(pts[pts.length - 1].v);
+    const headLength = Math.max(0.18, 2.0 * tipHalfWidth);
+    const { body, tip } = trimTail(pts, headLength);
+    if (body.length < 2) {
+      drawIntentHold(intent, project, colors);
+      return;
+    }
+
+    const tangents = pathTangents(body);
+    const left = [];
+    const right = [];
+    for (let i = 0; i < body.length; i++) {
+      const half = intentHalfWidth(body[i].v);
+      // Normal is the tangent rotated +90deg in the body frame.
+      const nx = -tangents[i].y;
+      const ny = tangents[i].x;
+      left.push(project(body[i].x + nx * half, body[i].y + ny * half));
+      right.push(project(body[i].x - nx * half, body[i].y - ny * half));
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(left[0][0], left[0][1]);
+    for (let i = 1; i < left.length; i++) ctx.lineTo(left[i][0], left[i][1]);
+    for (let i = right.length - 1; i >= 0; i--) ctx.lineTo(right[i][0], right[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = colors.fill;
+    ctx.fill();
+    ctx.strokeStyle = colors.edge;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Head, based at the trim point and tipped at the true path end.
+    const base = body[body.length - 1];
+    const dirX = tip.x - base.x;
+    const dirY = tip.y - base.y;
+    const dirLen = Math.hypot(dirX, dirY) || 1;
+    const ux = dirX / dirLen;
+    const uy = dirY / dirLen;
+    const headHalf = Math.max(1.9 * tipHalfWidth, 0.09);
+    const p1 = project(base.x - uy * headHalf, base.y + ux * headHalf);
+    const p2 = project(base.x + uy * headHalf, base.y - ux * headHalf);
+    const p3 = project(tip.x, tip.y);
+    ctx.beginPath();
+    ctx.moveTo(p1[0], p1[1]);
+    ctx.lineTo(p3[0], p3[1]);
+    ctx.lineTo(p2[0], p2[1]);
+    ctx.closePath();
+    ctx.fillStyle = colors.edge;
+    ctx.fill();
+  }
+
+  // A stop is not "no intent" -- gap_follow deliberately *holds the rack*
+  // where it is while stopped, because centring it would throw away the
+  // steering the car needs to get out of trouble. Drawing that held angle
+  // is the difference between "stopped" and "stopped, aimed left".
+  function drawIntentHold(intent, project, colors) {
+    const steer = intent.desired_steering || 0;
+    const stub = 0.55;
+    const a = project(0, 0);
+    const b = project(stub * Math.cos(steer), stub * Math.sin(steer));
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = colors.edge;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]);
+    ctx.lineTo(b[0], b[1]);
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.arc(a[0], a[1], 7, 0, Math.PI * 2);
+    ctx.strokeStyle = colors.edge;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  function drawIntentGhost(intent, project) {
+    const pts = intent.commanded_path || [];
+    if (polylineLength(pts) < 0.05) return;
+    ctx.save();
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = 'rgba(230, 237, 243, 0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      const [cx, cy] = project(p.x, p.y);
+      if (i === 0) ctx.moveTo(cx, cy); else ctx.lineTo(cx, cy);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawIntentTargets(intent, project, colors) {
+    (intent.targets || []).forEach((t) => {
+      const [cx, cy] = project(t.x, t.y);
+      ctx.beginPath();
+      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+      ctx.fillStyle = colors.edge;
+      ctx.fill();
+      ctx.font = '11px sans-serif';
+      ctx.fillStyle = 'rgba(230, 237, 243, 0.75)';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(t.kind || '').replace(/_/g, ' '), cx + 9, cy);
+    });
+  }
+
+  // The angular span the reactive controller picked out of the scan. Drawn
+  // from the LIDAR's own origin, which is where those bearings were
+  // measured -- not from base_link, 0.33m behind it.
+  function drawIntentWedge(intent, project) {
+    const w = intent.wedge;
+    if (!w) return;
+    const steps = 24;
+    ctx.save();
+    ctx.beginPath();
+    const [ox, oy] = project(w.x, w.y);
+    ctx.moveTo(ox, oy);
+    for (let i = 0; i <= steps; i++) {
+      const a = w.a0 + (w.a1 - w.a0) * (i / steps);
+      const [px, py] = project(w.x + w.r * Math.cos(a), w.y + w.r * Math.sin(a));
+      ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(88, 166, 255, 0.10)';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // ---------------------------------------------------------------------
+  // Decision panel: why the car is doing what it is doing
+  // ---------------------------------------------------------------------
+  function updateIntentPanel() {
+    const intent = state.intent;
+    if (!intent) {
+      intentState.textContent = 'no intent yet';
+      intentState.className = 'intent-chip';
+      intentNode.textContent = '';
+      intentReason.textContent =
+        'no driving node is publishing /drive_intent -- start gap_follow or pure_pursuit';
+      intentSpeeds.textContent = '--';
+      intentSteering.textContent = '--';
+      intentFactors.innerHTML = '';
+      setDot(intentDot, null);
+      return;
+    }
+
+    const stale = intentAgeMs() > INTENT_STALE_MS;
+    intentState.textContent = intent.state.replace(/_/g, ' ');
+    intentState.className = `intent-chip intent-${intent.severity}`;
+    intentNode.textContent = stale ? `${intent.node} (stale)` : intent.node;
+    intentReason.textContent = state.intentReason || 'waiting for the next explanation...';
+
+    const dv = intent.desired_speed;
+    const cv = intent.commanded_speed;
+    // Showing both, always, rather than only when they differ: the gap
+    // between "asked for" and "sent" is the shaping, and someone hunting a
+    // sluggish car needs to see it is zero as much as they need to see it
+    // is large.
+    intentSpeeds.textContent = `${cv.toFixed(2)} / want ${dv.toFixed(2)} m/s`;
+    const ds = (intent.desired_steering * 180 / Math.PI).toFixed(1);
+    const cs = (intent.commanded_steering * 180 / Math.PI).toFixed(1);
+    intentSteering.textContent = `${cs} / want ${ds} deg`;
+
+    intentFactors.innerHTML = '';
+    (intent.factors || []).forEach((f) => {
+      const row = document.createElement('div');
+      row.className = 'row intent-factor' + (f.binding ? ' intent-binding' : '');
+      const label = document.createElement('span');
+      label.className = 'row-label';
+      label.textContent = f.name;
+      const value = document.createElement('span');
+      value.className = 'row-value metric-value';
+      value.textContent = `${Number(f.value).toFixed(2)} ${f.unit || ''}`.trim();
+      row.appendChild(label);
+      row.appendChild(value);
+      intentFactors.appendChild(row);
+    });
+
+    intentLog.innerHTML = '';
+    state.intentLog.forEach((entry) => {
+      const line = document.createElement('div');
+      line.className = `intent-log-line intent-${entry.severity}`;
+      const held = entry.heldMs == null ? 'now' : `${(entry.heldMs / 1000).toFixed(1)}s`;
+      const at = new Date(entry.at);
+      const clock = `${String(at.getHours()).padStart(2, '0')}:` +
+        `${String(at.getMinutes()).padStart(2, '0')}:` +
+        `${String(at.getSeconds()).padStart(2, '0')}`;
+      line.textContent = `${clock}  ${entry.state.replace(/_/g, ' ')}  (${held})`;
+      intentLog.appendChild(line);
+    });
+
+    setDot(intentDot, { receivedAt: state.intentReceivedAt }, INTENT_STALE_MS);
+  }
+
   function drawCarMapRelative() {
     const [cx, cy] = worldToCanvas(state.pose.x, state.pose.y);
     // Canvas angle = -yaw: world yaw is measured counterclockwise, but
@@ -795,17 +1478,39 @@
     });
   }
 
+  // Two values per row now, so each one gets the short form and keeps the
+  // full detail in its tooltip. The freshness dot beside it already says
+  // what "12ms ago" said, which is what made room for a second column.
+  function setMetric(element, text, detail) {
+    element.textContent = text;
+    const holder = element.parentElement || element;
+    holder.title = detail || '';
+  }
+
   function updateStatusText() {
-    infoMap.textContent = state.map
-      ? `${state.map.width}x${state.map.height} @ ${state.map.resolution.toFixed(3)}m/cell, ${ageText(state.map)}`
-      : 'no map yet';
-    infoScan.textContent = state.scan ? `${state.scan.ranges.length} pts, ${ageText(state.scan)}` : 'no scan yet';
-    infoPose.textContent = state.pose
-      ? `${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)}m @ ${(state.pose.yaw * 180 / Math.PI).toFixed(0)}deg, ${ageText(state.pose)}`
-      : 'no pose yet';
-    infoDrive.textContent = state.drive
-      ? `${state.drive.speed.toFixed(2)}m/s @ ${(state.drive.steeringAngle * 180 / Math.PI).toFixed(1)}deg, ${ageText(state.drive)}`
-      : 'no command yet';
+    setMetric(infoMap,
+      state.map ? `${state.map.width}x${state.map.height}` : '--',
+      state.map
+        ? `${state.map.width}x${state.map.height} cells @ `
+          + `${state.map.resolution.toFixed(3)}m/cell, updated ${ageText(state.map)}`
+        : 'no map yet');
+    setMetric(infoScan,
+      state.scan ? `${state.scan.ranges.length} pts` : '--',
+      state.scan ? `${state.scan.ranges.length} beams, updated ${ageText(state.scan)}`
+                 : 'no scan yet');
+    setMetric(infoPose,
+      state.pose ? `${state.pose.x.toFixed(1)}, ${state.pose.y.toFixed(1)}` : '--',
+      state.pose
+        ? `${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)}m @ `
+          + `${(state.pose.yaw * 180 / Math.PI).toFixed(0)}deg, updated ${ageText(state.pose)}`
+        : 'no pose yet');
+    setMetric(infoDrive,
+      state.drive ? `${state.drive.speed.toFixed(1)} m/s` : '--',
+      state.drive
+        ? `${state.drive.speed.toFixed(2)}m/s @ `
+          + `${(state.drive.steeringAngle * 180 / Math.PI).toFixed(1)}deg, `
+          + `updated ${ageText(state.drive)}`
+        : 'no command yet');
     updateVehicleAndStopwatch();
 
     if (state.stats) {
@@ -821,6 +1526,8 @@
       updateWifiBars(null);
     }
 
+    updateIntentPanel();
+
     setDot(dots.map, state.map);
     setDot(dots.scan, state.scan);
     setDot(dots.pose, state.pose);
@@ -829,11 +1536,13 @@
     // shared 1s STALE_AFTER_MS would flicker red between every tick, so
     // this row gets a longer threshold (a few sample periods of slack).
     setDot(dots.stats, state.stats, 3000);
+
+    updateDigests();
   }
 
   // Re-render periodically even with no new messages, purely so the
   // "updated Xs ago" readout and stale-data coloring stay live.
-  setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) render(); }, 250);
+  setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) scheduleRender(); }, 250);
 
   // ---------------------------------------------------------------------
   // Pan / zoom
@@ -864,7 +1573,7 @@
     view.bodyPanY += dx / view.scale;
     view.bodyPanX += dy / view.scale;
     view.userAdjusted = true;
-    render();
+    scheduleRender();
   });
 
   canvas.addEventListener('wheel', (e) => {
@@ -896,7 +1605,7 @@
       view.bodyPanX = bxBefore + (mouseCanvasY - canvas.height / 2) / view.scale;
     }
     view.userAdjusted = true;
-    render();
+    scheduleRender();
   }, { passive: false });
 
   resetViewBtn.addEventListener('click', () => {
@@ -904,7 +1613,7 @@
     view.bodyPanX = 0;
     view.bodyPanY = 0;
     maybeAutoFit();
-    render();
+    scheduleRender();
   });
 
   function sendStopwatchControl(action, enabled) {
@@ -1271,7 +1980,13 @@
     // Cache-bust: without this, a browser that already failed to load
     // this exact URL once may just replay the cached failure instead of
     // actually retrying the connection.
-    cameraFeed.src = `http://${location.hostname}:${CAMERA_PORT}/stream?_=${Date.now()}`;
+    // The preview tier -- small and cheap. This inset is at most 220 CSS
+    // pixels wide, and it used to be fed a 1280x720 stream: roughly 34x
+    // more picture than it could ever show, at 12-18 Mbit/s, competing
+    // with this dashboard's own telemetry for the same WiFi link. The
+    // recording view (camera.js) asks for the full tier instead.
+    cameraFeed.src =
+      `http://${location.hostname}:${CAMERA_PORT}/stream?tier=preview&_=${Date.now()}`;
   }
 
   cameraFeed.addEventListener('load', () => {
@@ -1408,6 +2123,89 @@
     const saved = parseFloat(localStorage.getItem(CAMERA_WIDTH_KEY));
     if (Number.isFinite(saved)) setCameraWidth(saved);
   } catch (err) { /* see resetCameraSize */ }
+
+  // ---------------------------------------------------------------------
+  // Collapsible sections.
+  //
+  // The sidebar carries six sections and they do not all fit a laptop, let
+  // alone a phone. Rather than shrink everything until it is unreadable,
+  // sections collapse -- and a collapsed one still shows its headline value
+  // in its own header, so folding "vehicle" away does not cost you the
+  // speed. Which sections you keep open is a personal preference rather
+  // than a per-session one, so it is remembered in localStorage, the same
+  // way the camera inset remembers its size.
+  // ---------------------------------------------------------------------
+  const SECTION_STATE_KEY = 'racerbot.dashboard.sections';
+  const sectionEls = Array.from(document.querySelectorAll('.section[data-section]'));
+  const digestEls = {
+    feeds: document.getElementById('digest-feeds'),
+    intent: document.getElementById('digest-intent'),
+    vehicle: document.getElementById('digest-vehicle'),
+    stopwatch: document.getElementById('digest-stopwatch'),
+    system: document.getElementById('digest-system'),
+    tuning: document.getElementById('digest-tuning'),
+  };
+
+  function restoreSectionState() {
+    let saved = null;
+    try {
+      saved = JSON.parse(localStorage.getItem(SECTION_STATE_KEY) || 'null');
+    } catch (err) { /* private mode / storage disabled -- keep the defaults */ }
+    if (!saved || typeof saved !== 'object') return;
+    sectionEls.forEach((section) => {
+      const name = section.dataset.section;
+      if (typeof saved[name] === 'boolean') section.open = saved[name];
+    });
+  }
+
+  function saveSectionState() {
+    const state = {};
+    sectionEls.forEach((section) => { state[section.dataset.section] = section.open; });
+    try {
+      localStorage.setItem(SECTION_STATE_KEY, JSON.stringify(state));
+    } catch (err) { /* see restoreSectionState */ }
+  }
+
+  sectionEls.forEach((section) => {
+    section.addEventListener('toggle', () => {
+      saveSectionState();
+      // An opened section may need its contents laid out against a canvas
+      // that has not been repainted since.
+      scheduleRender();
+    });
+  });
+  restoreSectionState();
+
+  function setDigest(name, text) {
+    const element = digestEls[name];
+    if (element) element.textContent = text;
+  }
+
+  // The one number each collapsed section is actually about.
+  function updateDigests() {
+    const live = [state.map, state.scan, state.pose, state.drive]
+      .filter((entry) => entry && !isStale(entry)).length;
+    setDigest('feeds', `${live}/4 live`);
+
+    setDigest('intent', state.intent
+      ? String(state.intent.state || '').replace(/_/g, ' ')
+        + (intentAgeMs() > INTENT_STALE_MS ? ' (stale)' : '')
+      : '--');
+
+    setDigest('vehicle', state.speed && !isStale(state.speed)
+      ? `${state.speed.speed.toFixed(1)} m/s` : '--');
+
+    setDigest('stopwatch', formatStopwatch(stopwatchElapsed()));
+
+    setDigest('system', state.stats
+      ? `${state.stats.cpuPercent.toFixed(0)}%`
+        + (state.stats.cpuTempC != null ? ` ${state.stats.cpuTempC.toFixed(0)}C` : '')
+      : '--');
+
+    const tuning = state.tuning;
+    const onlineNodes = tuning ? (tuning.nodes || []).filter((n) => n.online) : [];
+    setDigest('tuning', onlineNodes.length ? `${onlineNodes.length} node(s)` : '--');
+  }
 
   // ---------------------------------------------------------------------
   // Go

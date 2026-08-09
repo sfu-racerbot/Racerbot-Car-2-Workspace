@@ -7,7 +7,10 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, Joy
 from nav_msgs.msg import Odometry
 from ackermann_msgs.msg import AckermannDriveStamped
+from std_msgs.msg import String
 
+from drive_intent import predict, schema
+from drive_intent.throttle import FailureLatch, IntentThrottle
 from gap_follow import gap_logic, live_tuning
 
 
@@ -31,8 +34,8 @@ class GapFollowNode(Node):
         self.declare_parameter('forward_fov_deg', 180.0)
         self.declare_parameter('min_gap_distance', 1.0)
         self.declare_parameter('fallback_min_gap_distance', 0.8)
-        self.declare_parameter('corner_speed', 0.5)
-        self.declare_parameter('max_speed', 2.0)
+        self.declare_parameter('corner_speed', 0.8)
+        self.declare_parameter('max_speed', 2.5)
         self.declare_parameter('min_speed', 0.5)
         self.declare_parameter('max_steering_angle', 0.26)
         # Dynamic control: bearing-proportional steering, physical speed
@@ -50,7 +53,7 @@ class GapFollowNode(Node):
         self.declare_parameter('wheelbase', 0.324)
         self.declare_parameter('laser_offset_x', 0.33)
         self.declare_parameter('laser_offset_y', 0.0)
-        self.declare_parameter('safety_margin', 0.10)
+        self.declare_parameter('safety_margin', 0.18)
         self.declare_parameter('disparity_threshold', 0.4)
         # Obstacle inflation already accounts for the full car width. This
         # threshold is only the remaining centerline corridor after inflation.
@@ -78,10 +81,11 @@ class GapFollowNode(Node):
 
         # F1TENTH instantaneous TTC, using the safest recent speed estimate.
         self.declare_parameter('enable_ttc', True)
-        self.declare_parameter('ttc_threshold_sec', 0.5)
+        self.declare_parameter('ttc_threshold_sec', 0.35)
         self.declare_parameter('ttc_min_closing_speed', 0.05)
         self.declare_parameter('ttc_command_speed_timeout_sec', 0.5)
         self.declare_parameter('ttc_command_fallback_max_odom_speed', 0.10)
+        self.declare_parameter('ttc_min_brake_speed', 0.6)
         self.declare_parameter('odom_timeout_sec', 0.5)
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('deadman_button', 4)
@@ -94,6 +98,23 @@ class GapFollowNode(Node):
         # times out at the mux; this timeout lets the status timer explain
         # that otherwise-silent stop in the launch terminal.
         self.declare_parameter('scan_timeout_sec', 0.5)
+        # --- Drive intent (docs/drive-intent.md) ---
+        # A read-only JSON description of what this controller is *trying*
+        # to do, for the web dashboard's intent arrow and decision panel.
+        # Publishing it cannot change what the car does -- see
+        # _publish_intent() for the three rules that guarantee that.
+        self.declare_parameter('publish_intent', True)
+        self.declare_parameter('intent_topic', '/drive_intent')
+        # Deliberately well under the scan rate. No browser benefits from
+        # redrawing an arrow 40 times a second, and this shares an 8GB
+        # Jetson with the code driving the car.
+        self.declare_parameter('intent_rate_hz', 20.0)
+        # How far ahead the arrow predicts: long enough to show the plan
+        # through a corner, short enough that it stays a claim about *now*
+        # rather than a lap projection.
+        self.declare_parameter('intent_horizon_sec', 1.5)
+        self.declare_parameter('intent_samples', 16)
+        self.declare_parameter('intent_max_length', 8.0)
         # Workspace policy (see docs/architecture.md): the deadman button
         # stays enabled until the team has enough confidence in the car's
         # behavior to deliberately relax it -- don't set this false otherwise.
@@ -175,6 +196,8 @@ class GapFollowNode(Node):
             self.get_parameter('ttc_command_speed_timeout_sec').value)
         self.ttc_command_fallback_max_odom_speed = float(self.get_parameter(
             'ttc_command_fallback_max_odom_speed').value)
+        self.ttc_min_brake_speed = float(
+            self.get_parameter('ttc_min_brake_speed').value)
         self.odom_timeout_sec = float(
             self.get_parameter('odom_timeout_sec').value)
         self.joy_topic = self.get_parameter('joy_topic').value
@@ -185,6 +208,15 @@ class GapFollowNode(Node):
         self.scan_timeout_sec = max(
             0.05, float(self.get_parameter('scan_timeout_sec').value))
         self.enable_deadman = bool(self.get_parameter('enable_deadman').value)
+        self.publish_intent = bool(self.get_parameter('publish_intent').value)
+        self.intent_topic = self.get_parameter('intent_topic').value
+        self.intent_rate_hz = float(self.get_parameter('intent_rate_hz').value)
+        self.intent_horizon_sec = max(
+            0.05, float(self.get_parameter('intent_horizon_sec').value))
+        self.intent_samples = max(
+            2, int(self.get_parameter('intent_samples').value))
+        self.intent_max_length = max(
+            0.1, float(self.get_parameter('intent_max_length').value))
 
         # Validate the footprint and sensor origin once at startup.
         gap_logic.vehicle_boundary_distances(
@@ -245,6 +277,10 @@ class GapFollowNode(Node):
             raise ValueError(
                 'ttc_command_fallback_max_odom_speed must be finite and '
                 'non-negative')
+        if not math.isfinite(self.ttc_min_brake_speed) or (
+                self.ttc_min_brake_speed < 0.0):
+            raise ValueError(
+                'ttc_min_brake_speed must be finite and non-negative')
 
         # Deadman state: gap_follow only drives while this button is held on
         # a live /joy stream. Defaults to "not engaged" so the car never
@@ -274,6 +310,11 @@ class GapFollowNode(Node):
         self.last_scan_time = None
         self.last_decision_state = None
         self.last_decision_log_time = None
+        # Intent throttles on its own clock, independent of the decision
+        # log, and latches itself off if it ever starts failing.
+        self._intent_throttle = IntentThrottle(
+            self.intent_rate_hz, self.decision_log_period_sec)
+        self._intent_failures = FailureLatch()
 
         # Live tuning: publish the catalogue of parameters this node will
         # accept changes to *while driving*, so the web dashboard can build
@@ -302,6 +343,9 @@ class GapFollowNode(Node):
         self.add_on_set_parameters_callback(self._parameter_callback)
 
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
+        self.intent_pub = (
+            self.create_publisher(String, self.intent_topic, 10)
+            if self.publish_intent else None)
         self.scan_sub = self.create_subscription(
             LaserScan, self.scan_topic, self.scan_callback, 10)
         self.odom_sub = self.create_subscription(
@@ -535,36 +579,54 @@ class GapFollowNode(Node):
         # command backs up fresh odometry only if it is effectively near zero.
         if self.enable_ttc:
             effective_speed, recent_command_speed = self._effective_ttc_speed()
-            min_ttc = gap_logic.minimum_ttc(
-                window,
-                window_valid,
-                beam_angles,
-                effective_speed,
-                body_boundaries,
-                self.ttc_min_closing_speed,
-                self.car_width / 2.0 + self.safety_margin,
-                # The rack is where the last command left it, so that is the
-                # arc the car is about to sweep. Straight-line TTC on a car at
-                # full lock brakes for the outside of the very corner it is
-                # negotiating.
-                math.tan(self.steering_basis) / self.wheelbase,
-                self.laser_offset_x,
-                self.laser_offset_y,
-            )
-            if min_ttc <= self.ttc_threshold_sec:
-                self._stop(
-                    'ttc_brake',
-                    lambda: (
-                        f"minimum footprint-aware TTC {min_ttc:.3f}s is at or "
-                        f"below the {self.ttc_threshold_sec:.3f}s threshold at "
-                        f"effective speed {effective_speed:.2f}m/s "
-                        f"(odom {self.current_speed:.2f}m/s, recent command "
-                        f"{recent_command_speed:.2f}m/s)"
-                        + self._escape_report(
-                            window, window_valid, scan, lo_idx,
-                            beam_angles)),
+            # Below ttc_min_brake_speed the clock is not consulted at all.
+            # TTC is a *closing-speed* brake, and at a crawl it stops being
+            # one. Measured on the 2026-08-06 run, 10 of 12 sampled TTC stops
+            # fired between 0.15 and 0.39m/s, where the 0.5s threshold is only
+            # 0.08-0.20m of clearance -- so a car that had already eased up to
+            # the inside of a corner could never re-commit to the turn. Worse,
+            # those samples repeatedly read "odom 0.00m/s, recent command
+            # 0.16m/s": the car was stopped, the command fallback supplied the
+            # speed, TTC braked, the command went to zero, the brake released,
+            # and the pair alternated at scan rate.
+            #
+            # The clearance layers own this regime and are built for it:
+            # emergency_stop_clearance still stops outright on contact and the
+            # forward reserve still creeps, which is what lets a car with a
+            # visible exit inch toward it. This gate removes the brake only
+            # where it was blocking that escape, not where it is doing work.
+            if effective_speed >= self.ttc_min_brake_speed:
+                min_ttc = gap_logic.minimum_ttc(
+                    window,
+                    window_valid,
+                    beam_angles,
+                    effective_speed,
+                    body_boundaries,
+                    self.ttc_min_closing_speed,
+                    self.car_width / 2.0 + self.safety_margin,
+                    # The rack is where the last command left it, so that is
+                    # the arc the car is about to sweep. Straight-line TTC on a
+                    # car at full lock brakes for the outside of the very
+                    # corner it is negotiating.
+                    math.tan(self.steering_basis) / self.wheelbase,
+                    self.laser_offset_x,
+                    self.laser_offset_y,
                 )
-                return
+                if min_ttc <= self.ttc_threshold_sec:
+                    self._stop(
+                        'ttc_brake',
+                        lambda: (
+                            f"minimum footprint-aware TTC {min_ttc:.3f}s is at "
+                            f"or below the {self.ttc_threshold_sec:.3f}s "
+                            f"threshold at effective speed "
+                            f"{effective_speed:.2f}m/s "
+                            f"(odom {self.current_speed:.2f}m/s, recent command "
+                            f"{recent_command_speed:.2f}m/s)"
+                            + self._escape_report(
+                                window, window_valid, scan, lo_idx,
+                                beam_angles)),
+                    )
+                    return
 
         (window, closest_dist, gap_start, gap_end, used_fallback,
          target_idx_in_window) = self._select_gap(
@@ -728,17 +790,49 @@ class GapFollowNode(Node):
             + (f", CREEP (forward clearance {forward_clearance:.3f}m inside "
                f"the {self.forward_stop_clearance:.3f}m reserve; crawling out)"
                if creeping else ""))
-        self._log_decision(
-            gap_mode,
+        decision_detail = (
             f"selected {depth_text} gap "
             f"{math.degrees(gap_lo_angle):+.1f}deg to "
             f"{math.degrees(gap_hi_angle):+.1f}deg; target="
             f"{target_distance:.2f}m at {math.degrees(target_angle):+.1f}deg, "
             f"curvature={limited_curvature:+.3f}/m, closest={closest_text}, "
             f"odom={self.current_speed:+.2f}m/s; "
-            f"{cap_text}{centering_text}{steering_shape_text}{speed_shape_text}",
-            steering_angle,
-            speed,
+            f"{cap_text}{centering_text}{steering_shape_text}{speed_shape_text}")
+        self._log_decision(gap_mode, decision_detail, steering_angle, speed)
+
+        # Every speed ceiling that competed for this tick, so the dashboard
+        # can name the one that actually won instead of leaving someone to
+        # infer it from four numbers in a log line. Only true ceilings go in
+        # the list -- they are combined with min(), which is what makes
+        # "smallest one is binding" the correct reading. The min_speed floor
+        # is folded into normal_speed rather than listed, precisely so it
+        # cannot be mistaken for a cap.
+        intent_factors = [
+            schema.factor('curve cap', normal_speed),
+            schema.factor('creep cap' if creeping else 'clearance cap',
+                          clearance_speed),
+        ]
+        if used_fallback:
+            intent_factors.append(schema.factor('corner cap', self.corner_speed))
+        intent_factors.append(schema.factor('accel ceiling', acceleration_ceiling))
+        self._publish_intent(
+            gap_mode,
+            decision_detail,
+            desired_steering=desired_steering,
+            desired_speed=desired_speed,
+            commanded_steering=steering_angle,
+            commanded_speed=speed,
+            factors=schema.bind_min(intent_factors),
+            targets=[schema.target('gap_target', *predict.polar_to_body(
+                target_angle, target_distance,
+                self.laser_offset_x, self.laser_offset_y))],
+            wedge={
+                'x': self.laser_offset_x,
+                'y': self.laser_offset_y,
+                'a0': gap_lo_angle,
+                'a1': gap_hi_angle,
+                'r': target_distance,
+            },
         )
 
     def _validate_centering_parameters(self):
@@ -873,25 +967,27 @@ class GapFollowNode(Node):
     def _sensor_status_callback(self):
         """Explain a missing scan stream even though scan_callback is idle."""
         if self.last_scan_time is None:
+            detail = (f"no LaserScan received on '{self.scan_topic}'; "
+                      "no drive command is being generated")
             self._log_decision(
-                'waiting_for_scan',
-                f"no LaserScan received on '{self.scan_topic}'; "
-                "no drive command is being generated",
-                0.0,
-                0.0,
-                command_published=False,
-            )
+                'waiting_for_scan', detail, 0.0, 0.0, command_published=False)
+            self._publish_intent(
+                'waiting_for_scan', detail,
+                desired_steering=0.0, desired_speed=0.0,
+                commanded_steering=0.0, commanded_speed=0.0)
             return
         age_sec = (self.get_clock().now() - self.last_scan_time).nanoseconds / 1e9
         if age_sec >= self.scan_timeout_sec:
+            detail = (
+                f"last LaserScan is {age_sec:.2f}s old "
+                f"(limit {self.scan_timeout_sec:.2f}s); /drive has gone quiet "
+                "and the mux will stop the car")
             self._log_decision(
-                'scan_stale',
-                f"last LaserScan is {age_sec:.2f}s old (limit {self.scan_timeout_sec:.2f}s); "
-                "/drive has gone quiet and the mux will stop the car",
-                0.0,
-                0.0,
-                command_published=False,
-            )
+                'scan_stale', detail, 0.0, 0.0, command_published=False)
+            self._publish_intent(
+                'scan_stale', detail,
+                desired_steering=0.0, desired_speed=0.0,
+                commanded_steering=0.0, commanded_speed=0.0)
 
     def _fov_indices(self, scan: LaserScan):
         half_fov = self.forward_fov / 2.0
@@ -951,7 +1047,91 @@ class GapFollowNode(Node):
         # from where the wheels actually are. Recovery must never depend on
         # someone noticing the car and cycling LB.
         self._publish_drive(self.steering_basis, 0.0)
+        # Memoized because some stop reasons are deliberately expensive
+        # thunks -- _escape_report re-runs the whole gap pipeline -- and the
+        # log and the intent publisher both want that same string on the
+        # ticks where their independent throttles happen to coincide.
+        detail = schema.memoize_reason(detail)
         self._log_decision(state, detail, self.steering_basis, 0.0)
+        self._publish_intent(
+            state,
+            detail,
+            desired_steering=self.steering_basis,
+            desired_speed=0.0,
+            commanded_steering=self.steering_basis,
+            commanded_speed=0.0,
+        )
+
+    def _publish_intent(self, state: str, reason, *, desired_steering: float,
+                        desired_speed: float, commanded_steering: float,
+                        commanded_speed: float, factors=(), targets=(),
+                        wedge=None):
+        """Publish what this controller is *trying* to do, for the dashboard.
+
+        Three rules make this safe to run inside a node that steers a
+        physical car, and they are why this method looks the way it does
+        (the full reasoning is in docs/drive-intent.md):
+
+        1. It is only ever called *after* the drive command for this tick
+           has already been published, so nothing in here -- however slow
+           or however broken -- can delay a command, including a stop.
+        2. Everything is wrapped in one try/except. An exception raised by
+           a diagnostic drawing must not propagate into scan_callback and
+           take down the node holding this car's steering. After a run of
+           failures it latches itself off and says so once.
+        3. It only reads values the driving path already computed, and
+           writes no state the driving path reads back.
+
+        `reason` may be a string or a thunk; it is resolved only on the
+        ticks that actually carry one (state changes, then every
+        decision_log_period_sec), so an expensive explanation costs nothing
+        on the ticks in between.
+        """
+        if self.intent_pub is None or self._intent_failures.disabled:
+            return
+        now = self.get_clock().now().nanoseconds / 1e9
+        if not self._intent_throttle.should_publish(now):
+            return
+        try:
+            payload = schema.build(
+                'gap_follow_node',
+                state,
+                reason=(reason
+                        if self._intent_throttle.wants_reason(now, state)
+                        else None),
+                # A reactive controller chooses a *heading*, not a path, so
+                # one constant-curvature arc is the honest prediction here --
+                # unlike pure_pursuit, which really is following a line and
+                # re-asks its steering law along the way.
+                path=predict.constant_arc(
+                    desired_steering, desired_speed, self.wheelbase,
+                    self.intent_horizon_sec, self.intent_samples,
+                    max_length_m=self.intent_max_length),
+                commanded_path=predict.constant_arc(
+                    commanded_steering, commanded_speed, self.wheelbase,
+                    self.intent_horizon_sec, self.intent_samples,
+                    max_length_m=self.intent_max_length),
+                desired_steering=desired_steering,
+                commanded_steering=commanded_steering,
+                desired_speed=desired_speed,
+                commanded_speed=commanded_speed,
+                horizon_s=self.intent_horizon_sec,
+                factors=factors,
+                targets=targets,
+                wedge=wedge,
+            )
+            self.intent_pub.publish(String(data=schema.encode(payload)))
+            self._intent_failures.record_success()
+        except Exception as exc:  # noqa: BLE001 -- see rule 2 above
+            if self._intent_failures.record_failure():
+                self.get_logger().error(
+                    f'drive intent publishing failed repeatedly '
+                    f'({type(exc).__name__}: {exc}); switching it off for the '
+                    f'rest of this run. Driving is unaffected.')
+            else:
+                self.get_logger().warn(
+                    f'drive intent skipped this tick: '
+                    f'{type(exc).__name__}: {exc}')
 
     def _log_decision(self, state: str, detail: str, steering_angle: float,
                       speed: float, command_published: bool = True):

@@ -1,5 +1,9 @@
 # `pure_pursuit`
 
+> **Who this is for:** someone reading or changing this package's code.
+> **Read first:** [docs/architecture.md](../../docs/architecture.md) for the safety model — this package can move the car — then [docs/racing-autonomy.md](../../docs/racing-autonomy.md) for the end-to-end workflow.
+> **What's in it:** the controller code, the math, and every parameter.
+
 Map-based race controller: given a saved (x, y, speed) racing line and a live localization pose, computes steering + speed every control tick via the Pure Pursuit algorithm. This file documents the code, the math, and every parameter in detail. For the end-to-end workflow (mapping → localizing → recording a lap → generating the profile → racing) and the full derivations/diagrams, see [docs/racing-autonomy.md](../../docs/racing-autonomy.md); for running it, see [docs/operations.md](../../docs/operations.md#racing-with-the-pure-pursuit-stack).
 
 ## Files
@@ -9,6 +13,7 @@ Map-based race controller: given a saved (x, y, speed) racing line and a live lo
 | [`pure_pursuit/racing_math.py`](pure_pursuit/racing_math.py) | **All the actual math**, as plain functions with no `rclpy`/ROS imports — frame conversions, Pure Pursuit geometry, path indexing, offline velocity-profile generation, CSV I/O, gap-finding, and opponent detection/tracking geometry. Deliberately kept separate from ROS plumbing so it's readable end-to-end and unit-testable without a robot (see [`test/test_racing_math.py`](test/test_racing_math.py)). |
 | [`pure_pursuit/pure_pursuit_node.py`](pure_pursuit/pure_pursuit_node.py) | The race controller ROS node — loads a profiled CSV at startup or safely at runtime, then owns control, watchdogs, opponent tracking, and overtaking. |
 | [`pure_pursuit/auto_map_race_node.py`](pure_pursuit/auto_map_race_node.py) | Supervisor for the one-command workflow: records SLAM poses while forwarding gap-follow commands, generates/loads the profile, saves map artifacts, then hands `/drive` selection to pure pursuit. |
+| [`pure_pursuit/recorded_path.py`](pure_pursuit/recorded_path.py) | Turns a lap recorded from a *live SLAM pose* into a line the rack can actually follow: trims to one revolution, resamples, low-passes the closed loop in space, and grades the result against `tan(delta_max)/L`. No `rclpy` (see [`test/test_recorded_path.py`](test/test_recorded_path.py)). Read its module docstring before touching the automatic workflow — it has the measurements from this car's own recordings. |
 | [`pure_pursuit/waypoint_recorder_node.py`](pure_pursuit/waypoint_recorder_node.py) | Records localized `(x, y)` positions to a CSV while you drive a lap by hand. |
 | [`pure_pursuit/generate_velocity_profile.py`](pure_pursuit/generate_velocity_profile.py) | Offline CLI tool — turns a raw `(x, y)` recording into a paced `(x, y, speed)` racing line. |
 | [`config/pure_pursuit.yaml`](config/pure_pursuit.yaml), [`config/auto_map_race.yaml`](config/auto_map_race.yaml), [`config/waypoint_recorder.yaml`](config/waypoint_recorder.yaml) | Controller, automatic workflow, and recorder parameters. |

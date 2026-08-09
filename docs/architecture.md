@@ -1,5 +1,10 @@
 # Architecture
 
+> **Who this is for:** anyone about to write or run code that can move the car. **Required reading before driving code.**
+> **Read first:** [concepts.md](concepts.md) for what nodes and topics are, and [glossary.md](glossary.md) for the vocabulary.
+> **You'll be able to:** read the node/topic graph, explain why driving needs two launch files, and state the safety rules and their reasons.
+> **Time:** about 30 minutes.
+
 How the car's software is put together: every node, every topic, and how they connect. Everything communicates over ROS2 Jazzy topics — there is no shared memory or direct function calls between packages, so this topic map *is* the system.
 
 ## The node graph
@@ -74,6 +79,8 @@ How the car's software is put together: every node, every topic, and how they co
 | Your own node | see [writing-your-own-node.md](writing-your-own-node.md) | `/drive` |
 
 Run **exactly one** of these at a time — `Ctrl+C` whichever is currently running before starting a different one, rather than stacking them in additional terminals. Nothing stops you from running two at once, but that isn't "blending" them: per the priority table just below, `/teleop` always beats `/drive` while it's live, so a second control layer just gets silently masked, not mixed in.
+
+The whole automatic composition can be run without the car -- the real launch file, the real SLAM, the real dashboard, over a simulated LiDAR and VESC: see [ros-simulator.md](ros-simulator.md).
 
 The automatic composition is the deliberate exception *inside one launch*: gap follow publishes only to `/auto_map/drive`, pure pursuit only to `/auto_race/drive`, and `auto_map_race_node` forwards exactly one of those to the real `/drive`. Both child controllers can run without competing at the mux.
 
@@ -150,6 +157,7 @@ All topics as they actually appear on the bus with `bringup_launch.py` plus a co
 | `/odom` | `nav_msgs/Odometry` | `vesc_to_odom_node` | `gap_follow` (TTC speed), `pure_pursuit` (lookahead sizing only, never a stop watchdog), `particle_filter` (if running) |
 | `/scan` | `sensor_msgs/LaserScan` | `urg_node` | `gap_follow`, `slam_toolbox`, `particle_filter` (whichever is running) |
 | `/tf`, `/tf_static` | `tf2_msgs/TFMessage` | `static_transform_publisher`, `vesc_to_odom_node` | RViz, `slam_toolbox`, `particle_filter` |
+| `/drive_intent` | `std_msgs/String` (JSON) | `gap_follow`, `pure_pursuit` (read-only diagnostics — never a control path) | `web_dashboard` — see [drive-intent.md](drive-intent.md) |
 | `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | `urg_node`, `ackermann_mux` | RViz / `ros2 topic echo` for debugging |
 
 ## Package reference

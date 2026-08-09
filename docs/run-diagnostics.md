@@ -1,5 +1,9 @@
 # Recording and diagnosing a run
 
+> **Who this is for:** anyone trying to work out why a run went wrong, after the fact.
+> **Read first:** [operations.md](operations.md) — record the run first, diagnose it second.
+> **You'll be able to:** record a run so it can actually be diagnosed, then analyze pipeline health, pose lag and watchdog stops.
+
 How to capture everything needed to work out what a run did — and how to
 hand that to a person or an AI agent so they can act on it.
 
@@ -53,7 +57,7 @@ One timestamped directory per run under `~/.ros/racerbot_runs/`:
 | `probe.log` | `race_diag_node` stdout | Same, human-readable |
 | `bag/` | `ros2 bag record` | Everything, replayable offline |
 | `map.pgm` / `map.yaml` | `slam_toolbox` save | The map as SLAM saw it |
-| `raceline_*.csv` | `auto_map_race_node` | The line that was generated and driven |
+| `raceline_*.csv` | `auto_map_race_node` | The line that was generated and driven. `raceline_raw.csv` is the unmodified recording and is written even when the cleanup *refuses* the run, so a refusal can be plotted against the map |
 
 ### Why the probe exists at all
 

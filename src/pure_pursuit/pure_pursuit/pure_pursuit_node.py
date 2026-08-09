@@ -61,7 +61,10 @@ from rclpy.parameter import Parameter
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from rclpy.time import Time as RclpyTime
 from sensor_msgs.msg import Joy, LaserScan
+from std_msgs.msg import String
 
+from drive_intent import predict, schema
+from drive_intent.throttle import FailureLatch, IntentThrottle
 from pure_pursuit import live_tuning, racing_math
 
 
@@ -188,6 +191,15 @@ class PurePursuitNode(Node):
         self.declare_parameter('enable_lidar_safety', True)
         self.declare_parameter('safety_fov_deg', 60.0)
         self.declare_parameter('emergency_stop_distance', 0.4)
+        # --- Escape from the hard stop (see _reactive_override tier 1) ---
+        # A hard stop with no way out is not a safe state, it is a stuck one:
+        # at zero speed nothing about the scene changes, so the obstacle that
+        # stopped the car never leaves the cone. gap_follow_node solved the
+        # identical deadlock with escape_creep_speed; this is the same idea
+        # for the race controller. 0.0 restores the old latching behaviour.
+        self.declare_parameter('emergency_escape_speed', 0.25)
+        self.declare_parameter('emergency_escape_min_gap', 0.8)
+        self.declare_parameter('emergency_escape_clearance', 0.10)
         self.declare_parameter('scan_timeout_sec', 0.5)
         # --- Deadman button (workspace policy, see docs/architecture.md) ---
         self.declare_parameter('enable_deadman', True)
@@ -198,6 +210,18 @@ class PurePursuitNode(Node):
         # explains steady-state path, speed, opponent, and LIDAR decisions
         # without printing at the full control_rate_hz.
         self.declare_parameter('decision_log_period_sec', 1.0)
+
+        # --- Drive intent (docs/drive-intent.md) ---
+        # A read-only JSON description of what this controller is *trying*
+        # to do, for the web dashboard's intent arrow and decision panel.
+        # Publishing it cannot change what the car does -- see
+        # _publish_intent() for the three rules that guarantee that.
+        self.declare_parameter('publish_intent', True)
+        self.declare_parameter('intent_topic', '/drive_intent')
+        self.declare_parameter('intent_rate_hz', 20.0)
+        self.declare_parameter('intent_horizon_sec', 1.5)
+        self.declare_parameter('intent_samples', 16)
+        self.declare_parameter('intent_max_length', 8.0)
 
         # --- Reactive avoidance (steer around something close, not just
         # stop, when there's room) ---
@@ -282,6 +306,12 @@ class PurePursuitNode(Node):
         self.enable_lidar_safety = bool(self.get_parameter('enable_lidar_safety').value)
         self.safety_fov_deg = float(self.get_parameter('safety_fov_deg').value)
         self.emergency_stop_distance = float(self.get_parameter('emergency_stop_distance').value)
+        self.emergency_escape_speed = float(
+            self.get_parameter('emergency_escape_speed').value)
+        self.emergency_escape_min_gap = float(
+            self.get_parameter('emergency_escape_min_gap').value)
+        self.emergency_escape_clearance = float(
+            self.get_parameter('emergency_escape_clearance').value)
         self.scan_timeout_sec = float(self.get_parameter('scan_timeout_sec').value)
         self.enable_deadman = bool(self.get_parameter('enable_deadman').value)
         self.joy_topic = self.get_parameter('joy_topic').value
@@ -289,6 +319,15 @@ class PurePursuitNode(Node):
         self.joy_timeout_sec = float(self.get_parameter('joy_timeout_sec').value)
         self.decision_log_period_sec = max(
             0.0, float(self.get_parameter('decision_log_period_sec').value))
+        self.publish_intent = bool(self.get_parameter('publish_intent').value)
+        self.intent_topic = self.get_parameter('intent_topic').value
+        self.intent_rate_hz = float(self.get_parameter('intent_rate_hz').value)
+        self.intent_horizon_sec = max(
+            0.05, float(self.get_parameter('intent_horizon_sec').value))
+        self.intent_samples = max(
+            2, int(self.get_parameter('intent_samples').value))
+        self.intent_max_length = max(
+            0.1, float(self.get_parameter('intent_max_length').value))
 
         self.max_range = float(self.get_parameter('max_range').value)
         self.avoidance_fallback_trigger_distance = float(
@@ -450,6 +489,11 @@ class PurePursuitNode(Node):
         self.last_decision_state = None
         self.last_decision_log_time = None
         self.last_opponent_status = 'opponent detection has not run yet'
+        # Intent throttles on its own clock, independent of the decision
+        # log, and latches itself off if it ever starts failing.
+        self._intent_throttle = IntentThrottle(
+            self.intent_rate_hz, self.decision_log_period_sec)
+        self._intent_failures = FailureLatch()
 
         # Opponent tracking + overtake state -- see OpponentTracker above
         # and _update_opponent_and_overtake below.
@@ -489,6 +533,9 @@ class PurePursuitNode(Node):
         self.add_on_set_parameters_callback(self._parameter_callback)
 
         self.drive_pub = self.create_publisher(AckermannDriveStamped, self.drive_topic, 10)
+        self.intent_pub = (
+            self.create_publisher(String, self.intent_topic, 10)
+            if self.publish_intent else None)
         self.pose_sub = self.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 10)
         self.odom_sub = self.create_subscription(
             Odometry, self.odom_topic, self.odom_callback, 10)
@@ -720,13 +767,18 @@ class PurePursuitNode(Node):
             self._control_step()
         except Exception as exc:
             self._publish_drive(0.0, 0.0)
+            detail = (f"unhandled {type(exc).__name__}: {exc}; node will "
+                      "exit after publishing stop")
             self._log_decision(
-                'control_exception',
-                f"unhandled {type(exc).__name__}: {exc}; node will exit after publishing stop",
-                0.0,
-                0.0,
-                level='error',
-            )
+                'control_exception', detail, 0.0, 0.0, level='error')
+            # Best-effort: the dashboard should show why the car stopped
+            # even though this node is on its way out. _publish_intent
+            # swallows its own failures, so this cannot mask the real
+            # exception being re-raised below.
+            self._publish_intent(
+                'control_exception', detail,
+                desired_steering=0.0, desired_speed=0.0,
+                commanded_steering=0.0, commanded_speed=0.0)
             raise
 
     def _control_step(self):
@@ -870,6 +922,13 @@ class PurePursuitNode(Node):
         speed_cmd = float(np.clip(speed_here, self.min_speed, self.max_speed))
         hard_speed_cap = self.max_speed
         decision_state = 'pure_pursuit'
+        # Named ceilings for the dashboard's decision panel. Kept as
+        # separate locals rather than recovered afterwards from the final
+        # number, because "which limit won" is exactly the thing a single
+        # min() throws away -- and exactly the thing worth knowing.
+        intent_profile_speed = speed_cmd
+        intent_reactive_cap = None
+        intent_curve_cap = None
 
         # --- Opponent tracking + overtaking: reconsiders the steering
         # *target* (not yet the final command) if another car has been
@@ -917,6 +976,7 @@ class PurePursuitNode(Node):
             if speed_override is not None:
                 speed_cmd = speed_override
                 hard_speed_cap = min(hard_speed_cap, speed_override)
+                intent_reactive_cap = speed_override
             if reactive_state is not None:
                 decision_state = reactive_state
                 decision_detail = f"{reactive_detail}; base plan: {decision_detail}"
@@ -936,6 +996,7 @@ class PurePursuitNode(Node):
              online_curve_speed, command_dt) = self._shape_normal_command(
                 desired_steering, desired_speed, hard_speed_cap)
             self._publish_drive(steering_angle, speed_cmd, now=now)
+            intent_curve_cap = online_curve_speed
             shaping_text = (
                 f", steering shaped from {desired_steering:+.3f}rad"
                 if not math.isclose(steering_angle, desired_steering) else "")
@@ -949,6 +1010,158 @@ class PurePursuitNode(Node):
 
         self._log_decision(
             decision_state, decision_detail, steering_angle, speed_cmd)
+
+        # Intent goes out last: the drive command for this tick is already
+        # published above, whichever branch produced it.
+        intent_factors = [schema.factor('profile speed', intent_profile_speed)]
+        if intent_curve_cap is not None:
+            intent_factors.append(schema.factor('curve cap', intent_curve_cap))
+        if intent_reactive_cap is not None:
+            intent_factors.append(
+                schema.factor('reactive cap', intent_reactive_cap))
+        else:
+            intent_factors.append(schema.factor('max speed', self.max_speed))
+        target_body_x, target_body_y = racing_math.world_to_body(
+            target_x - self.car_x, target_y - self.car_y, self.car_yaw)
+        self._publish_intent(
+            decision_state,
+            decision_detail,
+            desired_steering=desired_steering,
+            desired_speed=desired_speed,
+            commanded_steering=steering_angle,
+            commanded_speed=speed_cmd,
+            factors=schema.bind_min(intent_factors),
+            targets=[schema.target(
+                'steering_target', target_body_x, target_body_y)],
+            # Only trace the racing line when following it is actually the
+            # plan. Under an overtake or a reactive override the controller
+            # has chosen a heading, and drawing the line it is currently
+            # ignoring would show intent it does not have.
+            nearest_idx=(nearest_idx if decision_state == 'pure_pursuit'
+                         else None),
+        )
+
+    def _intent_path(self, steering: float, speed: float, nearest_idx=None):
+        """The trajectory this controller intends to follow, in base_link.
+
+        When the plan is "track the racing line", the pure pursuit law is
+        re-asked at every integration step rather than freezing the current
+        steering angle. That is the whole diagnostic value of the arrow
+        through a corner: a frozen arc leaves the line on a tangent and
+        says nothing useful, while a re-evaluated one draws the path the
+        controller will actually thread -- and when the plan is wrong, it
+        shows it being wrong before the car has driven it.
+
+        Falls back to one constant-curvature arc whenever there is no line
+        to follow (no profile loaded yet) or following it is not the
+        current plan (a committed overtake, a reactive override). In those
+        states the controller genuinely has chosen a heading rather than a
+        path, so an arc is the honest picture.
+        """
+        if nearest_idx is None or self.speed_profile.size == 0:
+            return predict.constant_arc(
+                steering, speed, self.wheelbase, self.intent_horizon_sec,
+                self.intent_samples, max_length_m=self.intent_max_length)
+
+        cursor = {'idx': int(nearest_idx)}
+        step_dt = self.intent_horizon_sec / (self.intent_samples - 1)
+
+        def speed_of(i, x, y, yaw):
+            return float(self.speed_profile[cursor['idx']])
+
+        def steering_of(i, x, y, yaw):
+            v = float(self.speed_profile[cursor['idx']])
+            lookahead = racing_math.adaptive_lookahead(
+                v, self.lookahead_speed_gain,
+                self.min_lookahead, self.max_lookahead)
+            target_idx = racing_math.find_lookahead_index(
+                self.seg_len, cursor['idx'], lookahead, closed=self.closed_loop)
+            tx, ty = self.xy[target_idx]
+            x_body, y_body = racing_math.world_to_body(tx - x, ty - y, yaw)
+            kappa = racing_math.steering_arc_curvature(x_body, y_body)
+            # Advance along the line by the arc length this step covers,
+            # rather than re-running a nearest-waypoint search: walking
+            # forward is cheaper and monotonic, and a nearest-point search
+            # on a closed loop can jump across a hairpin to the other side
+            # of the track, which would put a kink in the drawn path that
+            # the car is not going to make.
+            cursor['idx'] = racing_math.find_lookahead_index(
+                self.seg_len, cursor['idx'], max(1e-6, v * step_dt),
+                closed=self.closed_loop)
+            return float(np.clip(
+                racing_math.steering_from_curvature(kappa, self.wheelbase),
+                -self.max_steering_angle, self.max_steering_angle))
+
+        world = predict.integrate(
+            steering_of, speed_of, self.wheelbase, self.intent_horizon_sec,
+            self.intent_samples, start=(self.car_x, self.car_y, self.car_yaw),
+            max_length_m=self.intent_max_length)
+        # The racing line lives in the map frame, but the dashboard wants
+        # base_link so the arrow renders identically with or without a pose.
+        return predict.to_body(world, self.car_x, self.car_y, self.car_yaw)
+
+    def _publish_intent(self, state: str, reason, *, desired_steering: float,
+                        desired_speed: float, commanded_steering: float,
+                        commanded_speed: float, factors=(), targets=(),
+                        nearest_idx=None):
+        """Publish what this controller is *trying* to do, for the dashboard.
+
+        Three rules make this safe to run inside a node that steers a
+        physical car, and they are why this method looks the way it does
+        (the full reasoning is in docs/drive-intent.md):
+
+        1. It is only ever called *after* the drive command for this tick
+           has already been published, so nothing in here -- however slow
+           or however broken -- can delay a command, including a stop.
+        2. Everything is wrapped in one try/except. An exception raised by
+           a diagnostic drawing must not propagate into the control loop
+           and take down the node holding this car's steering. After a run
+           of failures it latches itself off and says so once.
+        3. It only reads values the driving path already computed, and
+           writes no state the driving path reads back.
+        """
+        if self.intent_pub is None or self._intent_failures.disabled:
+            return
+        now = self.get_clock().now().nanoseconds / 1e9
+        if not self._intent_throttle.should_publish(now):
+            return
+        try:
+            payload = schema.build(
+                'pure_pursuit_node',
+                state,
+                reason=(reason
+                        if self._intent_throttle.wants_reason(now, state)
+                        else None),
+                path=self._intent_path(
+                    desired_steering, desired_speed, nearest_idx=nearest_idx),
+                # The ghost is deliberately a plain one-tick projection of
+                # the command actually on the wire. Where it diverges from
+                # the path above, the difference *is* the slew-rate and
+                # acceleration shaping -- which is the point of drawing it.
+                commanded_path=predict.constant_arc(
+                    commanded_steering, commanded_speed, self.wheelbase,
+                    self.intent_horizon_sec, self.intent_samples,
+                    max_length_m=self.intent_max_length),
+                desired_steering=desired_steering,
+                commanded_steering=commanded_steering,
+                desired_speed=desired_speed,
+                commanded_speed=commanded_speed,
+                horizon_s=self.intent_horizon_sec,
+                factors=factors,
+                targets=targets,
+            )
+            self.intent_pub.publish(String(data=schema.encode(payload)))
+            self._intent_failures.record_success()
+        except Exception as exc:  # noqa: BLE001 -- see rule 2 above
+            if self._intent_failures.record_failure():
+                self.get_logger().error(
+                    f'drive intent publishing failed repeatedly '
+                    f'({type(exc).__name__}: {exc}); switching it off for the '
+                    f'rest of this run. Driving is unaffected.')
+            else:
+                self.get_logger().warn(
+                    f'drive intent skipped this tick: '
+                    f'{type(exc).__name__}: {exc}')
 
     def _fov_indices(self, scan: LaserScan, fov_deg: float):
         """Index bounds in `scan.ranges` for a forward cone `fov_deg`
@@ -1092,6 +1305,63 @@ class PurePursuitNode(Node):
         window = np.nan_to_num(window, nan=0.0, posinf=self.max_range, neginf=0.0)
         return np.clip(window, 0.0, self.max_range)
 
+    def _emergency_escape(self, scan, body_clearance: float, closest: float):
+        """Crawl toward a real opening instead of latching at a hard stop.
+
+        Returns a `_reactive_override` tuple, or None to let the caller stop.
+
+        The hard stop above is correct about the danger and wrong about the
+        remedy. Zero speed does not clear the cone -- nothing moves, so the
+        car sits there until a human picks it up. On 2026-08-08 that is
+        exactly how a simulated auto-map race ended: pure pursuit took over,
+        ran wide on its first corner, stopped 0.38m from a wall, and stayed
+        there for the rest of the run.
+
+        gap_follow_node reached the same conclusion about its own forward
+        reserve and answers it with `escape_creep_speed`. This is the same
+        answer, kept deliberately narrower:
+
+        * it is a crawl (`emergency_escape_speed`, 0.25m/s), not a drive;
+        * it only moves toward a gap that is really there -- deeper than
+          `emergency_escape_min_gap` in the wider avoidance cone -- and
+          never guesses a direction;
+        * it needs `emergency_escape_clearance` of room around the whole
+          body, measured over every beam, so a car wedged against something
+          the forward cone cannot see still stops; and
+        * the contact tier above still wins outright, and so does a
+          stale/missing scan.
+
+        Set `emergency_escape_speed` to 0.0 to restore the old behaviour.
+        """
+        if self.emergency_escape_speed <= 0.0:
+            return None
+        if body_clearance <= self.emergency_escape_clearance:
+            return None
+
+        lo_idx, hi_idx = self._fov_indices(scan, self.avoidance_fov_deg)
+        window = self._sanitized_window(scan, lo_idx, hi_idx)
+        if window.size == 0:
+            return None
+        gap_start, gap_end = racing_math.find_best_gap(
+            window, self.emergency_escape_min_gap)
+        if gap_start is None:
+            return None
+
+        target_idx = lo_idx + (gap_start + gap_end) // 2
+        angle = scan.angle_min + target_idx * scan.angle_increment
+        angle = float(np.clip(angle, -self.max_steering_angle, self.max_steering_angle))
+        return (
+            angle,
+            self.emergency_escape_speed,
+            'emergency_escape',
+            f"closest valid return in the {self.safety_fov_deg:.1f}deg safety cone is "
+            f"{closest:.2f}m, inside the {self.emergency_stop_distance:.2f}m emergency "
+            f"threshold, but the body still has {body_clearance:.3f}m all round and a "
+            f"{self.emergency_escape_min_gap:.2f}m opening exists at "
+            f"{math.degrees(angle):+.1f}deg -- crawling out at "
+            f"{self.emergency_escape_speed:.2f}m/s rather than latching stopped",
+        )
+
     def _reactive_override(self, allow_avoidance: bool = True):
         """The reactive LIDAR safety net -- independent of the racing
         line and the overtake logic above, and always has the final say.
@@ -1106,7 +1376,10 @@ class PurePursuitNode(Node):
              (treated the same as "too close" -- a safety net that's
              gone blind isn't a safety net) -- hard stop, steering left
              alone so the wheels stay pointed to resume the line once
-             clear.
+             clear. If the body still has room and there is a real
+             opening to aim at, _emergency_escape crawls out of it
+             instead: a stopped car cannot clear its own cone, so the
+             hard stop on its own ends the run wherever it fires.
           2. Something is inside avoidance_trigger_distance in a wider
              cone (but outside the hard-stop distance) -- steer at the
              best gap instead of stopping, at a capped cautious speed,
@@ -1155,6 +1428,9 @@ class PurePursuitNode(Node):
 
         emergency_closest = self._closest_in_cone(scan, self.safety_fov_deg)
         if emergency_closest < self.emergency_stop_distance:
+            escape = self._emergency_escape(scan, body_clearance, emergency_closest)
+            if escape is not None:
+                return escape
             return (
                 None,
                 0.0,
@@ -1588,7 +1864,12 @@ class PurePursuitNode(Node):
         self.steering_basis = racing_math.slew_rate_limit(
             0.0, self.steering_basis, command_dt, self.max_steering_rate)
         self._publish_drive(0.0, 0.0, now=now)
+        detail = schema.memoize_reason(detail)
         self._log_decision(state, detail, 0.0, 0.0)
+        self._publish_intent(
+            state, detail,
+            desired_steering=0.0, desired_speed=0.0,
+            commanded_steering=0.0, commanded_speed=0.0)
 
     def _log_decision(self, state: str, detail: str, steering_angle: float,
                       speed: float, level: str = None):

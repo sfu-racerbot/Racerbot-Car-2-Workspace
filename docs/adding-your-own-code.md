@@ -1,5 +1,10 @@
 # Adding your own code
 
+> **Who this is for:** anyone about to add anything new to this workspace — a driving node, a tool, a dashboard.
+> **Read first:** [concepts.md](concepts.md), so the words *package*, *node* and *launch file* mean something.
+> **You'll be able to:** work out which category your code is in, where it goes, and what it must contain.
+> **Time:** about 15 minutes.
+
 Start here if you're about to add anything new to this workspace — an autonomy node, a dashboard, a logging tool, whatever. It answers three questions: where does it go, what does it need to have, and how do you actually run it. For the deeper reference on any one of these topics, this doc points you to the right place rather than repeating it.
 
 ## Step 1: decide what kind of code this is

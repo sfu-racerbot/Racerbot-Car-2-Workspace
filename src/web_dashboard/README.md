@@ -1,5 +1,9 @@
 # `web_dashboard`
 
+> **Who this is for:** someone reading or changing this package's code.
+> **Read first:** [docs/web-dashboard.md](../../docs/web-dashboard.md) for what the dashboard shows and how to run it.
+> **What's in it:** the server, the wire protocol, and the browser side. Subscribes only — but note the live tuning panel's `set_parameters` path.
+
 Live browser dashboard: streams the SLAM/localization map, proximity-colored
 LIDAR, pose, measured speed, selected steering command, LB state, and a shared
 stopwatch to any web browser over a WebSocket. This file documents the code in
@@ -24,6 +28,8 @@ for the user-facing account and `enable_tuning: false` to remove it.
 | File | What it is |
 |---|---|
 | [`web_dashboard/protocol.py`](web_dashboard/protocol.py) | Wire-format conversion — turns ROS messages into JSON headers + binary payloads. No `rclpy`/Tornado/network imports, so it's unit-testable in isolation (see [`test/test_protocol.py`](test/test_protocol.py)). |
+| [`web_dashboard/mapstream.py`](web_dashboard/mapstream.py) | Turns a stream of whole occupancy grids into keyframes and patches, so the car sends what changed rather than 4MB. No ROS imports (see [`test/test_mapstream.py`](test/test_mapstream.py)). |
+| [`web_dashboard/batching.py`](web_dashboard/batching.py) | Collapses ~155 small telemetry messages a second into one frame per tick, while preserving every `/drive_intent` state transition (see [`test/test_batching.py`](test/test_batching.py)). |
 | [`web_dashboard/stopwatch.py`](web_dashboard/stopwatch.py) | ROS-free deadman-gated stopwatch state machine, including joystick timeout handling. |
 | [`web_dashboard/tuning.py`](web_dashboard/tuning.py) | Live-tuning support: parsing a node's advertised catalogue, clamping a browser request, and the comment-preserving YAML writer. No ROS/Tornado imports either (see [`test/test_tuning.py`](test/test_tuning.py)). |
 | [`web_dashboard/dashboard_node.py`](web_dashboard/dashboard_node.py) | The ROS2 node: subscribes to map/scan/pose/command/odom/joy, runs a [Tornado](https://www.tornadoweb.org/) web + WebSocket server, and bridges its two threads. |
@@ -34,7 +40,7 @@ for the user-facing account and `enable_tuning: false` to remove it.
 
 ## Interface
 
-- **Subscribes:** map (`/map`), scan (`/scan`), pose (`/pf/viz/inferred_pose` *and* `/slam_pose`), selected command (`/ackermann_cmd`), measured odometry (`/odom`), and joystick state (`/joy`). Every subscription is display/timer input only.
+- **Subscribes:** map (`/map`), scan (`/scan`), pose (`/pf/viz/inferred_pose` *and* `/slam_pose`), selected command (`/ackermann_cmd`), measured odometry (`/odom`), joystick state (`/joy`), and drive intent (`/drive_intent`). Every subscription is display/timer input only.
 - Also samples CPU%/mem%/CPU temp/WiFi signal/uptime on a timer (`psutil` + `/sys/class/thermal` + `/proc/net/wireless`).
 - **Publishes:** nothing, to any topic. Browser input can enable/reset the dashboard-local stopwatch (which never leaves this process) and — once armed — change live-tunable parameters on the nodes in `tuning_nodes`.
 - **Calls (services):** `/<node>/get_parameters` and `/<node>/set_parameters` for each node in `tuning_nodes`, and nothing else.
@@ -91,32 +97,83 @@ payload), laid out to match a JavaScript `TypedArray` byte-for-byte:
 
 | Update | JSON header fields | Binary payload |
 |---|---|---|
-| `map` | `width`, `height`, `resolution`, `origin_x`, `origin_y`, `origin_yaw` | `Int8Array` — one signed byte per cell, matching `OccupancyGrid.data` exactly (`-1` unknown, `0` free, `100` occupied) |
-| `scan` | `angle_min`, `angle_increment`, `range_min`, `range_max`, `count`, `laser_offset_x`, `laser_offset_y` | `Float32Array` — one little-endian float per beam, matching `LaserScan.ranges` |
+| `map` | `seq`, `width`, `height`, `resolution`, `origin_x`, `origin_y`, `origin_yaw`, `encoding`, `bytes`, `raw_bytes` | the whole grid — one signed byte per cell, matching `OccupancyGrid.data` exactly (`-1` unknown, `0` free, `100` occupied), usually deflated |
+| `map_patch` | `seq`, `x`, `y`, `w`, `h`, `encoding`, `bytes`, `raw_bytes` | just the `w`×`h` rectangle of cells that changed, in grid coordinates |
+| `scan` | `encoding`, `angle_min`, `angle_increment`, `range_min`, `range_max`, `count`, `laser_offset_x`, `laser_offset_y` | `Uint16Array` of millimetres (`u16mm`, the default) or `Float32Array` of metres (`f32`) |
+| `batch` | `items`: a list of the compact messages below, each exactly as it would have been on its own | *(none)* |
 | `pose` | `x`, `y`, `yaw` | *(none — small enough to just be JSON)* |
 | `drive` | selected-command `speed`, `steering_angle` | *(none)* |
 | `speed` | measured odometry `speed` | *(none)* |
 | `stopwatch` | `elapsed_s`, enabled/running flags, LB/freshness flags | *(none)* |
 | `stats` | `cpu_percent`, `mem_percent`, `cpu_temp_c` (nullable), `uptime_s`, `wifi_dbm` (nullable) | *(none)* |
+| `intent` | `intent`: one `/drive_intent` payload, forwarded after validation — see [docs/drive-intent.md](../../docs/drive-intent.md) | *(none)* |
+
+`bytes` always means the exact length of the binary frame that follows, so
+the browser's desync check works unchanged; `raw_bytes` is what it should
+be once inflated.
+
+### The map is sent as changes, not as a map
+
+This is the single biggest thing the dashboard does for the car's WiFi
+link, and it lives in [`mapstream.py`](web_dashboard/mapstream.py).
+`slam_toolbox` republishes its whole grid every `map_update_interval` for
+as long as it is mapping — which is exactly while somebody is driving. At
+the levine map's 2048×2048 that is 4MB a message, 819 kB/s, per open tab.
+Measured on this car, the region that actually changed between two of
+those messages compresses to about **200 bytes**.
+
+So the browser owns the map image and the car sends it deltas: a
+**keyframe** on first sight, on a resize (`slam_toolbox` grows its grid as
+the car explores), for a newly connected tab, and every `map_keyframe_sec`
+so nobody can stay wrong forever; a **patch** covering only the changed
+rectangle otherwise; and **nothing at all** when the grid is byte-identical
+to the last one, which is what a parked car publishes forever.
+
+Every frame carries a `seq`. The browser applies a patch only when it is
+the exact successor of the frame it last applied — on any gap it stops
+applying patches and waits for a keyframe, rather than painting a map that
+is subtly and silently wrong.
+
+### Packing
 
 ```python
 def map_cells(msg) -> bytes:
-    data = list(msg.data)
+    data = msg.data
+    if _LITTLE_ENDIAN and getattr(data, 'typecode', None) == 'b':
+        return data.tobytes()
     return struct.pack(f'<{len(data)}b', *data)
 ```
 
-`struct.pack`'s signed-char format (`b`) is what makes a cell value of
-`-1` round-trip correctly as the single byte `0xFF` — plain `bytes(data)`
-can't do this (it only accepts values `0`-`255`). The browser then reads
-it with zero parsing beyond `new Int8Array(arrayBuffer)`.
+rclpy hands `OccupancyGrid.data` over as `array('b')`, which already *is*
+the wire layout, so `.tobytes()` is a buffer copy. The `struct.pack` path
+builds the same bytes from individual Python ints — for a 2048×2048 map
+that means unpacking 4.2 *million* arguments into one call, measured at
+178ms on this car's Jetson against 2.2ms for `.tobytes()`. It stays as the
+fallback for big-endian hosts and for the plain lists the tests build
+their fakes from; the round-trip tests in `test_protocol.py` passing
+unedited are the proof the two produce identical bytes.
 
-`dashboard_node.py` throttles `scan` broadcasts to `scan_broadcast_rate_hz`
-(default `10Hz`) regardless of how fast `/scan` itself publishes (~40Hz) —
-no browser needs to redraw that often, and it keeps WiFi/CPU load down.
-`map`, `pose`, `drive`, and `speed` updates are broadcast immediately.
-LB/stopwatch state emits at `stopwatch_update_rate_hz` so every open tab stays
-synchronized and sees the same reset/elapsed value without redrawing the map for
-every joystick message.
+### Rates
+
+`scan` broadcasts are throttled to `scan_broadcast_rate_hz` (default
+`10Hz`) regardless of how fast `/scan` publishes (~40Hz), and sent as
+uint16 millimetres — half the bytes of float32, for a difference well
+below one screen pixel and below the LIDAR's own accuracy.
+
+Everything compact (`pose`, `drive`, `speed`, `intent`, `stopwatch`,
+`stats`) is collected and sent as one `batch` frame at
+`telemetry_rate_hz` (default `20Hz`) rather than one frame each. Their
+inputs run at 32–44Hz apiece, about 155 frames a second in total, and a
+WebSocket frame costs roughly the same however small it is — so this is
+about an 8× saving on framing alone, plus the ~60 bytes of TCP/IP and
+WebSocket header each of those frames used to carry.
+
+Latest-wins per type, with one exception. The browser builds its decision
+log out of `/drive_intent` **state transitions**, so a 30ms emergency stop
+collapsed into "whatever the state was at the end of the tick" would
+silently erase a line from a safety-adjacent diagnostic. Intents are
+queued as an ordered list instead ([`batching.py`](web_dashboard/batching.py)),
+and every transition survives.
 `stats` isn't event-driven at all — it's sampled on its own timer
 (`stats_interval_sec`, default 1Hz) since there's no ROS topic to hang it
 off of. Both `_read_cpu_temp_c()` and `_read_wifi_signal_dbm()` read
@@ -279,10 +336,16 @@ button and cursor hide after `CONTROLS_IDLE_MS` of no input
 | `pose_topics` | `[/pf/viz/inferred_pose, /slam_pose]` | Every map-frame pose source, subscribed at once so one dashboard works across the localization *and* SLAM stacks; last message wins |
 | `drive_topic` / `odom_topic` | `/ackermann_cmd` / `/odom` | Selected steering command / measured speed |
 | `joy_topic` / `deadman_button` / `joy_timeout_sec` | `/joy` / `4` / `0.5` | Read-only LB input and freshness timeout for the stopwatch |
-| `stopwatch_update_rate_hz` | `10.0` | Shared stopwatch broadcast rate |
+| `stopwatch_update_rate_hz` | `4.0` | Shared stopwatch broadcast rate. Low because the browser runs the clock between updates; this only corrects drift and carries LB press/release |
 | `host` | `0.0.0.0` | Listen on every interface — see the security note in [docs/web-dashboard.md](../../docs/web-dashboard.md#security-note) |
 | `port` | `8080` | Web server port |
 | `scan_broadcast_rate_hz` | `10.0` | Throttle for `/scan` broadcasts (input itself runs ~40Hz) |
+| `telemetry_rate_hz` | `20.0` | Pose/command/speed/intent/stopwatch/stats are collected and sent as ONE frame at this rate instead of one frame each |
+| `map_compression` | `true` | Deflate map keyframes and patches |
+| `map_patching` | `true` | Send only the changed rectangle of the grid. Set false to go back to whole grids if a patch is ever suspected of painting the map wrong |
+| `map_keyframe_sec` | `30.0` | Resend the whole grid at least this often, so a client cannot stay wrong indefinitely |
+| `scan_encoding` | `u16mm` | `u16mm` (uint16 millimetres, half the bytes) or `f32` (the original one float per beam) |
+| `scan_decimation` | `1` | Send only every Nth beam. `1` = every beam |
 | `stats_interval_sec` | `1.0` | How often CPU%/mem%/temp/WiFi/uptime are sampled and broadcast |
 | `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` | Estimated LIDAR mounting offset from `base_link` (matches [hardware-reference.md](../../docs/hardware-reference.md)) |
 | `enable_tuning` | `true` | Whether live tuning exists at all; `false` never creates the service clients |

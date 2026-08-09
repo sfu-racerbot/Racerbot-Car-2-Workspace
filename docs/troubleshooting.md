@@ -1,5 +1,9 @@
 # Troubleshooting
 
+> **Who this is for:** anyone whose car, build, or launch isn't doing what it should.
+> **Read first:** nothing — come straight here when something breaks.
+> **What's in it:** real problems hit during bring-up, how each was diagnosed, and the fix.
+
 Real issues hit while bringing this car up, in the order you're likely to hit them, with how they were actually diagnosed — not just the fix, so you can apply the same method to whatever's different next time.
 
 ## Nothing happens when holding LB
@@ -75,6 +79,98 @@ ros2 node list | grep joy
 If it isn't, this is why: `gap_follow_node` and `pure_pursuit_node` both have their **own** deadman-button check, separate from `ackermann_mux` — each subscribes to `/joy` directly and only publishes a non-zero command while LB is held on a *live* `/joy` stream (see `gap_follow_node.py`'s or `pure_pursuit_node.py`'s `joy_callback`/`_deadman_engaged`). `joy_node` lives in `bringup_launch.py`, so it should normally always be up while autonomy runs — if it isn't, something killed it (see the `pkill -f` gotcha below), or `bringup_launch.py`'s terminal itself died. Either way, no `/joy` means the node's own deadman check can never engage. The autonomy launch terminal now reports this explicitly as `STOP [waiting_for_joy]` or `STOP [joy_stale]`, including the configured timeout. A custom node should have the same check per [writing-your-own-node.md](writing-your-own-node.md#the-interface-contract) — if it doesn't, that's a bug in that node, not expected behavior.
 
 **Fix:** restart `bringup_launch.py` so `joy_node` comes back, and hold LB while your autonomy node is active. See [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node).
+
+## "slam_toolbox failed to save occupancy map (result code 255)"
+
+Symptom: the run completes and races, `posegraph.*` and `raceline_*.csv` are
+in the output directory, but `map.pgm`/`map.yaml` are not. The log has
+`[map_saver]: Failed to spin map subscription` just before it.
+
+`SaveMap` runs nav2's `map_saver` inline inside slam_toolbox, and
+`map_saver` gives up after about two seconds if no `/map` message arrives
+in that window. `/map` is only republished every `map_update_interval`
+(5 s in `f1tenth_online_async.yaml`), so whether the save works is a race
+against when the request happens to land — the same run succeeds or fails
+with nothing else different.
+
+`auto_map_race_node` now retries (`map_save_retries`, default 3, spaced
+`map_save_retry_delay_sec`), which lands the request in a different part of
+that window. If every attempt fails the run continues anyway and says so:
+the racing line is already on disk and the pose graph usually saved fine,
+and a map can be rebuilt from a pose graph with slam_toolbox's
+`deserialize_map`. Shortening `map_update_interval` would also close the
+race, at the cost of republishing a growing grid more often.
+
+## `auto_map_race_launch.py` maps forever and never switches to pure pursuit
+
+Symptom: the car drives cautious `gap_follow` laps indefinitely. The
+supervisor keeps printing `lap 1/2: ...` and the racing phase never starts.
+
+Read the numbers in that line; each gate says which one is unmet:
+
+```
+lap 1/2: samples=168, distance=27.2/5.0m, turn=341/300deg, elapsed=31.4/15.0s,
+departed=yes, start distance=0.43/0.75m, heading error=6.2/30.0deg,
+SLAM corrections absorbed=6
+```
+
+- **`start distance` never drops below its limit.** The car is not
+  returning close enough to where the recorder started. That start point is
+  wherever the car was when SLAM's `map->base_link` first appeared, which
+  is a few seconds *into* the run, so it may be mid-corner. Raise
+  `closure_distance`, or start the run with the car already sitting still
+  and let SLAM come up before holding LB.
+- **`heading error` too large at the moment it passes.** Same cause,
+  different axis; `closure_heading_deg` is the knob.
+- **`turn` climbing far past 300 without closing.** The car is going round
+  and round without ever satisfying the proximity gates -- see above. It is
+  not a `minimum_lap_turn_deg` problem, and past two laps of turning the log
+  says so outright. Measured worst case: a car weaving around two slower
+  cars drove 413m and ten laps' worth of turning, passing 6.5m wide of its
+  start every time. `closure_distance` is the knob.
+- **`SLAM corrections absorbed` in the dozens per lap.** Localisation is
+  struggling. Look at the map in the dashboard before trusting anything
+  downstream; a smeared map moves the start point out from under the
+  closure test.
+
+Before 2026-08-08 there was a fourth cause and it was the usual one:
+`minimum_lap_distance` defaulted to `20.0`, longer than the ~15m loop this
+car is driven on, so closure could not fire until the car had been round
+*twice*. It is now `5.0`, with `minimum_lap_turn_deg` doing the real work.
+
+## `auto_map_race_launch.py` refuses to start racing: "Refusing to hand it to pure pursuit"
+
+Symptom: the mapping laps complete, then the supervisor logs an error and
+stays stopped.
+
+This is the racing line being rejected as unfollowable — deliberately, and
+the message says by how much. A line the rack cannot steer does not degrade
+gracefully; it saturates the steering, runs wide, and latches on the
+emergency stop, which is what used to happen instead.
+
+The message names which check failed. `passes closer to a wall than the car
+is wide` is the geometric one — the cleaned line does not fit in the
+corridor, usually because filtering rounded a corner inward on a course
+whose corners are already near the car's turning circle. `asks for more
+steering than the car has` is the kinematic one.
+
+The two real causes:
+
+1. **The course has a corner tighter than the car.** `tan(0.26)/0.324` is a
+   1.22m minimum turning radius. Plot `raceline_raw.csv` (written even on a
+   refusal) over the saved `map.pgm` and look at the tightest corner. If
+   that is the answer, the course needs opening out — no amount of
+   filtering fixes geometry.
+2. **The map is smeared, so the recorded pose is not the path.** Check the
+   map in the dashboard and the `SLAM corrections absorbed` count in the
+   mapping log.
+
+`profile_reject_ratio` and `profile_reject_fraction` in `auto_map_race.yaml`
+control how strict the refusal is. Raising them races a line the car
+partially cannot steer — do that only with the wheels off the ground first,
+and read
+[racing-autonomy.md](racing-autonomy.md#what-a-recorded-lap-actually-looks-like)
+for what those numbers mean.
 
 ## `slam_toolbox` starts without errors but no map, no `map` frame, and mapping never finishes
 

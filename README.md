@@ -1,5 +1,9 @@
 # racerbot-ws
 
+> **Who this is for:** anyone landing on this repo — new team members included. No ROS2 or robotics experience assumed.
+> **Read first:** nothing. For a guided path into the docs, go to [docs/README.md](docs/README.md).
+> **What's in it:** what this repo is, what's in `src/`, and how to build and drive the car.
+
 ROS2 Jazzy workspace for the team's roboracer/F1TENTH car (Jetson Orin Nano Super, JetPack 7.2, Ubuntu 24.04).
 
 Recent changes to the team's own packages are logged in [CHANGELOG.md](CHANGELOG.md) — check it after pulling to see what changed and whether anything still needs on-car validation.
@@ -10,28 +14,17 @@ The team's actively developed codebases live in the [`racerbot_a`](src/racerbot_
 
 ## Documentation
 
-Start here if you're new to the car or the codebase:
+**New here? Start with [docs/README.md](docs/README.md)** — it has a numbered reading order for newcomers and lists every doc grouped by what you're trying to do.
+
+The three you'll want first:
 
 | Doc | What's in it |
 |---|---|
-| [docs/concepts.md](docs/concepts.md) | New to ROS2/colcon/this workspace? What `ros2 launch`/`colcon build`/`source` actually do, what every top-level folder is for, and how a package is laid out — start here if any of that is unfamiliar |
-| [docs/adding-your-own-code.md](docs/adding-your-own-code.md) | **Adding your own code? Start here.** Where new packages go, what they're required to have (depends on whether it can move the car), and how to build/run them |
-| [docs/architecture.md](docs/architecture.md) | The full node/topic graph, what talks to what, and the safety/priority model — **read this before writing any driving code** |
-| [docs/racing-autonomy.md](docs/racing-autonomy.md) | The map-based race stack (SLAM → localization → recorded racing line → curvature-paced velocity profile → pure pursuit control) — the algorithm, the math, and how to tune it |
-| [docs/simulator.md](docs/simulator.md) | Reproducible F1TENTH Gym setup, headless solo/multi-car validation commands, current results, and simulation limitations |
-| [docs/sim-fidelity-audit.md](docs/sim-fidelity-audit.md) | How closely the simulator matches this physical car — measured divergences (grip, braking, steering, localization), what they mean for tuning, and a prioritized plan to close them |
-| [tools/f1tenth_sim/README.md](tools/f1tenth_sim/README.md) | **Our version of the simulator** — the fidelity layer we put over stock F1TENTH Gym (friction circle, real servo, this car's parameters, working collision detection), what it changed, and what it then revealed |
-| [docs/writing-your-own-node.md](docs/writing-your-own-node.md) | The full contract for driving code specifically, using `gap_follow` as a worked template |
-| [docs/web-dashboard.md](docs/web-dashboard.md) | Live browser dashboard of the car's map/scan/pose, plus live parameter tuning for the driving nodes — safe to run alongside anything |
-| [docs/hardware-reference.md](docs/hardware-reference.md) | VESC, LiDAR, joystick — exact addresses, ports, config values, and gotchas for this specific car |
-| [docs/usb-camera-livestream.md](docs/usb-camera-livestream.md) | Live MJPEG video stream from a USB webcam, viewable in any browser — camera picks, how it works, security note |
-| [docs/realsense-camera.md](docs/realsense-camera.md) | Intel RealSense D435i color/depth over ROS2 — install notes, verified performance, and a known IMU limitation on this hardware |
-| [docs/operations.md](docs/operations.md) | Step-by-step procedures: driving, mapping, localizing, running autonomy, shutting down |
-| [docs/run-diagnostics.md](docs/run-diagnostics.md) | Recording a run so it can actually be diagnosed afterwards, plus the AI-agent prompt template |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | Real issues hit during bring-up and how they were diagnosed |
-| [docs/git-setup.md](docs/git-setup.md) | How this repo is versioned: which `src/` packages are real git submodules vs. plain vendored code, cloning/updating them, and checking upstream f1tenth repos for updates |
+| [docs/glossary.md](docs/glossary.md) | Every term the docs use — node, topic, mux, deadman, SLAM — defined for someone new to robotics |
+| [docs/concepts.md](docs/concepts.md) | What `ros2 launch`, `colcon build` and `source` actually do, and what each folder is for |
+| [docs/architecture.md](docs/architecture.md) | The node/topic graph and the safety model — **read before writing any driving code** |
 
-This file stays a short quick-start; the docs above are the full reference.
+Full index, including the deep-dive and reference docs: **[docs/README.md](docs/README.md)**.
 
 ## Layout (`src/`)
 | Package | Source | Purpose |
@@ -45,8 +38,10 @@ This file stays a short quick-start; the docs above are the full reference.
 | `gap_follow` | local package | baseline reactive autonomy — follow-the-gap on `/scan` → `/drive`, no map needed. Code/algorithm detail: [src/gap_follow/README.md](src/gap_follow/README.md) |
 | `pure_pursuit` | local package | map-based race controller — pure pursuit over a curvature-paced recorded racing line, plus the tools to record and pace one. Pipeline/workflow: [docs/racing-autonomy.md](docs/racing-autonomy.md); code/math detail: [src/pure_pursuit/README.md](src/pure_pursuit/README.md) |
 | `race_diagnostics` | local package | read-only run recorder and post-run analyzer: pipeline health, localization lag, watchdog stops, rosbag. Not an autonomy node, safe alongside anything. Workflow: [docs/run-diagnostics.md](docs/run-diagnostics.md); code detail: [src/race_diagnostics/README.md](src/race_diagnostics/README.md) |
+| `drive_intent` | local package | shared schema and trajectory prediction for `/drive_intent` — what a driving algorithm is trying to do, and why. Pure Python (no `rclpy`), plus a single-header C++ port for teammates' codebases. Detail: [docs/drive-intent.md](docs/drive-intent.md) |
 | `web_dashboard` | local package | live browser dashboard of the map/LIDAR/pose over a WebSocket, plus a panel for tuning the driving nodes' parameters live — not an autonomy node, publishes to no topic, safe to run alongside anything else. Workflow: [docs/web-dashboard.md](docs/web-dashboard.md); code detail: [src/web_dashboard/README.md](src/web_dashboard/README.md) |
 | `racerbot_launch` | local package | launch glue not owned by any single driver repo (SLAM, one-command autonomous map→race, saved-map race-day localization, and cameras) |
+| `racerbot_sim` | local package | F1TENTH Gym behind the car's own topics: stands in for the LiDAR, VESC and joystick so the real driving stack runs unchanged above it. Refuses to publish while the real drivers are on the graph. Detail: [docs/ros-simulator.md](docs/ros-simulator.md) |
 | `usb_cam_stream` | local package | live MJPEG video stream from a USB webcam, served over plain HTTP for viewing in any browser. Detail: [docs/usb-camera-livestream.md](docs/usb-camera-livestream.md), [src/usb_cam_stream/README.md](src/usb_cam_stream/README.md) |
 
 `slam_toolbox` is installed system-wide via apt (`ros-jazzy-slam-toolbox`), not vendored in `src/`.
@@ -80,5 +75,5 @@ For mapping, localization, running `gap_follow` or your own autonomy code, and e
 ## Notes
 - **Current safety policy:** every autonomy node in this workspace (`gap_follow`, `pure_pursuit`, and any new one) requires the driver to hold **LB** on the physical controller for the car to move, on top of the usual `ackermann_mux` arbitration — see [docs/architecture.md](docs/architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car). This stays in force until the team explicitly confirms the car's behavior is trustworthy enough to relax it — don't set any node's `enable_deadman` parameter to `false` unilaterally.
 - The official `f1tenth`/roboracer driver repos don't have a `jazzy` branch yet; everything here is the `humble-devel`/`humble` source built against ROS2 Jazzy. If a future `rosdep update`/dependency bump breaks the build, check each package's upstream (submodule or vendored — see [docs/git-setup.md](docs/git-setup.md)) for a newer ROS2-distro branch before patching locally.
-- F1TENTH Gym is installed reproducibly under the ignored `.sim/` directory by `tools/f1tenth_sim/setup.sh`; see [docs/simulator.md](docs/simulator.md). It does not modify the system Python environment. That checkout is kept pristine upstream code — our own fidelity work lives beside it in `tools/f1tenth_sim/racerbot_sim/` and layers on top, so nothing is ever forked or pushed upstream ([tools/f1tenth_sim/README.md](tools/f1tenth_sim/README.md)).
+- F1TENTH Gym is installed reproducibly under the ignored `.sim/` directory by `tools/f1tenth_sim/setup.sh`; see [docs/simulator.md](docs/simulator.md). It does not modify the system Python environment. That checkout is kept pristine upstream code — our own fidelity work lives beside it in `tools/f1tenth_sim/sim_fidelity/` and layers on top, so nothing is ever forked or pushed upstream ([tools/f1tenth_sim/README.md](tools/f1tenth_sim/README.md)).
 - `src/f1tenth_system/f1tenth_stack/config/joy_teleop.yaml`'s `human_control` profile was patched locally: upstream ships `drive-steering_angle` mapped to `axis: 2` (this F710's left trigger, not the right stick). Changed to `axis: 3`. `f1tenth_system` is vendored (not a submodule) specifically so this fix could be committed — see [docs/git-setup.md](docs/git-setup.md) before pulling in any upstream changes to it.

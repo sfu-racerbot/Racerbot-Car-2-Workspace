@@ -1,5 +1,9 @@
 # RealSense–LiDAR Perception and Autonomy Research Report
 
+> **Who this is for:** anyone considering combining camera and LiDAR perception on this car. This is background reading, not a procedure.
+> **Read first:** [realsense-camera.md](realsense-camera.md) and [architecture.md](architecture.md).
+> **What's in it:** a design and research report. It changes no driving behavior — nothing here is running on the car.
+
 **Platform:** Racerbot F1TENTH / ROS 2 Jazzy / NVIDIA Jetson Orin Nano Super  
 **Sensors:** Intel RealSense D435i RGB-D camera, Hokuyo UST-10LX 2D LiDAR, VESC odometry and IMU  
 **Status:** Design and research report; no driving behavior is changed by this document  

@@ -13,8 +13,18 @@ usb_cam_stream_node:
     # UVC-webcam variant) at the same time, both default to this port.
     host: 0.0.0.0   # listen on every interface -- see docs/usb-camera-livestream.md's security note
     port: 9090
-    stream_fps: 15.0   # how often a connected browser is sent a new frame
-    jpeg_quality: 80   # 0-100 -- higher = better quality, more bandwidth/CPU
+    stream_fps: 30.0   # a cap: frames are pushed as soon as they exist
+
+    # Two tiers -- see docs/usb-camera-livestream.md. /stream is the small
+    # preview the dashboard inset uses; /stream?tier=full is the recording
+    # view. A tier nobody is watching is never encoded.
+    preview_width: 480
+    preview_quality: 65
+    full_width: 0
+    full_quality: 90
+    # No effect in image_topic mode: frames arrive already decoded, so
+    # there is no camera JPEG to pass through.
+    passthrough: false
 
     # --- Terminal diagnostics ---
     frame_timeout_sec: 2.0      # warn if the image topic stops producing frames

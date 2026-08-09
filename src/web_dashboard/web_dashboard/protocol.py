@@ -18,17 +18,63 @@ comfortably in JSON):
          unknown, 0 free, 100 occupied), one byte per cell.
   SCAN:  {"type": "scan", ...metadata...} -> binary: float32 ranges,
          little-endian, one 4-byte value per LaserScan.ranges entry.
+
   POSE/DRIVE/SPEED/STOPWATCH/STATS: compact JSON only (no binary payload).
+  INTENT: compact JSON only -- a driving node's own description of what it
+         is trying to do, forwarded almost unchanged from /drive_intent.
+         See drive_intent/schema.py and docs/drive-intent.md.
 
 Both binary payloads are laid out to match a JavaScript TypedArray
 byte-for-byte (Int8Array for the map, Float32Array for the scan), so the
 browser needs no parsing beyond `new Int8Array(buf)` / `new
 Float32Array(buf)` -- see web/dashboard.js.
+
+Both binary-carrying headers also declare `bytes`, the exact length of the
+frame that must follow. The browser holds a single "what does the next
+binary mean" slot, so a header that never gets its binary -- a write that
+fails between the two, a proxy that drops a frame -- leaves that slot
+pointing at the wrong thing, and the *next* binary is then decoded as the
+previous type. A 1081-beam scan payload read as occupancy cells is 4324
+bytes against an 80000-cell header: every read past the end is undefined,
+every colour computes to NaN, and the map paints as garbage rather than
+failing. `bytes` makes that detectable instead of silent -- see
+web/dashboard.js handleBinary.
 """
 
 import math
 import struct
+import sys
 import time
+
+
+# The wire format is little-endian by definition (it has to match a
+# JavaScript TypedArray, which is little-endian on every platform a browser
+# runs on). On a little-endian host -- every machine this workspace targets:
+# the Jetson's ARM64, and x86 laptops -- `array.array` already holds exactly
+# those bytes, so the fast paths below can hand the buffer straight over.
+# On a big-endian host they would be byte-swapped, so the explicit
+# struct.pack('<...') fallback is what runs instead.
+_LITTLE_ENDIAN = sys.byteorder == 'little'
+
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover - present in any ROS2 env; degrade anyway
+    _np = None
+
+#: Scan payload encodings. 'f32' is the original one float per beam.
+#: 'u16mm' is half the size for no visible difference: the browser paints
+#: each return as a 2x2 pixel dot, so millimetre quantisation is far below
+#: anything that can be seen, and it is already below the LIDAR's own
+#: ~30mm accuracy. Invalid returns (inf/NaN/out of range) encode as 0,
+#: which the browser already discards -- it filters everything below
+#: range_min, and range_min is never 0 on a real scanner.
+SCAN_F32 = 'f32'
+SCAN_U16MM = 'u16mm'
+
+#: A range this big or bigger cannot be expressed in millimetres in 16
+#: bits. The Hokuyo used here tops out at 10m, so this is headroom, not a
+#: limit anyone will meet.
+_U16MM_MAX_M = 65.535
 
 
 def quaternion_to_yaw(x: float, y: float, z: float, w: float) -> float:
@@ -54,6 +100,9 @@ def map_header(msg) -> dict:
         'type': 'map',
         'width': int(info.width),
         'height': int(info.height),
+        # One signed byte per cell; see the module docstring on why the
+        # browser is told the length rather than trusting the pairing.
+        'bytes': int(info.width) * int(info.height),
         'resolution': float(info.resolution),
         'origin_x': float(info.origin.position.x),
         'origin_y': float(info.origin.position.y),
@@ -72,11 +121,23 @@ def map_cells(msg) -> bytes:
     do (it only accepts 0-255), but `struct.pack('b', ...)` handles
     correctly by design.
     """
-    data = list(msg.data)
+    data = msg.data
+    # rclpy hands OccupancyGrid.data over as array('b') -- one signed byte
+    # per cell, already exactly this wire layout -- so on a little-endian
+    # host .tobytes() is a straight buffer copy. The struct.pack path below
+    # builds the same bytes out of individual Python ints, which for a
+    # 2048x2048 map means unpacking 4.2 MILLION arguments into one call:
+    # measured at 192ms on this car's Jetson against 4.8ms for .tobytes(),
+    # a 40x difference, on a callback that fires every /map message.
+    # Byte-for-byte identical either way -- test_map_cells_round_trips_*
+    # passes unchanged, which is the proof.
+    if _LITTLE_ENDIAN and getattr(data, 'typecode', None) == 'b':
+        return data.tobytes()
     return struct.pack(f'<{len(data)}b', *data)
 
 
-def scan_header(msg, laser_offset_x: float = 0.0, laser_offset_y: float = 0.0) -> dict:
+def scan_header(msg, laser_offset_x: float = 0.0, laser_offset_y: float = 0.0,
+                encoding: str = SCAN_F32, decimation: int = 1) -> dict:
     """JSON-serializable metadata for a sensor_msgs/LaserScan.
 
     Includes the LIDAR's mounting offset from base_link so the browser can
@@ -84,13 +145,25 @@ def scan_header(msg, laser_offset_x: float = 0.0, laser_offset_y: float = 0.0) -
     second topic or a TF lookup -- see docs/web-dashboard.md for why this
     node reads pose from a plain topic instead of TF.
     """
+    decimation = max(1, int(decimation))
+    count = len(range(0, len(msg.ranges), decimation))
     return {
         'type': 'scan',
+        # Two or four bytes per beam, for the same reason map_header
+        # carries it -- see the module docstring on why the browser is told
+        # the length rather than trusting the pairing.
+        'bytes': (2 if encoding == SCAN_U16MM else 4) * count,
+        'encoding': encoding,
         'angle_min': float(msg.angle_min),
-        'angle_increment': float(msg.angle_increment),
+        # Scaled by the decimation: dropping every other beam doubles the
+        # angle between the beams that remain, and the browser derives each
+        # point's bearing from this. Getting it wrong would fan the scan out
+        # across the wrong arc, which looks plausible and is completely
+        # wrong -- the worst kind of display bug.
+        'angle_increment': float(msg.angle_increment) * decimation,
         'range_min': float(msg.range_min),
         'range_max': float(msg.range_max),
-        'count': len(msg.ranges),
+        'count': count,
         'laser_offset_x': float(laser_offset_x),
         'laser_offset_y': float(laser_offset_y),
         'stamp': time.time(),
@@ -100,8 +173,97 @@ def scan_header(msg, laser_offset_x: float = 0.0, laser_offset_y: float = 0.0) -
 def scan_ranges(msg) -> bytes:
     """Raw range floats, one little-endian float32 per beam -- matches
     JavaScript's Float32Array byte-for-byte."""
-    ranges = list(msg.ranges)
+    ranges = msg.ranges
+    # Same story as map_cells: rclpy delivers LaserScan.ranges as
+    # array('f'), which is already the wire layout. 236x faster per scan.
+    if _LITTLE_ENDIAN and getattr(ranges, 'typecode', None) == 'f':
+        return ranges.tobytes()
     return struct.pack(f'<{len(ranges)}f', *ranges)
+
+
+def scan_ranges_u16mm(msg, decimation: int = 1) -> bytes:
+    """Ranges as little-endian uint16 millimetres -- half the bytes of
+    scan_ranges(), and the largest steady saving on the link.
+
+    Anything the browser would throw away anyway (inf, NaN, negative, or
+    beyond what 16 bits of millimetres can hold) becomes 0, which is below
+    every real scanner's range_min and so is already discarded by the
+    drawing code. That keeps "no return" and "a return at 0mm"
+    indistinguishable, which is correct: neither is a point to plot.
+    """
+    decimation = max(1, int(decimation))
+    if _np is not None:
+        values = _np.asarray(msg.ranges, dtype=_np.float32)
+        if decimation > 1:
+            values = values[::decimation]
+        millimetres = values * 1000.0
+        usable = _np.isfinite(values) & (values > 0.0) & (values <= _U16MM_MAX_M)
+        quantised = _np.where(usable, _np.rint(millimetres), 0.0)
+        return quantised.astype('<u2').tobytes()
+
+    # No numpy: correctness matters more than speed on a path that should
+    # never run in this workspace.
+    out = []
+    for index in range(0, len(msg.ranges), decimation):
+        value = msg.ranges[index]
+        if not math.isfinite(value) or value <= 0.0 or value > _U16MM_MAX_M:
+            out.append(0)
+        else:
+            out.append(int(round(value * 1000.0)))
+    return struct.pack(f'<{len(out)}H', *out)
+
+
+def scan_payload(msg, encoding: str = SCAN_F32, decimation: int = 1) -> bytes:
+    """The binary frame for a scan, in whichever encoding was asked for."""
+    if encoding == SCAN_U16MM:
+        return scan_ranges_u16mm(msg, decimation)
+    if decimation > 1:
+        return scan_ranges(_Decimated(msg.ranges, decimation))
+    return scan_ranges(msg)
+
+
+class _Decimated:
+    """Just enough of a LaserScan for scan_ranges() to read a thinned copy."""
+
+    __slots__ = ('ranges',)
+
+    def __init__(self, ranges, decimation):
+        self.ranges = list(ranges)[::decimation]
+
+
+#: Below this, the commanded path and the desired path are the same line to
+#: the eye -- well under one pixel at any zoom the dashboard uses.
+INTENT_PATH_MERGE_TOLERANCE_M = 0.02
+
+
+def thin_intent_payload(payload: dict,
+                        tolerance_m: float = INTENT_PATH_MERGE_TOLERANCE_M) -> dict:
+    """Drop `commanded_path` when it is indistinguishable from `path`.
+
+    The two paths are most of an intent message's ~1.4kB, and at 18Hz that
+    was 25 kB/s -- the second largest feed after the map. They only
+    separate where slew-rate and acceleration shaping bend the command away
+    from what the algorithm asked for, which is exactly when the dashed
+    ghost line is worth drawing and exactly when this keeps it.
+
+    Returns the payload unchanged (not a copy) when there is nothing to
+    drop, so the common path allocates nothing. Never mutates its argument
+    -- the caller's copy is the validated one.
+    """
+    wanted = payload.get('path')
+    commanded = payload.get('commanded_path')
+    if not wanted or not commanded or len(wanted) != len(commanded):
+        return payload
+    for a, b in zip(wanted, commanded):
+        if (abs(a.get('x', 0.0) - b.get('x', 0.0)) > tolerance_m
+                or abs(a.get('y', 0.0) - b.get('y', 0.0)) > tolerance_m):
+            return payload
+    thinned = dict(payload)
+    # Empty rather than absent: the browser reads `intent.commanded_path ||
+    # []`, so both work, but an explicit empty list says "there is no
+    # separate commanded path" instead of "this field may be missing".
+    thinned['commanded_path'] = []
+    return thinned
 
 
 def pose_message(x: float, y: float, yaw: float) -> dict:
@@ -130,6 +292,31 @@ def speed_message(speed: float) -> dict:
     return {
         'type': 'speed',
         'speed': float(speed),
+        'stamp': time.time(),
+    }
+
+
+def intent_message(payload: dict) -> dict:
+    """Wrap one validated /drive_intent payload for the browser.
+
+    Deliberately a pass-through rather than a re-encoding: the schema is
+    owned by drive_intent/schema.py, which the driving nodes publish and
+    the browser draws, and having this file paraphrase it would create a
+    third definition to keep in sync with the other two. The nesting under
+    'intent' keeps the dashboard's own envelope fields ('type', and the
+    server-side receive 'stamp') from colliding with schema fields.
+
+    The payload is validated by the caller *before* it gets here -- see
+    DashboardNode.intent_callback -- so anything reaching this function is
+    already known to be well-formed.
+    """
+    return {
+        'type': 'intent',
+        'intent': payload,
+        # The server's own receive time, kept separate from payload['stamp']
+        # (the car's). Two clocks, two fields: a browser on a laptop whose
+        # clock disagrees with the Jetson's can still tell "this arrow is
+        # stale" from the one it can trust.
         'stamp': time.time(),
     }
 

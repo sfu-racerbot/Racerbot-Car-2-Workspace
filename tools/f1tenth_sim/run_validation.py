@@ -6,7 +6,7 @@ checking, and multi-agent ray casting.  It directly calls the repository's
 framework-independent controller math so failures are reproducible without
 ROS scheduling, joystick hardware, RViz, or wall-clock timing.
 
-The vehicle the controllers meet is not stock gym: racerbot_sim layers this
+The vehicle the controllers meet is not stock gym: sim_fidelity layers this
 car's measured and derived parameters, a friction circle, a real steering
 servo and realistic sensing on top of the pinned upstream checkout, which is
 left pristine.  See tools/f1tenth_sim/README.md; --fidelity legacy reproduces
@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from racerbot_sim.bootstrap import bootstrap  # noqa: E402
+from sim_fidelity.bootstrap import bootstrap  # noqa: E402
 
 ROOT = bootstrap()
 
@@ -51,9 +51,9 @@ except ImportError as exc:
 from gap_follow import gap_logic
 from pure_pursuit import racing_math
 
-from racerbot_sim import CALIBRATION, FidelityPlant, PROFILES
-from racerbot_sim.calibration import unmeasured as unmeasured_parameters
-from racerbot_sim.plant import DEFAULT_PROFILE, env_components
+from sim_fidelity import CALIBRATION, FidelityPlant, PROFILES
+from sim_fidelity.calibration import unmeasured as unmeasured_parameters
+from sim_fidelity.plant import DEFAULT_PROFILE, env_components
 
 
 CONTROL_DT = 0.025  # 40 Hz, matching pure_pursuit.yaml

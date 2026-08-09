@@ -1,7 +1,7 @@
 """The fidelity layer that sits between the controllers and the gym.
 
 Everything the audit found wrong with the simulated vehicle is either a
-parameter (fixed in :mod:`racerbot_sim.calibration`) or something that has to
+parameter (fixed in :mod:`sim_fidelity.calibration`) or something that has to
 happen on the way in or out of ``env.step()``. This module is that path.
 
 Per control tick, for each agent:

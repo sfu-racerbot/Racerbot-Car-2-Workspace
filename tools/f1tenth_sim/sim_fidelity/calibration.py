@@ -8,7 +8,7 @@ was measured on this car, derived from this car's committed configs, taken from
 a datasheet for a part actually fitted, estimated from physics, or simply
 inherited from upstream.
 
-``python3 -m racerbot_sim.calibration`` prints the table, worst provenance
+``python3 -m sim_fidelity.calibration`` prints the table, worst provenance
 first. Anything still marked ``STOCK`` is a number nobody has justified.
 
 Filling in a measurement means editing one line here. See

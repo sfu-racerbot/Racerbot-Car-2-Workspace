@@ -366,6 +366,59 @@ def test_stops_when_odometry_goes_stale_while_ttc_is_enabled(node):
     assert node.last_decision_state == 'odometry_stale'
 
 
+def _wall_ahead(distance, half_angle_deg=10.0, n=541, span=math.pi):
+    """A slab at `distance` straight ahead, open space either side of it."""
+    increment = span / (n - 1)
+    ranges = [8.0] * n
+    for i in range(n):
+        angle = -span / 2.0 + i * increment
+        if abs(angle) <= math.radians(half_angle_deg):
+            ranges[i] = distance
+    return ranges
+
+
+def test_ttc_brakes_at_speed_but_not_at_a_crawl(node):
+    """The TTC brake is armed only above ttc_min_brake_speed.
+
+    TTC is clearance/closing-speed, so a crawling car reaches the threshold
+    on a *tiny* clearance -- exactly the state a car is in once it has eased
+    up to the inside of a corner. Braking there removes the only motion that
+    would clear the corner, and the measured 2026-08-06 run shows the result:
+    stops at 0.15-0.39m/s, several reading `odom 0.00m/s` while braking on
+    the car's own commanded speed. Above the gate the brake must still fire.
+    """
+    _ready(node, speed=1.2)
+    published = _capture(node)
+    _tick(node, _scan(_wall_ahead(0.45)))
+    assert node.last_decision_state == 'ttc_brake', \
+        'at 1.2m/s a wall 0.45m ahead must still trip the TTC brake'
+    assert published[-1].drive.speed == 0.0
+
+    # Same closing geometry, scaled to a crawl: TTC is still under threshold,
+    # but the car must be left free to creep out rather than latched at zero.
+    _ready(node, speed=0.55)
+    published = _capture(node)
+    _tick(node, _scan(_wall_ahead(0.28)))
+    assert node.last_decision_state != 'ttc_brake', \
+        'below ttc_min_brake_speed the TTC brake must not be what stops the car'
+    assert published[-1].drive.speed > 0.0, \
+        'a crawling car with a visible way out must still be able to move'
+
+
+def test_the_crawl_case_is_the_gate_and_not_the_geometry(node):
+    """Guard against the test above passing for an unrelated reason.
+
+    With the gate opened back up, the identical crawl scan must brake -- which
+    is what pins ttc_min_brake_speed as the thing that changed.
+    """
+    node.ttc_min_brake_speed = 0.0
+    _ready(node, speed=0.55)
+    published = _capture(node)
+    _tick(node, _scan(_wall_ahead(0.28)))
+    assert node.last_decision_state == 'ttc_brake'
+    assert published[-1].drive.speed == 0.0
+
+
 def test_stops_on_a_malformed_scan_rather_than_guessing(node):
     published = _capture(node)
     _ready(node)

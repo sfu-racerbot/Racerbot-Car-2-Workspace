@@ -249,6 +249,7 @@ def test_safety_flagged_parameters_are_the_expected_ones():
         'max_braking_decel', 'safety_margin', 'emergency_stop_clearance',
         'forward_stop_clearance', 'forward_stop_fov_deg',
         'escape_creep_speed', 'enable_ttc', 'ttc_threshold_sec',
+        'ttc_min_brake_speed',
     }
 
 

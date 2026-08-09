@@ -1,5 +1,9 @@
 # Simulator fidelity audit
 
+> **Who this is for:** anyone about to trust a simulator result, or wondering why the car behaves differently than the sim said it would.
+> **Read first:** [simulator.md](simulator.md) and [ros-simulator.md](ros-simulator.md).
+> **What's in it:** measured divergences between simulator and physical car — grip, braking, steering, localization — and what they mean for tuning.
+
 How closely does `tools/f1tenth_sim/` match this physical car, where does it
 diverge, and what would it cost to close the gap?
 
@@ -14,7 +18,7 @@ Read [docs/simulator.md](simulator.md) first — it describes what the harness i
 and how to run it. This document is about how much to trust it.
 
 > **Status: acted on.** Most of the recommendations below are implemented in
-> `tools/f1tenth_sim/racerbot_sim/`; see
+> `tools/f1tenth_sim/sim_fidelity/`; see
 > [tools/f1tenth_sim/README.md](../tools/f1tenth_sim/README.md) for what was
 > done, what was deliberately left alone, and what the fixes then revealed.
 >

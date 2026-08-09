@@ -14,7 +14,7 @@ tools/f1tenth_sim/
 ├── setup.sh              # clones upstream, pinned; refuses a dirty checkout
 ├── run_validation.py     # the scenarios and the controllers under test
 ├── README.md             # this file
-└── racerbot_sim/         # our fidelity layer
+└── sim_fidelity/         # our fidelity layer
     ├── calibration.py    # this car's parameters, each tagged with provenance
     ├── grip.py           # friction circle the stock tyre model does not have
     ├── actuation.py      # steering servo and command transport lag
@@ -32,7 +32,7 @@ what that audit found, plus three things it missed.
 ```bash
 ./setup.sh                                    # once
 python3 run_validation.py --scenario all      # the suite
-python3 racerbot_sim/calibration.py           # what we know about the car
+python3 sim_fidelity/calibration.py           # what we know about the car
 ```
 
 ## The headline: collision detection never worked
@@ -312,7 +312,7 @@ count to 1081 measured marginally *faster* than 819. See
 
 ## Calibration and its provenance
 
-`python3 racerbot_sim/calibration.py` prints every constant with where it came
+`python3 sim_fidelity/calibration.py` prints every constant with where it came
 from, least trustworthy first:
 
 - `MEASURED` — measured on this car. *Currently none.*
@@ -344,7 +344,7 @@ Two deliberate non-changes worth knowing about, both cases where the obvious
 
 - **`legacy` must keep reproducing the baseline.** It is the only guard against
   a fidelity change being mistaken for a controller regression. Check it after
-  touching anything in `racerbot_sim/`.
+  touching anything in `sim_fidelity/`.
 - **Determinism.** Every sensor RNG is seeded from the scenario seed. Do not
   introduce unseeded randomness; reproducibility is what the harness is for.
 - **`run_validation.py` re-implements the node's command stage.** Audit R6 is

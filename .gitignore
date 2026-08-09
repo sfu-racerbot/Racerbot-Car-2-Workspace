@@ -3,10 +3,11 @@ install/
 log/
 __pycache__/
 *.pyc
-.claude/
-# Trailing slash would match only a real directory, so a `.sim` symlink --
-# handy for pointing a git worktree at the main checkout's install -- would
-# show up as untracked and could be committed by accident.
+.claude/*
+!.claude/skills/
+# No trailing slash: a trailing slash matches only a real directory, so a
+# `.sim` symlink -- handy for pointing a git worktree at the main checkout's
+# clone -- would show up as untracked and could be committed by accident.
 .sim
-.sim/
 .venv-f1tenth/
+.pytest_cache/

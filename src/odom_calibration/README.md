@@ -1,5 +1,9 @@
 # Odom calibration wizard
 
+> **Who this is for:** someone reading or changing this package's code.
+> **Read first:** [docs/odom-calibration.md](../../docs/odom-calibration.md) for the calibration procedure itself.
+> **What's in it:** how the wizard is put together and what it writes.
+
 `odom_calibration` is a guided browser wizard for calibrating the RacerBot
 VESC odometry and, optionally, the steering conversion. A human drives the car
 with the physical remote and measures ground truth with a tape measure. The

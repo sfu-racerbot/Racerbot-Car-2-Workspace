@@ -1,0 +1,122 @@
+[
+  {
+    "scenario": "solo",
+    "track": "indoor_wide",
+    "seed": 12345,
+    "passed": true,
+    "phases": {
+      "slam_up": 6.0,
+      "mapping_lap_1": 47.1,
+      "line_cleaned": 87.2,
+      "profile_written": 87.2,
+      "map_saved": 91.2,
+      "profile_loaded": 91.2,
+      "racing": 93.2
+    },
+    "failure": null,
+    "cleanup": {
+      "points": 262.0,
+      "length_m": 39.3,
+      "harmonics": 26.0,
+      "deviation_m": 0.03,
+      "peak_curvature": 0.683,
+      "rack_limit": 0.821,
+      "steering_deg": 12.5,
+      "over_limit_pct": 0.0,
+      "seam_deg": 4.5,
+      "text": "262 points over 39.3m (from 232 recorded, 232 after trimming to one lap); kept 26 harmonics (nothing shorter than 1.51m), moving the line at most 0.03m off the recorded one; peak curvature 0.683/m of the 0.821/m the rack can reach (needs 12.5deg steering, limit 14.9deg) on 0.0% of waypoints; seam heading error 4.5deg; closest wall 0.83m, needs 0.20m"
+    },
+    "sim": {
+      "sim_time_s": 165.3,
+      "distance_travelled_m": 225.193,
+      "wall_contact_steps": 0,
+      "ever_contacted": false,
+      "opponent_wall_contact": false,
+      "car_contact_steps": 0,
+      "num_agents": 1
+    },
+    "racing_seconds": 81.6,
+    "raced_metres": 138.7,
+    "raceline": "/tmp/auto_map_solo_gk4adn3l/20260808-123720/raceline_profiled.csv"
+  },
+  {
+    "scenario": "obstacle",
+    "track": "indoor_wide",
+    "seed": 12345,
+    "passed": true,
+    "phases": {
+      "slam_up": 6.0,
+      "mapping_lap_1": 47.0,
+      "line_cleaned": 87.1,
+      "profile_written": 87.1,
+      "map_saved": 103.1,
+      "profile_loaded": 103.1,
+      "racing": 105.2
+    },
+    "failure": null,
+    "cleanup": {
+      "points": 268.0,
+      "length_m": 40.2,
+      "harmonics": 26.0,
+      "deviation_m": 0.04,
+      "peak_curvature": 0.82,
+      "rack_limit": 0.821,
+      "steering_deg": 14.9,
+      "over_limit_pct": 0.0,
+      "seam_deg": 3.9,
+      "text": "268 points over 40.2m (from 241 recorded, 241 after trimming to one lap); kept 26 harmonics (nothing shorter than 1.55m), moving the line at most 0.04m off the recorded one; peak curvature 0.820/m of the 0.821/m the rack can reach (needs 14.9deg steering, limit 14.9deg) on 0.0% of waypoints; seam heading error 3.9deg; closest wall 0.40m, needs 0.20m"
+    },
+    "sim": {
+      "sim_time_s": 177.125,
+      "distance_travelled_m": 113.114,
+      "wall_contact_steps": 0,
+      "ever_contacted": false,
+      "opponent_wall_contact": false,
+      "car_contact_steps": 0,
+      "num_agents": 2
+    },
+    "racing_seconds": 82.0,
+    "raced_metres": 29.7,
+    "raceline": "/tmp/auto_map_obstacle_fa6a7t73/20260808-124017/raceline_profiled.csv"
+  },
+  {
+    "scenario": "traffic",
+    "track": "indoor_wide",
+    "seed": 12345,
+    "passed": true,
+    "phases": {
+      "slam_up": 6.0,
+      "mapping_lap_1": 48.0,
+      "line_cleaned": 85.1,
+      "profile_written": 86.1,
+      "map_saved": 100.2,
+      "profile_loaded": 100.2,
+      "racing": 102.2
+    },
+    "failure": null,
+    "cleanup": {
+      "points": 249.0,
+      "length_m": 37.4,
+      "harmonics": 14.0,
+      "deviation_m": 0.05,
+      "peak_curvature": 0.795,
+      "rack_limit": 0.821,
+      "steering_deg": 14.4,
+      "over_limit_pct": 0.0,
+      "seam_deg": 0.9,
+      "text": "249 points over 37.4m (from 226 recorded, 226 after trimming to one lap); kept 14 harmonics (nothing shorter than 2.67m), moving the line at most 0.05m off the recorded one; peak curvature 0.795/m of the 0.821/m the rack can reach (needs 14.4deg steering, limit 14.9deg) on 0.0% of waypoints; seam heading error 0.9deg; closest wall 0.00m, needs 0.00m (relaxed: the driven line itself measured 0.00m, so the map has phantom obstacles in it -- other cars, most likely)"
+    },
+    "sim": {
+      "sim_time_s": 172.675,
+      "distance_travelled_m": 83.054,
+      "wall_contact_steps": 0,
+      "ever_contacted": false,
+      "opponent_wall_contact": false,
+      "car_contact_steps": 0,
+      "num_agents": 3
+    },
+    "racing_seconds": 80.7,
+    "raced_metres": 83.1,
+    "raceline": "/tmp/auto_map_traffic_dinym6r_/20260808-150927/raceline_profiled.csv"
+  }
+]

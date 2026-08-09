@@ -22,6 +22,27 @@ pure_pursuit_node:
     # path/LIDAR/opponent decision and final command. Set 0.0 for transitions only.
     decision_log_period_sec: 1.0
 
+    # --- Drive intent (docs/drive-intent.md) ---
+    # Publishes a JSON description of what this controller is trying to do
+    # -- the predicted path along the racing line, the speed ceilings that
+    # competed, and the reason for the current decision -- for the web
+    # dashboard's intent arrow and decision panel. Read-only diagnostics:
+    # it goes out only after the drive command for the tick has already
+    # been published, and disables itself rather than the node if it ever
+    # starts failing.
+    publish_intent: true
+    intent_topic: /drive_intent
+    intent_rate_hz: 20.0
+    # How far ahead the arrow predicts. The arrow's *length* is distance
+    # travelled over this horizon, so a stopped car draws a stub and a fast
+    # one draws a long arrow -- that is the intended reading. While the
+    # racing line is being followed the prediction re-runs the pure pursuit
+    # law at each sample, so the arrow bends through the corner ahead.
+    intent_horizon_sec: 1.5
+    intent_samples: 16
+    # Never draw an arrow longer than this, however fast the plan is.
+    intent_max_length: 8.0
+
     # --- Pure pursuit geometry ---
     # Validated headlessly on Spielberg, Silverstone, and Brands Hatch in
     # F1TENTH Gym; see docs/simulator.md for scenarios and limitations.
@@ -104,6 +125,21 @@ pure_pursuit_node:
     enable_lidar_safety: true
     safety_fov_deg: 60.0
     emergency_stop_distance: 0.4
+    # Escape from that hard stop rather than latching in it. A stopped car
+    # cannot clear its own safety cone -- nothing about the scene changes at
+    # zero speed -- so the stop above, on its own, ends the run wherever it
+    # fires. gap_follow has had escape_creep_speed for exactly this since the
+    # 2026-08-06 run; this is the same idea, kept narrower: a crawl, only
+    # toward an opening that is genuinely there, and only while the whole
+    # body still has room. Contact and stale-scan stops still win outright.
+    # Set emergency_escape_speed to 0.0 for the old latching behaviour.
+    emergency_escape_speed: 0.25
+    # The opening has to be a real one, not the least-bad direction.
+    emergency_escape_min_gap: 0.8
+    # Minimum clearance around the entire body (every beam, not the cone)
+    # before crawling is allowed at all. Above emergency_stop_clearance, so
+    # a car that is nearly touching stops instead of nudging.
+    emergency_escape_clearance: 0.10
     scan_timeout_sec: 0.5
     max_range: 10.0   # range readings beyond this (and inf/NaN) are clipped/filled before any math touches them
 
