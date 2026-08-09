@@ -10,29 +10,17 @@ The team's actively developed codebases live in the [`racerbot_a`](src/racerbot_
 
 ## Documentation
 
-Start here if you're new to the car or the codebase:
+**New here? Start with [docs/README.md](docs/README.md)** — it has a numbered reading order for newcomers and lists every doc grouped by what you're trying to do.
+
+The three you'll want first:
 
 | Doc | What's in it |
 |---|---|
-| [docs/concepts.md](docs/concepts.md) | New to ROS2/colcon/this workspace? What `ros2 launch`/`colcon build`/`source` actually do, what every top-level folder is for, and how a package is laid out — start here if any of that is unfamiliar |
-| [docs/adding-your-own-code.md](docs/adding-your-own-code.md) | **Adding your own code? Start here.** Where new packages go, what they're required to have (depends on whether it can move the car), and how to build/run them |
-| [docs/architecture.md](docs/architecture.md) | The full node/topic graph, what talks to what, and the safety/priority model — **read this before writing any driving code** |
-| [docs/racing-autonomy.md](docs/racing-autonomy.md) | The map-based race stack (SLAM → localization → recorded racing line → curvature-paced velocity profile → pure pursuit control) — the algorithm, the math, and how to tune it |
-| [docs/simulator.md](docs/simulator.md) | Reproducible F1TENTH Gym setup, headless solo/multi-car validation commands, current results, and simulation limitations |
-| [docs/ros-simulator.md](docs/ros-simulator.md) | The same physics behind the *real ROS topics*, so the whole stack — SLAM, the launch files, the map→race handover, the dashboard — can be run and validated without the car. Includes the interlock that stops it running beside real hardware |
-| [docs/sim-fidelity-audit.md](docs/sim-fidelity-audit.md) | How closely the simulator matches this physical car — measured divergences (grip, braking, steering, localization), what they mean for tuning, and a prioritized plan to close them |
-| [docs/writing-your-own-node.md](docs/writing-your-own-node.md) | The full contract for driving code specifically, using `gap_follow` as a worked template |
-| [docs/drive-intent.md](docs/drive-intent.md) | The intent arrow and decision panel: what the driving algorithm is *trying* to do and why, the `/drive_intent` schema, and the porting guide for the `racerbot_a`/`racerbot_b` codebases |
-| [docs/web-dashboard.md](docs/web-dashboard.md) | Live browser dashboard of the car's map/scan/pose, plus live parameter tuning for the driving nodes — safe to run alongside anything |
-| [docs/hardware-reference.md](docs/hardware-reference.md) | VESC, LiDAR, joystick — exact addresses, ports, config values, and gotchas for this specific car |
-| [docs/usb-camera-livestream.md](docs/usb-camera-livestream.md) | Live MJPEG video stream from a USB webcam, viewable in any browser — camera picks, how it works, security note |
-| [docs/realsense-camera.md](docs/realsense-camera.md) | Intel RealSense D435i color/depth over ROS2 — install notes, verified performance, and a known IMU limitation on this hardware |
-| [docs/operations.md](docs/operations.md) | Step-by-step procedures: driving, mapping, localizing, running autonomy, shutting down |
-| [docs/run-diagnostics.md](docs/run-diagnostics.md) | Recording a run so it can actually be diagnosed afterwards, plus the AI-agent prompt template |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | Real issues hit during bring-up and how they were diagnosed |
-| [docs/git-setup.md](docs/git-setup.md) | How this repo is versioned: which `src/` packages are real git submodules vs. plain vendored code, cloning/updating them, and checking upstream f1tenth repos for updates |
+| [docs/glossary.md](docs/glossary.md) | Every term the docs use — node, topic, mux, deadman, SLAM — defined for someone new to robotics |
+| [docs/concepts.md](docs/concepts.md) | What `ros2 launch`, `colcon build` and `source` actually do, and what each folder is for |
+| [docs/architecture.md](docs/architecture.md) | The node/topic graph and the safety model — **read before writing any driving code** |
 
-This file stays a short quick-start; the docs above are the full reference.
+Full index, including the deep-dive and reference docs: **[docs/README.md](docs/README.md)**.
 
 ## Layout (`src/`)
 | Package | Source | Purpose |
