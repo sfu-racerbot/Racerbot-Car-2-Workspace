@@ -1,6 +1,6 @@
 # The house standard
 
-The full version of the seven techniques in SKILL.md. Every "after" example below is a rewrite of text that is actually in this repo.
+The full version of the techniques in SKILL.md. Every "after" example below is a rewrite of text that is actually in this repo.
 
 ## Contents
 
@@ -11,7 +11,8 @@ The full version of the seven techniques in SKILL.md. Every "after" example belo
 5. [Marking depth as skippable](#5-marking-depth-as-skippable)
 6. [Command blocks](#6-command-blocks)
 7. [Safety writing](#7-safety-writing)
-8. [Smaller habits](#8-smaller-habits)
+8. [The Highlights block](#8-the-highlights-block)
+9. [Smaller habits](#9-smaller-habits)
 
 ---
 
@@ -111,25 +112,63 @@ Same information. The beginner now has a mental model to hang the math on, and t
 
 ## 5. Marking depth as skippable
 
-The device that lets one file serve both readers. A deep section gets a `Deep dive:` heading prefix and a one-line skip note directly beneath it:
+The device that lets one file serve both readers. **Depth goes inside a collapsed
+`<details>` block**, so the page reads short and expands only for the reader who
+wants it:
 
 ```markdown
-### Deep dive: cornering speed from a simplified friction circle
+### Cornering speed
 
-> **Skip this unless** you're tuning `a_lat_max` or you want to know where the speed
-> numbers come from. Nothing later in this doc depends on understanding it.
+The car slows down for corners. The tighter the corner, the slower it goes.
 
-[...the existing math, untouched...]
+<details>
+<summary><b>The math behind this</b> — click to expand. Skip it unless you're
+tuning <code>a_lat_max</code>; nothing later in this doc depends on it.</summary>
+
+[...the existing derivation, untouched...]
+
+</details>
 ```
 
-Why it's phrased as permission rather than a warning: a beginner who hits unexplained math assumes the problem is them and often closes the file entirely. Being told explicitly that skipping is the correct move keeps them moving through the doc. Meanwhile the expert now has a table of contents to the substantial parts.
+GitHub renders this folded. The beginner sees a one-line summary and moves on;
+the expert clicks once and gets everything that was always there.
+
+**The mechanics matter, and they are easy to get wrong:**
+
+- **Blank line after `</summary>`, and before `</details>`.** Without them GitHub
+  will not render the Markdown inside — your tables and code fences come out as
+  raw text. This is the single most common mistake with this pattern.
+- **No blank line between `<details>` and `<summary>`.** That one breaks the fold.
+- Use `<b>` and `<code>` inside `<summary>`, not `**` and backticks. Markdown is
+  not processed inside the summary line itself.
+- Keep the summary to one or two lines. It is a signpost, not an abstract.
+
+**What the summary has to say.** Always both of these:
+
+1. What's inside, concretely — "the math behind this", "why we didn't use MPC",
+   "the full wire format".
+2. Whether skipping is safe — and say it as permission, not warning. A beginner
+   who hits unexplained math assumes the problem is them and closes the file.
+   Being told that skipping is the correct move keeps them reading.
+
+If a later section genuinely does depend on the contents, say so instead:
+`<summary><b>How the velocity profile is computed</b> — you'll need this to
+follow the tuning section below.</summary>`
 
 Rules for applying it:
 
-- **The content underneath does not change.** This is signposting, not editing. Resist the urge to "clean up" the math while you're there.
-- **The skip note must be honest.** If a later section really does depend on this one, say that instead: `> **You'll need this** to understand the tuning section below.`
-- Good candidates: derivations, postmortems, "why we didn't do X instead", performance measurements, protocol/wire-format details, historical context.
-- Bad candidates: anything about safety, anything needed to run a command correctly, anything a reader hits before the doc's main payoff.
+- **The content inside does not change.** This is signposting, not editing.
+  Resist the urge to "clean up" the math while you're in there.
+- Good candidates: derivations, postmortems, "why we didn't do X instead",
+  performance measurements, protocol and wire-format details, historical context,
+  exhaustive parameter tables.
+- **Bad candidates: anything about safety**, anything needed to run a command
+  correctly, and anything a reader hits before the doc's main payoff. A folded
+  safety rule is a safety rule nobody reads. Safety content is never collapsed.
+- Don't nest `<details>` inside `<details>`. If you want to, the section needs
+  restructuring instead.
+- For a very long doc, a `# Part 2 — the technical detail` split can carry the
+  same load. Use whichever leaves the top of the file readable.
 
 ## 6. Command blocks
 
@@ -189,7 +228,54 @@ Things to hold to when editing near safety content:
 - Never let a warning turn into a parenthetical or a footnote.
 - If a safety rule is repeated in five docs, that repetition is deliberate — leave it.
 
-## 8. Smaller habits
+## 8. The Highlights block
+
+Every doc for a thing you can *run or use* — the dashboard, both simulators, the
+diagnostics recorder, the cameras, the calibration wizard, each driving node,
+each package README — carries a short block near the top saying what it is and
+what's genuinely good about it.
+
+This is **written to be read by an outsider**: someone at a competition, another
+team, a judge, or somebody deciding whether this project is worth their attention.
+It goes after the header block and the one-paragraph description, before the
+setup instructions.
+
+```markdown
+## Highlights
+
+- **Streams map updates as deltas, not frames.** A full occupancy grid is ~4 MB;
+  after the first send, updates are typically under 2 KB.
+- **Live parameter tuning with no rebuild.** Change a driving node's parameters
+  from the browser and the running node picks them up immediately.
+- **Read-only by construction.** Subscribes to topics, publishes to none, so it
+  cannot move the car and is safe to leave running during a race.
+- **No install on the viewing machine.** Any browser on the network.
+```
+
+**What makes one of these good:**
+
+- **Lead with the concrete, specific thing.** "Streams map updates as deltas"
+  beats "efficient networking". A number beats an adjective every time.
+- **Every claim must be true and checkable against this repo.** These are the
+  lines most likely to be quoted somewhere embarrassing. If you can't point at
+  the code or a measurement that backs a bullet, cut it.
+- **Bold the claim, then explain it in one sentence.** Skimmable at two speeds.
+- **Four to eight bullets.** A list of fifteen is not highlights, it's an index.
+- **Don't hide the limits.** If something only works on a saved map, or only at
+  low speed, that belongs here too — an outsider who discovers a caveat later
+  trusts the rest of the document less.
+
+Follow it, where it helps, with a short **"Why it exists"** paragraph in the same
+outward-facing register: what the situation was without this thing, and what it
+changed. Two or three sentences. That paragraph is what somebody actually quotes
+when they explain the project to another person.
+
+**Do not write marketing.** No "powerful", "seamless", "robust", "cutting-edge",
+"state-of-the-art". The reader this is aimed at discounts those words to zero and
+starts wondering what's being covered up. Specifics are the only thing that reads
+as confident.
+
+## 9. Smaller habits
 
 **Second person, active voice.** "You'll see the map appear", not "the map will be observed to appear".
 

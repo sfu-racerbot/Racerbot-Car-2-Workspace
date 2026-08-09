@@ -92,6 +92,22 @@ SUCCESS_SIGNAL = re.compile(
 
 LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 
+# Docs describing something a person can actually run, which therefore owe the
+# reader a Highlights block. Every src/<pkg>/README.md counts too.
+RUNNABLE_DOCS = {
+    "web-dashboard.md",
+    "simulator.md",
+    "ros-simulator.md",
+    "run-diagnostics.md",
+    "racing-autonomy.md",
+    "drive-intent.md",
+    "realsense-camera.md",
+    "usb-camera-livestream.md",
+    "odom-calibration.md",
+}
+
+HIGHLIGHTS_HEADING = re.compile(r"^#{2,4}\s+Highlights\b", re.I)
+
 SEVERITY_ORDER = {"error": 0, "warn": 1, "info": 2}
 
 
@@ -126,6 +142,7 @@ def classify_lines(lines: list[str]) -> list[str]:
     """Label each line: 'code', 'fence', 'table', 'heading', 'blank', 'prose'."""
     kinds: list[str] = []
     fence: str | None = None
+    in_summary = False
 
     for raw in lines:
         stripped = raw.strip()
@@ -140,6 +157,19 @@ def classify_lines(lines: list[str]) -> list[str]:
         if m:
             fence = m.group(1)[0] * len(m.group(1))
             kinds.append("fence")
+            continue
+
+        # <details> deep dives: markup lines are scaffolding, not prose. A
+        # <summary> may wrap onto several lines before it closes.
+        if in_summary:
+            kinds.append("html")
+            if "</summary>" in stripped:
+                in_summary = False
+            continue
+        if stripped.startswith(("<details", "</details", "<summary", "</summary")):
+            kinds.append("html")
+            if stripped.startswith("<summary") and "</summary>" not in stripped:
+                in_summary = True
             continue
 
         if not stripped:
@@ -263,7 +293,8 @@ def check_jargon(path: Path, lines: list[str], kinds: list[str],
     if path.name in {"glossary.md", "glossary-seed.md"}:
         return
 
-    prose_idx = [i for i, k in enumerate(kinds) if k in ("prose", "table", "heading")]
+    prose_idx = [i for i, k in enumerate(kinds)
+                 if k in ("prose", "table", "heading", "html")]
 
     for term in JARGON:
         pattern = re.compile(r"\b" + re.escape(term) + r"\b",
@@ -362,6 +393,60 @@ def check_command_blocks(lines: list[str], kinds: list[str],
         i = end + 1
 
 
+def check_details_blocks(lines: list[str], rep: FileReport) -> None:
+    """The <details> blank-line rules, which GitHub enforces silently.
+
+    Get these wrong and the block still folds, but every table and code fence
+    inside it renders as raw text -- easy to miss, since it looks fine locally.
+    """
+    depth = 0
+    for i, line in enumerate(lines):
+        s = line.strip()
+
+        if s.startswith("<details"):
+            depth += 1
+            if depth > 1:
+                rep.add(i + 1, "warn", "details",
+                        "Nested <details>. Restructure the section instead -- "
+                        "readers rarely find the inner one.")
+            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            if not nxt.startswith("<summary"):
+                rep.add(i + 1, "error", "details",
+                        "<details> must be followed immediately by <summary>, "
+                        "with no blank line between them, or the fold breaks.")
+
+        if s.endswith("</summary>") and i + 1 < len(lines) and lines[i + 1].strip():
+            rep.add(i + 2, "error", "details",
+                    "Add a blank line after </summary>. Without it GitHub "
+                    "renders the Markdown inside this block as raw text.")
+
+        if s.startswith("</details"):
+            depth -= 1
+            if i > 0 and lines[i - 1].strip():
+                rep.add(i, "error", "details",
+                        "Add a blank line before </details>. Without it GitHub "
+                        "renders the Markdown inside this block as raw text.")
+
+    if depth > 0:
+        rep.add(len(lines), "error", "details",
+                f"{depth} <details> block(s) never closed with </details>.")
+
+
+def check_highlights(path: Path, lines: list[str], rep: FileReport) -> None:
+    """Docs for things you can run say what they're good for, up front."""
+    name = path.name
+    runnable = name == "README.md" and path.parent.parent.name == "src"
+    runnable = runnable or name in RUNNABLE_DOCS
+    if not runnable:
+        return
+
+    if not any(HIGHLIGHTS_HEADING.match(l) for l in lines):
+        rep.add(1, "warn", "highlights",
+                "No '## Highlights' section. Anything a person can run says "
+                "what it does and what's good about it, up front, in terms an "
+                "outsider can follow (standard.md#8-the-highlights-block).")
+
+
 def check_index(docs_dir: Path, rep: FileReport) -> None:
     """Every doc should be reachable from the index."""
     index = docs_dir / "README.md"
@@ -434,6 +519,8 @@ def check_file(path: Path) -> FileReport:
     check_jargon(path, lines, kinds, rep)
     check_links(path, lines, kinds, rep)
     check_command_blocks(lines, kinds, rep)
+    check_details_blocks(lines, rep)
+    check_highlights(path, lines, rep)
     return rep
 
 
@@ -491,6 +578,8 @@ def render(reports: list[FileReport], root: Path, verbose: bool) -> tuple[int, i
             "link": "broken links/anchors",
             "command": "command blocks with no terminal label or success signal",
             "index": "docs missing from the index",
+            "details": "broken <details> markup",
+            "highlights": "runnable things with no Highlights block",
             "read": "unreadable files",
         }
         for category, count in sorted(totals.items(), key=lambda kv: -kv[1]):

@@ -49,7 +49,7 @@ If you genuinely believe something should be deleted, say so to the user and let
 
 Always finish by running the checker (below).
 
-## The seven things that make the difference
+## The eight things that make the difference
 
 Full detail and worked examples for each live in `references/standard.md`. In brief:
 
@@ -65,14 +65,17 @@ This repo's characteristic failure is the 300-to-550-character paragraph that ch
 **4. Concrete before abstract.**
 Say what the reader will do and see, then explain the mechanism behind it. Most of these docs currently open with mechanism, which only works if you already know why you'd care.
 
-**5. Mark depth as skippable instead of hiding it or cutting it.**
-A "Deep dive:" heading plus a one-line skip note tells the beginner they may move on and tells the expert exactly where the good part is. Both readers win, nothing is lost.
+**5. Fold depth into collapsible blocks instead of hiding it or cutting it.**
+Math, derivations, wire formats and postmortems go inside a `<details>` block that GitHub renders folded, with a `<summary>` saying what's inside and whether skipping is safe. The page reads short; the expert clicks once and gets everything. Nothing is lost, and the beginner is told explicitly that moving on is allowed. Safety content is never collapsed.
 
 **6. Every command block says which terminal it belongs to and how you know it worked.**
 This is the biggest single win for robotics beginners. They run a launch file, get 40 lines of log, and have no idea whether that was success. Multi-terminal workflows compound it. Label the terminal, then state the success signal and the most likely failure.
 
 **7. Safety content gets clearer, never softer.**
 Simplifying prose must never dilute the LB deadman policy, the wheels-off-the-ground test order, or the `racerbot_sim` hardware interlock. A beginner is precisely the reader those rules exist to protect, so they get the *plainest* possible statement of the rule and the consequence — plus, in a sentence, why the rule exists. "Because a rule says so" is what people talk themselves out of at 11pm before a race.
+
+**8. Anything you can run gets a Highlights block.**
+Every doc for a usable thing — dashboard, simulators, diagnostics, cameras, calibration, each driving node, each package README — opens with four to eight bullets on what it does and what's genuinely good about it, then a short "Why it exists". Write it for an outsider: a judge, another team, someone deciding whether this project is worth their attention. Concrete claims with numbers, every one checkable against this repo, limits included. No marketing adjectives — they read as evasion.
 
 ## Never do these
 
