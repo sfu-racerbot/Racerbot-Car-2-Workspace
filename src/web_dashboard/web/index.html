@@ -9,122 +9,195 @@
 <body>
   <canvas id="view"></canvas>
 
+  <!-- The sidebar is three parts: a pinned header, ONE scrolling region,
+       and a pinned footer. That shape is deliberate. Previously the whole
+       thing grew to whatever height its contents wanted while the page
+       itself could not scroll, so on a laptop or a phone the bottom
+       sections -- the decision log, the tuning button, reset view -- simply
+       ran off the screen with no way to reach them. -->
   <div id="overlay">
     <div id="status">
       <span id="conn-dot" class="dot dot-red"></span>
       <span id="conn-text">connecting...</span>
     </div>
 
-    <div class="section">
-      <div class="section-title">feeds</div>
-      <div class="row">
-        <span id="dot-map" class="dot dot-gray"></span>
-        <span class="row-label">map</span>
-        <span class="row-value" id="info-map">no map yet</span>
-      </div>
-      <div class="row">
-        <span id="dot-scan" class="dot dot-gray"></span>
-        <span class="row-label">scan</span>
-        <span class="row-value" id="info-scan">no scan yet</span>
-      </div>
-      <div class="lidar-legend" aria-label="LIDAR color scale: red is close, green is far">
-        <span>close</span><span class="lidar-gradient"></span><span>far</span>
-      </div>
-      <div class="row">
-        <span id="dot-pose" class="dot dot-gray"></span>
-        <span class="row-label">pose</span>
-        <span class="row-value" id="info-pose">no pose yet</span>
-      </div>
-      <div class="row">
-        <span id="dot-drive" class="dot dot-gray"></span>
-        <span class="row-label">cmd</span>
-        <span class="row-value" id="info-drive">no command yet</span>
-      </div>
+    <div id="panels">
+      <!-- Each section is a <details> so it collapses, and so keyboard and
+           screen-reader behaviour comes from the browser rather than from
+           JavaScript. Which ones start open is remembered per browser in
+           localStorage; the defaults here are what a first-time visitor
+           gets: what the car can see, and what it intends to do. -->
+      <details class="section" data-section="feeds" open>
+        <summary class="section-head">
+          <span class="section-name">feeds</span>
+          <span class="section-digest" id="digest-feeds"></span>
+        </summary>
+        <div class="section-body">
+          <div class="metrics">
+            <div class="metric" id="metric-map">
+              <span id="dot-map" class="dot dot-gray"></span>
+              <span class="metric-label">map</span>
+              <span class="metric-value" id="info-map">--</span>
+            </div>
+            <div class="metric" id="metric-scan">
+              <span id="dot-scan" class="dot dot-gray"></span>
+              <span class="metric-label">scan</span>
+              <span class="metric-value" id="info-scan">--</span>
+            </div>
+            <div class="metric" id="metric-pose">
+              <span id="dot-pose" class="dot dot-gray"></span>
+              <span class="metric-label">pose</span>
+              <span class="metric-value" id="info-pose">--</span>
+            </div>
+            <div class="metric" id="metric-drive">
+              <span id="dot-drive" class="dot dot-gray"></span>
+              <span class="metric-label">cmd</span>
+              <span class="metric-value" id="info-drive">--</span>
+            </div>
+          </div>
+          <div class="lidar-legend" aria-label="LIDAR color scale: red is close, green is far">
+            <span>close</span><span class="lidar-gradient"></span><span>far</span>
+          </div>
+        </div>
+      </details>
+
+      <!-- What the driving algorithm is trying to do, and why. Above live
+           tuning because it is the thing you read while the car is moving;
+           tuning is what you reach for once it has stopped. -->
+      <details class="section" data-section="intent" id="intent-section" open>
+        <summary class="section-head">
+          <span id="dot-intent" class="dot dot-gray"></span>
+          <span class="section-name">intent</span>
+          <span class="section-digest" id="digest-intent"></span>
+        </summary>
+        <div class="section-body">
+          <div class="intent-headline">
+            <span id="intent-state" class="intent-chip">no intent yet</span>
+            <span id="intent-node" class="intent-node"></span>
+          </div>
+          <div id="intent-reason" class="intent-reason scrolls">
+            no driving node is publishing /drive_intent -- start gap_follow or pure_pursuit
+          </div>
+          <div class="metrics">
+            <div class="metric">
+              <span class="metric-label">speed</span>
+              <span class="metric-value" id="intent-speeds">--</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">steer</span>
+              <span class="metric-value" id="intent-steering">--</span>
+            </div>
+          </div>
+          <div class="intent-subtitle">limits (bold = binding)</div>
+          <div id="intent-factors"></div>
+          <div class="intent-subtitle">
+            recent decisions
+            <span class="scroll-hint">scroll</span>
+          </div>
+          <div id="intent-log" class="intent-log scrolls"></div>
+          <label class="intent-toggle" title="show or hide the intent arrow on the map">
+            <input type="checkbox" id="intent-toggle" checked />
+            <span>show arrow on map</span>
+          </label>
+        </div>
+      </details>
+
+      <details class="section" data-section="vehicle">
+        <summary class="section-head">
+          <span class="section-name">vehicle</span>
+          <span class="section-digest" id="digest-vehicle"></span>
+        </summary>
+        <div class="section-body">
+          <div class="metrics">
+            <div class="metric">
+              <span class="metric-label">speed</span>
+              <span class="metric-value" id="vehicle-speed">-- m/s</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">steer</span>
+              <span class="metric-value" id="vehicle-steering">-- deg</span>
+            </div>
+          </div>
+          <div class="metric metric-wide">
+            <span class="metric-label">LB</span>
+            <span class="metric-value" id="vehicle-lb">waiting for joystick</span>
+          </div>
+        </div>
+      </details>
+
+      <details class="section stopwatch-section" data-section="stopwatch">
+        <summary class="section-head">
+          <span class="section-name">LB stopwatch</span>
+          <span class="section-digest" id="digest-stopwatch"></span>
+        </summary>
+        <div class="section-body">
+          <div id="stopwatch-display">00:00.00</div>
+          <div id="stopwatch-state">off &middot; enable, then hold LB to run</div>
+          <div class="stopwatch-controls">
+            <button id="stopwatch-toggle">enable</button>
+            <button id="stopwatch-reset">reset</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="section" data-section="system">
+        <summary class="section-head">
+          <span id="dot-stats" class="dot dot-gray"></span>
+          <span class="section-name">system</span>
+          <span class="section-digest" id="digest-system"></span>
+        </summary>
+        <div class="section-body">
+          <div class="metrics">
+            <div class="metric">
+              <span class="metric-label">cpu</span>
+              <span class="metric-value" id="info-cpu">--</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">mem</span>
+              <span class="metric-value" id="info-mem">--</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">temp</span>
+              <span class="metric-value" id="info-temp">--</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">up</span>
+              <span class="metric-value" id="info-uptime">--</span>
+            </div>
+          </div>
+          <div class="metric metric-wide">
+            <span class="metric-label">wifi</span>
+            <span class="metric-value" id="info-wifi">
+              <span id="info-wifi-text">--</span>
+              <span id="wifi-bars" class="wifi-bars">
+                <span class="wifi-bar"></span><span class="wifi-bar"></span><span class="wifi-bar"></span><span class="wifi-bar"></span>
+              </span>
+            </span>
+          </div>
+        </div>
+      </details>
+
+      <details class="section" data-section="tuning" id="tuning-section">
+        <summary class="section-head">
+          <span id="dot-tuning" class="dot dot-gray"></span>
+          <span class="section-name">live tuning</span>
+          <span class="section-digest" id="digest-tuning"></span>
+        </summary>
+        <div class="section-body">
+          <div class="metric metric-wide">
+            <span class="metric-value" id="tuning-summary">looking for driving nodes...</span>
+          </div>
+          <div class="tuning-open-controls">
+            <button id="tuning-open">open panel</button>
+          </div>
+        </div>
+      </details>
     </div>
 
-    <div class="section">
-      <div class="section-title">vehicle</div>
-      <div class="row"><span class="row-label">speed</span><span class="row-value metric-value" id="vehicle-speed">-- m/s</span></div>
-      <div class="row"><span class="row-label">steer</span><span class="row-value metric-value" id="vehicle-steering">-- deg</span></div>
-      <div class="row"><span class="row-label">LB</span><span class="row-value" id="vehicle-lb">waiting for joystick</span></div>
-    </div>
-
-    <div class="section stopwatch-section">
-      <div class="section-title">LB stopwatch</div>
-      <div id="stopwatch-display">00:00.00</div>
-      <div id="stopwatch-state">off &middot; enable, then hold LB to run</div>
-      <div class="stopwatch-controls">
-        <button id="stopwatch-toggle">enable</button>
-        <button id="stopwatch-reset">reset</button>
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="section-title">
-        <span id="dot-stats" class="dot dot-gray"></span>
-        system
-      </div>
-      <div class="row"><span class="row-label">cpu</span><span class="row-value" id="info-cpu">--</span></div>
-      <div class="row"><span class="row-label">mem</span><span class="row-value" id="info-mem">--</span></div>
-      <div class="row"><span class="row-label">temp</span><span class="row-value" id="info-temp">--</span></div>
-      <div class="row">
-        <span class="row-label">wifi</span>
-        <span class="row-value" id="info-wifi">
-          <span id="info-wifi-text">--</span>
-          <span id="wifi-bars" class="wifi-bars">
-            <span class="wifi-bar"></span><span class="wifi-bar"></span><span class="wifi-bar"></span><span class="wifi-bar"></span>
-          </span>
-        </span>
-      </div>
-      <div class="row"><span class="row-label">up</span><span class="row-value" id="info-uptime">--</span></div>
-    </div>
-
-    <!-- What the driving algorithm is trying to do, and why. Sits above
-         live tuning because it is the thing you read while the car is
-         moving; tuning is what you reach for once it has stopped. -->
-    <div class="section" id="intent-section">
-      <div class="section-title">
-        <span id="dot-intent" class="dot dot-gray"></span>
-        intent
-        <label class="intent-toggle" title="show or hide the intent arrow">
-          <input type="checkbox" id="intent-toggle" checked />
-          <span>arrow</span>
-        </label>
-      </div>
-      <div class="intent-headline">
-        <span id="intent-state" class="intent-chip">no intent yet</span>
-        <span id="intent-node" class="intent-node"></span>
-      </div>
-      <div id="intent-reason" class="intent-reason">
-        no driving node is publishing /drive_intent -- start gap_follow or pure_pursuit
-      </div>
-      <div class="row">
-        <span class="row-label">speed</span>
-        <span class="row-value metric-value" id="intent-speeds">--</span>
-      </div>
-      <div class="row">
-        <span class="row-label">steer</span>
-        <span class="row-value metric-value" id="intent-steering">--</span>
-      </div>
-      <div class="intent-subtitle">limits (bold = binding)</div>
-      <div id="intent-factors"></div>
-      <div class="intent-subtitle">recent decisions</div>
-      <div id="intent-log" class="intent-log"></div>
-    </div>
-
-    <div class="section" id="tuning-section">
-      <div class="section-title">
-        <span id="dot-tuning" class="dot dot-gray"></span>
-        live tuning
-      </div>
-      <div class="row"><span class="row-value" id="tuning-summary">looking for driving nodes...</span></div>
-      <div class="tuning-open-controls">
-        <button id="tuning-open">open panel</button>
-      </div>
-    </div>
-
+    <!-- Pinned below the scroll region: a banner explaining why the picture
+         looks the way it does, and the view controls, are exactly the two
+         things that must never be the part that scrolled out of sight. -->
     <div id="mode-banner"></div>
-
     <div id="help">drag to pan &middot; scroll to zoom &middot; <button id="reset-view">reset view</button></div>
   </div>
 

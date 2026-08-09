@@ -1478,17 +1478,39 @@
     });
   }
 
+  // Two values per row now, so each one gets the short form and keeps the
+  // full detail in its tooltip. The freshness dot beside it already says
+  // what "12ms ago" said, which is what made room for a second column.
+  function setMetric(element, text, detail) {
+    element.textContent = text;
+    const holder = element.parentElement || element;
+    holder.title = detail || '';
+  }
+
   function updateStatusText() {
-    infoMap.textContent = state.map
-      ? `${state.map.width}x${state.map.height} @ ${state.map.resolution.toFixed(3)}m/cell, ${ageText(state.map)}`
-      : 'no map yet';
-    infoScan.textContent = state.scan ? `${state.scan.ranges.length} pts, ${ageText(state.scan)}` : 'no scan yet';
-    infoPose.textContent = state.pose
-      ? `${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)}m @ ${(state.pose.yaw * 180 / Math.PI).toFixed(0)}deg, ${ageText(state.pose)}`
-      : 'no pose yet';
-    infoDrive.textContent = state.drive
-      ? `${state.drive.speed.toFixed(2)}m/s @ ${(state.drive.steeringAngle * 180 / Math.PI).toFixed(1)}deg, ${ageText(state.drive)}`
-      : 'no command yet';
+    setMetric(infoMap,
+      state.map ? `${state.map.width}x${state.map.height}` : '--',
+      state.map
+        ? `${state.map.width}x${state.map.height} cells @ `
+          + `${state.map.resolution.toFixed(3)}m/cell, updated ${ageText(state.map)}`
+        : 'no map yet');
+    setMetric(infoScan,
+      state.scan ? `${state.scan.ranges.length} pts` : '--',
+      state.scan ? `${state.scan.ranges.length} beams, updated ${ageText(state.scan)}`
+                 : 'no scan yet');
+    setMetric(infoPose,
+      state.pose ? `${state.pose.x.toFixed(1)}, ${state.pose.y.toFixed(1)}` : '--',
+      state.pose
+        ? `${state.pose.x.toFixed(2)}, ${state.pose.y.toFixed(2)}m @ `
+          + `${(state.pose.yaw * 180 / Math.PI).toFixed(0)}deg, updated ${ageText(state.pose)}`
+        : 'no pose yet');
+    setMetric(infoDrive,
+      state.drive ? `${state.drive.speed.toFixed(1)} m/s` : '--',
+      state.drive
+        ? `${state.drive.speed.toFixed(2)}m/s @ `
+          + `${(state.drive.steeringAngle * 180 / Math.PI).toFixed(1)}deg, `
+          + `updated ${ageText(state.drive)}`
+        : 'no command yet');
     updateVehicleAndStopwatch();
 
     if (state.stats) {
@@ -1514,6 +1536,8 @@
     // shared 1s STALE_AFTER_MS would flicker red between every tick, so
     // this row gets a longer threshold (a few sample periods of slack).
     setDot(dots.stats, state.stats, 3000);
+
+    updateDigests();
   }
 
   // Re-render periodically even with no new messages, purely so the
@@ -2093,6 +2117,89 @@
     const saved = parseFloat(localStorage.getItem(CAMERA_WIDTH_KEY));
     if (Number.isFinite(saved)) setCameraWidth(saved);
   } catch (err) { /* see resetCameraSize */ }
+
+  // ---------------------------------------------------------------------
+  // Collapsible sections.
+  //
+  // The sidebar carries six sections and they do not all fit a laptop, let
+  // alone a phone. Rather than shrink everything until it is unreadable,
+  // sections collapse -- and a collapsed one still shows its headline value
+  // in its own header, so folding "vehicle" away does not cost you the
+  // speed. Which sections you keep open is a personal preference rather
+  // than a per-session one, so it is remembered in localStorage, the same
+  // way the camera inset remembers its size.
+  // ---------------------------------------------------------------------
+  const SECTION_STATE_KEY = 'racerbot.dashboard.sections';
+  const sectionEls = Array.from(document.querySelectorAll('.section[data-section]'));
+  const digestEls = {
+    feeds: document.getElementById('digest-feeds'),
+    intent: document.getElementById('digest-intent'),
+    vehicle: document.getElementById('digest-vehicle'),
+    stopwatch: document.getElementById('digest-stopwatch'),
+    system: document.getElementById('digest-system'),
+    tuning: document.getElementById('digest-tuning'),
+  };
+
+  function restoreSectionState() {
+    let saved = null;
+    try {
+      saved = JSON.parse(localStorage.getItem(SECTION_STATE_KEY) || 'null');
+    } catch (err) { /* private mode / storage disabled -- keep the defaults */ }
+    if (!saved || typeof saved !== 'object') return;
+    sectionEls.forEach((section) => {
+      const name = section.dataset.section;
+      if (typeof saved[name] === 'boolean') section.open = saved[name];
+    });
+  }
+
+  function saveSectionState() {
+    const state = {};
+    sectionEls.forEach((section) => { state[section.dataset.section] = section.open; });
+    try {
+      localStorage.setItem(SECTION_STATE_KEY, JSON.stringify(state));
+    } catch (err) { /* see restoreSectionState */ }
+  }
+
+  sectionEls.forEach((section) => {
+    section.addEventListener('toggle', () => {
+      saveSectionState();
+      // An opened section may need its contents laid out against a canvas
+      // that has not been repainted since.
+      scheduleRender();
+    });
+  });
+  restoreSectionState();
+
+  function setDigest(name, text) {
+    const element = digestEls[name];
+    if (element) element.textContent = text;
+  }
+
+  // The one number each collapsed section is actually about.
+  function updateDigests() {
+    const live = [state.map, state.scan, state.pose, state.drive]
+      .filter((entry) => entry && !isStale(entry)).length;
+    setDigest('feeds', `${live}/4 live`);
+
+    setDigest('intent', state.intent
+      ? String(state.intent.state || '').replace(/_/g, ' ')
+        + (intentAgeMs() > INTENT_STALE_MS ? ' (stale)' : '')
+      : '--');
+
+    setDigest('vehicle', state.speed && !isStale(state.speed)
+      ? `${state.speed.speed.toFixed(1)} m/s` : '--');
+
+    setDigest('stopwatch', formatStopwatch(stopwatchElapsed()));
+
+    setDigest('system', state.stats
+      ? `${state.stats.cpuPercent.toFixed(0)}%`
+        + (state.stats.cpuTempC != null ? ` ${state.stats.cpuTempC.toFixed(0)}C` : '')
+      : '--');
+
+    const tuning = state.tuning;
+    const onlineNodes = tuning ? (tuning.nodes || []).filter((n) => n.online) : [];
+    setDigest('tuning', onlineNodes.length ? `${onlineNodes.length} node(s)` : '--');
+  }
 
   // ---------------------------------------------------------------------
   // Go

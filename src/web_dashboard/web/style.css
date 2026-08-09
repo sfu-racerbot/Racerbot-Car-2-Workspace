@@ -21,36 +21,95 @@ html, body {
 }
 
 /* ------------------------------------------------------------------ */
-/* Left sidebar -- height is intentionally unconstrained (no max-height)
-   so it simply grows to fit however many rows/sections it has; on a
-   short viewport it's fine for it to run off the bottom rather than
-   cramming rows together. */
+/* Left sidebar.
+ *
+ * Three parts stacked: a pinned status line, ONE scrolling region holding
+ * the sections, and a pinned banner + view controls. It is bounded to the
+ * viewport, which is the whole point -- it used to grow to whatever height
+ * its contents wanted while `html, body` had `overflow: hidden`, so on a
+ * laptop or a phone the bottom of it (the decision log, the tuning button,
+ * reset view) was off-screen with no way to reach it.
+ *
+ * It is also interactive. It used to be `pointer-events: none` with an
+ * exception for buttons, so that dragging the map "through" the sidebar
+ * worked -- but that also meant no scroll region inside it could ever
+ * receive a wheel event. The decision log had `overflow-y: auto` and was
+ * genuinely impossible to scroll: the wheel went past it to the canvas and
+ * zoomed the map instead. Panning still works everywhere outside these
+ * ~300px.
+ */
 /* ------------------------------------------------------------------ */
 #overlay {
   position: fixed;
   top: 12px;
   left: 12px;
-  max-width: min(300px, calc(100vw - 24px));
+  width: min(300px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
   background: rgba(13, 18, 25, 0.88);
   border: 1px solid #263140;
   border-radius: 10px;
-  padding: 14px 16px;
+  padding: 12px 14px;
   font-size: 13px;
   line-height: 1.5;
-  pointer-events: none;
-}
-
-#overlay button {
   pointer-events: auto;
 }
 
+/* The one scrolling region. min-height:0 is what actually lets a flex
+   child shrink below its content and scroll instead of overflowing. */
+#panels {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain; /* don't hand the wheel to the map at the ends */
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+
+/* Default scrollbars are effectively invisible on this dark theme, which
+   makes a scrollable region look like a truncated one. */
+#panels,
+.scrolls,
+#tuning-body {
+  scrollbar-width: thin;
+  scrollbar-color: #3a4757 transparent;
+}
+
+#panels::-webkit-scrollbar,
+.scrolls::-webkit-scrollbar,
+#tuning-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+#panels::-webkit-scrollbar-track,
+.scrolls::-webkit-scrollbar-track,
+#tuning-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#panels::-webkit-scrollbar-thumb,
+.scrolls::-webkit-scrollbar-thumb,
+#tuning-body::-webkit-scrollbar-thumb {
+  background: #3a4757;
+  border-radius: 4px;
+}
+
+#panels::-webkit-scrollbar-thumb:hover,
+.scrolls::-webkit-scrollbar-thumb:hover,
+#tuning-body::-webkit-scrollbar-thumb:hover {
+  background: #4b5b6e;
+}
+
 #status {
+  flex: none;            /* pinned above the scroll region, never squeezed */
   display: flex;
   align-items: center;
   gap: 8px;
   font-weight: 600;
   font-size: 14px;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 
 .dot {
@@ -65,13 +124,21 @@ html, body {
 .dot-red { background: #f85149; box-shadow: 0 0 6px #f8514988; }
 .dot-gray { background: #4b5560; }
 
+/* Sections are <details>, so collapsing, keyboard access and
+   screen-reader semantics come from the browser rather than from JS. */
 .section {
-  margin-top: 10px;
-  padding-top: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid #263140;
 }
 
-.section-title {
+.section:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.section-head {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -80,7 +147,113 @@ html, body {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: #8b949e;
-  margin-bottom: 6px;
+  cursor: pointer;
+  list-style: none;          /* the default triangle, replaced below */
+  user-select: none;
+  padding: 2px 0;
+}
+
+.section-head::-webkit-details-marker {
+  display: none;
+}
+
+/* A disclosure caret we control, so it sits on the correct side and
+   rotates rather than jumping between two glyphs. */
+.section-head::before {
+  content: '';
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4px solid #6b7684;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform 0.12s ease;
+}
+
+.section[open] .section-head::before {
+  transform: rotate(90deg);
+}
+
+.section-head:hover {
+  color: #c9d1d9;
+}
+
+.section-name {
+  flex: none;
+}
+
+/* The headline value, shown in the summary so a collapsed section still
+   answers its own question at a glance -- "vehicle 2.8 m/s" is most of
+   what that section says anyway. Hidden while open, where the full rows
+   are already visible and it would just be a duplicate. */
+.section-digest {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #c9d1d9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.section[open] .section-digest {
+  display: none;
+}
+
+.section-body {
+  padding: 2px 0 4px;
+}
+
+/* Two columns of label+value. Most readouts here are a short word and a
+   number, and one full-width row each was what made the sidebar taller
+   than the screen. */
+.metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px 10px;
+}
+
+.metric {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.metric-wide {
+  grid-column: 1 / -1;
+  margin-top: 1px;
+}
+
+.metric-label {
+  flex: none;
+  color: #8b949e;
+}
+
+.metric-value {
+  flex: 1;
+  min-width: 0;
+  color: #e6edf3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Tells you a region scrolls before you have to guess. */
+.scroll-hint {
+  float: right;
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: #5b6672;
+  text-transform: lowercase;
 }
 
 .row {
@@ -130,9 +303,14 @@ html, body {
 .wifi-bar.active.weak { background: #d29922; }
 .wifi-bar.active.bad { background: #f85149; }
 
+/* Pinned below the scroll region. A banner explaining why the picture
+   looks the way it does, and the view controls, are precisely the two
+   things that must never be what scrolled out of sight. */
 #mode-banner {
-  margin-top: 10px;
+  flex: none;
+  margin-top: 8px;
   font-size: 12px;
+  line-height: 1.35;
   color: #d29922;
 }
 
@@ -141,8 +319,9 @@ html, body {
 }
 
 #help {
-  margin-top: 10px;
-  padding-top: 10px;
+  flex: none;
+  margin-top: 8px;
+  padding-top: 8px;
   border-top: 1px solid #263140;
   font-size: 11px;
   color: #8b949e;
@@ -304,7 +483,7 @@ html, body {
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 6px;
-  margin: 3px 0 2px 17px;
+  margin: 4px 0 2px;
   color: #8b949e;
   font-size: 10px;
   text-transform: uppercase;
@@ -487,6 +666,35 @@ html, body {
 
 @media (max-width: 640px) {
   #tuning-panel { width: 100vw; }
+}
+
+/* ------------------------------------------------------------------ */
+/* Tightening up where there is genuinely no room. The sidebar always
+   fits now -- it scrolls -- but scrolling to reach something is worse
+   than seeing it, so give back what vertical space we can. */
+/* ------------------------------------------------------------------ */
+@media (max-height: 720px) {
+  #overlay {
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .section { margin-top: 6px; padding-top: 6px; }
+  .intent-log { max-height: 104px; }
+  #stopwatch-display { font-size: 22px; }
+}
+
+@media (max-width: 640px) {
+  #overlay {
+    /* Leave room for the corner insets on a phone rather than covering
+       them: the map and camera panels are pinned to the right edge. */
+    width: min(280px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+  }
+  .metrics { gap: 1px 8px; }
+  /* Touch targets: a 10px summary row is not comfortably tappable. */
+  .section-head { padding: 5px 0; }
+  .intent-log { max-height: 120px; }
 }
 
 #tuning-head {
@@ -722,12 +930,15 @@ html, body {
    dashboard.js) so the chip in the sidebar and the ribbon on the map are
    obviously the same statement rather than two things to correlate.
    --------------------------------------------------------------------- */
+/* Lives in the section body rather than its header: a checkbox inside a
+   <summary> toggles the whole section when you click it, which is exactly
+   the wrong thing. */
 .intent-toggle {
-  margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 4px;
-  font-size: 9px;
+  gap: 5px;
+  margin-top: 6px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.04em;
   color: #8b949e;
@@ -778,6 +989,7 @@ html, body {
   margin: 2px 0 6px;
   max-height: 6.5em;
   overflow-y: auto;
+  overscroll-behavior: contain;
   overflow-wrap: anywhere;
 }
 
@@ -810,12 +1022,27 @@ html, body {
   font-weight: 700;
 }
 
+/* The rolling list of state transitions. It always had overflow-y:auto and
+   was still impossible to scroll, because the sidebar above it swallowed
+   every wheel event with pointer-events:none -- see the #overlay comment.
+   Now it scrolls, says so, and gets a little more room. */
 .intent-log {
-  max-height: 128px;
+  max-height: 150px;
+  min-height: 34px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 10px;
   line-height: 1.6;
+  border: 1px solid #1d2733;
+  border-radius: 4px;
+  padding: 3px 5px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.intent-log:empty::after {
+  content: 'no decisions yet';
+  color: #5b6672;
 }
 
 .intent-log-line {
