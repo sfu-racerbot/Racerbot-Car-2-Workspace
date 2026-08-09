@@ -30,8 +30,8 @@ import argparse
 import asyncio
 import json
 from pathlib import Path
-import struct
 import sys
+import zlib
 
 import numpy as np
 
@@ -60,6 +60,13 @@ class Capture:
         self.speed = None
         self.intent_state = None
         self._pending = None
+        # Map delta stream (see web_dashboard/mapstream.py): the grid is
+        # sent once as a keyframe and thereafter as patches, so a healthy
+        # mapping run is a handful of keyframes and many small patches.
+        self.map_seq = None
+        self.map_keyframes = 0
+        self.map_patches = 0
+        self.map_patches_ignored = 0
         # Everything below is the report: what arrived, and whether any of
         # it was wrong.
         self.counts = {}
@@ -93,30 +100,31 @@ class Capture:
                 self.desyncs.append(
                     f'{kind} payload is {len(message)} bytes, header says {expected}')
                 return
+            try:
+                raw = self._decode(header, bytes(message))
+            except ValueError as exc:
+                self.desyncs.append(f'{kind} payload: {exc}')
+                return
             if kind == 'map':
-                count = header['width'] * header['height']
-                self.map_cells = np.array(
-                    struct.unpack(f'<{count}b', message[:count]), dtype=np.int8)
-                self.map_header = header
-                shape = (header['width'], header['height'])
-                if not self.map_shapes or self.map_shapes[-1] != shape:
-                    self.map_shapes.append(shape)
-                # Everything web/dashboard.js's maybeAutoFit() reads, so the
-                # view it would have computed can be replayed offline.
-                self.map_fits.append((
-                    header['width'], header['height'], header['resolution'],
-                    header['origin_x'], header['origin_y']))
+                self._apply_map(header, raw)
+            elif kind == 'map_patch':
+                self._apply_map_patch(header, raw)
             elif kind == 'scan':
-                count = header['count']
-                self.scan_ranges = np.array(
-                    struct.unpack(f'<{count}f', message[:count * 4]), dtype=np.float64)
+                self.scan_ranges = self._decode_ranges(header, raw)
                 self.scan_header = header
             return
 
         payload = json.loads(message)
         kind = payload.get('type')
         self._count(kind)
-        if kind in ('map', 'scan'):
+        if kind == 'batch':
+            # One frame carrying a tick's worth of compact telemetry -- see
+            # web_dashboard/batching.py. Each item is exactly the message it
+            # would have been on its own.
+            for item in payload.get('items') or []:
+                self.handle(json.dumps(item))
+            return
+        if kind in ('map', 'map_patch', 'scan'):
             if self._pending is not None:
                 # Two headers in a row: the first one's binary never came.
                 self.desyncs.append(
@@ -131,6 +139,70 @@ class Capture:
             self.speed = payload['speed']
         elif kind == 'intent':
             self.intent_state = (payload.get('intent') or {}).get('state')
+
+    # -- decoding the wire format ------------------------------------------
+    #
+    # This is deliberately a second, independent implementation of what
+    # web/dashboard.js does. Two implementations that agree on a recorded
+    # run is a much stronger statement about the protocol than one
+    # implementation checked against itself.
+
+    @staticmethod
+    def _decode(header, payload: bytes) -> bytes:
+        """Undo the transport encoding and check the declared raw length."""
+        encoding = header.get('encoding')
+        raw = zlib.decompress(payload) if encoding == 'deflate' else payload
+        expected = header.get('raw_bytes')
+        if expected is not None and len(raw) != expected:
+            raise ValueError(f'decoded to {len(raw)} bytes, header says {expected}')
+        return raw
+
+    @staticmethod
+    def _decode_ranges(header, raw: bytes):
+        """Scan ranges in metres, from whichever encoding arrived."""
+        if header.get('encoding') == 'u16mm':
+            return np.frombuffer(raw, dtype='<u2').astype(np.float64) / 1000.0
+        return np.frombuffer(raw, dtype='<f4').astype(np.float64)
+
+    def _apply_map(self, header, raw: bytes):
+        """A keyframe: the whole grid."""
+        self.map_keyframes += 1
+        self.map_cells = np.frombuffer(raw, dtype=np.int8).copy()
+        self.map_header = header
+        self.map_seq = header.get('seq')
+        shape = (header['width'], header['height'])
+        if not self.map_shapes or self.map_shapes[-1] != shape:
+            self.map_shapes.append(shape)
+        # Everything web/dashboard.js's maybeAutoFit() reads, so the view it
+        # would have computed can be replayed offline.
+        self.map_fits.append((
+            header['width'], header['height'], header['resolution'],
+            header['origin_x'], header['origin_y']))
+
+    def _apply_map_patch(self, header, raw: bytes):
+        """A patch: just the rectangle of cells that changed.
+
+        Grid coordinates throughout -- `map_cells` is held in the grid's own
+        bottom-up row order and only flipped when a PNG is written, so no
+        flip is needed here.
+        """
+        self.map_patches += 1
+        if self.map_cells is None:
+            return  # no keyframe yet
+        seq = header.get('seq')
+        if self.map_seq is None or seq != self.map_seq + 1:
+            # Same rule as the browser: a patch out of sequence would leave
+            # the map quietly wrong, so wait for the next keyframe instead.
+            self.map_patches_ignored += 1
+            self.desyncs.append(
+                f'map patch {seq} does not follow frame {self.map_seq}')
+            return
+        width = self.map_header['width']
+        x, y, w, h = header['x'], header['y'], header['w'], header['h']
+        block = np.frombuffer(raw, dtype=np.int8).reshape(h, w)
+        grid = self.map_cells.reshape(self.map_header['height'], width)
+        grid[y:y + h, x:x + w] = block
+        self.map_seq = seq
 
     @property
     def complete(self) -> bool:
@@ -206,6 +278,11 @@ class Capture:
             'messages': dict(sorted(self.counts.items())),
             'desyncs': len(self.desyncs),
             'desync_detail': self.desyncs[:10],
+            'map_keyframes': self.map_keyframes,
+            'map_patches': self.map_patches,
+            # Non-zero means patches arrived out of order and the map went
+            # stale until the next keyframe -- worth knowing about.
+            'map_patches_ignored': self.map_patches_ignored,
             'map_sizes_seen': [f'{w}x{h}' for w, h in self.map_shapes],
             'pose_updates': len(self.pose_track),
             'pose_path_m': round(travelled, 2),

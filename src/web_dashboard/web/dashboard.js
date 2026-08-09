@@ -61,7 +61,7 @@
   if (intentToggle) {
     intentToggle.addEventListener('change', () => {
       state.showIntent = intentToggle.checked;
-      render();
+      scheduleRender();
     });
   }
 
@@ -236,19 +236,28 @@
   }
 
   function handleHeader(header) {
-    if (header.type === 'map' || header.type === 'scan') {
+    if (header.type === 'batch') {
+      // One frame carrying everything that happened in the last tick --
+      // see web_dashboard/batching.py. Each item is exactly the message it
+      // would have been on its own, so every handler below is reused as-is
+      // rather than duplicated for the batched case.
+      const items = header.items || [];
+      for (let i = 0; i < items.length; i++) handleHeader(items[i]);
+      return;
+    }
+    if (header.type === 'map' || header.type === 'map_patch' || header.type === 'scan') {
       pendingBinaryType = header.type;
       pendingHeader = header;
     } else if (header.type === 'pose') {
       state.pose = { x: header.x, y: header.y, yaw: header.yaw, receivedAt: performance.now() };
       maybeAutoFit();
-      render();
+      scheduleRender();
     } else if (header.type === 'drive') {
       state.drive = { speed: header.speed, steeringAngle: header.steering_angle, receivedAt: performance.now() };
-      updateStatusText();
+      scheduleRender();
     } else if (header.type === 'speed') {
       state.speed = { speed: header.speed, receivedAt: performance.now() };
-      updateStatusText();
+      scheduleRender();
     } else if (header.type === 'stopwatch') {
       state.stopwatch = {
         elapsedS: header.elapsed_s,
@@ -259,10 +268,10 @@
         buttonAvailable: header.button_available,
         receivedAt: performance.now(),
       };
-      updateStatusText();
+      scheduleRender();
     } else if (header.type === 'intent') {
       applyIntent(header.intent);
-      render();
+      scheduleRender();
     } else if (header.type === 'tuning') {
       state.tuning = { enabled: header.enabled, allowSave: header.allow_save, nodes: header.nodes || [] };
       renderTuning();
@@ -281,7 +290,7 @@
         wifiDbm: header.wifi_dbm,
         receivedAt: performance.now(),
       };
-      updateStatusText();
+      scheduleRender();
     }
   }
 
@@ -294,7 +303,7 @@
       console.warn(`dashboard: dropped a binary frame -- ${detail} `
         + `(${state.desyncCount} so far)`);
     }
-    render();
+    scheduleRender();
   }
 
   function handleBinary(buffer) {
@@ -325,13 +334,81 @@
       return;
     }
 
-    if (type === 'map') {
-      applyMap(header, new Int8Array(buffer));
-    } else if (type === 'scan') {
-      applyScan(header, new Float32Array(buffer));
+    if (type === 'map' || type === 'map_patch') {
+      queueMapFrame(type, header, buffer);
+      return; // the chain re-renders once the frame has actually landed
+    }
+    if (type === 'scan') {
+      applyScan(header, buffer);
     }
     maybeAutoFit();
-    render();
+    scheduleRender();
+  }
+
+  // ---------------------------------------------------------------------
+  // Map frames arrive as a keyframe (the whole grid) followed by patches
+  // (just the rectangle that changed) -- see web_dashboard/mapstream.py.
+  // Decoding one is asynchronous, because inflating is, and patches MUST be
+  // applied in the order the car sent them: applying two out of order would
+  // leave the map quietly wrong rather than visibly broken. So every map
+  // frame goes through one promise chain, which serialises them no matter
+  // how the inflates interleave.
+  // ---------------------------------------------------------------------
+  let mapChain = Promise.resolve();
+
+  function queueMapFrame(type, header, buffer) {
+    mapChain = mapChain
+      .then(() => applyMapFrame(type, header, buffer))
+      .then(() => { maybeAutoFit(); scheduleRender(); })
+      .catch((err) => {
+        noteDesync(`could not decode a ${type} frame -- ${err && err.message ? err.message : err}`);
+      });
+  }
+
+  // Whether this browser can inflate at all. DecompressionStream is in
+  // every current browser (Chrome 80+, Firefox 113+, Safari 16.4+), but a
+  // silently blank map on an older one would be a miserable thing to
+  // debug, so it is detected and reported rather than assumed.
+  const CAN_INFLATE = typeof DecompressionStream === 'function';
+  let warnedAboutInflate = false;
+
+  async function decodePayload(header, buffer) {
+    const expected = header.raw_bytes;
+    if (header.encoding !== 'deflate') {
+      const raw = new Uint8Array(buffer);
+      if (typeof expected === 'number' && raw.length !== expected) {
+        throw new Error(`payload is ${raw.length} bytes, header says ${expected}`);
+      }
+      return raw;
+    }
+    if (!CAN_INFLATE) {
+      if (!warnedAboutInflate) {
+        warnedAboutInflate = true;
+        console.error(
+          'dashboard: this browser has no DecompressionStream, so the '
+          + 'compressed map cannot be drawn. Set map_compression: false in '
+          + 'web_dashboard.yaml, or use a newer browser.');
+      }
+      throw new Error('this browser cannot inflate the map (set map_compression: false)');
+    }
+    const stream = new Blob([buffer]).stream()
+      .pipeThrough(new DecompressionStream('deflate'));
+    const raw = new Uint8Array(await new Response(stream).arrayBuffer());
+    if (typeof expected === 'number' && raw.length !== expected) {
+      throw new Error(`inflated to ${raw.length} bytes, header says ${expected}`);
+    }
+    return raw;
+  }
+
+  async function applyMapFrame(type, header, buffer) {
+    const raw = await decodePayload(header, buffer);
+    // Int8 view over the same bytes: occupancy values are signed (-1 is
+    // 'unknown'), and the palette below is indexed by the raw byte anyway.
+    if (type === 'map') {
+      applyMap(header, raw);
+    } else {
+      applyMapPatch(header, raw);
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -368,11 +445,63 @@
   // just scale/position that image with a single fast drawImage() call
   // every frame instead of redrawing every cell every frame.
   // ---------------------------------------------------------------------
+  // A 256-entry palette indexed by the RAW BYTE of each cell, so colouring
+  // is one lookup and one 32-bit store per cell instead of a branch and
+  // four byte stores. That matters: a 2048x2048 keyframe is 4.2 million
+  // cells, and this runs on whatever laptop or phone is watching.
+  //
+  // Indexing by the raw byte is what removes the branch. Occupancy values
+  // are signed: 0..100 are probabilities and -1 is "unknown", which as a
+  // byte is 255. So bytes 0..100 take the gradient, 101..127 clamp to
+  // occupied (out of spec, but that is what the old code did with them),
+  // and 128..255 -- every negative value -- are unknown.
+  const LITTLE_ENDIAN = (() => {
+    const probe = new ArrayBuffer(4);
+    new Uint32Array(probe)[0] = 0x01020304;
+    return new Uint8Array(probe)[0] === 0x04;
+  })();
+
+  const MAP_PALETTE = (() => {
+    const lut = new Uint32Array(256);
+    const pack = (r, g, b, a) => (LITTLE_ENDIAN
+      ? ((a * 16777216) + (b * 65536) + (g * 256) + r)
+      : ((r * 16777216) + (g * 65536) + (b * 256) + a)) >>> 0;
+    const unknown = pack(MAP_UNKNOWN_RGBA[0], MAP_UNKNOWN_RGBA[1],
+                         MAP_UNKNOWN_RGBA[2], MAP_UNKNOWN_RGBA[3]);
+    for (let byte = 0; byte < 256; byte++) {
+      if (byte > 127) { lut[byte] = unknown; continue; } // negative int8
+      const t = Math.min(byte, 100) / 100;               // 0 free -> 1 occupied
+      lut[byte] = pack(
+        Math.round(MAP_FREE_RGB[0] + (MAP_OCCUPIED_RGB[0] - MAP_FREE_RGB[0]) * t),
+        Math.round(MAP_FREE_RGB[1] + (MAP_OCCUPIED_RGB[1] - MAP_FREE_RGB[1]) * t),
+        Math.round(MAP_FREE_RGB[2] + (MAP_OCCUPIED_RGB[2] - MAP_FREE_RGB[2]) * t),
+        255);
+    }
+    return lut;
+  })();
+
+  // OccupancyGrid.data is row-major with row 0 at the *bottom* of the map
+  // (smallest world Y); a plain <canvas> image has row 0 at the *top*.
+  // Flipping rows here, once, means everywhere else in this file can treat
+  // "top of the map image" as "largest world Y" without re-deriving it.
+  // Patches arrive in the same grid coordinates, so they flip the same way
+  // -- see applyMapPatch.
+  function paintCells(target, cells, width, height) {
+    const words = new Uint32Array(target.data.buffer);
+    for (let row = 0; row < height; row++) {
+      const src = (height - 1 - row) * width;
+      const dst = row * width;
+      for (let col = 0; col < width; col++) {
+        words[dst + col] = MAP_PALETTE[cells[src + col]];
+      }
+    }
+  }
+
   function applyMap(header, cells) {
     const { width, height, resolution, origin_x: originX, origin_y: originY } = header;
-    // Belt and braces with handleBinary's length check: this loop indexes
-    // width*height entries and an undefined read turns every colour into
-    // NaN, which canvas silently paints as black rather than throwing.
+    // Belt and braces with handleBinary's length check: this indexes
+    // width*height entries and a read past the end would paint garbage
+    // rather than throwing.
     if (!(width > 0 && height > 0) || cells.length < width * height) {
       noteDesync(`map payload holds ${cells.length} cells, header says ${width * height}`);
       return;
@@ -382,37 +511,67 @@
     off.height = height;
     const octx = off.getContext('2d');
     const img = octx.createImageData(width, height);
-
-    // OccupancyGrid.data is row-major with row 0 at the *bottom* of the
-    // map (smallest world Y); a plain <canvas> image has row 0 at the
-    // *top*. Flipping rows here, once, means everywhere else in this
-    // file can treat "top of the map image" as "largest world Y" without
-    // re-deriving that each time it's needed.
-    for (let row = 0; row < height; row++) {
-      const srcRow = height - 1 - row;
-      for (let col = 0; col < width; col++) {
-        const value = cells[srcRow * width + col];
-        const p = (row * width + col) * 4;
-        if (value < 0) {
-          img.data[p] = MAP_UNKNOWN_RGBA[0];
-          img.data[p + 1] = MAP_UNKNOWN_RGBA[1];
-          img.data[p + 2] = MAP_UNKNOWN_RGBA[2];
-          img.data[p + 3] = MAP_UNKNOWN_RGBA[3];
-        } else {
-          const t = Math.min(value, 100) / 100; // 0 free -> 1 occupied
-          img.data[p] = Math.round(MAP_FREE_RGB[0] + (MAP_OCCUPIED_RGB[0] - MAP_FREE_RGB[0]) * t);
-          img.data[p + 1] = Math.round(MAP_FREE_RGB[1] + (MAP_OCCUPIED_RGB[1] - MAP_FREE_RGB[1]) * t);
-          img.data[p + 2] = Math.round(MAP_FREE_RGB[2] + (MAP_OCCUPIED_RGB[2] - MAP_FREE_RGB[2]) * t);
-          img.data[p + 3] = 255;
-        }
-      }
-    }
+    paintCells(img, cells, width, height);
     octx.putImageData(img, 0, 0);
 
-    state.map = { width, height, resolution, originX, originY, canvas: off, receivedAt: performance.now() };
+    state.map = {
+      width, height, resolution, originX, originY,
+      canvas: off, ctx: octx,
+      seq: typeof header.seq === 'number' ? header.seq : null,
+      receivedAt: performance.now(),
+    };
   }
 
-  function applyScan(header, ranges) {
+  // Just the rectangle that changed, blitted into the image we already
+  // hold. This is what lets the car send ~200 bytes instead of 4MB while it
+  // is mapping, and it is the clearest case of the browser rather than the
+  // car doing the work of keeping a map picture current.
+  function applyMapPatch(header, cells) {
+    const map = state.map;
+    if (!map) return; // no keyframe yet; the next one brings everything
+    const { x, y, w, h, seq } = header;
+
+    // A patch describes a change from one exact grid to the next. Applied
+    // to anything else it would leave the map quietly, plausibly wrong --
+    // so on any gap we stop applying patches and wait for the keyframe the
+    // car sends every map_keyframe_sec.
+    if (map.seq === null || seq !== map.seq + 1) {
+      noteDesync(`map patch ${seq} does not follow frame ${map.seq}; waiting for a keyframe`);
+      return;
+    }
+    if (!(w > 0 && h > 0) || x < 0 || y < 0
+        || x + w > map.width || y + h > map.height) {
+      noteDesync(`map patch (${x},${y},${w},${h}) does not fit a ${map.width}x${map.height} map`);
+      return;
+    }
+    if (cells.length < w * h) {
+      noteDesync(`map patch holds ${cells.length} cells, header says ${w * h}`);
+      return;
+    }
+
+    const img = map.ctx.createImageData(w, h);
+    paintCells(img, cells, w, h);
+    // Grid rows [y, y+h) are image rows [height-y-h, height-y): paintCells
+    // flips the patch within itself, and this puts that flipped block at
+    // the mirrored offset.
+    map.ctx.putImageData(img, x, map.height - y - h);
+    map.seq = seq;
+    map.receivedAt = performance.now();
+  }
+
+  function applyScan(header, buffer) {
+    // 'u16mm' is millimetres in a uint16: half the bytes of float32, for a
+    // difference far below one screen pixel and below the LIDAR's own
+    // accuracy. 0 means "nothing came back", which the drawing code already
+    // discards because it is under every real scanner's range_min.
+    let ranges;
+    if (header.encoding === 'u16mm') {
+      const millimetres = new Uint16Array(buffer);
+      ranges = new Float32Array(millimetres.length);
+      for (let i = 0; i < millimetres.length; i++) ranges[i] = millimetres[i] / 1000;
+    } else {
+      ranges = new Float32Array(buffer);
+    }
     state.scan = {
       angleMin: header.angle_min,
       angleIncrement: header.angle_increment,
@@ -481,7 +640,30 @@
 
   // ---------------------------------------------------------------------
   // Rendering
+  //
+  // Everything that changes state asks for a repaint through
+  // scheduleRender() rather than painting immediately. Updates arrive far
+  // faster than a screen can show them -- pose alone used to force a full
+  // canvas repaint 40 times a second, and a batch frame carries several
+  // updates that would each have triggered their own -- so they are
+  // coalesced into at most one repaint per animation frame.
+  //
+  // The other half of the win is free: requestAnimationFrame does not fire
+  // in a hidden tab, so a dashboard left open on a second monitor or a
+  // phone in someone's pocket stops drawing entirely while still tracking
+  // everything the car sends.
   // ---------------------------------------------------------------------
+  let renderPending = false;
+
+  function scheduleRender() {
+    if (renderPending) return;
+    renderPending = true;
+    requestAnimationFrame(() => {
+      renderPending = false;
+      render();
+    });
+  }
+
   function render() {
     resizeCanvasIfNeeded();
     ctx.fillStyle = '#0b0f14';
@@ -1336,7 +1518,7 @@
 
   // Re-render periodically even with no new messages, purely so the
   // "updated Xs ago" readout and stale-data coloring stay live.
-  setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) render(); }, 250);
+  setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) scheduleRender(); }, 250);
 
   // ---------------------------------------------------------------------
   // Pan / zoom
@@ -1367,7 +1549,7 @@
     view.bodyPanY += dx / view.scale;
     view.bodyPanX += dy / view.scale;
     view.userAdjusted = true;
-    render();
+    scheduleRender();
   });
 
   canvas.addEventListener('wheel', (e) => {
@@ -1399,7 +1581,7 @@
       view.bodyPanX = bxBefore + (mouseCanvasY - canvas.height / 2) / view.scale;
     }
     view.userAdjusted = true;
-    render();
+    scheduleRender();
   }, { passive: false });
 
   resetViewBtn.addEventListener('click', () => {
@@ -1407,7 +1589,7 @@
     view.bodyPanX = 0;
     view.bodyPanY = 0;
     maybeAutoFit();
-    render();
+    scheduleRender();
   });
 
   function sendStopwatchControl(action, enabled) {
