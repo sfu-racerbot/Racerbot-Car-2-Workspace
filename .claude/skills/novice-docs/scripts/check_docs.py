@@ -28,7 +28,15 @@ from pathlib import Path
 # Configuration
 # --------------------------------------------------------------------------
 
-PROSE_LINE_LIMIT = 200
+# A paragraph is flagged when a single sentence runs past SENTENCE_LIMIT, or the
+# whole paragraph passes PARAGRAPH_LIMIT. Two separate problems: the sentence
+# that's really three sentences in a trenchcoat, and the undifferentiated wall.
+# Three crisp sentences totalling 210 characters are fine and shouldn't fire.
+SENTENCE_LIMIT = 200
+PARAGRAPH_LIMIT = 350
+
+# Abbreviations whose '.' does not end a sentence.
+_ABBREV = r"(?:e\.g|i\.e|etc|vs|cf|Dr|Mr|Ms|approx|Fig|no|No)"
 
 # Directories under src/ that are upstream code, not ours. Their READMEs are
 # out of scope -- we don't hold vendored docs to our house style.
@@ -212,16 +220,41 @@ def check_header_block(lines: list[str], kinds: list[str], rep: FileReport) -> N
                 "Header block is missing: " + "; ".join(missing))
 
 
+def sentences(text: str) -> list[str]:
+    """Rough sentence split -- good enough to spot a runaway sentence."""
+    protected = re.sub(_ABBREV + r"\.", lambda m: m.group(0).replace(".", "\0"),
+                       text, flags=re.I)
+    parts = re.split(r"(?<=[.!?])\s+(?=[A-Z`*\[(])", protected)
+    return [p.replace("\0", ".").strip() for p in parts if p.strip()]
+
+
 def check_long_paragraphs(lines: list[str], kinds: list[str], rep: FileReport) -> None:
     """Dense multi-idea paragraphs are this repo's characteristic problem."""
     for i, (line, kind) in enumerate(zip(lines, kinds)):
         if kind != "prose":
             continue
-        length = visible_length(line)
-        if length > PROSE_LINE_LIMIT:
+
+        text = LINK_RE.sub(lambda m: m.group(1), line)
+        text = re.sub(r"^\s*>\s?", "", text)
+        # Emphasis/code markers aren't read, and '**' straddling a full stop
+        # ("...ladder.** Simulator...") hides the sentence boundary.
+        text = re.sub(r"[*`_]", "", text).strip()
+        length = len(text)
+        if not length:
+            continue
+
+        longest = max((len(s) for s in sentences(text)), default=0)
+
+        if longest > SENTENCE_LIMIT:
             rep.add(i + 1, "warn", "dense",
-                    f"Paragraph is {length} characters. Split it into one idea "
-                    f"per paragraph (standard.md#2-one-idea-per-paragraph).")
+                    f"One sentence runs {longest} characters. That's usually two "
+                    f"or three sentences joined by dashes or semicolons -- split "
+                    f"it (standard.md#2-one-idea-per-paragraph).")
+        elif length > PARAGRAPH_LIMIT:
+            rep.add(i + 1, "warn", "dense",
+                    f"Paragraph is {length} characters. Break it up so each "
+                    f"paragraph carries one idea "
+                    f"(standard.md#2-one-idea-per-paragraph).")
 
 
 def check_jargon(path: Path, lines: list[str], kinds: list[str],
@@ -300,7 +333,15 @@ def check_command_blocks(lines: list[str], kinds: list[str],
             end += 1
 
         body = lines[start + 1:end]
-        if not any(RUNNY_COMMAND.match(b) for b in body):
+        runnable = [b for b in body if RUNNY_COMMAND.match(b)]
+        if not runnable:
+            i = end + 1
+            continue
+
+        # A block holding several alternative invocations is a menu ("useful
+        # overrides", a list of variants), not a step in a procedure. Asking it
+        # for one terminal number and one success signal makes no sense.
+        if len(runnable) >= 2:
             i = end + 1
             continue
 
