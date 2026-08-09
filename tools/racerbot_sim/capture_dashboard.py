@@ -31,6 +31,7 @@ import asyncio
 import json
 from pathlib import Path
 import sys
+import time
 import zlib
 
 import numpy as np
@@ -70,17 +71,28 @@ class Capture:
         # Everything below is the report: what arrived, and whether any of
         # it was wrong.
         self.counts = {}
+        self.bytes = {}
+        self.total_bytes = 0
+        self.started_at = None
         self.desyncs = []
         self.map_shapes = []
         self.map_fits = []
         self.pose_track = []
 
-    def _count(self, kind):
+    def _count(self, kind, size=0):
         self.counts[kind] = self.counts.get(kind, 0) + 1
+        # Bytes actually on the wire, which is the number the whole
+        # lightweight-dashboard exercise is about. Counted per message type
+        # so it is obvious which feed is expensive rather than just that
+        # something is.
+        self.bytes[kind] = self.bytes.get(kind, 0) + size
+        self.total_bytes += size
 
     def handle(self, message):
+        if self.started_at is None:
+            self.started_at = time.monotonic()
         if isinstance(message, (bytes, bytearray)):
-            self._count('binary')
+            self._count('binary', len(message))
             pending = self._pending
             self._pending = None
             if pending is None:
@@ -116,14 +128,23 @@ class Capture:
 
         payload = json.loads(message)
         kind = payload.get('type')
-        self._count(kind)
+        self._count(kind, len(message))
         if kind == 'batch':
             # One frame carrying a tick's worth of compact telemetry -- see
             # web_dashboard/batching.py. Each item is exactly the message it
             # would have been on its own.
             for item in payload.get('items') or []:
-                self.handle(json.dumps(item))
+                # Counted under its own type, but with no size of its own:
+                # those bytes were already counted once as part of the batch
+                # frame that carried it.
+                self._count(item.get('type'), 0)
+                self._dispatch(item)
             return
+        self._dispatch(payload)
+
+    def _dispatch(self, payload):
+        """Apply one decoded JSON message, batched or standalone."""
+        kind = payload.get('type')
         if kind in ('map', 'map_patch', 'scan'):
             if self._pending is not None:
                 # Two headers in a row: the first one's binary never came.
@@ -269,6 +290,25 @@ class Capture:
             'intent_state': self.intent_state,
         }
 
+    def _wire_report(self) -> dict:
+        """What this actually cost the link.
+
+        The point of the whole delta/batch protocol is a number, so measure
+        it rather than assert it. Per message type, because "the dashboard
+        uses N kB/s" is much less useful than knowing which feed is the N.
+        """
+        seconds = max(1e-6, time.monotonic() - (self.started_at or time.monotonic()))
+        by_type = {
+            kind: round(size / seconds / 1024, 2)
+            for kind, size in sorted(self.bytes.items()) if size
+        }
+        return {
+            'seconds': round(seconds, 1),
+            'total_kb': round(self.total_bytes / 1024, 1),
+            'total_kb_per_s': round(self.total_bytes / seconds / 1024, 2),
+            'kb_per_s_by_type': by_type,
+        }
+
     def report(self) -> dict:
         """What arrived over the whole session, and whether any of it was wrong."""
         travelled = 0.0
@@ -278,6 +318,7 @@ class Capture:
             'messages': dict(sorted(self.counts.items())),
             'desyncs': len(self.desyncs),
             'desync_detail': self.desyncs[:10],
+            'wire': self._wire_report(),
             'map_keyframes': self.map_keyframes,
             'map_patches': self.map_patches,
             # Non-zero means patches arrived out of order and the map went

@@ -74,6 +74,17 @@ fails). Full detail:
 The stream is also directly viewable at `http://<car-ip>:9090/` without
 the dashboard.
 
+Two things about this mode are worth knowing. It serves the same
+[two tiers](usb-camera-livestream.md#two-streams-not-one) as the webcam
+mode — a small `/stream` for the dashboard inset and
+`/stream?tier=full` for the recording view — but `passthrough` does
+nothing here: frames arrive from the topic already decoded, so there is no
+camera JPEG to pass through and every frame is encoded from scratch. And
+the subscription deliberately uses sensor QoS with a queue depth of 1. The
+default depth of 10 meant up to ten already-stale frames sat queued ahead
+of the current one, which on a 30fps camera is a third of a second of pure
+latency spent on frames nobody would ever see.
+
 ## Known limitation: no IMU on this backend
 
 `librealsense2` logs `No HID info provided, IMU is disabled` on startup, and

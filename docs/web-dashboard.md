@@ -133,8 +133,10 @@ manual parsing:
 
 | Update | JSON header | Binary payload |
 |---|---|---|
-| Map | width, height, resolution, origin | `Int8Array` — one signed byte per cell, exactly matching `OccupancyGrid.data` (-1 unknown, 0 free, 100 occupied) |
-| Scan | angle range/increment, LIDAR mounting offset | `Float32Array` — one little-endian float per beam, exactly matching `LaserScan.ranges` |
+| Map (keyframe) | `seq`, width, height, resolution, origin, `encoding` | the whole grid, one signed byte per cell, exactly matching `OccupancyGrid.data` (-1 unknown, 0 free, 100 occupied) — deflated |
+| Map (patch) | `seq`, `x`, `y`, `w`, `h`, `encoding` | only the rectangle of cells that changed since the last frame |
+| Scan | `encoding`, angle range/increment, LIDAR mounting offset | `Uint16Array` of millimetres (default) or `Float32Array` of metres — half the bytes for a difference below one screen pixel |
+| Batch | `items`: a tick's worth of the compact updates below, in one frame |  *(none)* |
 | Pose | `{x, y, yaw}` | *(none — small enough to just be JSON)* |
 | Drive | selected-command `{speed, steering_angle}` | *(none)* |
 | Speed | measured `{speed}` from odometry | *(none)* |
@@ -149,18 +151,75 @@ kept free of any ROS/Tornado/network imports so it's directly
 unit-testable (`test/test_protocol.py`) without a running robot, browser,
 or web server.
 
+### What this costs the car
+
+The dashboard is documented above as safe to leave running at all times,
+including during a race. That is only an honest claim if it is genuinely
+cheap, so here is what it actually costs, measured on this car's Jetson.
+
+**On the WiFi link**, per connected tab, while driving with SLAM mapping:
+
+| | Before | After |
+|---|---|---|
+| `/map` | 819 kB/s (the whole 2048×2048 grid, re-sent every 5s) | ~0.04 kB/s (a patch), or ~24 kB compressed on a keyframe |
+| scan | 44 kB/s (float32) | 22 kB/s (uint16 millimetres) |
+| intent | 31 kB/s | 24 kB/s (the commanded path is dropped while it matches the desired one) |
+| pose + command + speed + stopwatch | 14 kB/s | folded into one 20Hz frame |
+| WebSocket frames | ~155/s | ~40/s |
+| **total** | **~914 kB/s (7.1 Mbit/s)** | **~57 kB/s (0.45 Mbit/s)** |
+
+Measured live against the simulator over a 60s mapping run: **61 kB/s,
+0.48 Mbit/s, zero dropped frames**. Re-run it yourself with
+`tools/web_dashboard/bench_protocol.py`, or against a live car with
+`tools/racerbot_sim/capture_dashboard.py --report`.
+
+The reason this mattered so much while *driving* specifically is circular:
+driving is when `slam_toolbox` is mapping, and `slam_toolbox` republishes
+its entire grid every `map_update_interval` whether or not anything in it
+changed. The region that actually changed between two of those messages
+compresses to about 200 bytes.
+
+**On the Jetson's CPU**, the honest picture is more mixed. Packing the map
+went from 178ms to 2.2ms per message, the fan-out from ~3.3% of a core to
+~0.8%, and none of it happens at all when no browser is connected. But
+`dashboard_node`'s *total* CPU is dominated by rclpy's own executor and
+message deserialization, which this work does not touch — with no browser
+attached it sits around 35% of a core, right alongside `auto_map_race`
+(34%), `pure_pursuit` (32%) and `gap_follow` (25%) in the same run. Every
+Python node in this workspace pays that floor. Attaching a browser is now
+lost in the noise of it.
+
+If you need the node itself cheaper than that, the lever is
+`enable_tuning: false`, which removes two service clients and the 0.5Hz
+graph query — not any of the above.
+
 ### The browser side
 
 `web/dashboard.js` is one plain file, no build step, no framework:
 connects to `ws://<host>/ws`, keeps the latest map/scan/pose/command/speed/
-stopwatch/stats in a small state object, and redraws an HTML5 `<canvas>` whenever data
-arrives (plus on a 250ms timer, purely so "updated Xs ago" and stale-data
-coloring stay live even when nothing new has arrived). The occupancy grid
-is rendered into an off-screen canvas once per map update (not once per
-frame) and then scaled onto the visible canvas with a single `drawImage()`
-call — redrawing every cell every frame would be needlessly slow for a
-large map. Drag to pan (works both before and after localization — see
-below), scroll to zoom (toward the cursor), "reset view" to re-fit.
+stopwatch/stats in a small state object, and redraws an HTML5 `<canvas>`.
+Drag to pan (works both before and after localization — see below), scroll
+to zoom (toward the cursor), "reset view" to re-fit.
+
+**The browser owns the map.** The occupancy grid is rendered into an
+off-screen canvas, and thereafter the car sends only patches, which are
+blitted into that same canvas — so the expensive full redraw happens on
+connect and on the occasional keyframe rather than every few seconds. Each
+cell is coloured through a 256-entry palette indexed by its raw byte (one
+lookup and one 32-bit store, rather than a branch and four byte writes),
+which matters when a 2048×2048 keyframe is 4.2 million cells and the thing
+doing the work is a phone. Patches carry a sequence number and are applied
+only when they are the exact successor of the last frame; on any gap the
+browser waits for a keyframe rather than painting a map that is subtly
+wrong. Compressed payloads are inflated with `DecompressionStream` — if a
+browser is old enough not to have it, the console says so and
+`map_compression: false` is the fix.
+
+**Repaints are coalesced** through `requestAnimationFrame`: many state
+updates arriving together (a batch frame carries several) produce one
+repaint, not one each. A hidden tab draws nothing at all while still
+tracking everything the car sends — worth knowing if you leave the
+dashboard open on a second monitor or a phone in your pocket.
 
 The map is drawn in the dashboard's own dark palette rather than the
 ROS/RViz convention of white free space on mid-gray unknown, which on this
@@ -196,13 +255,28 @@ the bottom-left corner shows the current zoom level in meters/cm.
 
 ### Layout
 
-- **Left sidebar** — connection status; `feeds`; `vehicle` (measured speed,
-  selected steering, LB state); an LB-gated stopwatch with enable/reset;
-  `live tuning` (which driving nodes are tunable, and the button that
-  opens the panel); and `system` health. Feed dots are gray = never received, green = fresh,
-  red = stale. It has no fixed/maximum height — it simply
-  grows to fit whatever rows it has, rather than cramming them into a
-  fixed box.
+- **Left sidebar** — connection status; `feeds`; `intent`; `vehicle`
+  (measured speed, selected steering, LB state); an LB-gated stopwatch
+  with enable/reset; `system` health; and `live tuning` (which driving
+  nodes are tunable, and the button that opens the panel). Feed dots are
+  gray = never received, green = fresh, red = stale.
+
+  **Sections collapse.** Click a header to fold it away; a collapsed
+  section still shows its headline value in its own header, so hiding
+  `vehicle` does not cost you the speed. Which ones you keep open is
+  remembered in your browser, per device.
+
+  The sidebar is bounded to the window and scrolls, and each row shows a
+  short value with the full detail in its tooltip. Both are fixes rather
+  than preferences: it previously grew to whatever height it wanted while
+  the page itself could not scroll, so on a laptop or a phone the bottom
+  of it — the decision log, the tuning button, "reset view" — was rendered
+  below the bottom of the screen with no way to reach it. The decision log
+  and the reason text scroll on their own, which they also could not do
+  before: the whole sidebar ignored pointer events so that you could drag
+  the map "through" it, which meant the scroll wheel went past the log to
+  the canvas and zoomed the map instead. Panning still works everywhere
+  outside the sidebar.
 - **Top-right inset** — a minimap: always shows the *whole* map at a
   fixed auto-fit scale, independent of the main canvas's own pan/zoom,
   with a rectangle in the UI's accent blue showing what the main view
@@ -612,11 +686,17 @@ All in `src/web_dashboard/config/web_dashboard.yaml`:
 | `drive_topic` | `/ackermann_cmd` | Selected command after `ackermann_mux`; steering display and command-speed reference only |
 | `odom_topic` | `/odom` | Measured longitudinal speed |
 | `joy_topic` / `deadman_button` / `joy_timeout_sec` | `/joy` / `4` / `0.5` | Read-only LB state and freshness watchdog for the stopwatch |
-| `stopwatch_update_rate_hz` | `10.0` | Shared stopwatch state broadcast rate |
+| `stopwatch_update_rate_hz` | `4.0` | Shared stopwatch state broadcast rate. Low because the browser runs the clock between updates |
 | `host` | `0.0.0.0` | Listen on every network interface — see [security note](#security-note) |
 | `port` | `8080` | Web server port |
 | `scan_broadcast_rate_hz` | `10.0` | `/scan` runs ~40Hz; no browser needs to redraw that often, and this keeps WiFi/CPU load down |
 | `stats_interval_sec` | `1.0` | How often CPU%/mem%/temp/uptime are sampled and broadcast |
+| `telemetry_rate_hz` | `20.0` | Pose/command/speed/intent/stopwatch/stats go out as ONE frame at this rate rather than one frame each — see [what this costs the car](#what-this-costs-the-car) |
+| `map_compression` | `true` | Deflate map keyframes and patches |
+| `map_patching` | `true` | Send only the rectangle of the grid that changed. `false` goes back to whole grids, if a patch is ever suspected of painting the map wrong |
+| `map_keyframe_sec` | `30.0` | Resend the whole grid at least this often, so a browser cannot stay wrong indefinitely |
+| `scan_encoding` | `u16mm` | `u16mm` (uint16 millimetres — half the bytes, difference below one screen pixel) or `f32` |
+| `scan_decimation` | `1` | Send only every Nth beam. `1` = every beam |
 | `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` | Estimated LIDAR mounting offset from `base_link` (matches [hardware-reference.md](hardware-reference.md)), used to place scan points correctly relative to the car's pose |
 | `enable_tuning` | `true` | Whether [live parameter tuning](#live-parameter-tuning) exists at all. `false` never creates the service clients, and the panel disappears — a strictly read-only dashboard |
 | `tuning_nodes` | `[pure_pursuit_node, gap_follow_node]` | The only nodes this dashboard will probe or write to. An explicit list rather than bus discovery, which is what keeps it inside this workspace's own driving code |

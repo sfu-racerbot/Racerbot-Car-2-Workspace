@@ -6,6 +6,106 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-08-08 — A dashboard the car can afford, and a camera worth watching
+
+### web_dashboard
+
+- **The map is sent as changes, not as a map.** `slam_toolbox` republishes
+  its entire grid every `map_update_interval` for as long as it is mapping
+  — which is exactly while somebody is driving — and at the levine map's
+  2048×2048 that is 4MB a message, 819 kB/s, per open browser tab. New
+  `mapstream.py` answers each grid with a *keyframe* (first sight, a
+  resize, a new tab, or every `map_keyframe_sec`), a *patch* covering only
+  the rectangle that changed, or nothing at all when the grid is identical
+  to the last one. Measured: ~200 bytes where it used to be 4MB. Every
+  frame carries a sequence number, and the browser applies a patch only if
+  it is the exact successor of the last one — on a gap it waits for a
+  keyframe rather than painting a map that is quietly wrong.
+- **~155 WebSocket frames a second became ~40.** Pose, command, speed,
+  intent, stopwatch and stats are collected into one `batch` frame at
+  `telemetry_rate_hz`. A frame costs about the same however small it is, so
+  the framing was the cost. Latest-wins per type — except `/drive_intent`,
+  whose *state transitions* the browser builds its decision log from, so
+  those are queued in order and every one survives (`batching.py`).
+- Scans are uint16 millimetres rather than float32: half the bytes, for a
+  difference below one screen pixel and below the LIDAR's own accuracy.
+  Intent messages drop their commanded path while it is indistinguishable
+  from the desired one.
+- `protocol.map_cells`/`scan_ranges` now hand rclpy's `array.array`
+  straight to the wire instead of unpacking 4.2 million ints into
+  `struct.pack`: 178ms → 2.2ms per map message, byte-for-byte identical
+  (the existing round-trip tests pass unedited, which is the proof).
+- **Nothing happens at all when no browser is connected.** Every
+  broadcasting callback checks first; a newly connected tab is caught up by
+  `send_initial_state()` as before. Stats still sample on their timer and
+  intent messages are still validated, since both are useful with no tab
+  open.
+- Measured over a live 60s mapping run: **914 kB/s → 61 kB/s** (7.1 →
+  0.48 Mbit/s), zero dropped frames. Re-runnable:
+  `tools/web_dashboard/bench_protocol.py`.
+- **The sidebar can be used now.** The decision log had `overflow-y: auto`
+  and was impossible to scroll, because `#overlay` was
+  `pointer-events: none` so the wheel went past it to the canvas and
+  zoomed the map. And the sidebar had no height bound while the page could
+  not scroll, so on a laptop or phone its bottom — the decision log, the
+  tuning button, "reset view" — was rendered off-screen and unreachable.
+  It is now bounded and scrolls, with the mode banner and view controls
+  pinned outside the scroll region.
+- Sections are collapsible `<details>` that remember their state per
+  browser, and a collapsed one still shows its headline value in its
+  header. Feeds, vehicle and system moved to two compact columns with the
+  long form in each row's tooltip. Scrollbars are styled, since the
+  defaults are invisible on this theme.
+- The browser coalesces repaints through `requestAnimationFrame` (pose
+  alone used to force 40 full canvas repaints a second) and paints map
+  cells through a 256-entry palette. A hidden tab now draws nothing.
+- **New parameters:** `telemetry_rate_hz` (20.0), `map_compression`
+  (true), `map_patching` (true), `map_keyframe_sec` (30.0),
+  `scan_encoding` (`u16mm`), `scan_decimation` (1).
+  **Changed default:** `stopwatch_update_rate_hz` 10.0 → 4.0, since the
+  browser runs the clock between updates.
+
+### usb_cam_stream
+
+- **Two tiers.** `/stream` is a small preview (`preview_width`, default
+  480) for the dashboard's camera inset; `/stream?tier=full` is the
+  camera's own resolution for the recording view. The inset is at most 220
+  CSS pixels wide and was being fed 1280×720 at 12–18 Mbit/s — about 34×
+  more picture than it could show, competing with the dashboard's own
+  telemetry for the same link. Each tier is encoded once and shared, and a
+  tier nobody is watching is never encoded at all.
+- **The blur was a second JPEG generation.** The camera is asked for
+  MJPEG, OpenCV silently decodes it to BGR, and this node re-encoded it.
+  With `passthrough` (default true) the camera's own JPEG is served
+  untouched — sharper, and it removes a decode and an encode per frame.
+  Probed at startup, falls back cleanly, logs which mode is active.
+- Frames are pushed as soon as they exist instead of polled for on a
+  `1/stream_fps` sleep, which used to add up to 66ms to every frame.
+  Encoding moved to its own thread and always works on the newest frame,
+  dropping any backlog rather than letting latency accumulate — in
+  `image_topic` mode it used to run on the rclpy executor thread, stalling
+  every other ROS callback behind a 720p encode.
+- `image_topic` mode subscribes with sensor QoS at depth 1, not the default
+  10: a ten-frame backlog is a third of a second of stale frames.
+- Downscaling uses `INTER_AREA`, so the preview is legible rather than
+  aliased.
+- **New parameters:** `preview_width` (480), `preview_quality` (65),
+  `full_width` (0), `full_quality` (90), `passthrough` (true).
+  **Changed default:** `stream_fps` 15.0 → 30.0 (now a cap, not a poll
+  rate). **Deprecated:** `jpeg_quality` — still honoured, applied to both
+  tiers, warns.
+
+### tools
+
+- `tools/web_dashboard/bench_protocol.py` — packing speed, bytes on the
+  wire, and WebSocket framing cost at real dimensions (2048² map, 1081
+  beams), with thresholds so it fails on a regression.
+- `tools/web_dashboard/check_wire_format.py` — drives `dashboard_node`'s
+  real callbacks and checks what it puts on the wire.
+- `tools/racerbot_sim/capture_dashboard.py` speaks the new protocol and
+  reports kB/s per message type, keyframe/patch counts, and any patch it
+  had to ignore.
+
 ## 2026-08-08 — The automatic map-to-race path, and a simulator that can see it
 
 ### racerbot_sim (new package)
