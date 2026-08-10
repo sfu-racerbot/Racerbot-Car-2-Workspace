@@ -52,6 +52,7 @@ def _rule(css, selector):
 
 @pytest.mark.parametrize('script,page', [
     ('dashboard.js', 'index.html'),
+    ('panels.js', 'index.html'),
     ('camera.js', 'camera.html'),
 ])
 def test_every_element_the_script_looks_up_exists_in_its_page(script, page):
@@ -74,6 +75,15 @@ def test_the_dashboard_still_loads_its_stylesheet_and_script():
     html = _read('index.html')
     assert 'href="style.css"' in html
     assert 'src="dashboard.js"' in html
+    assert 'src="panels.js"' in html
+
+
+def test_the_panel_manager_loads_after_the_dashboard():
+    """panels.js MOVES section elements out of the sidebar. dashboard.js
+    resolves ~forty elements by id at load time and keeps the references,
+    which survive re-parenting -- but only if it ran first."""
+    html = _read('index.html')
+    assert html.index('src="dashboard.js"') < html.index('src="panels.js"')
 
 
 # --------------------------------------------------------------------------

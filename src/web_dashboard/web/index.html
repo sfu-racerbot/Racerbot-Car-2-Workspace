@@ -81,8 +81,12 @@
               <span class="metric-value" id="info-drive">--</span>
             </div>
           </div>
-          <div class="lidar-legend" aria-label="LIDAR color scale: red is close, green is far">
-            <span>close</span><span class="lidar-gradient"></span><span>far</span>
+          <!-- The real numbers, not "close"/"far": the useful question at
+               the trackside is "is that red point close enough to matter",
+               and only a distance answers it. Matches LIDAR_NEAR_M and
+               LIDAR_FAR_M in dashboard.js. -->
+          <div class="lidar-legend" aria-label="LIDAR colour scale: red at 10cm or nearer, green at 2m or further">
+            <span>10cm</span><span class="lidar-gradient"></span><span>2m+</span>
           </div>
         </div>
       </details>
@@ -224,10 +228,21 @@
          looks the way it does, and the view controls, are exactly the two
          things that must never be the part that scrolled out of sight. -->
     <div id="mode-banner"></div>
-    <div id="help">drag to pan &middot; scroll to zoom &middot; <button id="reset-view">reset view</button></div>
+    <div id="help">
+      drag to pan &middot; scroll to zoom
+      <span class="help-buttons">
+        <button id="reset-view">reset view</button>
+        <button id="reset-layout" title="Put every panel back where it started">reset layout</button>
+      </span>
+    </div>
   </div>
 
-  <!-- Live parameter tuning. A drawer rather than another sidebar section:
+  <!-- Live parameter tuning. Opens on the LEFT, docked against the info
+       panel's right edge -- it used to slide in from the right, where it
+       covered the minimap and the camera feed, which are exactly what you
+       want to keep watching while you change a speed.
+
+       A drawer rather than another sidebar section:
        it carries ~40 controls across two nodes, which would push the rest
        of the sidebar off a phone screen, and it is the one panel here that
        reaches the car rather than just reporting on it -- so it earns its
@@ -280,5 +295,9 @@
   </div>
 
   <script src="dashboard.js"></script>
+  <!-- After dashboard.js on purpose. panels.js MOVES section elements
+       around the page; dashboard.js has already looked all of them up by
+       id and holds direct references, which survive being re-parented. -->
+  <script src="panels.js"></script>
 </body>
 </html>

@@ -35,6 +35,7 @@ for the user-facing account and `enable_tuning: false` to remove it.
 | [`web_dashboard/tuning.py`](web_dashboard/tuning.py) | Live-tuning support: parsing a node's advertised catalogue, clamping a browser request, and the comment-preserving YAML writer. No ROS/Tornado imports either (see [`test/test_tuning.py`](test/test_tuning.py)). |
 | [`web_dashboard/dashboard_node.py`](web_dashboard/dashboard_node.py) | The ROS2 node: subscribes to map/scan/pose/command/odom/joy, runs a [Tornado](https://www.tornadoweb.org/) web + WebSocket server, and bridges its two threads. |
 | [`web/index.html`](web/index.html), [`web/dashboard.js`](web/dashboard.js), [`web/style.css`](web/style.css) | The main browser dashboard — plain HTML/JS/CSS, no build step. |
+| [`web/panels.js`](web/panels.js) | The window manager: popping a section out of the info panel, dragging, magnetic snapping, 8-way resizing, and the saved layout. Touches no telemetry — it only moves boxes. Its geometry is tested under node (see [`test/browser/panels_test.js`](test/browser/panels_test.js)). |
 | [`web/camera.html`](web/camera.html), [`web/camera.js`](web/camera.js), [`web/camera.css`](web/camera.css) | Full-window camera recording view with clock and telemetry overlays. |
 | [`config/web_dashboard.yaml`](config/web_dashboard.yaml) | Every parameter, loaded at launch. |
 | [`launch/web_dashboard_launch.py`](launch/web_dashboard_launch.py) | Starts the node with the YAML above. |
@@ -284,7 +285,11 @@ rules run through it, both stated at the top of the file:
   itself: the car marker, the view rectangle, the scale bar. Green, amber
   and red (`--go` / `--warn` / `--bad`) are reserved for what the car has
   decided. This is why the car icon is drawn cyan rather than red — a
-  permanently red car competes with "stop" meaning stop.
+  permanently red car competes with "stop" meaning stop. The LIDAR ramp is
+  the one exception and is a scale, not a state: red at `LIDAR_NEAR_M`
+  (0.1m) through orange and yellow to green at `LIDAR_FAR_M` (2.0m), with
+  `.lidar-gradient` in the stylesheet as its legend — change one, change
+  the other.
 - **Nothing resizes itself, and layout is never animated.** Numbers are
   `tabular-nums`; `#panels` uses `scrollbar-gutter: stable`; and any
   region whose content arrives later has a *fixed* size rather than a
@@ -297,6 +302,40 @@ rules run through it, both stated at the top of the file:
 The canvas half of the palette is the `HUD` constant near the top of
 `dashboard.js`. Canvas cannot read CSS custom properties, so those values
 are duplicated by hand — **change one, change the other.**
+
+### Detachable panels (`web/panels.js`)
+
+Any section can be popped out of the info panel into a floating panel,
+moved, snapped and resized; the LB stopwatch starts that way, in the
+right rail between the minimap and the camera.
+
+The trick that keeps this from touching anything else: detaching **moves
+the section's own `<details>` element** into the floating wrapper. Same
+DOM node, same ids, same children — so `dashboard.js` goes on writing to
+`#stopwatch-display` by id and neither file needs to know the element now
+lives somewhere else. `panels.js` never reads telemetry and never touches
+the WebSocket; it only moves boxes. It loads *after* `dashboard.js`, which
+has by then resolved its ~40 element references (those survive
+re-parenting), and `test_web_assets.py` pins that ordering.
+
+Three things are easy to get wrong here and are worth knowing:
+
+- **`offsetParent` is null for every `position: fixed` element**, and
+  every panel here is fixed. An `offsetParent === null` visibility test
+  therefore excludes all of them, which silently disables panel-to-panel
+  snapping and drops new panels on top of existing ones. Zero-sized
+  `getBoundingClientRect()` is the check that actually works.
+- **Equal `z-index` means document order wins.** Floating panels are
+  appended to `<body>` at runtime, so they come after the tuning drawer
+  and would paint over it — the drawer sits on 13 for that reason.
+- **Snapping considers both adjacency and alignment** (my left to your
+  right, *and* my left to your left), nearest wins. `snapAxis` in
+  `panels.js` is the whole rule, and `test/browser/panels_test.js` covers
+  it along with resize, clamping and the saved-layout round trip.
+
+Below `FLOAT_MIN_WIDTH` (900px) every panel re-docks and the pop-out
+buttons hide, but the layout state still records them as floating, so the
+wide-screen arrangement returns when the window widens.
 
 ### Layout: sidebar + two corner insets
 

@@ -104,6 +104,8 @@ That look carries one rule that's worth knowing before you read anything off the
 
 So anything red on this page means something. That's also why the car icon is cyan rather than red: a permanently red car competed with "stop" meaning stop, and after a while the eye stops believing red.
 
+**The one exception is the LiDAR points**, and it's a scale rather than a state: red at 10 cm through orange and yellow to green at 2 m. It carries its own legend, in the `feeds` section, for exactly that reason.
+
 ### Getting just `/scan` without the rest of the hardware
 
 If you only want LiDAR — no `joy_node`, [VESC](glossary.md#vesc) (the motor controller), or `ackermann_mux`, which otherwise only come bundled via `bringup_launch.py` — run the LiDAR driver directly with the same config:
@@ -272,7 +274,11 @@ A translucent red wedge marks the LIDAR's actual blind spot: the arc it physical
 
 That wedge is computed from the scan's own `angle_min` / `angle_increment` / count, **not** guessed from which beams read "no return" this frame. Open space with nothing in range would look identical to a blind spot that way, and shouldn't be flagged as one.
 
-Valid returns use a red→yellow→green proximity scale (0.3 m near to 5 m far). A scale bar in the bottom-left corner shows the current zoom level in meters or cm.
+Valid returns use a proximity scale: **red at 10 cm or nearer**, through orange and yellow, to **green at 2 m or further**. The legend under `feeds` states those two distances, so you never have to remember which end is which.
+
+That band is deliberately tight around the distances that matter to a car this size. It used to run 0.3 m to 5 m, which spent most of its range on distances where nothing was at stake and left everything inside a metre looking much the same shade.
+
+A scale bar in the bottom-left corner shows the current zoom level in meters or cm.
 
 **The faint grid behind everything** is not texture. It does two jobs:
 
@@ -302,7 +308,7 @@ If you edit `web/style.css`, keep both that rule and the colour rule above. Ther
 - `feeds`
 - `intent`
 - `vehicle` — measured speed, selected steering, LB state
-- an LB-gated stopwatch, with enable and reset
+- an LB-gated stopwatch, with enable and reset — though this one **starts detached**, in the right-hand rail (see below)
 - `system` health
 - `live tuning` — which driving nodes are tunable, plus the button that opens the panel
 
@@ -317,6 +323,24 @@ The sidebar is bounded to the window and scrolls, and each row shows a short val
 > The decision log and the reason text scroll on their own, which they also could not do before. The whole sidebar ignored pointer events so that you could drag the map "through" it — which meant the scroll wheel went past the log to the canvas and zoomed the map instead.
 >
 > Panning still works everywhere outside the sidebar.
+
+**Any section can be pulled out of the sidebar into its own floating panel**, and the arrangement is remembered in your browser.
+
+Hover a section header and a small **↗** appears on the right. Click it and that section becomes its own panel, leaving the sidebar (which gets shorter). The **⤓** button on the floating panel puts it back.
+
+Drag a floating panel by its title bar to move it. The sidebar and the minimap move too — drag them anywhere that isn't a button or the scrolling area.
+
+Bring a panel within about 12 pixels of another panel's edge, or of the screen edge, and it snaps flush to it. A cyan line shows the edge it locked onto. Snapped panels stay independent, so moving one does not drag the other along.
+
+Grab any edge or corner to resize. The camera inset is the exception and keeps its own top-left grip, because it stays locked to the video's shape — see below.
+
+**reset layout**, next to **reset view**, puts everything back.
+
+Two behaviours here are deliberate rather than accidental:
+
+> **The LB stopwatch starts detached**, in the right-hand rail between the minimap and the camera. It is the one readout people watch from several metres away while somebody else drives, so it gets its own space instead of being one collapsed row in a sidebar.
+>
+> **On a narrow window everything comes home.** Below about 900px there is no room to float panels usefully, so they all return to the sidebar and the ↗ buttons disappear. Your wide-screen arrangement is kept rather than discarded — widen the window and the panels go back where you put them. This is also what a phone gets.
 
 **Top-right inset** — a minimap. It always shows the *whole* map at a fixed auto-fit scale, independent of the main canvas's own pan and zoom.
 

@@ -922,8 +922,14 @@
     ctx.strokeRect(x0 + 0.5, y0 + 0.5, x1 - x0 - 1, y1 - y0 - 1);
   }
 
-  const LIDAR_NEAR_M = 0.3;
-  const LIDAR_FAR_M = 5.0;
+  // Proximity scale. Anything at or inside 10cm is fully red; anything at
+  // or beyond 2m is fully green, with orange and yellow in between. The
+  // band is deliberately tight around the distances that matter to a car
+  // this size -- a 5m ceiling spent most of the ramp on ranges where
+  // nothing is at stake, and left everything inside a metre looking
+  // much the same shade. Keep .lidar-gradient in style.css in step.
+  const LIDAR_NEAR_M = 0.1;
+  const LIDAR_FAR_M = 2.0;
   const LIDAR_COLORS = Array.from({ length: 17 }, (_, i) => {
     const hue = Math.round((i / 16) * 120); // red (near) -> yellow -> green (far)
     // Brighter and more saturated than a chart palette would be: these
@@ -1173,7 +1179,7 @@
   }
 
   function drawIntentRibbon(intent, project, colors) {
-    const pts = intent.path || [];
+    const pts = anchoredToCar(intent.path || []);
     if (polylineLength(pts) < 0.05) {
       drawIntentHold(intent, project, colors);
       return;
@@ -1256,8 +1262,27 @@
     ctx.stroke();
   }
 
+  // Both intent polylines are in the car's own body frame, so the car is
+  // exactly (0, 0) in them. A publisher whose first point is some way out
+  // in front left the line hanging in space with a gap between it and the
+  // car -- which reads as "that floating thing is a second vehicle"
+  // rather than "this is where THIS car is going". Anchoring the line at
+  // the origin makes the claim unambiguous: it always grows out of the
+  // car that is making it.
+  const PATH_ANCHOR_GAP_M = 0.05;
+
+  function anchoredToCar(pts) {
+    if (!pts.length) return pts;
+    const first = pts[0];
+    if (Math.hypot(first.x, first.y) <= PATH_ANCHOR_GAP_M) return pts;
+    // Spread the first point rather than building a bare {x, y}: the
+    // ribbon reads a per-point speed (`v`) off these to decide its own
+    // width, and an anchor without one would widen to NaN.
+    return [{ ...first, x: 0, y: 0 }, ...pts];
+  }
+
   function drawIntentGhost(intent, project) {
-    const pts = intent.commanded_path || [];
+    const pts = anchoredToCar(intent.commanded_path || []);
     if (polylineLength(pts) < 0.05) return;
     ctx.save();
     ctx.setLineDash([5, 5]);
@@ -1272,18 +1297,39 @@
     ctx.restore();
   }
 
+  // A reticle -- a hollow ring with a cross through it -- rather than a
+  // solid disc. A filled dot sitting out in front of the car, at roughly
+  // the car's own on-screen size, read as a second vehicle; the first
+  // question anyone asked of this display was "which one is the car?".
+  // A sight is not a thing that drives, so it cannot be confused for one.
   function drawIntentTargets(intent, project, colors) {
     (intent.targets || []).forEach((t) => {
       const [cx, cy] = project(t.x, t.y);
+      const r = 6;
+      ctx.save();
+      ctx.strokeStyle = colors.edge;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
-      ctx.fillStyle = colors.edge;
-      ctx.fill();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      // Cross arms, drawn past the ring on both axes.
+      ctx.beginPath();
+      ctx.moveTo(cx - r - 3, cy);
+      ctx.lineTo(cx - 2, cy);
+      ctx.moveTo(cx + 2, cy);
+      ctx.lineTo(cx + r + 3, cy);
+      ctx.moveTo(cx, cy - r - 3);
+      ctx.lineTo(cx, cy - 2);
+      ctx.moveTo(cx, cy + 2);
+      ctx.lineTo(cx, cy + r + 3);
+      ctx.stroke();
+      ctx.restore();
+
       ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.fillStyle = 'rgba(220, 236, 247, 0.78)';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(String(t.kind || '').replace(/_/g, ' '), cx + 9, cy);
+      ctx.fillText(String(t.kind || '').replace(/_/g, ' '), cx + r + 7, cy);
     });
   }
 

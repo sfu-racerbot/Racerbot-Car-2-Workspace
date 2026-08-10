@@ -34,7 +34,10 @@
 :root {
   /* --- Ground --- */
   --void: #04070c;            /* the field the map is drawn on */
-  --panel: rgba(7, 14, 24, 0.88);
+  /* Quite transparent on purpose -- the map behind a panel stays legible.
+     The blur on .hud-panel is what keeps the text on top readable at this
+     alpha; drop the blur and this has to go back up. */
+  --panel: rgba(6, 12, 21, 0.62);
   --panel-solid: #070e18;
   --well: rgba(0, 0, 0, 0.32); /* recessed areas: log, inputs */
 
@@ -144,15 +147,15 @@ html, body {
  * panel read as an instrument rather than as a rounded web card.
  */
 /* ------------------------------------------------------------------ */
+/* Deliberately plain: a flat, quite transparent wash and a hairline, with
+   the corner brackets below carrying the HUD character instead. This used
+   to also paint a 22px technical grid over every panel, which looked the
+   part on an empty screenshot and was simply noise behind six sections of
+   live numbers -- the panel competed with its own contents. The map shows
+   through instead, which is the thing actually worth looking at. */
 .hud-panel {
   position: relative;
   background-color: var(--panel);
-  /* A 22px technical grid, barely visible. FUI convention: the grid is
-     what makes a surface read as "a system is drawing this". */
-  background-image:
-    linear-gradient(to right, var(--line-soft) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--line-soft) 1px, transparent 1px);
-  background-size: 22px 22px;
   border: 1px solid var(--line);
   border-radius: 2px;   /* crisp, not soft: 2px reads as machined, 10px reads as an app card */
   backdrop-filter: blur(9px);
@@ -216,9 +219,13 @@ html, body {
   position: fixed;
   top: 12px;
   left: 12px;
-  z-index: 10;
+  /* Above the tuning drawer (11) and the floating panels, so the drawer
+     emerges from behind it and a dragged panel passes underneath rather
+     than burying the one panel that is always there. */
+  z-index: 12;
   /* A FIXED width, not a content-driven one: the sidebar must not breathe
-     in and out as values change length. */
+     in and out as values change length. panels.js overrides width/height
+     inline once you resize it. */
   width: min(320px, calc(100vw - 24px));
   max-height: calc(100vh - 24px);
   box-sizing: border-box;
@@ -671,6 +678,200 @@ html, body {
   outline-offset: 2px;
 }
 
+/* ==================================================================== */
+/* Detachable panels (panels.js)
+ *
+ * Any section of the info panel can be popped out into its own floating
+ * panel, moved, snapped against other panels, and resized from any edge
+ * or corner. The section's own <details> element is moved into the
+ * floating wrapper rather than rebuilt, so everything it contains keeps
+ * working and keeps its ids -- which is why almost nothing in here is
+ * about the section's own contents.
+ */
+/* ==================================================================== */
+
+/* The pop-out button in a section header. Pushed to the far right of the
+   summary row, and only inked on hover, so six of these across the
+   sidebar do not read as six more things to look at. */
+.section-detach {
+  flex: none;
+  margin-left: 4px;
+  padding: 0 3px;
+  background: none;
+  border: none;
+  color: var(--ink-faint);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms linear, color 120ms linear;
+}
+
+/* .section-digest takes the slack in the header, so the button sits hard
+   right without needing a margin of its own. */
+.section-head:hover .section-detach,
+.section-head:focus-within .section-detach {
+  opacity: 1;
+}
+
+.section-detach:hover {
+  color: var(--accent);
+}
+
+/* A touchscreen has no hover to reveal it with. */
+@media (hover: none) {
+  .section-detach { opacity: 1; }
+}
+
+.float-panel {
+  position: fixed;
+  z-index: 11;
+  /* Less see-through than a fixed panel. These can be dragged on top of
+     one another, and at the info panel's alpha two overlapping panels
+     turned into one illegible pile. */
+  background-color: rgba(6, 12, 21, 0.86);
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 0;
+}
+
+/* The drag handle. Also the only part of a floating panel that starts a
+   move -- dragging from the body would fight with selecting text and
+   with the scroll regions inside it. */
+.float-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border-bottom: 1px solid var(--line);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.float-panel.panel-dragging .float-bar {
+  cursor: grabbing;
+}
+
+.float-title {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.float-dock {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--ink-dim);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  transition: color 120ms linear;
+}
+
+.float-dock:hover {
+  color: var(--accent);
+}
+
+.float-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 6px 10px 8px;
+}
+
+/* Inside a floating panel the section header is redundant -- the title
+   bar already says what this is, and the disclosure caret would collapse
+   a panel you deliberately pulled out to watch. */
+.float-body .section-head {
+  display: none;
+}
+
+.float-body .section {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+/* Lifted while it is being moved or sized, so it is unambiguous which
+   panel the pointer currently owns. */
+.float-panel.panel-dragging,
+.float-panel.panel-resizing,
+.panel-dragging,
+.panel-resizing {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgba(61, 220, 255, 0.35), 0 18px 48px rgba(0, 0, 0, 0.65);
+}
+
+/* --- The eight resize grips ----------------------------------------
+   Invisible, sitting just inside each edge and corner. 8px is wide
+   enough to hit with a mouse without eating clicks meant for the panel's
+   own contents; corners are 14px because they are what people aim for. */
+.panel-resize {
+  position: absolute;
+  z-index: 5;
+  touch-action: none;
+}
+
+.panel-resize-n { top: -2px; left: 10px; right: 10px; height: 8px; cursor: ns-resize; }
+.panel-resize-s { bottom: -2px; left: 10px; right: 10px; height: 8px; cursor: ns-resize; }
+.panel-resize-e { right: -2px; top: 10px; bottom: 10px; width: 8px; cursor: ew-resize; }
+.panel-resize-w { left: -2px; top: 10px; bottom: 10px; width: 8px; cursor: ew-resize; }
+.panel-resize-ne { top: -2px; right: -2px; width: 14px; height: 14px; cursor: nesw-resize; }
+.panel-resize-nw { top: -2px; left: -2px; width: 14px; height: 14px; cursor: nwse-resize; }
+.panel-resize-se { bottom: -2px; right: -2px; width: 14px; height: 14px; cursor: nwse-resize; }
+.panel-resize-sw { bottom: -2px; left: -2px; width: 14px; height: 14px; cursor: nesw-resize; }
+
+/* The camera inset keeps its own aspect-locked grip in the top-left
+   corner (see #camera-resize) -- that one exists so the panel is always
+   exactly the shape of the video. Its generic grips must not sit on top
+   of it and steal the gesture. */
+#camera-panel .panel-resize-nw { display: none; }
+
+/* --- Snap guides ----------------------------------------------------
+   A single hairline showing the edge a dragged panel has locked onto, so
+   a snap reads as a decision the UI made rather than as a jump. */
+.snap-guide {
+  position: fixed;
+  z-index: 30;
+  display: none;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(61, 220, 255, 0.8);
+  pointer-events: none;
+}
+
+.snap-guide-x { top: 0; bottom: 0; width: 1px; }
+.snap-guide-y { left: 0; right: 0; height: 1px; }
+
+/* Below the floating threshold every section is back in the info panel,
+   so the pop-out affordance would be a button that cannot work. */
+body.panels-narrow .section-detach {
+  display: none;
+}
+
+.help-buttons {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 4px;
+}
+
 /* ------------------------------------------------------------------ */
 /* Corner insets: a small always-on overview map (top-right) and the
    live camera feed (bottom-right), both independent of the main
@@ -831,10 +1032,18 @@ html, body {
   letter-spacing: 0.12em;
 }
 
+/* The same ramp dashboard.js paints the points with: hue 0->120 linear in
+   distance, so 25% of the way is orange and 50% is yellow. Stated in four
+   stops rather than three so the legend is not a smoother gradient than
+   the thing it is a legend for. */
 .lidar-gradient {
   height: 3px;
-  background: linear-gradient(90deg, var(--bad) 0%, var(--warn) 50%, var(--go) 100%);
-  box-shadow: 0 0 10px rgba(255, 69, 96, 0.25);
+  background: linear-gradient(90deg,
+    hsl(0 95% 58%) 0%,
+    hsl(30 95% 58%) 25%,
+    hsl(60 95% 58%) 50%,
+    hsl(120 95% 58%) 100%);
+  box-shadow: 0 0 10px rgba(255, 69, 96, 0.22);
 }
 
 #stopwatch-display {
@@ -978,28 +1187,43 @@ html, body {
   margin-top: 7px;
 }
 
+/* Opens on the LEFT, docked just right of the info panel -- not from the
+   right edge, where it covered the camera feed and the minimap, which are
+   exactly what you want to keep watching while you change a speed.
+   `--tuning-left` is kept in step with the info panel's real right edge by
+   panels.js, so the drawer still lands correctly after the info panel has
+   been moved or resized. */
 #tuning-panel {
   position: fixed;
   top: 0;
-  right: 0;
-  z-index: 20;
+  left: var(--tuning-left, 344px);
+  /* Above the floating panels (11). Floating panels are appended to
+     <body> at runtime, so they come after this element in document order
+     and would paint over it at an equal z-index -- which interleaved the
+     drawer and any detached panel parked in its strip into an unreadable
+     stack. It never overlaps #overlay (it starts at that panel's right
+     edge), so sitting above that too costs nothing. */
+  z-index: 13;
   display: flex;
   flex-direction: column;
-  width: min(390px, 100vw);
+  width: min(390px, calc(100vw - var(--tuning-left, 344px)));
   height: 100%;
   /* Opaque, unlike the floating panels: this one is full height and sits
      over the corner insets, and at 97% the minimap and camera ghosted
      through it looking like artifacts rather than depth. */
   background-color: var(--panel-solid);
   border: none;
-  border-left: 1px solid var(--line-strong);
+  border-right: 1px solid var(--line-strong);
   border-radius: 0;
   font-size: 13px;
   /* Off-screen by default. transform rather than display:none so the
      panel animates, and so its scroll position survives a close/open.
      transform is also the only way to animate this without reflowing the
      page behind it. */
-  transform: translateX(100%);
+  /* Slides left, far enough to clear its own left offset as well as its
+     width, so it parks completely off-screen instead of peeking out from
+     under the info panel. */
+  transform: translateX(calc(-100% - var(--tuning-left, 344px)));
   transition: transform 0.18s ease-out;
 }
 
@@ -1482,7 +1706,14 @@ html, body {
   /* Touch targets: a 10px summary row is not comfortably tappable. */
   .section-head { padding: 6px 0; }
   .intent-log { height: 120px; max-height: 120px; }
-  #tuning-panel { width: 100vw; }
+  /* No room to sit beside the info panel on a phone: take the whole
+     width and cover it instead, which is also why it goes above it here. */
+  #tuning-panel {
+    left: 0;
+    width: 100vw;
+    z-index: 14;
+    transform: translateX(-100%);
+  }
   /* The viewport brackets crowd a phone screen and add nothing there. */
   .frame-corner { display: none; }
 }
