@@ -687,6 +687,49 @@
     });
   }
 
+  // ---------------------------------------------------------------------
+  // Which coordinate frame each overlay may be drawn in, given what has
+  // actually arrived. One function, because the three used to decide it
+  // separately and drifted apart:
+  //
+  //   'map'  -- world coordinates, locked to the map
+  //   'body' -- the car's own frame, car fixed at the view origin
+  //   'none' -- we do not know enough to draw it honestly
+  //
+  // The rule that ties them together: a body-frame picture is only honest
+  // when there is NO map. With a map on screen and no pose, "the car is at
+  // the middle of the view, pointing up" is not a fact about the car, it
+  // is a fact about the viewport -- and drawn over a world-frame map it
+  // reads as a real position. The scan already refused to draw in that
+  // state; the car did not, and so sat at the wrong place, facing a fixed
+  // "up" regardless of its real heading, sliding against the map whenever
+  // the view was re-fitted. That is the bug this function exists to make
+  // impossible to reintroduce in one overlay but not the others.
+  // ---------------------------------------------------------------------
+  function drawFrames(has) {
+    const mapRelative = !!has.pose;
+    const bodyIsHonest = !has.map;
+    const overlay = (present) => {
+      if (!present) return 'none';
+      if (mapRelative && has.map) return 'map';
+      return bodyIsHonest ? 'body' : 'none';
+    };
+    return {
+      scan: overlay(has.scan),
+      intent: overlay(has.intent),
+      // The car follows the same rule, and specifically must land in the
+      // SAME frame as the scan whenever both are drawn. It used to go to
+      // world coordinates on a pose alone -- so with a pose but no map
+      // yet, the car was projected through worldToCanvas while its own
+      // LIDAR was projected through bodyToCanvas, and the car floated
+      // away from the scan it had produced.
+      car: (mapRelative && has.map) ? 'map'
+        : (bodyIsHonest && has.scan) ? 'body'
+        : 'none',
+    };
+  }
+  if (typeof window !== 'undefined') window.__drawFrames = drawFrames;
+
   function render() {
     resizeCanvasIfNeeded();
     ctx.fillStyle = HUD.void;
@@ -715,29 +758,32 @@
         + `-- ${state.desyncDetail}. The picture below may be stale.`;
     }
 
-    if (state.scan) {
-      if (mapRelative && state.map) {
-        drawBlindSpotMapRelative();
-        drawScanMapRelative();
-      } else if (!state.map) {
-        drawBlindSpotRobotCentric();
-        drawScanRobotCentric();
-      }
-      // Map loaded but no pose yet: deliberately not drawing the scan --
-      // plotting it without a pose would just be a guess dressed up as
-      // data, and the banner above already explains why.
+    // One decision for all three overlays -- see drawFrames above. A
+    // 'none' here means "a map is up but no pose has arrived": the banner
+    // already says so, and drawing any of them anyway would be a guess
+    // dressed up as data.
+    const frames = drawFrames({
+      map: !!state.map, pose: !!state.pose,
+      scan: !!state.scan, intent: !!state.intent,
+    });
+
+    if (frames.scan === 'map') {
+      drawBlindSpotMapRelative();
+      drawScanMapRelative();
+    } else if (frames.scan === 'body') {
+      drawBlindSpotRobotCentric();
+      drawScanRobotCentric();
     }
 
     // Intent under the car icon, so the car always reads as the thing the
-    // arrow belongs to. Needs a body frame it can place: either a pose, or
-    // the robot-centric fallback that exists whenever there is no map.
-    if (state.intent && (mapRelative || !state.map)) {
-      drawIntent(mapRelative && !!state.map);
+    // arrow belongs to.
+    if (frames.intent !== 'none') {
+      drawIntent(frames.intent === 'map');
     }
 
-    if (mapRelative) {
+    if (frames.car === 'map') {
       drawCarMapRelative();
-    } else if (state.scan) {
+    } else if (frames.car === 'body') {
       drawCarRobotCentric();
     }
 
