@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'web_dashboard'
@@ -16,14 +18,15 @@ setup(
         ('share/' + package_name + '/config', [
             'config/web_dashboard.yaml',
         ]),
-        ('share/' + package_name + '/web', [
-            'web/index.html',
-            'web/dashboard.js',
-            'web/style.css',
-            'web/camera.html',
-            'web/camera.js',
-            'web/camera.css',
-        ]),
+        # Globbed, NOT listed by hand. These were an explicit list until
+        # adding web/panels.js to the page and forgetting to add it here
+        # too -- which installs a dashboard whose index.html asks for a
+        # script that was never copied, so the browser 404s it and every
+        # feature in that file silently does not exist. Nothing about the
+        # page looks broken; the missing behaviour just never appears.
+        # A glob cannot forget. test_packaging.py holds the line.
+        ('share/' + package_name + '/web',
+            glob('web/*.html') + glob('web/*.js') + glob('web/*.css')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
