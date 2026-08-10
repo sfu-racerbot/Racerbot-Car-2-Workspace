@@ -54,6 +54,7 @@
   const intentFactors = document.getElementById('intent-factors');
   const intentLog = document.getElementById('intent-log');
   const intentToggle = document.getElementById('intent-toggle');
+  const commandedToggle = document.getElementById('commanded-toggle');
 
   const modeBanner = document.getElementById('mode-banner');
   const resetViewBtn = document.getElementById('reset-view');
@@ -61,6 +62,13 @@
   if (intentToggle) {
     intentToggle.addEventListener('change', () => {
       state.showIntent = intentToggle.checked;
+      scheduleRender();
+    });
+  }
+
+  if (commandedToggle) {
+    commandedToggle.addEventListener('change', () => {
+      state.showCommanded = commandedToggle.checked;
       scheduleRender();
     });
   }
@@ -114,6 +122,11 @@
     intentReceivedAt: 0,
     intentLog: [],   // [{ state, severity, at, heldMs }] newest first
     showIntent: true,
+    // The commanded-path ghost and the lookahead reticle. Off unless
+    // asked for -- see drawIntent. Seeded from the checkbox rather than a
+    // literal false, because a browser restoring a ticked box across a
+    // reload would otherwise leave the box ticked and the paths hidden.
+    showCommanded: !!(commandedToggle && commandedToggle.checked),
     // Binary frames whose length did not match the header that claimed
     // them -- see handleBinary. Surfaced rather than swallowed, because
     // the visible symptom is a map that has turned to garbage and there
@@ -1214,12 +1227,23 @@
     if (stale) ctx.globalAlpha = 0.35;
 
     drawIntentWedge(intent, project, colors);
-    // The ghost goes underneath: where it separates from the ribbon, the
-    // gap is the slew-rate and acceleration shaping between what the
-    // algorithm asked for and what actually went on the wire.
-    drawIntentGhost(intent, project);
+    // Off by default. The arrow already says where the car is going, and
+    // a dashed second path plus a crosshair sitting in front of the car
+    // read as more vehicles rather than as annotations on this one.
+    //
+    // They are still worth having when you want them: the ghost is the
+    // *commanded* path against the arrow's *desired* one, so the gap
+    // between them is the slew-rate and acceleration shaping -- the
+    // answer to "the arrow says 4 m/s and the car is doing 2".
+    if (state.showCommanded) {
+      // The ghost goes underneath, so where it separates from the ribbon
+      // the gap itself is the thing you see.
+      drawIntentGhost(intent, project);
+    }
     drawIntentRibbon(intent, project, colors);
-    drawIntentTargets(intent, project, colors);
+    if (state.showCommanded) {
+      drawIntentTargets(intent, project, colors);
+    }
 
     ctx.restore();
   }

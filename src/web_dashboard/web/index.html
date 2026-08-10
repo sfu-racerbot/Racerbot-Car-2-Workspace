@@ -129,6 +129,14 @@
             <input type="checkbox" id="intent-toggle" checked />
             <span>show arrow on map</span>
           </label>
+          <!-- Off by default. The arrow alone answers "where is it going";
+               these two answer the narrower "why is it not going there as
+               fast as it wanted", which is only worth the clutter while
+               you are actually asking it. -->
+          <label class="intent-toggle" title="Also draw the commanded path (dashed) and the lookahead target. The gap between the dashed path and the arrow is the slew-rate and acceleration shaping.">
+            <input type="checkbox" id="commanded-toggle" />
+            <span>show commanded path</span>
+          </label>
         </div>
       </details>
 
