@@ -268,13 +268,41 @@ def sentences(text: str) -> list[str]:
     return [p.replace("\0", ".").strip() for p in parts if p.strip()]
 
 
-def check_long_paragraphs(lines: list[str], kinds: list[str], rep: FileReport) -> None:
-    """Dense multi-idea paragraphs are this repo's characteristic problem."""
+def paragraphs(lines: list[str], kinds: list[str]) -> list[tuple[int, str]]:
+    """Group consecutive prose lines into (start_line_index, joined_text).
+
+    A list item is its own paragraph, so a bulleted line that continues onto
+    the next physical line joins, but the next bullet starts fresh.
+    """
+    out: list[tuple[int, str]] = []
+    start: int | None = None
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal start, buf
+        if start is not None and buf:
+            out.append((start, " ".join(buf)))
+        start, buf = None, []
+
     for i, (line, kind) in enumerate(zip(lines, kinds)):
         if kind != "prose":
+            flush()
             continue
+        stripped = line.strip()
+        # A new bullet, numbered item, or blockquote marker starts a new block.
+        if re.match(r"^([-*+]|\d+\.)\s", stripped) or stripped.startswith(">"):
+            flush()
+        if start is None:
+            start = i
+        buf.append(stripped)
+    flush()
+    return out
 
-        raw = LINK_RE.sub(lambda m: m.group(1), line)
+
+def check_long_paragraphs(lines: list[str], kinds: list[str], rep: FileReport) -> None:
+    """Dense multi-idea paragraphs are this repo's characteristic problem."""
+    for i, para in paragraphs(lines, kinds):
+        raw = LINK_RE.sub(lambda m: m.group(1), para)
         raw = re.sub(r"^\s*>\s?", "", raw)
         # Emphasis and code markers aren't read, so they don't count toward
         # length -- but they must survive until after the sentence split.
