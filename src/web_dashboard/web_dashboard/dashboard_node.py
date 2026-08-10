@@ -79,13 +79,15 @@ from rcl_interfaces.srv import GetParameters, SetParameters
 from sensor_msgs.msg import Joy, LaserScan
 from std_msgs.msg import String
 
+import tornado.httpserver
 import tornado.ioloop
+import tornado.netutil
 import tornado.web
 import tornado.websocket
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 
 from drive_intent import schema as intent_schema
-from web_dashboard import protocol, tuning
+from web_dashboard import netbind, protocol, tuning
 from web_dashboard.batching import TelemetryBatcher
 from web_dashboard.mapstream import MapGeometry, MapStreamer
 from web_dashboard.stopwatch import DeadmanStopwatch
@@ -1180,10 +1182,22 @@ def main(args=None):
     ros_thread.start()
 
     app = node.make_app()
-    app.listen(node.port, address=node.host)
+
+    # Not app.listen(port, address='0.0.0.0'): that binds IPv4 only, which
+    # is why the dashboard was reachable on the LAN but not over Tailscale
+    # -- MagicDNS hands the browser the node's IPv6 address and nothing was
+    # listening on it. Binding with no address at all is what actually
+    # covers every interface in both families. See netbind.py.
+    server = tornado.httpserver.HTTPServer(app)
+    if netbind.wants_all_interfaces(node.host):
+        sockets = tornado.netutil.bind_sockets(node.port)
+    else:
+        sockets = tornado.netutil.bind_sockets(node.port, address=node.host)
+    server.add_sockets(sockets)
+
     node._loop = tornado.ioloop.IOLoop.current()
 
-    node.get_logger().info(f"Serving on http://{node.host}:{node.port}/ (Ctrl+C to stop)")
+    node.get_logger().info(netbind.describe(node.host, node.port) + ' (Ctrl+C to stop)')
     try:
         node._loop.start()
     except KeyboardInterrupt:

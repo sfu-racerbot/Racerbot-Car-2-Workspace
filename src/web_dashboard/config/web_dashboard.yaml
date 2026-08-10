@@ -29,7 +29,13 @@ web_dashboard_node:
     stopwatch_update_rate_hz: 4.0
 
     # --- Web server ---
-    host: 0.0.0.0   # listen on every interface -- see docs/web-dashboard.md's security note
+    # Every interface, IPv4 *and* IPv6 -- the node treats this wildcard as
+    # "bind everything" rather than passing it straight to the web server,
+    # which would bind IPv4 only and leave the dashboard unreachable at the
+    # car's Tailscale IPv6 address. See web_dashboard/netbind.py and
+    # docs/web-dashboard.md's security note.
+    host: 0.0.0.0
+    # Set a real address instead (e.g. 127.0.0.1) to restrict it to one.
     port: 8080
 
     # --- Bandwidth ---

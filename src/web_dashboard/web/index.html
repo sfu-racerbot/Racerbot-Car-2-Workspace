@@ -3,11 +3,26 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- Force dark form controls: without this the browser renders native
+       checkboxes, number inputs and sliders in its light theme, which on
+       this palette looks like a rendering bug. -->
+  <meta name="color-scheme" content="dark" />
   <title>racerbot live dashboard</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <canvas id="view"></canvas>
+
+  <!-- Viewport framing: corner brackets and a vignette over the map.
+       Decorative only -- aria-hidden, pointer-events:none, no ids the
+       script depends on -- so it can never intercept a drag on the map
+       or announce itself to a screen reader. -->
+  <div id="hud-frame" aria-hidden="true">
+    <span class="frame-corner frame-tl"></span>
+    <span class="frame-corner frame-tr"></span>
+    <span class="frame-corner frame-bl"></span>
+    <span class="frame-corner frame-br"></span>
+  </div>
 
   <!-- The sidebar is three parts: a pinned header, ONE scrolling region,
        and a pinned footer. That shape is deliberate. Previously the whole
@@ -15,7 +30,18 @@
        itself could not scroll, so on a laptop or a phone the bottom
        sections -- the decision log, the tuning button, reset view -- simply
        ran off the screen with no way to reach them. -->
-  <div id="overlay">
+  <div id="overlay" class="hud-panel">
+    <!-- Pinned identity + link state. Kept above the scroll region because
+         "is this page still connected to the car" is the one thing that
+         must be answerable without scrolling anywhere. -->
+    <div id="masthead">
+      <div id="brand">
+        <span id="brand-mark" aria-hidden="true"></span>
+        <span id="brand-name">RACERBOT</span>
+      </div>
+      <div id="brand-sub">LIVE TELEMETRY</div>
+    </div>
+
     <div id="status">
       <span id="conn-dot" class="dot dot-red"></span>
       <span id="conn-text">connecting...</span>
@@ -206,7 +232,7 @@
        of the sidebar off a phone screen, and it is the one panel here that
        reaches the car rather than just reporting on it -- so it earns its
        own deliberate open/close rather than being always underfoot. -->
-  <aside id="tuning-panel" aria-hidden="true" aria-label="Live parameter tuning">
+  <aside id="tuning-panel" class="hud-panel" aria-hidden="true" aria-label="Live parameter tuning">
     <header id="tuning-head">
       <div id="tuning-title">live tuning</div>
       <button id="tuning-close" aria-label="Close tuning panel">&times;</button>
@@ -230,13 +256,13 @@
     </footer>
   </aside>
 
-  <div id="minimap-panel">
+  <div id="minimap-panel" class="hud-panel">
     <div class="panel-label">map</div>
     <canvas id="minimap"></canvas>
     <div id="minimap-placeholder" class="panel-placeholder">no map yet</div>
   </div>
 
-  <div id="camera-panel">
+  <div id="camera-panel" class="hud-panel">
     <a id="camera-link" href="camera.html" target="_blank" rel="noopener" title="Open recording view in a new tab">
       <div class="panel-label">camera</div>
       <div class="camera-open-hint">open recording view &#8599;</div>

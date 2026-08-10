@@ -136,10 +136,33 @@
   const INTENT_STALE_MS = 1000;
   const INTENT_LOG_LIMIT = 20;
 
+  // ---------------------------------------------------------------------
+  // The HUD palette, in one place.
+  //
+  // These are the canvas half of the theme and they are deliberately the
+  // same values as the CSS custom properties at the top of style.css --
+  // --void, --accent, --go, --warn, --bad, --ink. Canvas cannot read CSS
+  // variables, so the two lists have to be kept in step by hand; if you
+  // change a colour there, change it here.
+  //
+  // The rule the palette encodes: cyan is "the system" (the car itself,
+  // UI marks drawn over the map), and green/amber/red are reserved for
+  // what the car has *decided*. That is why the car icon is no longer red
+  // -- a permanently red car competes with "stop" meaning stop.
+  // ---------------------------------------------------------------------
+  const HUD = {
+    void: '#04070c',      // the field everything is drawn on
+    accent: '#3ddcff',    // cyan: the car, view marks, scale
+    go: '#2bf58a',
+    warn: '#ffb636',
+    bad: '#ff4560',
+    ink: '#dcecf7',
+  };
+
   const INTENT_COLORS = {
-    drive:   { fill: 'rgba(63, 185, 80, 0.28)',  edge: 'rgba(63, 185, 80, 0.90)',  ink: '#3fb950' },
-    caution: { fill: 'rgba(210, 153, 34, 0.30)', edge: 'rgba(210, 153, 34, 0.92)', ink: '#d29922' },
-    stop:    { fill: 'rgba(248, 81, 73, 0.28)',  edge: 'rgba(248, 81, 73, 0.92)',  ink: '#f85149' },
+    drive:   { fill: 'rgba(43, 245, 138, 0.26)', edge: 'rgba(43, 245, 138, 0.92)', ink: HUD.go },
+    caution: { fill: 'rgba(255, 182, 54, 0.28)', edge: 'rgba(255, 182, 54, 0.94)', ink: HUD.warn },
+    stop:    { fill: 'rgba(255, 69, 96, 0.28)',  edge: 'rgba(255, 69, 96, 0.94)',  ink: HUD.bad },
   };
 
   function intentColors(severity) {
@@ -433,10 +456,10 @@
   // Intermediate probabilities (1..99) interpolate between free and
   // occupied, so a half-confident wall still reads as a half-bright one.
   // ---------------------------------------------------------------------
-  const MAP_FREE_RGB = [30, 44, 61];        // #1e2c3d
-  const MAP_OCCUPIED_RGB = [150, 172, 196]; // #96acc4
-  const MAP_UNKNOWN_RGBA = [38, 49, 64, 50]; // #263140 (panel border) at ~20% alpha
-  const MAP_EDGE_COLOR = '#263140';         // same hairline as every panel border
+  const MAP_FREE_RGB = [14, 30, 44];        // #0e1e2c -- cyan-shifted "track surface"
+  const MAP_OCCUPIED_RGB = [138, 190, 216]; // #8abed8 -- walls, the actual information
+  const MAP_UNKNOWN_RGBA = [30, 54, 72, 46]; // faint cyan haze at ~18% alpha
+  const MAP_EDGE_COLOR = 'rgba(61, 220, 255, 0.30)'; // same hairline as every panel border
 
   // ---------------------------------------------------------------------
   // Turning a raw occupancy grid into something drawable, once per map
@@ -666,10 +689,14 @@
 
   function render() {
     resizeCanvasIfNeeded();
-    ctx.fillStyle = '#0b0f14';
+    ctx.fillStyle = HUD.void;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     const mapRelative = !!state.pose; // do we know exactly where the car is in the map frame?
+
+    // Behind the map on purpose: mapped ground is opaque and covers it,
+    // so the grid shows exactly where the car has no map yet.
+    drawBackdropGrid(mapRelative ? worldToCanvas : bodyToCanvas);
 
     if (state.map) {
       drawMap();
@@ -738,7 +765,7 @@
 
   function drawMinimap() {
     resizeMinimapIfNeeded();
-    minimapCtx.fillStyle = '#0b0f14';
+    minimapCtx.fillStyle = HUD.void;
     minimapCtx.fillRect(0, 0, minimapCanvas.width, minimapCanvas.height);
 
     if (!state.map) {
@@ -777,10 +804,9 @@
       [view.centerX + halfW, view.centerY + halfH],
       [view.centerX - halfW, view.centerY + halfH],
     ].map(([wx, wy]) => toMinimap(wx, wy));
-    // The dashboard's accent blue (#58a6ff, as used for links/hover in
-    // style.css) rather than plain white: it reads as a UI element on top
-    // of the map instead of another shade of map.
-    minimapCtx.strokeStyle = 'rgba(88, 166, 255, 0.75)';
+    // The HUD accent cyan rather than plain white: it reads as a UI
+    // element on top of the map instead of another shade of map.
+    minimapCtx.strokeStyle = 'rgba(61, 220, 255, 0.80)';
     minimapCtx.lineWidth = 1;
     minimapCtx.beginPath();
     minimapCtx.moveTo(corners[0][0], corners[0][1]);
@@ -798,7 +824,7 @@
     minimapCtx.lineTo(-3, 3);
     minimapCtx.lineTo(-3, -3);
     minimapCtx.closePath();
-    minimapCtx.fillStyle = '#f85149';
+    minimapCtx.fillStyle = HUD.accent;
     minimapCtx.fill();
     minimapCtx.restore();
   }
@@ -808,6 +834,52 @@
   // the right rail rather than canvas paint, so no floating panel can
   // cover it.
   const SCALE_BAR_STEPS_M = [0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200];
+
+  // A world-aligned reference grid, drawn behind everything else.
+  //
+  // It earns its place rather than being texture: the spacing is one of
+  // the same round meter steps the scale bar reports, so a distance on the
+  // map can be counted off in squares -- and it gives pan/zoom something
+  // fixed to move against. Without it, dragging across an unmapped area
+  // shows no motion at all, because there is nothing there to move.
+  const GRID_MIN_PX = 80;   // never denser than this on screen
+  const GRID_COLOR = 'rgba(61, 220, 255, 0.055)';
+
+  function drawBackdropGrid(project) {
+    const dpr = window.devicePixelRatio || 1;
+    if (!(view.scale > 0) || !isFinite(view.scale)) return;
+
+    let spacing = SCALE_BAR_STEPS_M[0];
+    for (const step of SCALE_BAR_STEPS_M) {
+      spacing = step;
+      if (step * view.scale >= GRID_MIN_PX * dpr) break;
+    }
+    const pitch = spacing * view.scale;
+    // Below a few pixels the grid is moire rather than information, and
+    // the loops below would run once per pixel column. Bail instead.
+    if (!isFinite(pitch) || pitch < 4) return;
+
+    const [originX, originY] = project(0, 0);
+    if (!isFinite(originX) || !isFinite(originY)) return;
+
+    ctx.save();
+    ctx.strokeStyle = GRID_COLOR;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    // Anchor the lines to the projected world origin, so the grid is
+    // genuinely fixed to the world and slides under the car rather than
+    // being painted onto the screen.
+    for (let x = originX - Math.floor(originX / pitch) * pitch; x < canvas.width; x += pitch) {
+      ctx.moveTo(Math.round(x) + 0.5, 0);
+      ctx.lineTo(Math.round(x) + 0.5, canvas.height);
+    }
+    for (let y = originY - Math.floor(originY / pitch) * pitch; y < canvas.height; y += pitch) {
+      ctx.moveTo(0, Math.round(y) + 0.5);
+      ctx.lineTo(canvas.width, Math.round(y) + 0.5);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
 
   function updateScaleBar() {
     const dpr = window.devicePixelRatio || 1;
@@ -854,7 +926,11 @@
   const LIDAR_FAR_M = 5.0;
   const LIDAR_COLORS = Array.from({ length: 17 }, (_, i) => {
     const hue = Math.round((i / 16) * 120); // red (near) -> yellow -> green (far)
-    return `hsl(${hue} 85% 50%)`;
+    // Brighter and more saturated than a chart palette would be: these
+    // are single pixels on a near-black field, and they have to read as
+    // emitted light rather than as ink. Matches .lidar-gradient in
+    // style.css, which is the legend for exactly this scale.
+    return `hsl(${hue} 95% 58%)`;
   });
 
   function lidarColor(range) {
@@ -933,7 +1009,7 @@
     if (!span) return;
     const { rangeMax } = state.scan;
     const [ox, oy] = bodyToCanvas(0, 0);
-    ctx.fillStyle = 'rgba(248, 81, 73, 0.18)';
+    ctx.fillStyle = 'rgba(255, 69, 96, 0.16)';
     drawWedge(ox, oy, span.from, span.to, (a) => bodyToCanvas(rangeMax * Math.cos(a), rangeMax * Math.sin(a)));
     drawBlindSpotLabel(ox, oy, (span.from + span.to) / 2, rangeMax, (a, r) => bodyToCanvas(r * Math.cos(a), r * Math.sin(a)));
   }
@@ -949,7 +1025,7 @@
     const laserWorldY = pose.y + laserOffsetX * sinYaw + laserOffsetY * cosYaw;
     const toPoint = (a, r) => worldToCanvas(laserWorldX + r * Math.cos(pose.yaw + a), laserWorldY + r * Math.sin(pose.yaw + a));
     const [ox, oy] = toPoint(0, 0);
-    ctx.fillStyle = 'rgba(248, 81, 73, 0.18)';
+    ctx.fillStyle = 'rgba(255, 69, 96, 0.16)';
     drawWedge(ox, oy, span.from, span.to, (a) => toPoint(a, rangeMax));
     drawBlindSpotLabel(ox, oy, (span.from + span.to) / 2, rangeMax, toPoint);
   }
@@ -957,8 +1033,8 @@
   function drawBlindSpotLabel(ox, oy, midAngle, rangeMax, angleToPoint) {
     const [lx, ly] = angleToPoint(midAngle, rangeMax * 0.55);
     ctx.save();
-    ctx.fillStyle = 'rgba(230, 237, 243, 0.6)';
-    ctx.font = '11px sans-serif';
+    ctx.fillStyle = 'rgba(220, 236, 247, 0.62)';
+    ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('blind spot', lx, ly);
@@ -1185,7 +1261,7 @@
     if (polylineLength(pts) < 0.05) return;
     ctx.save();
     ctx.setLineDash([5, 5]);
-    ctx.strokeStyle = 'rgba(230, 237, 243, 0.55)';
+    ctx.strokeStyle = 'rgba(220, 236, 247, 0.55)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     pts.forEach((p, i) => {
@@ -1203,8 +1279,8 @@
       ctx.arc(cx, cy, 5, 0, Math.PI * 2);
       ctx.fillStyle = colors.edge;
       ctx.fill();
-      ctx.font = '11px sans-serif';
-      ctx.fillStyle = 'rgba(230, 237, 243, 0.75)';
+      ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.fillStyle = 'rgba(220, 236, 247, 0.78)';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillText(String(t.kind || '').replace(/_/g, ' '), cx + 9, cy);
@@ -1228,7 +1304,7 @@
       ctx.lineTo(px, py);
     }
     ctx.closePath();
-    ctx.fillStyle = 'rgba(88, 166, 255, 0.10)';
+    ctx.fillStyle = 'rgba(61, 220, 255, 0.10)';
     ctx.fill();
     ctx.restore();
   }
@@ -1338,7 +1414,7 @@
     // Wheels first, so the body draws on top of their inner edges.
     const wheelLen = size * 0.5;
     const wheelThick = size * 0.22;
-    ctx.fillStyle = '#1c1f24';
+    ctx.fillStyle = '#0a1119';
     for (const ax of [frontX - bodyLen * 0.22, rearX + bodyLen * 0.22]) {
       for (const side of [-1, 1]) {
         const wy = side * (halfWidth + wheelThick * 0.35);
@@ -1358,15 +1434,21 @@
     ctx.lineTo(rearX, -halfWidth + r);
     ctx.quadraticCurveTo(rearX, -halfWidth, rearX + r, -halfWidth);
     ctx.closePath();
-    ctx.fillStyle = '#f85149';
+    // Cyan, not red: on this palette red means "the car has decided to
+    // stop", and a permanently red car icon competes with that. Cyan is
+    // the accent that means "this mark is the system talking".
+    ctx.fillStyle = HUD.accent;
+    ctx.shadowColor = 'rgba(61, 220, 255, 0.85)';
+    ctx.shadowBlur = Math.max(4, size * 0.5);
     ctx.fill();
-    ctx.strokeStyle = '#ffffff';
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = '#eafaff';
     ctx.lineWidth = Math.max(1, size * 0.06);
     ctx.stroke();
 
     // Windshield-ish stripe near the front -- the one visual cue that
     // makes "which end is the front" unambiguous at a glance.
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+    ctx.fillStyle = 'rgba(4, 10, 18, 0.65)';
     ctx.fillRect(frontX - bodyLen * 0.34, -halfWidth * 0.7, bodyLen * 0.14, halfWidth * 1.4);
 
     ctx.restore();
@@ -1379,7 +1461,7 @@
   // leaving the last good value on screen forever.
   // ---------------------------------------------------------------------
   const STALE_AFTER_MS = 1000;
-  const STALE_COLOR = '#f85149';
+  const STALE_COLOR = HUD.bad;
 
   function ageText(entry) {
     if (!entry) return 'never';

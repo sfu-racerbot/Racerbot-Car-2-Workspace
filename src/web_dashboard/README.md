@@ -31,6 +31,7 @@ for the user-facing account and `enable_tuning: false` to remove it.
 | [`web_dashboard/mapstream.py`](web_dashboard/mapstream.py) | Turns a stream of whole occupancy grids into keyframes and patches, so the car sends what changed rather than 4MB. No ROS imports (see [`test/test_mapstream.py`](test/test_mapstream.py)). |
 | [`web_dashboard/batching.py`](web_dashboard/batching.py) | Collapses ~155 small telemetry messages a second into one frame per tick, while preserving every `/drive_intent` state transition (see [`test/test_batching.py`](test/test_batching.py)). |
 | [`web_dashboard/stopwatch.py`](web_dashboard/stopwatch.py) | ROS-free deadman-gated stopwatch state machine, including joystick timeout handling. |
+| [`web_dashboard/netbind.py`](web_dashboard/netbind.py) | One decision: whether the configured `host` means "every interface". `0.0.0.0` binds IPv4 *only*, which left the dashboard unreachable at the car's Tailscale IPv6 address, so the wildcards are turned into "bind with no address" and get both families. No ROS imports (see [`test/test_netbind.py`](test/test_netbind.py)). |
 | [`web_dashboard/tuning.py`](web_dashboard/tuning.py) | Live-tuning support: parsing a node's advertised catalogue, clamping a browser request, and the comment-preserving YAML writer. No ROS/Tornado imports either (see [`test/test_tuning.py`](test/test_tuning.py)). |
 | [`web_dashboard/dashboard_node.py`](web_dashboard/dashboard_node.py) | The ROS2 node: subscribes to map/scan/pose/command/odom/joy, runs a [Tornado](https://www.tornadoweb.org/) web + WebSocket server, and bridges its two threads. |
 | [`web/index.html`](web/index.html), [`web/dashboard.js`](web/dashboard.js), [`web/style.css`](web/style.css) | The main browser dashboard — plain HTML/JS/CSS, no build step. |
@@ -273,12 +274,40 @@ freshness signal into the sidebar's per-row status dot instead of text
 color (gray = `null` entry, i.e. never received at all; green/red = fresh
 vs. stale, same threshold logic).
 
+### Theme: the HUD, and why nothing moves
+
+`web/style.css` is a token-driven HUD theme — near-black ground, cyan
+hairlines and corner brackets, uppercase monospaced micro-labels. Two
+rules run through it, both stated at the top of the file:
+
+- **Colour is state, not decoration.** Cyan (`--accent`) is the system
+  itself: the car marker, the view rectangle, the scale bar. Green, amber
+  and red (`--go` / `--warn` / `--bad`) are reserved for what the car has
+  decided. This is why the car icon is drawn cyan rather than red — a
+  permanently red car competes with "stop" meaning stop.
+- **Nothing resizes itself, and layout is never animated.** Numbers are
+  `tabular-nums`; `#panels` uses `scrollbar-gutter: stable`; and any
+  region whose content arrives later has a *fixed* size rather than a
+  growable one. `.intent-log` and `.intent-reason` are the important
+  ones: measured with a growable box, the log gained 16.5px per decision
+  and pushed the stopwatch, the system section and the pinned footer down
+  the sidebar every time the car changed its mind. Transitions are
+  restricted to colour/opacity/transform/shadow, none of which reflow.
+
+The canvas half of the palette is the `HUD` constant near the top of
+`dashboard.js`. Canvas cannot read CSS custom properties, so those values
+are duplicated by hand — **change one, change the other.**
+
 ### Layout: sidebar + two corner insets
 
-The left sidebar (`#overlay`) has no fixed or max height in CSS — it's a
-`position: fixed` box sized by its content, split into `feeds`, `vehicle`
-(measured speed, selected steering, LB), `LB stopwatch` (enable/reset), and
-`system` sections. WiFi gets a small 4-bar icon
+The left sidebar (`#overlay`) is a `position: fixed` box bounded to the
+viewport (`max-height: calc(100vh - 24px)`), split into a pinned masthead
+and link state, one scroll region (`#panels`) holding the `feeds`,
+`intent`, `vehicle`, `LB stopwatch`, `system` and `live tuning` sections,
+and a pinned footer (`#mode-banner` + `#help`). Those three parts, and the
+fact that `#overlay` is *not* `pointer-events: none`, are pinned by
+[`test/test_web_assets.py`](test/test_web_assets.py) — read that file
+before restructuring the sidebar. WiFi gets a small 4-bar icon
 (`updateWifiBars()`) alongside the raw dBm reading, using the same
 dBm-band thresholds phones use for their own signal icons.
 
@@ -337,7 +366,7 @@ button and cursor hide after `CONTROLS_IDLE_MS` of no input
 | `drive_topic` / `odom_topic` | `/ackermann_cmd` / `/odom` | Selected steering command / measured speed |
 | `joy_topic` / `deadman_button` / `joy_timeout_sec` | `/joy` / `4` / `0.5` | Read-only LB input and freshness timeout for the stopwatch |
 | `stopwatch_update_rate_hz` | `4.0` | Shared stopwatch broadcast rate. Low because the browser runs the clock between updates; this only corrects drift and carries LB press/release |
-| `host` | `0.0.0.0` | Listen on every interface — see the security note in [docs/web-dashboard.md](../../docs/web-dashboard.md#security-note) |
+| `host` | `0.0.0.0` | Listen on every interface, IPv4 **and** IPv6 (see [`netbind.py`](web_dashboard/netbind.py); a real address such as `127.0.0.1` restricts it to that one) — plus the security note in [docs/web-dashboard.md](../../docs/web-dashboard.md#security-note) |
 | `port` | `8080` | Web server port |
 | `scan_broadcast_rate_hz` | `10.0` | Throttle for `/scan` broadcasts (input itself runs ~40Hz) |
 | `telemetry_rate_hz` | `20.0` | Pose/command/speed/intent/stopwatch/stats are collected and sent as ONE frame at this rate instead of one frame each |
@@ -438,3 +467,4 @@ so that case is visible rather than silent.
 | `stats` never shows real numbers | The running `dashboard_node` process predates a rebuild — Python files aren't hot-reloaded, so restart `ros2 launch web_dashboard web_dashboard_launch.py` after any `colcon build` that touches this package |
 | `temp`/`wifi` show `n/a` | No readable `cpu-thermal` thermal zone / no wireless interface on this machine (e.g. developing on a laptop docked to Ethernet) — expected, not a bug |
 | Camera inset shows "camera offline" | `usb_cam_stream` isn't running, or is on a different port than the hardcoded `CAMERA_PORT` (`9090`) in `dashboard.js` |
+| Reachable at the car's `100.x.x.x` address but not at its Tailscale hostname | An IPv4-only listener: MagicDNS publishes the car's IPv6 address too and browsers often try it first. `ss -tlnp \| grep 8080` should show *two* lines (IPv4 and IPv6); one line means a build predating [`netbind.py`](web_dashboard/netbind.py) — rebuild and relaunch. If both are listening, check `tailscale status` and that `tailscale debug prefs` reports `"ShieldsUp": false` |

@@ -19,6 +19,7 @@ No RViz. No ROS install on the viewing device. No login. Just a URL.
 - **Works at every stage.** Nothing else running? You still get live [LiDAR](glossary.md#lidar). [SLAM](glossary.md#slam) up? The map builds in front of you. Once [localization](glossary.md#localization) has a fix, everything locks to world coordinates.
 - **Runs on a phone.** One plain JS file, no build step, no framework. A 2048×2048 keyframe is 4.2 million cells, drawn through a palette lookup so a phone can keep up.
 - **Costs the car almost nothing.** Packing a map message went from 178 ms to 2.2 ms. With no browser connected, none of the work happens at all.
+- **Reachable by name, from off-network.** The server listens on both kinds of internet address at once, so `http://racerbotcar-2:8080/` opens the car over [Tailscale](#viewing-over-tailscale-by-name) from anywhere — you don't have to look up a number first.
 
 **Honest limits:** no authentication of any kind — anyone who can reach the port can watch, and if tuning is armed, change how the car drives. One car per dashboard. Live SLAM without a pose republisher shows the map but keeps the car centred rather than locked to it. All three are covered below.
 
@@ -89,6 +90,19 @@ The dashboard degrades gracefully depending on what's running, so it's useful at
 | Just [`/scan`](glossary.md#scan) (LIDAR driver only) | **Robot-centric mode**: the car fixed at the center of the screen, always facing "up", with the raw LIDAR points drawn around it exactly as the beams came in. No map, no localization needed — this is literally "what the car is seeing," live. |
 | `/scan` + `slam_toolbox` mapping | The map builds and updates live in the background as you drive; the scan stays robot-centric (see [Limitations](#limitations) for why the overlay doesn't lock onto the map during live SLAM specifically). |
 | `/scan` + a saved map + `particle_filter` localized (seeded with RViz's "2D Pose Estimate") | **Map-relative mode**: the map is the background, the car is drawn at its real localized position and heading, and the LIDAR points are drawn in true world coordinates — so you can directly see where the car is relative to the walls, other objects, and the rest of the track. |
+
+### Reading the colours
+
+The dashboard is styled as a **HUD** — a heads-up display, the kind of instrument panel you'd see in a cockpit. Near-black background, cyan hairlines and corner brackets, small uppercase labels, monospaced numbers.
+
+That look carries one rule that's worth knowing before you read anything off the page:
+
+**Colour means state, never decoration.**
+
+- **Cyan** is *the system talking* — the car marker, the rectangle on the minimap showing what you're looking at, the scale bar. Cyan is never an opinion about how the car is doing.
+- **Green, amber and red** are reserved for what the car has **decided**: go, caution, stop.
+
+So anything red on this page means something. That's also why the car icon is cyan rather than red: a permanently red car competed with "stop" meaning stop, and after a while the eye stops believing red.
 
 ### Getting just `/scan` without the rest of the hardware
 
@@ -240,9 +254,9 @@ The polarity is inverted instead:
 - **free space** is a dark slate "track surface"
 - **occupied cells** are the bright end — a desaturated blue-gray
 
-That keeps walls the most legible thing in the map, without competing with the saturated red→green LIDAR points or the red car icon. Cells between free and occupied interpolate between the two.
+That keeps walls the most legible thing in the map, without competing with the saturated red→green LIDAR points or the cyan car icon. Cells between free and occupied interpolate between the two.
 
-Since unknown area fades out, a one-pixel hairline (the same `#263140` every panel border uses) marks the grid's extent. All three colors are constants at the top of `applyMap()`'s section in `dashboard.js` if the theme ever changes.
+Since unknown area fades out, a one-pixel cyan hairline — the same one every panel border uses — marks the grid's extent. All three colors are constants at the top of `applyMap()`'s section in `dashboard.js` if the theme ever changes.
 
 **Two coordinate transforms, two pan offsets.** Robot-centric mode (no pose yet) and map-relative mode (once localized) use `bodyToCanvas` vs `worldToCanvas`.
 
@@ -250,7 +264,9 @@ So panning and zooming track their own offset in each: `view.bodyPanX/bodyPanY` 
 
 They deliberately don't share one, since a drag that happened before localization has no meaningful world-frame equivalent to carry over.
 
-**The car icon.** Drawn as a small top-down car silhouette — rounded body, wheels, a lighter "windshield" stripe marking the front — rather than a bare arrow, so heading reads unambiguously at a glance.
+**The car icon.** A small top-down car silhouette rather than a bare arrow: rounded cyan body with a faint glow, four wheels, and a dark "windshield" stripe near the nose.
+
+The stripe is the one cue that makes heading unambiguous at a glance. A plain rectangle looks the same front-to-back.
 
 A translucent red wedge marks the LIDAR's actual blind spot: the arc it physically never scans. The Hokuyo's ~270° field of view leaves a real ~90° gap behind its mount.
 
@@ -258,10 +274,27 @@ That wedge is computed from the scan's own `angle_min` / `angle_increment` / cou
 
 Valid returns use a red→yellow→green proximity scale (0.3 m near to 5 m far). A scale bar in the bottom-left corner shows the current zoom level in meters or cm.
 
+**The faint grid behind everything** is not texture. It does two jobs:
+
+- Its spacing is one of the same round metre steps the scale bar reports, so a distance on the map can be counted off in squares.
+- It's anchored to the world origin rather than to the screen, so it slides *under* the car as the car moves.
+
+That second job is the real reason it's there. Drag across an unmapped region without it and nothing appears to move, because there's nothing in view to move.
+
 </details>
 
 <details>
 <summary><b>Layout: what every panel does</b> — sidebar, minimap, camera inset, and the resizing behaviour. Read when you want to know what a control does or why the sidebar behaves as it does.</summary>
+
+**Nothing on this page resizes itself while you're reading it.** Numbers use a monospaced font with tabular figures, so a changing digit never changes a column's width.
+
+Every region that fills in later — the decision log, the reason text, the connection banner — has its space reserved up front and scrolls inside it.
+
+That's a fix rather than a preference. Measured with WebDriver over 20 seconds of streaming telemetry, the decision log used to gain 16.5 px per decision.
+
+Every one of those entries shoved the stopwatch, the `system` section and the pinned footer further down the sidebar — every time the car changed its mind.
+
+If you edit `web/style.css`, keep both that rule and the colour rule above. There are comments at the top of that file explaining each, and `test/test_web_assets.py` pins the structural parts so a redesign can't quietly undo them.
 
 **Left sidebar**, in order:
 
@@ -287,7 +320,7 @@ The sidebar is bounded to the window and scrolls, and each row shows a short val
 
 **Top-right inset** — a minimap. It always shows the *whole* map at a fixed auto-fit scale, independent of the main canvas's own pan and zoom.
 
-A rectangle in the UI's accent blue shows what the main view currently frames, plus a small marker for the car.
+A rectangle in the UI's accent cyan shows what the main view currently frames, plus a small marker for the car.
 
 So zooming into one corner of the track on the main canvas doesn't lose the big picture. Shows a placeholder until a map has arrived.
 
@@ -485,6 +518,50 @@ Two ways to fix it:
 
 This isn't specific to the camera panel or this dashboard. Any tool that has a browser make a *second* connection to a *different* port than the one you loaded the page from will hit the same issue under port-forwarding. The camera panel is just the one place in this workspace that currently does that.
 
+### Viewing over Tailscale, by name
+
+Tailscale is the private network that lets you reach the car from anywhere, not just from the same WiFi. It gives the car **two** addresses, not one:
+
+- an **IPv4** address, the familiar four-numbers kind: `100.107.122.58`
+- an **IPv6** address, the newer and much longer kind: `fd7a:115c:a1e0::4133:7a3b`
+
+Both point at the same car. Tailscale also publishes a short hostname for it — that feature is called *MagicDNS* — so you can type `http://racerbotcar-2:8080/` instead of memorising either number.
+
+Here's the part that used to bite. When you browse by *hostname*, your browser is handed both addresses and picks one — and browsers generally try the IPv6 one first.
+
+The dashboard used to listen on IPv4 only. So that first attempt was refused, and the page could fail to load while the car was running perfectly.
+
+Browsing the `100.x.x.x` address directly still worked, which made the whole thing look like a Tailscale problem rather than a dashboard one.
+
+**It now listens on both**, so the hostname, the IPv4 address and the IPv6 address all work, with nothing to configure. `host: 0.0.0.0` in the config is understood as "every interface, both kinds of address".
+
+**Terminal 1, on the car**, to confirm it's listening on both:
+
+```bash
+ss -tlnp | grep 8080
+```
+
+**Working when:** you get *two* lines rather than one — an IPv4 one (`0.0.0.0:8080`) and an IPv6 one (`[::]:8080` or `*:8080`). Only `0.0.0.0:8080` means you're running an older build; rebuild `web_dashboard` and relaunch.
+
+The node says so at startup too. Look for `Serving on port 8080, every interface, IPv4 + IPv6` in the launch output.
+
+> **If it still won't connect from another machine,** the remaining suspects are on the Tailscale side rather than in this node. Check that both machines are online with `tailscale status`, and that "shields up" — a Tailscale setting that blocks all incoming connections — is off. `tailscale debug prefs` prints `"ShieldsUp": false` when it's fine.
+
+<details>
+<summary><b>Why <code>0.0.0.0</code> wasn't already enough</b> — the bind-address trap, and why it got its own module. Skip unless you're changing how the server binds.</summary>
+
+The trap is that `0.0.0.0` does not mean "every interface". It means every *IPv4* interface, and there is no IPv4 wildcard that also covers IPv6. Binding with **no address at all** is what gets both families.
+
+So `netbind.wants_all_interfaces()` recognises the wildcard spellings (`0.0.0.0`, `::`, `*`, empty) and the node then binds with no address. Naming a real address, like `127.0.0.1`, still restricts the dashboard to exactly that address — that behaviour is unchanged, and is what the [security note](#security-note) below relies on.
+
+That decision lives in its own `rclpy`-free module, `src/web_dashboard/web_dashboard/netbind.py`, specifically so it can be unit-tested directly.
+
+`test/test_netbind.py` binds real sockets and asserts that the old way is IPv4-only while the new way answers on both.
+
+It has to go that far because this class of bug is completely invisible to a test that only checks a return value.
+
+</details>
+
 ---
 
 ## Drive intent: the arrow and the decision panel
@@ -643,7 +720,7 @@ All in `src/web_dashboard/config/web_dashboard.yaml`. A few entries mention [TF]
 | `odom_topic` | `/odom` | Measured longitudinal speed |
 | `joy_topic` / `deadman_button` / `joy_timeout_sec` | `/joy` / `4` / `0.5` | Read-only LB state and freshness watchdog for the stopwatch |
 | `stopwatch_update_rate_hz` | `4.0` | Shared stopwatch state broadcast rate. Low because the browser runs the clock between updates |
-| `host` | `0.0.0.0` | Listen on every network interface — see [security note](#security-note) |
+| `host` | `0.0.0.0` | Listen on every network interface, IPv4 **and** IPv6 — which is what makes the car reachable at its Tailscale hostname, see [viewing over Tailscale](#viewing-over-tailscale-by-name) and the [security note](#security-note). Set a real address (e.g. `127.0.0.1`) to restrict it to that one |
 | `port` | `8080` | Web server port |
 | `scan_broadcast_rate_hz` | `10.0` | `/scan` runs ~40Hz; no browser needs to redraw that often, and this keeps WiFi/CPU load down |
 | `stats_interval_sec` | `1.0` | How often CPU%/mem%/temp/uptime are sampled and broadcast |
