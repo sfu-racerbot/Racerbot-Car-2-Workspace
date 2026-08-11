@@ -66,10 +66,45 @@
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
           "Helvetica Neue", sans-serif;
 
+  /* --- Type scale -----------------------------------------------------
+     Every size in this file goes through one of these eight tokens rather
+     than being written as a literal px. That is not tidiness: it is the
+     whole responsive strategy. A phone at arm's length needs a bigger
+     floor than a laptop at 60cm, and a page built from forty hard-coded
+     8.5px labels can only be rescaled by editing forty rules. The media
+     queries at the bottom of this file re-state these eight values and the
+     entire interface resizes with them, in proportion, at once. */
+  --fs-micro: 8.5px;     /* legends, scroll hints -- the quietest text here */
+  --fs-nano: 9px;        /* panel labels over the map */
+  --fs-label: 9.5px;     /* section heads, metric labels, buttons */
+  --fs-small: 10px;      /* log lines, notes */
+  --fs-body: 11px;       /* prose: reasons, descriptions, warnings */
+  --fs-body-lg: 12px;    /* secondary numbers */
+  --fs-value: 13px;      /* the numbers this page exists to show */
+  --fs-hero: 30px;       /* the stopwatch, and nothing else */
+
   /* Corner-bracket geometry, shared by every panel and the viewport frame
      so they read as one system rather than as similar-looking parts. */
   --bracket: 14px;
   --bracket-weight: 2px;
+
+  /* The diagonal cut taken out of a control's top-right corner. One
+     shared value so every button, chip and pill on the page is cut at the
+     same angle -- that repetition is what makes them read as machined
+     parts of one instrument rather than as assorted rounded widgets. */
+  --chamfer: 6px;
+
+  /* Minimum comfortable hit area. Raised, not just nudged, under
+     `pointer: coarse` at the bottom of this file: a 10px summary row is a
+     perfectly good mouse target and an unusable thumb target. */
+  --tap: 26px;
+
+  /* How much of the phone sheet stays on screen when it is closed. Read
+     by the transform that parks it, by panels.js when it works out which
+     detent a drag ended nearest, and by the scale ruler so it never hides
+     underneath. Defined here (rather than only in the phone media query)
+     so those three always agree. */
+  --sheet-peek: 140px;
 }
 
 html, body {
@@ -78,6 +113,11 @@ html, body {
   width: 100%;
   height: 100%;
   overflow: hidden;
+  /* Nothing here scrolls the page -- every scrolling region is internal --
+     so a gesture that reaches the document is always a mistake. On a phone
+     that mistake is Android's pull-to-refresh firing in the middle of
+     dragging the map, which reloads the dashboard. */
+  overscroll-behavior: none;
   background: var(--void);
   font-family: var(--sans);
   color: var(--ink);
@@ -91,8 +131,18 @@ html, body {
 #view {
   display: block;
   width: 100vw;
+  /* dvh so the canvas ends where the phone's visible viewport ends rather
+     than underneath the browser's own chrome. dashboard.js overrides both
+     with pixel values on every resize; this is what the first frame uses,
+     before that has run. */
   height: 100vh;
+  height: 100dvh;
   cursor: grab;
+  /* The canvas owns every touch that lands on it: one finger pans, two
+     pinch (see the pan/zoom section of dashboard.js). Without this the
+     browser claims the same gestures first for scrolling and page zoom,
+     and the map simply cannot be moved on a touchscreen. */
+  touch-action: none;
 }
 
 #view:active {
@@ -113,17 +163,33 @@ html, body {
   inset: 0;
   z-index: 5;
   pointer-events: none;
-  /* Scanlines: 2px pitch at very low alpha. Enough to read as a screen
-     rather than a document; not enough to interfere with LIDAR points. */
-  background-image: repeating-linear-gradient(
-    to bottom,
-    rgba(120, 220, 255, 0.022) 0px,
-    rgba(120, 220, 255, 0.022) 1px,
-    transparent 1px,
-    transparent 3px
-  );
+  /* Two layers, in paint order:
+     1. A vignette. Corners fall off to near-black, which is what makes
+        the middle of the canvas -- where the car is -- read as the lit
+        part of the instrument rather than as a flat field of pixels.
+     2. Scanlines: 2px pitch at very low alpha. Enough to read as a screen
+        rather than a document; not enough to interfere with LIDAR points.
+     Both are alpha over the canvas, so neither costs a repaint when the
+     map underneath changes. */
+  background-image:
+    radial-gradient(115% 85% at 50% 45%,
+                    transparent 42%,
+                    rgba(2, 4, 8, 0.28) 78%,
+                    rgba(2, 4, 8, 0.55) 100%),
+    repeating-linear-gradient(
+      to bottom,
+      rgba(120, 220, 255, 0.022) 0px,
+      rgba(120, 220, 255, 0.022) 1px,
+      transparent 1px,
+      transparent 3px
+    );
 }
 
+/* The corner brackets, each with a short ruled tick scale running away
+   from it along the top or bottom edge. The ticks are the detail that
+   makes the frame read as a measuring instrument instead of as four
+   decorative Ls -- they are the same idea as the scale ruler in the
+   bottom-right, just without a number attached. */
 .frame-corner {
   position: absolute;
   width: 26px;
@@ -131,6 +197,26 @@ html, body {
   border: 0 solid var(--line-strong);
   opacity: 0.75;
 }
+
+.frame-corner::after {
+  content: "";
+  position: absolute;
+  height: 5px;
+  width: 84px;
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--line-strong) 0px,
+    var(--line-strong) 1px,
+    transparent 1px,
+    transparent 8px
+  );
+  opacity: 0.6;
+}
+
+.frame-tl::after, .frame-tr::after { top: 0; }
+.frame-bl::after, .frame-br::after { bottom: 0; }
+.frame-tl::after, .frame-bl::after { left: 28px; }
+.frame-tr::after, .frame-br::after { right: 28px; }
 
 .frame-tl { top: 8px;    left: 8px;    border-top-width: 2px; border-left-width: 2px; }
 .frame-tr { top: 8px;    right: 8px;   border-top-width: 2px; border-right-width: 2px; }
@@ -156,6 +242,16 @@ html, body {
 .hud-panel {
   position: relative;
   background-color: var(--panel);
+  /* A single soft wash from the top-left, over the flat colour. It gives
+     the surface a light source without adding any texture behind the
+     numbers -- an earlier pass painted a 22px technical grid across every
+     panel, which looked the part on an empty screenshot and was simply
+     noise behind six sections of live telemetry. */
+  background-image: linear-gradient(
+    160deg,
+    rgba(80, 190, 240, 0.055) 0%,
+    rgba(80, 190, 240, 0.012) 34%,
+    transparent 68%);
   border: 1px solid var(--line);
   border-radius: 2px;   /* crisp, not soft: 2px reads as machined, 10px reads as an app card */
   backdrop-filter: blur(9px);
@@ -163,7 +259,11 @@ html, body {
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.55),
     0 18px 48px rgba(0, 0, 0, 0.55),
-    inset 0 1px 0 rgba(120, 220, 255, 0.05);
+    /* Two inset hairlines: a lit top edge and a shaded bottom one. This is
+       the whole reason a panel reads as a physical plate lying on the
+       screen rather than as a rectangle of tinted glass. */
+    inset 0 1px 0 rgba(120, 220, 255, 0.07),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.45);
 }
 
 /* The corner brackets. ::before is the top-left L, ::after the
@@ -179,6 +279,10 @@ html, body {
   opacity: 0.85;
   pointer-events: none;
   z-index: 2;
+  /* The brackets are the one part of a panel allowed to glow. Everything
+     else here earns colour by meaning something; this is the frame
+     itself, so it gets the house accent and nothing else does. */
+  filter: drop-shadow(0 0 4px rgba(61, 220, 255, 0.45));
 }
 
 .hud-panel::before {
@@ -232,7 +336,7 @@ html, body {
   display: flex;
   flex-direction: column;
   padding: 13px 14px 12px;
-  font-size: 13px;
+  font-size: var(--fs-value);
   line-height: 1.5;
   pointer-events: auto;
 }
@@ -290,7 +394,7 @@ html, body {
 
 #brand-name {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: var(--fs-value);
   font-weight: 700;
   letter-spacing: 0.22em;
   color: var(--ink-bright);
@@ -300,7 +404,7 @@ html, body {
 
 #brand-sub {
   font-family: var(--mono);
-  font-size: 8px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.18em;
   color: var(--ink-faint);
@@ -364,7 +468,7 @@ html, body {
   gap: 8px;
   font-family: var(--mono);
   font-weight: 600;
-  font-size: 11px;
+  font-size: var(--fs-body);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--ink-dim);
@@ -388,6 +492,21 @@ html, body {
 .dot-green {
   background: var(--go);
   box-shadow: 0 0 8px rgba(43, 245, 138, 0.75), 0 0 2px rgba(43, 245, 138, 0.9);
+}
+
+/* A slow breath on the link indicator, and nowhere else. "Connected" and
+   "connected 40 seconds ago and frozen since" look identical on a page
+   made of numbers that happen not to be changing, and this is the one
+   element whose whole job is to answer that. Opacity only -- it cannot
+   reflow the row it sits in. */
+#conn-dot.dot-green,
+#strip-dot.dot-green {
+  animation: hud-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes hud-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
 }
 
 .dot-red {
@@ -419,7 +538,7 @@ html, body {
   align-items: center;
   gap: 6px;
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -438,6 +557,7 @@ html, body {
 /* A disclosure caret we control, so it sits on the correct side and
    rotates rather than jumping between two glyphs. */
 .section-head::before {
+
   content: '';
   flex: none;
   width: 0;
@@ -458,6 +578,17 @@ html, body {
   color: var(--accent);
 }
 
+/* An open section is marked by a lit rule down its left edge, so which
+   parts of a long sidebar you have expanded is legible from the shape of
+   the page rather than only from six small rotated carets. */
+.section[open] {
+  box-shadow: inset 2px 0 0 -1px var(--line-strong);
+}
+
+.section[open] .section-head {
+  color: var(--accent);
+}
+
 .section-name {
   flex: none;
 }
@@ -471,7 +602,7 @@ html, body {
   min-width: 0;
   text-align: right;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-body);
   font-weight: 400;
   letter-spacing: 0;
   text-transform: none;
@@ -504,7 +635,7 @@ html, body {
   gap: 5px;
   min-width: 0;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-body-lg);
 }
 
 .metric-wide {
@@ -515,7 +646,7 @@ html, body {
 .metric-label {
   flex: none;
   color: var(--ink-dim);
-  font-size: 9.5px;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -526,9 +657,14 @@ html, body {
 .metric-value {
   flex: 1;
   min-width: 0;
-  font-size: 13px;
+  font-family: var(--mono);
+  font-size: var(--fs-value);
   font-weight: 700;
   color: var(--ink-bright);
+  /* A faint halo, the same trick the stopwatch uses. On a near-black
+     field an unlit white number sits flat on the background; this lifts
+     it just enough to read as an illuminated readout. */
+  text-shadow: 0 0 12px rgba(120, 200, 240, 0.22);
   white-space: nowrap;
   /* Overflow rather than push: a long value ellipsizes inside its cell
      instead of widening the column and moving its neighbour. */
@@ -539,7 +675,7 @@ html, body {
 /* Tells you a region scrolls before you have to guess. */
 .scroll-hint {
   float: right;
-  font-size: 8.5px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.1em;
   color: var(--ink-faint);
@@ -551,7 +687,7 @@ html, body {
   gap: 8px;
   padding: 2px 0;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-body-lg);
 }
 
 .row-label {
@@ -601,7 +737,7 @@ html, body {
   flex: none;
   margin-top: 8px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-body);
   line-height: 1.4;
   color: var(--warn);
   border-left: 2px solid var(--warn);
@@ -627,7 +763,7 @@ html, body {
   padding-top: 8px;
   border-top: 1px solid var(--line);
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: var(--fs-label);
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--ink-faint);
@@ -639,14 +775,31 @@ html, body {
 .stopwatch-controls button,
 .tuning-open-controls button,
 #tuning-foot button,
+.proc-stop,
 #tuning-close {
-  background: rgba(61, 220, 255, 0.07);
+  /* A shallow vertical gradient rather than a flat fill: a button here is
+     a raised key on an instrument panel, and one flat rectangle among
+     dozens of flat rectangles is the thing that stops reading as
+     pressable. */
+  background-image: linear-gradient(
+    180deg, rgba(61, 220, 255, 0.13), rgba(61, 220, 255, 0.04));
+  background-color: transparent;
   color: var(--accent);
   border: 1px solid var(--line-strong);
   border-radius: 2px;
+  /* The corner cut. Every control on the page loses the same 6px triangle
+     from its top-right corner, which is what ties the buttons, the state
+     chip and the process rows together into one machined family. */
+  clip-path: polygon(
+    0 0,
+    calc(100% - var(--chamfer)) 0,
+    100% var(--chamfer),
+    100% 100%,
+    0 100%);
   padding: 4px 10px;
+  min-height: var(--tap);
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-small);
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -659,21 +812,53 @@ html, body {
 .stopwatch-controls button:hover,
 .tuning-open-controls button:hover,
 #tuning-foot button:not(:disabled):hover,
+.proc-stop:hover,
 #tuning-close:hover {
-  background: rgba(61, 220, 255, 0.18);
+  background-image: linear-gradient(
+    180deg, rgba(61, 220, 255, 0.30), rgba(61, 220, 255, 0.12));
   color: var(--ink-bright);
   border-color: var(--accent);
   box-shadow: 0 0 12px rgba(61, 220, 255, 0.25);
 }
 
+/* Pressed state. Only the fill and the glow change -- a button that moved
+   or grew would shift whatever sits beside it, which is rule 1 at the top
+   of this file. */
+#help button:active,
+.stopwatch-controls button:active,
+.tuning-open-controls button:active,
+#tuning-foot button:not(:disabled):active,
+.proc-stop:active,
+#tuning-close:active {
+  background-image: linear-gradient(
+    180deg, rgba(61, 220, 255, 0.06), rgba(61, 220, 255, 0.22));
+  box-shadow: inset 0 1px 6px rgba(0, 0, 0, 0.5);
+}
+
 /* Keyboard users get the same affordance as the mouse, not a browser
-   default ring that clashes with the theme. */
+   default ring that clashes with the theme.
+
+   Two recipes, and the split is not cosmetic. Everything carrying the
+   chamfer above is clipped by a clip-path, and a clip-path clips the
+   focus ring with it -- an `outline` on those controls is invisible, which
+   is a keyboard user losing their place on a page that can stop a car. An
+   inset ring is inside the clip, so it survives. */
 #help button:focus-visible,
 .stopwatch-controls button:focus-visible,
 .tuning-open-controls button:focus-visible,
 #tuning-foot button:focus-visible,
-#tuning-close:focus-visible,
-.section-head:focus-visible {
+.proc-stop:focus-visible,
+#tuning-close:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
+  color: var(--ink-bright);
+}
+
+.section-head:focus-visible,
+.section-detach:focus-visible,
+#sheet-grip:focus-visible,
+.intent-toggle:focus-within,
+#camera-link:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 2px;
 }
@@ -700,7 +885,7 @@ html, body {
   background: none;
   border: none;
   color: var(--ink-faint);
-  font-size: 11px;
+  font-size: var(--fs-body);
   line-height: 1;
   cursor: pointer;
   opacity: 0;
@@ -734,7 +919,7 @@ html, body {
   flex-direction: column;
   box-sizing: border-box;
   overflow: hidden;
-  font-size: 13px;
+  font-size: var(--fs-value);
   line-height: 1.5;
   padding: 0;
 }
@@ -762,7 +947,7 @@ html, body {
   flex: 1;
   min-width: 0;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: var(--fs-nano);
   font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -777,7 +962,7 @@ html, body {
   background: none;
   border: none;
   color: var(--ink-dim);
-  font-size: 13px;
+  font-size: var(--fs-value);
   line-height: 1;
   padding: 0 2px;
   cursor: pointer;
@@ -902,7 +1087,7 @@ body.panels-narrow .section-detach {
   top: 6px;
   left: 9px;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: var(--fs-nano);
   font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -999,7 +1184,7 @@ body.panels-narrow .section-detach {
   align-items: center;
   justify-content: center;
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -1026,7 +1211,7 @@ body.panels-narrow .section-detach {
   margin: 6px 0 2px;
   color: var(--ink-faint);
   font-family: var(--mono);
-  font-size: 8.5px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.12em;
@@ -1049,10 +1234,10 @@ body.panels-narrow .section-detach {
 #stopwatch-display {
   color: var(--ink-bright);
   font-family: var(--mono);
-  font-size: 30px;
+  font-size: var(--fs-hero);
   font-variant-numeric: tabular-nums;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0.01em;
   line-height: 1.15;
   text-shadow: 0 0 22px rgba(61, 220, 255, 0.25);
   /* Only colour and glow change when it starts running -- never the size,
@@ -1070,7 +1255,7 @@ body.panels-narrow .section-detach {
   margin-top: 3px;
   color: var(--ink-dim);
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: var(--fs-label);
   letter-spacing: 0.06em;
 }
 
@@ -1092,7 +1277,8 @@ body.panels-narrow .section-detach {
 #stopwatch-toggle.enabled {
   border-color: var(--go);
   color: var(--go);
-  background: rgba(43, 245, 138, 0.10);
+  background-image: linear-gradient(
+    180deg, rgba(43, 245, 138, 0.20), rgba(43, 245, 138, 0.05));
 }
 
 /* The entire camera inset opens a clean, full-window recording view. */
@@ -1121,7 +1307,7 @@ body.panels-narrow .section-detach {
   border-radius: 2px;
   color: var(--accent);
   font-family: var(--mono);
-  font-size: 8.5px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -1166,7 +1352,7 @@ body.panels-narrow .section-detach {
   bottom: 8px;
   color: var(--ink);
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.08em;
   line-height: 1;
@@ -1215,7 +1401,7 @@ body.panels-narrow .section-detach {
   border: none;
   border-right: 1px solid var(--line-strong);
   border-radius: 0;
-  font-size: 13px;
+  font-size: var(--fs-value);
   /* Off-screen by default. transform rather than display:none so the
      panel animates, and so its scroll position survives a close/open.
      transform is also the only way to animate this without reflowing the
@@ -1248,7 +1434,7 @@ body.panels-narrow .section-detach {
 
 #tuning-title {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-small);
   font-weight: 700;
   letter-spacing: 0.18em;
   text-transform: uppercase;
@@ -1256,7 +1442,7 @@ body.panels-narrow .section-detach {
 }
 
 #tuning-close {
-  font-size: 14px;
+  font-size: var(--fs-value);
   line-height: 1;
   padding: 3px 9px;
 }
@@ -1281,7 +1467,7 @@ body.panels-narrow .section-detach {
   align-items: center;
   gap: 8px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-body);
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -1295,7 +1481,7 @@ body.panels-narrow .section-detach {
 
 #tuning-arm-note {
   margin-top: 5px;
-  font-size: 11px;
+  font-size: var(--fs-body);
   color: var(--ink-dim);
   min-height: 2.8em;   /* reserved: armed/disarmed notes differ in length */
 }
@@ -1313,7 +1499,7 @@ body.panels-narrow .section-detach {
 .tuning-empty,
 .tuning-node-error {
   color: var(--ink-dim);
-  font-size: 12px;
+  font-size: var(--fs-body-lg);
   padding: 10px 0;
 }
 
@@ -1324,7 +1510,7 @@ body.panels-narrow .section-detach {
   align-items: center;
   gap: 6px;
   margin: 14px 0 2px;
-  font-size: 12px;
+  font-size: var(--fs-body-lg);
   font-weight: 700;
   color: var(--ink-bright);
   font-family: var(--mono);
@@ -1333,7 +1519,7 @@ body.panels-narrow .section-detach {
 .tuning-group-title {
   margin: 13px 0 4px;
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: var(--fs-label);
   font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -1376,7 +1562,7 @@ body.panels-narrow .section-detach {
 
 .tuning-param-name {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-body-lg);
   color: var(--ink);
 }
 
@@ -1395,7 +1581,7 @@ body.panels-narrow .section-detach {
   border-radius: 2px;
   padding: 3px 6px;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-body-lg);
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -1410,7 +1596,7 @@ body.panels-narrow .section-detach {
 
 .tuning-unit {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-small);
   color: var(--ink-dim);
   min-width: 34px;   /* fixed: units differ in length across params */
 }
@@ -1420,7 +1606,7 @@ body.panels-narrow .section-detach {
   border: none;
   color: var(--ink-dim);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--fs-value);
   padding: 0 2px;
   /* visibility, not display: the button keeps its space when hidden, so a
      row does not shift sideways the moment a value becomes dirty. */
@@ -1444,21 +1630,21 @@ body.panels-narrow .section-detach {
   align-items: center;
   gap: 8px;
   margin-top: 3px;
-  font-size: 11px;
+  font-size: var(--fs-body);
   color: var(--ink-dim);
   cursor: pointer;
 }
 
 .tuning-desc {
   margin-top: 4px;
-  font-size: 11px;
+  font-size: var(--fs-body);
   line-height: 1.45;
   color: var(--ink-dim);
 }
 
 .tuning-note {
   margin-top: 3px;
-  font-size: 11px;
+  font-size: var(--fs-body);
   color: var(--bad);
   display: none;
 }
@@ -1475,7 +1661,7 @@ body.panels-narrow .section-detach {
 
 #tuning-save-status {
   margin-top: 7px;
-  font-size: 11px;
+  font-size: var(--fs-body);
   line-height: 1.45;
   color: var(--ink-dim);
   word-break: break-word;
@@ -1500,7 +1686,7 @@ body.panels-narrow .section-detach {
   gap: 6px;
   margin-top: 8px;
   font-family: var(--mono);
-  font-size: 9px;
+  font-size: var(--fs-nano);
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -1526,8 +1712,17 @@ body.panels-narrow .section-detach {
   display: inline-block;
   padding: 3px 9px;
   border-radius: 2px;
+  /* Same corner cut as every button (see --chamfer): the state chip is
+     the loudest thing in the sidebar and it should look like it was
+     stamped from the same sheet as the controls under it. */
+  clip-path: polygon(
+    0 0,
+    calc(100% - var(--chamfer)) 0,
+    100% var(--chamfer),
+    100% 100%,
+    0 100%);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-body);
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -1564,14 +1759,14 @@ body.panels-narrow .section-detach {
 .intent-node {
   margin-left: auto;
   font-family: var(--mono);
-  font-size: 9.5px;
+  font-size: var(--fs-label);
   color: var(--ink-faint);
 }
 
 /* The full sentence the car logged for this decision. Wraps and stays
    selectable: these get pasted into issues verbatim. */
 .intent-reason {
-  font-size: 11px;
+  font-size: var(--fs-body);
   line-height: 1.5;
   color: var(--ink);
   margin: 3px 0 7px;
@@ -1598,7 +1793,7 @@ body.panels-narrow .section-detach {
 
 .intent-subtitle {
   font-family: var(--mono);
-  font-size: 8.5px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -1613,7 +1808,7 @@ body.panels-narrow .section-detach {
 
 .intent-factor .row-value {
   flex: none;
-  font-size: 12px;
+  font-size: var(--fs-body-lg);
   font-weight: 400;
   color: var(--ink-dim);
 }
@@ -1654,7 +1849,7 @@ body.panels-narrow .section-detach {
   overflow-y: auto;
   overscroll-behavior: contain;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-small);
   line-height: 1.65;
   border: 1px solid var(--line-soft);
   border-radius: 2px;
@@ -1690,7 +1885,7 @@ body.panels-narrow .section-detach {
 /* sits above the list, not tucked in a tooltip. */
 /* ------------------------------------------------------------------ */
 .proc-note {
-  font-size: 10px;
+  font-size: var(--fs-small);
   line-height: 1.45;
   color: var(--warn);
   border-left: 2px solid var(--warn);
@@ -1708,7 +1903,7 @@ body.panels-narrow .section-detach {
 
 .proc-empty {
   color: var(--ink-faint);
-  font-size: 11px;
+  font-size: var(--fs-body);
   font-style: italic;
 }
 
@@ -1727,7 +1922,7 @@ body.panels-narrow .section-detach {
 
 .proc-name {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: var(--fs-body);
   color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1736,7 +1931,7 @@ body.panels-narrow .section-detach {
 
 .proc-kind {
   margin-left: 5px;
-  font-size: 9px;
+  font-size: var(--fs-nano);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--ink-faint);
@@ -1744,7 +1939,7 @@ body.panels-narrow .section-detach {
 
 .proc-meta {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--fs-small);
   color: var(--ink-dim);
 }
 
@@ -1756,29 +1951,16 @@ body.panels-narrow .section-detach {
 
 .proc-reason {
   grid-column: 1 / -1;
-  font-size: 9.5px;
+  font-size: var(--fs-label);
   line-height: 1.4;
   color: var(--ink-faint);
 }
 
+/* Fill, border, chamfer and hover all come from the shared button recipe
+   further up; only the size differs, because this one sits inside a
+   three-column row rather than on its own. */
 .proc-stop {
-  background: rgba(61, 220, 255, 0.07);
-  color: var(--accent);
-  border: 1px solid var(--line-strong);
-  border-radius: 2px;
   padding: 3px 9px;
-  font-family: var(--mono);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  cursor: pointer;
-}
-
-.proc-stop:hover {
-  background: rgba(61, 220, 255, 0.18);
-  color: var(--ink-bright);
-  border-color: var(--accent);
 }
 
 /* Armed, waiting for the second press. Amber = caution, and it is
@@ -1786,7 +1968,8 @@ body.panels-narrow .section-detach {
    confirms by reflex without registering that something changed. */
 .proc-stop-armed,
 .proc-stop-armed:hover {
-  background: rgba(255, 182, 54, 0.16);
+  background-image: none;
+  background-color: rgba(255, 182, 54, 0.16);
   border-color: var(--warn);
   color: var(--warn);
 }
@@ -1794,7 +1977,7 @@ body.panels-narrow .section-detach {
 .proc-status {
   margin-top: 6px;
   min-height: 1.2em;
-  font-size: 10px;
+  font-size: var(--fs-small);
   line-height: 1.4;
   color: var(--ink-dim);
 }
@@ -1802,56 +1985,442 @@ body.panels-narrow .section-detach {
 .proc-status-good { color: var(--go); }
 .proc-status-bad { color: var(--bad); }
 
-/* ------------------------------------------------------------------ */
-/* Tightening up where there is genuinely no room. The sidebar always
-   fits now -- it scrolls -- but scrolling to reach something is worse
-   than seeing it, so give back what vertical space we can. */
-/* ------------------------------------------------------------------ */
+/* ==================================================================== */
+/* PHONE FURNITURE
+ *
+ * Two elements that exist only in the phone layout and are display:none
+ * everywhere else. They are declared out here, at full size, rather than
+ * inside the media query, so that everything about how they LOOK lives
+ * next to the rest of the theme and the media query below only has to say
+ * where they go and that they are visible.
+ */
+/* ==================================================================== */
+
+/* The always-on status strip across the top of a phone screen.
+ *
+ * On a phone the map is full-bleed and the sidebar is a sheet parked off
+ * the bottom of the screen, so without this there is nothing on screen to
+ * read until you touch something. Three facts earn the space: is the link
+ * up, what is the car doing, how fast is it going. dashboard.js fills it
+ * from the same values as the section digests, so it cannot disagree with
+ * the panel underneath. */
+#phone-strip {
+  display: none;              /* the phone media query turns this on */
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  /* Above the map and its vignette (5), below the tuning drawer (14) so a
+     full-screen drawer still covers it. */
+  z-index: 9;
+  align-items: center;
+  gap: 9px;
+  box-sizing: border-box;
+  min-height: 34px;
+  padding: 5px 11px;
+  background-color: rgba(5, 10, 18, 0.90);
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  clip-path: polygon(
+    0 0,
+    calc(100% - var(--chamfer)) 0,
+    100% var(--chamfer),
+    100% 100%,
+    0 100%);
+  font-family: var(--mono);
+  font-size: var(--fs-label);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
+}
+
+.strip-state {
+  min-width: 0;
+  color: var(--ink-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The same three state colours as the chip in the sidebar and the ribbon
+   on the map -- one meaning, one colour, wherever it appears. */
+.strip-state.intent-drive { color: var(--go); }
+.strip-state.intent-caution { color: var(--warn); }
+.strip-state.intent-stop { color: var(--bad); }
+
+/* Both are pushed right and given a fixed width, so a speed going from
+   9.9 to 10.0 cannot shove its neighbour sideways -- rule 1, in the one
+   part of the phone layout that is always on screen. */
+.strip-speed {
+  margin-left: auto;
+  flex: none;
+  min-width: 66px;
+  text-align: right;
+  font-size: var(--fs-value);
+  color: var(--ink-bright);
+  text-shadow: 0 0 12px rgba(120, 200, 240, 0.25);
+}
+
+.strip-feeds {
+  flex: none;
+  min-width: 42px;
+  text-align: right;
+  color: var(--ink-dim);
+}
+
+/* The grab handle at the top of the phone sheet. panels.js owns the
+   gesture; this is only its appearance. */
+#sheet-grip {
+  display: none;              /* the phone media query turns this on */
+  order: -3;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: grab;
+  /* The handle owns the drag outright: without this the browser starts
+     scrolling or rubber-banding the page half a pixel into the gesture
+     and the sheet jitters against it. */
+  touch-action: none;
+}
+
+.sheet-grip-bar {
+  width: 44px;
+  height: 4px;
+  border-radius: 2px;
+  background-color: var(--line-strong);
+  box-shadow: 0 0 10px rgba(61, 220, 255, 0.30);
+  /* Colour and glow only. A handle that changed size as you grabbed it
+     would move the rows under it on a surface being dragged. */
+  transition: background-color 120ms linear, box-shadow 120ms linear;
+}
+
+#sheet-grip:active .sheet-grip-bar,
+body.sheet-dragging .sheet-grip-bar {
+  background-color: var(--accent);
+  box-shadow: 0 0 16px rgba(61, 220, 255, 0.65);
+}
+
+/* ==================================================================== */
+/* RESPONSIVE LADDER
+ *
+ * Four rungs, in order of how much has to change:
+ *
+ *   1. pointer: coarse   -- any touchscreen, at any size. Hit areas only.
+ *   2. max-height: 720   -- a short window. Give vertical space back.
+ *   3. body.panels-narrow -- too narrow to float panels (panels.js sets
+ *      this at exactly FLOAT_MIN_WIDTH, so the two can never drift apart
+ *      the way a duplicated 900px media query would).
+ *   4. max-width: 640    -- a phone. A different layout, not a squeeze.
+ *
+ * Rungs 1-3 tune the desktop layout. Rung 4 replaces it.
+ */
+/* ==================================================================== */
+
+/* --- 1. Touchscreens, any size -------------------------------------- */
+@media (pointer: coarse) {
+  :root {
+    /* The single number behind every hit area on the page. 26px is a fine
+       mouse target and a bad thumb target; nothing else has to change. */
+    --tap: 40px;
+  }
+
+  .section-head { padding: 8px 0; }
+  .section-detach { padding: 4px 7px; font-size: var(--fs-body-lg); }
+  .float-dock { padding: 4px 7px; }
+  #tuning-close { padding: 7px 13px; }
+
+  /* Native controls do not scale with the type scale, so they are the one
+     place a literal size is still the honest way to say it. */
+  .intent-toggle input,
+  .tuning-toggle input,
+  #tuning-arm-label input {
+    width: 18px;
+    height: 18px;
+  }
+
+  .tuning-param input[type="range"] { height: 30px; }
+  .tuning-param-value input[type="number"] { padding: 7px 8px; }
+
+  /* "scroll to zoom" is the wrong instruction on a touchscreen. */
+  .help-hint-fine { display: none; }
+  .help-hint-coarse { display: inline; }
+}
+
+.help-hint-coarse { display: none; }
+
+/* --- 2. Short windows ------------------------------------------------
+   The sidebar always fits now -- it scrolls -- but scrolling to reach
+   something is worse than seeing it, so give back what vertical space we
+   can before making anyone scroll for it. */
 @media (max-height: 720px) {
+  :root { --fs-hero: 24px; }
+
   #overlay {
     padding: 11px 12px 10px;
-    font-size: 12px;
+    font-size: var(--fs-body-lg);
     line-height: 1.4;
   }
   #masthead { padding-bottom: 6px; margin-bottom: 6px; }
   .section { margin-top: 6px; padding-top: 6px; }
   .intent-log { height: 104px; max-height: 104px; }
-  #stopwatch-display { font-size: 24px; }
 }
 
-@media (max-width: 640px) {
-  #overlay {
-    /* Leave room for the corner insets on a phone rather than covering
-       them: the map and camera panels are pinned to the right edge. */
-    width: min(290px, calc(100vw - 24px));
-    max-height: calc(100vh - 24px);
+/* --- 3. Too narrow to float panels ----------------------------------
+   Everything is docked back into the sidebar at this width (panels.js),
+   which makes the sidebar the tallest it ever gets while the screen is
+   the smallest it has been so far. Buy back width from the right rail,
+   which is now the only other thing competing for it. */
+@media (min-width: 641px) {
+  body.panels-narrow #overlay {
+    width: min(300px, calc(100vw - 24px));
   }
-  .metrics { gap: 2px 8px; }
-  /* Touch targets: a 10px summary row is not comfortably tappable. */
-  .section-head { padding: 6px 0; }
-  .intent-log { height: 120px; max-height: 120px; }
-  /* No room to sit beside the info panel on a phone: take the whole
-     width and cover it instead, which is also why it goes above it here. */
+
+  body.panels-narrow #minimap-panel,
+  body.panels-narrow #camera-panel,
+  body.panels-narrow #scale-panel {
+    width: clamp(132px, 21vw, 190px);
+  }
+}
+
+/* ==================================================================== */
+/* --- 4. THE PHONE LAYOUT --------------------------------------------
+ *
+ * Not the desktop layout made smaller. A 320px sidebar on a 390px phone
+ * covers the map it exists to annotate, and the map is the reason anyone
+ * opens this page at the trackside. So on a phone:
+ *
+ *   - the map is full-bleed, with nothing permanently over it but a thin
+ *     status strip;
+ *   - the sidebar becomes a sheet parked off the bottom of the screen
+ *     with only a grab handle and the link state showing. Drag it up to
+ *     half height to read the telemetry, or to full height to work in it;
+ *   - the minimap goes away entirely -- it is an overview of a map that
+ *     is already filling the screen;
+ *   - everything you can touch grows (see rung 1).
+ *
+ * The sheet moves with `transform`, never `height`. That is rule 2 at the
+ * top of this file, and it matters more here than anywhere else: a sheet
+ * animating its height would re-lay-out every row inside it on every
+ * frame of a drag, on top of a canvas already painting telemetry at 20Hz,
+ * on the least powerful screen this page ever runs on.
+ */
+/* ==================================================================== */
+@media (max-width: 640px) {
+  :root {
+    /* One place, and the whole interface grows. A phone is held at arm's
+       length by someone standing next to a moving car; the desktop floor
+       of 8.5px is not readable in that situation. */
+    --fs-micro: 9.5px;
+    --fs-nano: 10px;
+    --fs-label: 10.5px;
+    --fs-small: 11px;
+    --fs-body: 12.5px;
+    --fs-body-lg: 13px;
+    --fs-value: 15px;
+    --fs-hero: 34px;
+  }
+
+  #phone-strip { display: flex; }
+  #sheet-grip { display: flex; }
+
+  /* The viewport brackets and their tick scales crowd a phone screen and
+     add nothing there. */
+  .frame-corner { display: none; }
+
+  /* --- the sheet --------------------------------------------------- */
+  #overlay {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    /* dvh, not vh: on a phone browser 100vh is the window with the URL
+       bar hidden, so a vh-sized sheet hangs below the visible area by
+       exactly the height of the browser chrome. */
+    height: 86vh;
+    height: 86dvh;
+    max-height: 86dvh;
+    padding: 0 13px 13px;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    border-radius: 0;
+    /* Nearly opaque, and no blur. This covers most of the screen, and a
+       full-width backdrop-filter over a live canvas is the single most
+       expensive thing this page can ask a phone GPU for -- it showed up
+       as dropped frames in the map, not as a slow panel. */
+    background-color: rgba(5, 10, 18, 0.95);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    box-shadow:
+      0 -1px 0 var(--line-strong),
+      0 -16px 44px rgba(0, 0, 0, 0.66);
+    transform: translateY(calc(100% - var(--sheet-peek)));
+    transition: transform 0.24s cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+
+  /* Corner brackets belong on a small floating instrument, not on a
+     full-width sheet where they would land in two unrelated corners of
+     the screen. The grab handle is this surface's signature instead. */
+  #overlay::before,
+  #overlay::after { display: none; }
+
+  /* The three detents. panels.js puts one of these classes on <body> and
+     writes an inline transform only while a drag is actually in flight. */
+  body.sheet-peek #overlay { transform: translateY(calc(100% - var(--sheet-peek))); }
+  body.sheet-half #overlay { transform: translateY(46%); }
+  body.sheet-full #overlay { transform: translateY(0); }
+  body.sheet-dragging #overlay { transition: none; }
+
+  /* Reading order inside the sheet, top to bottom: handle, identity, link
+     state, why-the-picture-looks-like-this, the sections, the view
+     controls. It differs from the desktop order in one way that matters:
+     the mode banner moves ABOVE the scroll region, because on a phone the
+     bottom of the sheet is off-screen at every detent but the last, and
+     "no map yet" is not a message that can wait until you have dragged
+     the sheet all the way up. */
+  #masthead { order: -2; padding-bottom: 5px; margin-bottom: 5px; }
+  #status { order: -1; }
+  /* Two lines, hard. --sheet-peek is a fixed height, so anything that can
+     grow past what fits in it gets cut through the middle of a word, which
+     reads as a broken page rather than as a message continuing below the
+     fold. Two lines is what the peek was sized around; a longer banner
+     scrolls inside those two lines, which it could already do. */
+  #mode-banner {
+    order: 0;
+    margin-top: 0;
+    margin-bottom: 6px;
+    max-height: 2.9em;
+  }
+  #panels { order: 1; }
+  #help { order: 2; }
+
+  /* LIVE TELEMETRY under the wordmark is the first thing to go when the
+     row has to earn its height at every detent. */
+  #brand-sub { display: none; }
+
+  /* Roomier rows: this is the layout where a row is something you hit
+     with a thumb, not something you point at. */
+  .metrics { gap: 4px 10px; }
+  .section { margin-top: 9px; padding-top: 9px; }
+  .intent-log { height: 132px; max-height: 132px; }
+
+  #help {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 9px;
+    justify-content: space-between;
+  }
+
+  .help-buttons { margin-left: 0; gap: 9px; }
+
+  /* --- the map furniture ------------------------------------------- */
+  /* An overview inset for a map that already fills the screen is a
+     picture of a picture. The screen is worth more. */
+  #minimap-panel { display: none; }
+
+  #camera-panel {
+    top: 50px;             /* clear of the status strip */
+    bottom: auto;
+    right: 8px;
+    width: 34vw;
+    max-width: 168px;
+  }
+
+  /* Resizing the camera by dragging a 26px corner is a gesture that only
+     ever fires by accident on a touchscreen, and the panel has a sensible
+     fixed size here. Tapping it still opens the recording view. */
+  #camera-resize { display: none; }
+  #camera-panel .panel-label { left: 9px; }
+  /* Always visible -- there is no hover on a phone to reveal it with --
+     but reduced to its arrow. Spelled out, it wrapped onto two lines and
+     covered most of a 130px-wide panel. */
+  .camera-open-hint { opacity: 1; }
+  .camera-open-hint .hint-words { display: none; }
+
+  #scale-panel {
+    right: 8px;
+    bottom: calc(var(--sheet-peek) + 10px);
+    width: min(45vw, 190px);
+  }
+
+  /* Once the sheet is up, the ruler is behind it. */
+  body.sheet-half #scale-panel,
+  body.sheet-full #scale-panel { display: none; }
+
+  /* Dim the map while the sheet is raised, so the sheet reads as the
+     foreground rather than as a lighter rectangle over an equally bright
+     one. Inside #hud-frame, which is already pointer-events:none, so this
+     can never intercept a touch meant for the map. */
+  #hud-frame::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-color: rgba(2, 5, 10, 0.45);
+    opacity: 0;
+    transition: opacity 200ms linear;
+  }
+
+  body.sheet-half #hud-frame::after,
+  body.sheet-full #hud-frame::after { opacity: 1; }
+
+  /* --- the tuning drawer ------------------------------------------- */
+  /* No room to sit beside the sheet: take the whole screen and cover it,
+     which is also why it goes above it here. */
   #tuning-panel {
     left: 0;
     width: 100vw;
+    height: 100dvh;
     z-index: 14;
     transform: translateX(-100%);
   }
-  /* The viewport brackets crowd a phone screen and add nothing there. */
-  .frame-corner { display: none; }
+
+  /* A detached panel cannot exist at this width (panels.js re-docks them
+     all), but the grips are still in the DOM -- and an invisible 8px
+     resize strip along every edge of the sheet is a gesture waiting to
+     eat a scroll. */
+  #overlay .panel-resize { display: none; }
+}
+
+/* Small phones: the sheet's closed height is most of what is left of a
+   568px-tall screen, so it gives some back. */
+@media (max-width: 640px) and (max-height: 700px) {
+  :root {
+    --sheet-peek: 104px;
+    --fs-hero: 30px;
+  }
+  /* The wordmark is the one row in the peek that says nothing about the
+     car. On a 568px-tall screen that is no longer a trade worth making --
+     the status strip along the top already identifies the page. */
+  #masthead { display: none; }
+  .intent-log { height: 108px; max-height: 108px; }
 }
 
 /* ------------------------------------------------------------------ */
 /* Motion is ambient here, never informational -- so removing all of it
    costs nothing but the mood, and it is the difference between usable and
-   unusable for anyone who asked not to see it. */
+   unusable for anyone who asked not to see it.
+ *
+ * The sheet is the one exception worth naming: its transform is not
+ * decoration, it is the position of a thing you are dragging. Reduced
+ * motion makes it instant rather than removing it.
+ */
 /* ------------------------------------------------------------------ */
 @media (prefers-reduced-motion: reduce) {
   #masthead::after {
     animation: none;
     opacity: 0.4;
   }
+  #conn-dot.dot-green,
+  #strip-dot.dot-green { animation: none; }
   .tuning-param.applied { animation: none; }
   *, *::before, *::after {
     transition-duration: 0.01ms !important;

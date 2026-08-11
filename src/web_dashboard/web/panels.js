@@ -18,6 +18,12 @@
  *      rule that a window too narrow to float panels in re-docks them all
  *      without losing the layout you set up on a big screen.
  *
+ *   4. THE PHONE SHEET. Below the phone breakpoint the info panel stops
+ *      being a sidebar and becomes a sheet parked off the bottom of the
+ *      screen, with three detents you drag it between. That is a layout
+ *      state too, and it is the same element -- so it lives here rather
+ *      than in a fifth file that would also want to move #overlay.
+ *
  * Deliberately NOT in here: anything that reads telemetry or touches the
  * WebSocket. This file only ever moves boxes around.
  *
@@ -42,6 +48,27 @@
 
   const MIN_W = 180;
   const MIN_H = 90;
+
+  // The phone breakpoint. MUST match the `max-width: 640px` media query in
+  // style.css: that query decides whether the sheet styling applies at
+  // all, and this decides whether the gestures that drive it are live. If
+  // they ever disagree there is a window width with a sheet nobody can
+  // open, or a grip that drags a sidebar.
+  const PHONE_MAX_WIDTH = 640;
+
+  // Where the middle detent sits, as a fraction of the sheet's own height.
+  // MUST match `body.sheet-half #overlay { transform: translateY(46%) }`.
+  const SHEET_HALF_FRACTION = 0.46;
+
+  // Above this a drag counts as a flick and moves a detent in the
+  // direction it was thrown, however far it actually travelled. In CSS
+  // pixels per millisecond -- about a fast thumb flick, well clear of the
+  // speed a careful drag reaches.
+  const SHEET_FLICK_PX_PER_MS = 0.5;
+
+  // Past this a gesture is a drag, below it a tap. 3px absorbs the wobble
+  // of a thumb pressing a handle without moving it.
+  const SHEET_TAP_SLOP_PX = 3;
 
   // ---------------------------------------------------------------------
   // Pure geometry. No DOM, no state -- these are the parts worth testing.
@@ -125,6 +152,50 @@
     return { x, y, w, h };
   }
 
+  /**
+   * Where each sheet detent sits, as a downward translation in pixels
+   * from fully open. `height` is the sheet's own height and `peek` is how
+   * much of it stays on screen when closed.
+   */
+  function sheetOffsets(height, peek) {
+    return {
+      full: 0,
+      half: height * SHEET_HALF_FRACTION,
+      peek: Math.max(0, height - peek),
+    };
+  }
+
+  /**
+   * Which detent a drag ending at `offset` should settle into.
+   *
+   * Nearest wins, except that a flick always moves at least one detent in
+   * the direction it was thrown -- that is what makes a short fast gesture
+   * feel like it did something, instead of snapping back to where it
+   * started because the finger never travelled far enough.
+   *
+   * `velocity` is CSS pixels per millisecond, positive downwards (closing).
+   * The detents are sorted by offset rather than assumed to be in a fixed
+   * order: on a short screen `peek` and `half` can cross over, and a
+   * hard-coded order would then step the sheet the wrong way.
+   */
+  function detentFor(offset, height, peek, velocity = 0) {
+    const sorted = Object.entries(sheetOffsets(height, peek))
+      .sort((a, b) => a[1] - b[1]);
+
+    let nearest = 0;
+    for (let i = 1; i < sorted.length; i++) {
+      if (Math.abs(sorted[i][1] - offset) < Math.abs(sorted[nearest][1] - offset)) {
+        nearest = i;
+      }
+    }
+
+    if (Math.abs(velocity) > SHEET_FLICK_PX_PER_MS) {
+      const step = velocity > 0 ? 1 : -1;
+      nearest = Math.max(0, Math.min(sorted.length - 1, nearest + step));
+    }
+    return sorted[nearest][0];
+  }
+
   /** Layout state -> a plain object safe to JSON round-trip. */
   function serializeLayout(state) {
     const out = { sections: {}, panels: {} };
@@ -163,7 +234,9 @@
   // load this file with a DOM stub and still reach the maths.
   const api = {
     SNAP_PX, FLOAT_MIN_WIDTH, MIN_W, MIN_H,
+    PHONE_MAX_WIDTH, SHEET_HALF_FRACTION, SHEET_FLICK_PX_PER_MS,
     clampToViewport, snapAxis, snapBox, resizeBox,
+    sheetOffsets, detentFor,
     serializeLayout, deserializeLayout,
   };
   if (typeof window !== 'undefined') window.__panels = api;
@@ -570,6 +643,142 @@
     syncTuningOffset();
   }
 
+  // --- the phone sheet ---------------------------------------------------
+  // Below PHONE_MAX_WIDTH the info panel is a bottom sheet with three
+  // detents. style.css owns where each detent is (as a transform on a
+  // body class); this owns which one is current, and the gesture that
+  // changes it. The only time an inline transform is written here is
+  // while a finger is actually down -- the rest of the time the class
+  // decides, so a resize or an orientation change cannot leave the sheet
+  // stranded at a pixel offset that no longer means anything.
+  const DETENTS = ['peek', 'half', 'full'];
+  const phoneQuery = window.matchMedia(`(max-width: ${PHONE_MAX_WIDTH}px)`);
+  let phone = false;
+  let detent = 'peek';
+  let swallowClick = false;
+
+  /**
+   * The peek height, read from CSS so the two cannot drift apart -- the
+   * media queries change it per screen size, and this has to follow.
+   * The fallback is only reached if --sheet-peek is missing entirely, and
+   * matches the value declared in :root so the two agree even then.
+   */
+  function peekPx() {
+    const raw = getComputedStyle(overlay).getPropertyValue('--sheet-peek');
+    const value = parseFloat(raw);
+    return Number.isFinite(value) && value > 0 ? value : 140;
+  }
+
+  function setDetent(name) {
+    detent = DETENTS.includes(name) ? name : 'peek';
+    for (const other of DETENTS) {
+      document.body.classList.toggle(`sheet-${other}`, other === detent);
+    }
+    const grip = document.getElementById('sheet-grip');
+    if (grip) grip.setAttribute('aria-expanded', detent === 'peek' ? 'false' : 'true');
+  }
+
+  function bindSheetGrip() {
+    const grip = document.getElementById('sheet-grip');
+    if (!grip) return;
+    let drag = null;
+
+    const maxOffset = (height) => Math.max(0, height - peekPx());
+
+    grip.addEventListener('pointerdown', (e) => {
+      if (!phone || e.button !== 0) return;
+      e.preventDefault();
+      grip.setPointerCapture(e.pointerId);
+      const height = overlay.getBoundingClientRect().height;
+      drag = {
+        startY: e.clientY,
+        lastY: e.clientY,
+        lastT: e.timeStamp,
+        velocity: 0,
+        height,
+        from: sheetOffsets(height, peekPx())[detent],
+        moved: false,
+      };
+      document.body.classList.add('sheet-dragging');
+    });
+
+    grip.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const dt = e.timeStamp - drag.lastT;
+      // Instantaneous rather than averaged: what decides a flick is how
+      // fast the finger was moving when it left, not how fast the whole
+      // gesture was.
+      if (dt > 0) drag.velocity = (e.clientY - drag.lastY) / dt;
+      drag.lastY = e.clientY;
+      drag.lastT = e.timeStamp;
+
+      const dy = e.clientY - drag.startY;
+      if (Math.abs(dy) > SHEET_TAP_SLOP_PX) drag.moved = true;
+      const offset = Math.max(0, Math.min(maxOffset(drag.height), drag.from + dy));
+      overlay.style.transform = `translateY(${Math.round(offset)}px)`;
+    });
+
+    const release = (e) => {
+      if (!drag) return;
+      const finished = drag;
+      drag = null;
+      document.body.classList.remove('sheet-dragging');
+      if (grip.hasPointerCapture(e.pointerId)) grip.releasePointerCapture(e.pointerId);
+      // Hand the position back to the stylesheet before choosing the
+      // detent, so the class transition animates from where the finger
+      // left it rather than fighting a stale inline transform.
+      overlay.style.transform = '';
+
+      if (!finished.moved) {
+        // A tap. Handled here rather than in the click listener because a
+        // touch that began with preventDefault may never produce a click
+        // -- and the click listener below is what keyboard activation
+        // needs, so it stays, guarded.
+        swallowClick = true;
+        setDetent(DETENTS[(DETENTS.indexOf(detent) + 1) % DETENTS.length]);
+        return;
+      }
+
+      const offset = Math.max(0, Math.min(
+        maxOffset(finished.height), finished.from + (e.clientY - finished.startY)));
+      setDetent(detentFor(offset, finished.height, peekPx(), finished.velocity));
+    };
+
+    grip.addEventListener('pointerup', release);
+    grip.addEventListener('pointercancel', release);
+
+    // Keyboard: the grip is a real <button>, so Enter and Space arrive
+    // here as a click with no pointer sequence in front of them.
+    grip.addEventListener('click', () => {
+      if (swallowClick) {
+        swallowClick = false;
+        return;
+      }
+      if (!phone) return;
+      setDetent(DETENTS[(DETENTS.indexOf(detent) + 1) % DETENTS.length]);
+    });
+  }
+
+  function applyPhoneMode() {
+    const shouldBePhone = phoneQuery.matches;
+    if (shouldBePhone === phone) return;
+    phone = shouldBePhone;
+    document.body.classList.toggle('layout-phone', phone);
+
+    if (phone) {
+      // Any width/height/left/top this panel picked up from a drag on a
+      // wider screen would override the sheet's own geometry, since those
+      // land as inline styles.
+      overlay.style.cssText = '';
+      setDetent('peek');
+    } else {
+      overlay.style.transform = '';
+      for (const name of DETENTS) document.body.classList.remove(`sheet-${name}`);
+      document.body.classList.remove('sheet-dragging');
+    }
+    syncTuningOffset();
+  }
+
   // --- the fixed panels -------------------------------------------------
   function makeFixedPanelAdjustable(el, key, opts = {}) {
     if (!el) return;
@@ -579,6 +788,11 @@
         // Only a drag started on the panel's own chrome, never on a
         // control, a link, or inside the scrolling region.
         if (e.button !== 0) return;
+        // In the phone layout the info panel is a sheet pinned to the
+        // bottom of the screen. Dragging it around as a floating panel
+        // would leave it somewhere it has no styling for, and there is no
+        // second window to move it out of the way of.
+        if (phone) return;
         if (e.target.closest('button, input, a, select, textarea, .scrolls, #panels')) return;
         if (e.target.classList.contains('panel-resize')) return;
         beginDrag(el, e, (b) => { state.panels[key] = b; save(); syncTuningOffset(); });
@@ -632,6 +846,7 @@
 
   // --- boot -------------------------------------------------------------
   addDetachButtons();
+  bindSheetGrip();
   makeFixedPanelAdjustable(overlay, 'overlay', { draggable: true });
   makeFixedPanelAdjustable(document.getElementById('minimap-panel'), 'minimap', { draggable: true });
 
@@ -656,6 +871,7 @@
   }
   narrow = window.innerWidth < FLOAT_MIN_WIDTH;
   document.body.classList.toggle('panels-narrow', narrow);
+  applyPhoneMode();
 
   updateDetachButtons();
   syncTuningOffset();
@@ -665,6 +881,7 @@
 
   window.addEventListener('resize', () => {
     applyWidthMode();
+    applyPhoneMode();
     syncTuningOffset();
   });
 })();

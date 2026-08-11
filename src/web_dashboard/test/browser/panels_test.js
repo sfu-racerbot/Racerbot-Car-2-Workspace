@@ -193,6 +193,78 @@ section('layout state survives a save/load round trip');
 }
 
 // ---------------------------------------------------------------------------
+section('the phone sheet: where a drag settles');
+
+{
+  // A 720px-tall sheet on a phone, closed to a 140px peek.
+  const H = 720;
+  const PEEK = 140;
+  const offsets = panels.sheetOffsets(H, PEEK);
+
+  eq('fully open is no offset at all', offsets.full, 0);
+  eq('half sits at the fraction the stylesheet animates to',
+    offsets.half, H * panels.SHEET_HALF_FRACTION);
+  eq('closed leaves exactly the peek showing', offsets.peek, H - PEEK);
+
+  // --- released slowly: nearest detent wins ---
+  eq('a slow release near the top opens fully',
+    panels.detentFor(20, H, PEEK, 0), 'full');
+  eq('a slow release near the middle settles at half',
+    panels.detentFor(offsets.half + 15, H, PEEK, 0), 'half');
+  eq('a slow release near the bottom closes',
+    panels.detentFor(offsets.peek - 20, H, PEEK, 0), 'peek');
+
+  // --- flicked: direction beats distance ---
+  // The gesture this protects: a short sharp flick up from the closed
+  // sheet. It travels almost no distance, so "nearest detent" would snap
+  // it straight back to peek and the flick would look like it failed.
+  eq('a flick up from closed opens a detent',
+    panels.detentFor(offsets.peek - 5, H, PEEK, -1.2), 'half');
+  eq('a flick down from open closes a detent',
+    panels.detentFor(5, H, PEEK, 1.2), 'half');
+  eq('a flick up from half opens fully',
+    panels.detentFor(offsets.half, H, PEEK, -1.2), 'full');
+  eq('a flick down from half closes',
+    panels.detentFor(offsets.half, H, PEEK, 1.2), 'peek');
+
+  // A flick cannot walk off either end of the list.
+  eq('a flick up from fully open stays fully open',
+    panels.detentFor(0, H, PEEK, -3), 'full');
+  eq('a flick down from closed stays closed',
+    panels.detentFor(offsets.peek, H, PEEK, 3), 'peek');
+
+  // Just under the flick threshold is still a drag, not a throw.
+  eq('a firm but sub-threshold drag still lands on the nearest detent',
+    panels.detentFor(offsets.peek - 5, H, PEEK, -(panels.SHEET_FLICK_PX_PER_MS - 0.01)),
+    'peek');
+}
+
+{
+  // A short phone in landscape: the peek is a big share of a small sheet,
+  // so `peek` (h - peek) can end up ABOVE `half` (0.46h) on the axis. The
+  // detents are sorted by offset rather than assumed to be in a fixed
+  // order, so a flick still steps the way the finger went.
+  const H = 300;
+  const PEEK = 200;
+  const offsets = panels.sheetOffsets(H, PEEK);
+  check('the detents really have crossed over',
+    offsets.peek < offsets.half,
+    `peek=${offsets.peek} half=${offsets.half}`);
+
+  eq('a flick down from fully open still moves toward closed',
+    panels.detentFor(0, H, PEEK, 2), 'peek');
+  eq('a flick up from the bottom detent still opens',
+    panels.detentFor(offsets.half, H, PEEK, -2), 'peek');
+}
+
+{
+  // Peeks taller than the sheet would put the closed detent at a negative
+  // offset -- i.e. above the top of the screen.
+  eq('a peek taller than the sheet cannot lift it off the top',
+    panels.sheetOffsets(100, 400).peek, 0);
+}
+
+// ---------------------------------------------------------------------------
 console.log('');
 if (failures) {
   console.log(`${failures} of ${checks} checks FAILED`);

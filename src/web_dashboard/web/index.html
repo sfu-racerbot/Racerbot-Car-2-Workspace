@@ -24,6 +24,21 @@
     <span class="frame-corner frame-br"></span>
   </div>
 
+  <!-- PHONE LAYOUT ONLY (style.css hides it everywhere else).
+       On a phone the map takes the whole screen and the sidebar becomes a
+       sheet you pull up from the bottom, so nothing in the sidebar is
+       readable until you interact with the page. This strip is what
+       answers the three questions worth answering with no interaction at
+       all -- is the link up, what is the car doing, how fast is it going.
+       dashboard.js fills it from exactly the values the section digests
+       already use, so it can never disagree with the panel below it. -->
+  <div id="phone-strip">
+    <span id="strip-dot" class="dot dot-red"></span>
+    <span id="strip-state" class="strip-state">offline</span>
+    <span id="strip-speed" class="strip-speed">--</span>
+    <span id="strip-feeds" class="strip-feeds">--</span>
+  </div>
+
   <!-- The sidebar is three parts: a pinned header, ONE scrolling region,
        and a pinned footer. That shape is deliberate. Previously the whole
        thing grew to whatever height its contents wanted while the page
@@ -31,6 +46,16 @@
        sections -- the decision log, the tuning button, reset view -- simply
        ran off the screen with no way to reach them. -->
   <div id="overlay" class="hud-panel">
+    <!-- PHONE LAYOUT ONLY: the grab handle for the bottom sheet. Drag it
+         to place the sheet freely, or tap it to cycle closed -> half ->
+         full -> closed. panels.js owns the gesture; on every other layout
+         this is display:none, which also takes it out of the tab order,
+         and the sidebar behaves exactly as it always has. -->
+    <button id="sheet-grip" type="button" aria-expanded="false"
+            aria-controls="overlay" aria-label="Expand or collapse the telemetry sheet">
+      <span class="sheet-grip-bar" aria-hidden="true"></span>
+    </button>
+
     <!-- Pinned identity + link state. Kept above the scroll region because
          "is this page still connected to the car" is the one thing that
          must be answerable without scrolling anywhere. -->
@@ -267,7 +292,11 @@
          things that must never be the part that scrolled out of sight. -->
     <div id="mode-banner"></div>
     <div id="help">
-      drag to pan &middot; scroll to zoom
+      <!-- Two hints, one shown per pointer type (see style.css): "scroll to
+           zoom" is wrong advice on a touchscreen, where the gesture is a
+           two-finger pinch. -->
+      <span class="help-hint help-hint-fine">drag to pan &middot; scroll to zoom</span>
+      <span class="help-hint help-hint-coarse">drag to pan &middot; pinch to zoom</span>
       <span class="help-buttons">
         <button id="reset-view">reset view</button>
         <button id="reset-layout" title="Put every panel back where it started">reset layout</button>
@@ -318,7 +347,7 @@
   <div id="camera-panel" class="hud-panel">
     <a id="camera-link" href="camera.html" target="_blank" rel="noopener" title="Open recording view in a new tab">
       <div class="panel-label">camera</div>
-      <div class="camera-open-hint">open recording view &#8599;</div>
+      <div class="camera-open-hint"><span class="hint-words">open recording view </span>&#8599;</div>
       <img id="camera-feed" alt="camera feed" />
       <div id="camera-placeholder" class="panel-placeholder">camera offline</div>
     </a>

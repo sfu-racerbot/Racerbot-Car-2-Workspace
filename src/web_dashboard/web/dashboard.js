@@ -20,6 +20,16 @@
   const ctx = canvas.getContext('2d');
   const connDot = document.getElementById('conn-dot');
   const connText = document.getElementById('conn-text');
+  // The phone layout's always-on status strip. It is display:none on every
+  // other layout, so on a laptop these four writes go to elements nobody
+  // can see -- which is the point: there is no "phone mode" branch to get
+  // wrong, and the strip can never show a different number from the panel
+  // it summarises because it is filled from the same values at the same
+  // instant (see updateDigests).
+  const stripDot = document.getElementById('strip-dot');
+  const stripState = document.getElementById('strip-state');
+  const stripSpeed = document.getElementById('strip-speed');
+  const stripFeeds = document.getElementById('strip-feeds');
   const infoMap = document.getElementById('info-map');
   const infoScan = document.getElementById('info-scan');
   const infoPose = document.getElementById('info-pose');
@@ -265,6 +275,15 @@
   function setConnected(connected) {
     connDot.className = 'dot ' + (connected ? 'dot-green' : 'dot-red');
     connText.textContent = connected ? 'connected' : 'disconnected -- retrying...';
+    stripDot.className = 'dot ' + (connected ? 'dot-green' : 'dot-red');
+    if (!connected) {
+      // Said outright rather than left showing the last state the car was
+      // in, which on a strip with no other context reads as current.
+      stripState.textContent = 'link lost';
+      stripState.className = 'strip-state intent-stop';
+      stripSpeed.textContent = '--';
+      stripFeeds.textContent = '--';
+    }
   }
 
   function onMessage(event) {
@@ -1753,24 +1772,19 @@
 
   // ---------------------------------------------------------------------
   // Pan / zoom
+  //
+  // Two primitives, and every input goes through one of them: pan by a
+  // screen delta, and zoom about a screen point. A mouse drag, a wheel, a
+  // trackpad pinch and two fingers on a phone all end up here, which is
+  // what keeps the one genuinely fiddly part -- the world-frame versus
+  // body-frame distinction -- written down exactly once.
   // ---------------------------------------------------------------------
-  let dragging = false;
-  let lastX = 0;
-  let lastY = 0;
 
-  canvas.addEventListener('mousedown', (e) => {
-    dragging = true;
-    lastX = e.clientX;
-    lastY = e.clientY;
-  });
-  window.addEventListener('mouseup', () => { dragging = false; });
-  window.addEventListener('mousemove', (e) => {
-    if (!dragging) return;
+  /** Move the view by a delta in CSS pixels. */
+  function panBy(dxCss, dyCss) {
     const dpr = window.devicePixelRatio || 1;
-    const dx = (e.clientX - lastX) * dpr;
-    const dy = (e.clientY - lastY) * dpr;
-    lastX = e.clientX;
-    lastY = e.clientY;
+    const dx = dxCss * dpr;
+    const dy = dyCss * dpr;
     // Update both the world-frame pan (read by worldToCanvas, once a map
     // or pose exists) and the body-frame pan (read by bodyToCanvas, before
     // then) -- render() only uses whichever is actually active, but a drag
@@ -1780,48 +1794,134 @@
     view.bodyPanY += dx / view.scale;
     view.bodyPanX += dy / view.scale;
     view.userAdjusted = true;
-    scheduleRender();
-  });
+  }
 
-  canvas.addEventListener('wheel', (e) => {
-    e.preventDefault();
+  /**
+   * Scale the view by `factor`, keeping whatever is under the screen point
+   * (clientX, clientY) exactly where it is -- "zoom to the pointer", not
+   * "zoom to the middle of the canvas". For a pinch, that point is the
+   * midpoint between the two fingers.
+   */
+  function zoomAt(clientX, clientY, factor) {
     const dpr = window.devicePixelRatio || 1;
-    const mouseCanvasX = e.clientX * dpr;
-    const mouseCanvasY = e.clientY * dpr;
-    const zoomFactor = Math.exp(-e.deltaY * 0.001);
+    const px = clientX * dpr;
+    const py = clientY * dpr;
 
     if (state.pose) {
-      // World point currently under the cursor, before changing scale.
-      const worldXBefore = view.centerX + (mouseCanvasX - canvas.width / 2) / view.scale;
-      const worldYBefore = view.centerY - (mouseCanvasY - canvas.height / 2) / view.scale;
-      view.scale = Math.min(Math.max(view.scale * zoomFactor, 2), 4000);
-      // Re-center so the same world point stays under the cursor -- "zoom
-      // to cursor" rather than "zoom to canvas center".
-      view.centerX = worldXBefore - (mouseCanvasX - canvas.width / 2) / view.scale;
-      view.centerY = worldYBefore + (mouseCanvasY - canvas.height / 2) / view.scale;
+      // World point currently under the pointer, before changing scale.
+      const worldXBefore = view.centerX + (px - canvas.width / 2) / view.scale;
+      const worldYBefore = view.centerY - (py - canvas.height / 2) / view.scale;
+      view.scale = Math.min(Math.max(view.scale * factor, 2), 4000);
+      view.centerX = worldXBefore - (px - canvas.width / 2) / view.scale;
+      view.centerY = worldYBefore + (py - canvas.height / 2) / view.scale;
     } else {
       // Same idea in body-frame coordinates (see bodyToCanvas) -- keeping
       // this mode-aware, rather than always updating centerX/centerY,
       // avoids leaving stale world-frame values that would otherwise make
       // the view jump the instant a pose first arrives and mapRelative
       // mode switches on.
-      const byBefore = view.bodyPanY - (mouseCanvasX - canvas.width / 2) / view.scale;
-      const bxBefore = view.bodyPanX - (mouseCanvasY - canvas.height / 2) / view.scale;
-      view.scale = Math.min(Math.max(view.scale * zoomFactor, 2), 4000);
-      view.bodyPanY = byBefore + (mouseCanvasX - canvas.width / 2) / view.scale;
-      view.bodyPanX = bxBefore + (mouseCanvasY - canvas.height / 2) / view.scale;
+      const byBefore = view.bodyPanY - (px - canvas.width / 2) / view.scale;
+      const bxBefore = view.bodyPanX - (py - canvas.height / 2) / view.scale;
+      view.scale = Math.min(Math.max(view.scale * factor, 2), 4000);
+      view.bodyPanY = byBefore + (px - canvas.width / 2) / view.scale;
+      view.bodyPanX = bxBefore + (py - canvas.height / 2) / view.scale;
     }
     view.userAdjusted = true;
+  }
+
+  // ---------------------------------------------------------------------
+  // Input, as pointer events rather than mouse events.
+  //
+  // This is not a tidy-up. The dashboard was mouse-and-wheel only, so on a
+  // phone -- the layout with the biggest map and the least room for
+  // anything else -- the map could not be panned or zoomed AT ALL. There
+  // was no gesture that did anything, and no error to notice.
+  //
+  // One handler covers every device, because tracking the set of live
+  // pointers collapses the two gestures into the same arithmetic:
+  //
+  //   one pointer  -- the "midpoint" is that pointer, its spread is
+  //                   meaningless, so the move is a pure pan;
+  //   two pointers -- the midpoint moving is a pan, the spread changing
+  //                   is a zoom about that midpoint, and doing both is a
+  //                   pinch.
+  //
+  // Scale first about the OLD midpoint, then translate by how far the
+  // midpoint moved: that order is what keeps the world point under each
+  // finger under that finger for the whole gesture.
+  // ---------------------------------------------------------------------
+  const pointers = new Map();   // pointerId -> {x, y} in CSS pixels
+
+  function pointerMidpoint() {
+    let x = 0;
+    let y = 0;
+    for (const p of pointers.values()) { x += p.x; y += p.y; }
+    return { x: x / pointers.size, y: y / pointers.size };
+  }
+
+  /** Distance between the two live pointers; 0 for any other count. */
+  function pointerSpread() {
+    if (pointers.size !== 2) return 0;
+    const [a, b] = Array.from(pointers.values());
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    // A third finger would drag the midpoint sideways for no reason.
+    if (pointers.size >= 2) return;
+    e.preventDefault();     // no text selection, no native image drag
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (!pointers.has(e.pointerId)) return;
+
+    const before = pointerMidpoint();
+    const spreadBefore = pointerSpread();
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const after = pointerMidpoint();
+    const spreadAfter = pointerSpread();
+
+    if (spreadBefore > 0 && spreadAfter > 0) {
+      zoomAt(before.x, before.y, spreadAfter / spreadBefore);
+    }
+    panBy(after.x - before.x, after.y - before.y);
+    scheduleRender();
+  });
+
+  function endPointer(e) {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.delete(e.pointerId);
+    if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+    // Lifting one finger of a pinch needs no fix-up: the next move reads
+    // its "before" midpoint from the pointers still down, which is the
+    // remaining finger, so the view does not jump to it.
+  }
+
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.001));
     scheduleRender();
   }, { passive: false });
 
-  resetViewBtn.addEventListener('click', () => {
+  function resetView() {
     view.userAdjusted = false;
     view.bodyPanX = 0;
     view.bodyPanY = 0;
     maybeAutoFit();
     scheduleRender();
-  });
+  }
+
+  resetViewBtn.addEventListener('click', resetView);
+  // Double-click, and on a touchscreen double-tap, does the same thing.
+  // On a phone the reset button is inside a sheet that has to be dragged
+  // up before it can be pressed, which is a lot of interaction to undo an
+  // accidental pinch.
+  canvas.addEventListener('dblclick', resetView);
 
   function sendStopwatchControl(action, enabled) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -2412,7 +2512,13 @@
     const style = getComputedStyle(cameraPanel);
     const right = parseFloat(style.right) || PANEL_GAP;
     const bottom = parseFloat(style.bottom) || 47;
-    const overlayRight = overlay.getBoundingClientRect().right;
+    // "Do not grow across the sidebar" means nothing in the phone layout,
+    // where the sidebar is a full-width sheet along the bottom: its right
+    // edge is the right edge of the screen, so this clamp would compute a
+    // negative width and pin the camera to its 120px minimum forever.
+    const overlayRight = document.body.classList.contains('layout-phone')
+      ? PANEL_GAP
+      : overlay.getBoundingClientRect().right;
     const minimapBottom = minimapPanel.getBoundingClientRect().bottom;
     return {
       width: Math.max(CAMERA_MIN_WIDTH, window.innerWidth - right - overlayRight - PANEL_GAP),
@@ -2569,13 +2675,28 @@
       .filter((entry) => entry && !isStale(entry)).length;
     setDigest('feeds', `${live}/4 live`);
 
+    const intentStale = intentAgeMs() > INTENT_STALE_MS;
+    const intentText = state.intent
+      ? String(state.intent.state || '').replace(/_/g, ' ') : '--';
     setDigest('intent', state.intent
-      ? String(state.intent.state || '').replace(/_/g, ' ')
-        + (intentAgeMs() > INTENT_STALE_MS ? ' (stale)' : '')
+      ? intentText + (intentStale ? ' (stale)' : '')
       : '--');
 
-    setDigest('vehicle', state.speed && !isStale(state.speed)
-      ? `${state.speed.speed.toFixed(1)} m/s` : '--');
+    const speedText = state.speed && !isStale(state.speed)
+      ? `${state.speed.speed.toFixed(1)} m/s` : '--';
+    setDigest('vehicle', speedText);
+
+    // The phone strip, from the values just computed. Only the live
+    // connection sets it back to a real state after a drop, so a stale
+    // intent is shown uncoloured rather than as a confident green DRIVE
+    // that stopped being true a second ago.
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      stripState.textContent = state.intent ? intentText : 'no intent';
+      stripState.className = 'strip-state'
+        + (state.intent && !intentStale ? ` intent-${state.intent.severity}` : '');
+      stripSpeed.textContent = speedText;
+      stripFeeds.textContent = `${live}/4`;
+    }
 
     setDigest('stopwatch', formatStopwatch(stopwatchElapsed()));
 

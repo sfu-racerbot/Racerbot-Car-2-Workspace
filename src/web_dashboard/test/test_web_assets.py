@@ -224,6 +224,140 @@ def test_the_page_is_well_formed():
         assert not checker.stack, f'{page} leaves these tags unclosed: {checker.stack}'
 
 
+# --------------------------------------------------------------------------
+# Touch input
+#
+# The dashboard was mouse-and-wheel only for a long time, which meant the
+# map could not be panned or zoomed on a phone at all -- no gesture did
+# anything, and nothing logged an error. It is an easy regression to
+# reintroduce, because on a laptop everything still works.
+# --------------------------------------------------------------------------
+
+def test_the_map_handles_pointer_events_not_just_mouse_events():
+    js = _read('dashboard.js')
+    for event in ('pointerdown', 'pointermove', 'pointerup'):
+        assert f"canvas.addEventListener('{event}'" in js, (
+            f'the canvas does not listen for {event}, so the map cannot be '
+            f'dragged with a finger')
+    assert "canvas.addEventListener('mousedown'" not in js, (
+        'a mouse-only drag handler is back beside the pointer handlers; two '
+        'of them means every mouse drag pans twice as far')
+
+
+def test_the_canvas_claims_touch_gestures_from_the_browser():
+    """Without touch-action:none the browser scrolls and page-zooms first
+    and the canvas never sees the gesture."""
+    assert 'touch-action: none' in _rule(_read('style.css'), '#view')
+
+
+def test_pinch_zoom_and_the_wheel_share_one_zoom_implementation():
+    """Two copies of the world-frame/body-frame branch is how they drift
+    apart, and a body-frame bug only shows up before a map has loaded."""
+    js = _read('dashboard.js')
+    assert js.count('function zoomAt(') == 1
+    assert js.count('view.scale = Math.min(Math.max(view.scale * factor, 2), 4000)') == 2, (
+        'the two frame branches of zoomAt no longer clamp the same way')
+
+
+# --------------------------------------------------------------------------
+# The phone layout
+#
+# style.css decides whether the sheet styling applies; panels.js decides
+# whether the gestures that drive it are live. They agree on two numbers,
+# and nothing but these tests makes them: disagree on the breakpoint and
+# there is a window width with a sheet nobody can open, disagree on the
+# half detent and the sheet lands somewhere its own animation did not.
+# --------------------------------------------------------------------------
+
+def _js_number(js, name):
+    match = re.search(rf'const {name} = ([0-9.]+);', js)
+    assert match, f'panels.js no longer defines {name}'
+    return float(match.group(1))
+
+
+def test_the_phone_breakpoint_agrees_between_the_stylesheet_and_the_script():
+    width = _js_number(_read('panels.js'), 'PHONE_MAX_WIDTH')
+    assert f'@media (max-width: {int(width)}px)' in _read('style.css'), (
+        f'panels.js switches to the phone layout at {int(width)}px but '
+        f'style.css has no breakpoint there')
+
+
+def test_the_half_detent_agrees_between_the_stylesheet_and_the_script():
+    fraction = _js_number(_read('panels.js'), 'SHEET_HALF_FRACTION')
+    percent = round(fraction * 100)
+    assert f'body.sheet-half #overlay {{ transform: translateY({percent}%); }}' in _read('style.css'), (
+        f'panels.js settles the sheet at {percent}% but the stylesheet puts '
+        f'it somewhere else')
+
+
+def test_the_sheet_moves_by_transform_only():
+    """Rule 2 of the stylesheet, and it bites hardest here: a sheet that
+    transitioned its height would re-lay-out every row inside it on every
+    frame of a drag, over a canvas already painting at 20Hz, on the least
+    powerful screen this page runs on."""
+    css = _read('style.css')
+    phone = css[css.index('@media (max-width: 640px)'):]
+    overlay = re.search(r'#overlay \{(.*?)\}', phone, re.S)
+    assert overlay, 'the phone layout no longer restyles #overlay'
+    transition = re.search(r'transition: ([^;]+);', overlay.group(1))
+    assert transition, 'the sheet has no transition at all'
+    animated = transition.group(1)
+    for forbidden in ('height', 'width', 'margin', 'padding', 'all'):
+        assert forbidden not in animated, (
+            f'the phone sheet animates {forbidden}, which relayouts its '
+            f'contents on every frame of a drag')
+
+
+def test_the_peek_height_is_a_variable_both_sides_can_read():
+    """panels.js reads --sheet-peek off the computed style to decide which
+    detent a drag ended nearest. A literal in the stylesheet would leave
+    the gesture snapping to a height the sheet no longer has."""
+    assert '--sheet-peek:' in _rule(_read('style.css'), ':root')
+    assert '--sheet-peek' in _read('panels.js')
+
+
+def test_the_phone_strip_is_filled_by_the_dashboard():
+    """It is display:none on a laptop, so nothing else would notice it
+    quietly not being updated."""
+    js = _read('dashboard.js')
+    for name in ('strip-dot', 'strip-state', 'strip-speed', 'strip-feeds'):
+        assert f"getElementById('{name}')" in js, f'{name} is never looked up'
+    assert 'stripState.textContent' in js, 'the phone strip is never written to'
+
+
+# --------------------------------------------------------------------------
+# The type scale
+# --------------------------------------------------------------------------
+
+def test_every_font_size_goes_through_the_type_scale():
+    """The whole responsive strategy is eight variables that the media
+    queries re-state, so one override rescales the interface in
+    proportion. A literal px size is a piece of the page that silently
+    stays laptop-sized on a phone."""
+    css = _read('style.css')
+    literals = re.findall(r'font-size: [0-9.]+px', css)
+    assert not literals, (
+        f'these font sizes bypass the type scale and will not respond to '
+        f'the breakpoints: {sorted(set(literals))}')
+
+
+def test_the_phone_breakpoint_rescales_every_size_in_the_scale():
+    """Adding a token to the scale and forgetting to re-state it at the
+    phone breakpoint leaves one piece of the interface laptop-sized on a
+    phone -- which is invisible on the machine you are editing on."""
+    css = _read('style.css')
+    root = css[css.index(':root {'):css.index('html, body {')]
+    declared = set(re.findall(r'(--fs-[a-z-]+):', root))
+
+    phone = css[css.index('@media (max-width: 640px)'):]
+    restated = set(re.findall(r'(--fs-[a-z-]+):', phone[:phone.index('\n}\n')]))
+
+    missing = sorted(declared - restated)
+    assert not missing, (
+        f'these type-scale tokens are never re-stated for a phone, so the '
+        f'text they carry stays laptop-sized: {missing}')
+
+
 def test_the_stylesheet_has_balanced_braces():
     css = _read('style.css')
     assert css.count('{') == css.count('}'), 'unbalanced braces in style.css'

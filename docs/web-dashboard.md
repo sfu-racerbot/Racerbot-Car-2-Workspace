@@ -18,6 +18,7 @@ No RViz. No ROS install on the viewing device. No login. Just a URL.
 - **Clears the stale processes `Ctrl+C` left behind.** A `Ctrl+C` that looked like it worked often leaves a driving node alive and still publishing to `/drive`, so the next run fights it. The [processes panel](#stopping-a-driving-process) lists what is really running and ends it — escalating when a node ignores `SIGINT`, and refusing anything in the actuation path.
 - **Shows the algorithm's *intent*, not just its output.** A curved arrow ahead of the car draws where the controller plans to go, how fast, and which constraint is currently holding it back — so you can catch a wrong plan while it's still only a plan.
 - **Works at every stage.** Nothing else running? You still get live [LiDAR](glossary.md#lidar). [SLAM](glossary.md#slam) up? The map builds in front of you. Once [localization](glossary.md#localization) has a fix, everything locks to world coordinates.
+- **A real phone layout, not a shrunken desktop one.** The map fills the screen, a strip along the top always shows link/state/speed, and the sidebar becomes a sheet you drag up from the bottom in three steps. One finger pans the map, two pinch to zoom — [see below](#on-a-phone).
 - **Runs on a phone.** One plain JS file, no build step, no framework. A 2048×2048 keyframe is 4.2 million cells, drawn through a palette lookup so a phone can keep up.
 - **Costs the car almost nothing.** Packing a map message went from 178 ms to 2.2 ms. With no browser connected, none of the work happens at all.
 - **Reachable by name, from off-network.** The server listens on both kinds of internet address at once, so `http://racerbotcar-2:8080/` opens the car over [Tailscale](#viewing-over-tailscale-by-name) from anywhere — you don't have to look up a number first.
@@ -239,7 +240,15 @@ If you need the node itself cheaper than that, the lever is `enable_tuning: fals
 
 `web/dashboard.js` is one plain file — no build step, no framework. It connects to `ws://<host>/ws`, keeps the latest map/scan/pose/command/speed/stopwatch/stats in a small state object, and redraws an HTML5 `<canvas>`.
 
-Drag to pan (works both before and after localization), scroll to zoom toward the cursor, "reset view" to re-fit.
+**Moving the map.** Drag to pan — with a mouse or with one finger, and it works both before and after [localization](glossary.md#localization) (the car working out where it is on the map).
+
+Zoom with the scroll wheel, or with a two-finger pinch on a touchscreen. Either way it zooms toward the pointer or the middle of the pinch, not the middle of the screen.
+
+Double-click or double-tap the map to re-fit it, which is the same thing the **reset view** button does. On a phone that button is inside the sheet, so a double-tap saves dragging the sheet up to undo a stray pinch.
+
+> Touch gestures are new. Before this the dashboard listened only for mouse and wheel events.
+>
+> On a phone that meant the map could not be panned or zoomed **at all**. Nothing said so either: no gesture did anything, and no error appeared anywhere.
 
 **The browser owns the map.** The occupancy grid is rendered into an off-screen canvas, and thereafter the car sends only patches, which are blitted into that same canvas.
 
@@ -345,7 +354,9 @@ Two behaviours here are deliberate rather than accidental:
 
 > **The LB stopwatch starts detached**, in the right-hand rail between the minimap and the camera. It is the one readout people watch from several metres away while somebody else drives, so it gets its own space instead of being one collapsed row in a sidebar.
 >
-> **On a narrow window everything comes home.** Below about 900px there is no room to float panels usefully, so they all return to the sidebar and the ↗ buttons disappear. Your wide-screen arrangement is kept rather than discarded — widen the window and the panels go back where you put them. This is also what a phone gets.
+> **On a narrow window everything comes home.** Below about 900px there is no room to float panels usefully, so they all return to the sidebar and the ↗ buttons disappear. Your wide-screen arrangement is kept rather than discarded — widen the window and the panels go back where you put them.
+>
+> Below 640px you get [the phone layout](#on-a-phone) instead, which is a different arrangement rather than a narrower version of this one.
 
 **Top-right inset** — a minimap. It always shows the *whole* map at a fixed auto-fit scale, independent of the main canvas's own pan and zoom.
 
@@ -370,6 +381,73 @@ The panel is pinned to the bottom-right corner, so that's the only corner that c
 Dragging *scales* the panel along the stream's own aspect ratio rather than reshaping it freely. The inset is therefore always exactly the shape of the frame: the whole image visible at every size, never cropped and never letterboxed.
 
 It won't grow over the sidebar or up into the minimap, and the size is remembered in the browser's `localStorage` (per browser, not per session — the car doesn't know about it). Dragging the grip never opens the recording tab, even though the rest of the panel is a link.
+
+</details>
+
+### On a phone
+
+<details>
+<summary><b>The bottom sheet, the status strip, and the touch gestures</b> — read if you use the dashboard trackside from a phone, or if you are changing the small-screen layout.</summary>
+
+Below 640px wide the dashboard uses a **different arrangement**, not a squeezed version of the desktop one.
+
+The reason is simple arithmetic. The sidebar is 320px wide, and a common phone screen is 390px. Docked at the side, it covers the map it exists to annotate — and the map is why anyone opens this page at the trackside.
+
+So on a phone:
+
+**The map fills the whole screen.** Nothing sits permanently on top of it except the strip described next.
+
+**A thin strip across the top is always visible**, with four things and no interaction needed to see them:
+
+- a dot for the link to the car — green when connected, red when not
+- what the car is currently doing (the [intent](#drive-intent-the-arrow-and-the-decision-panel) state: `DRIVE`, `CAUTION`, `STOP`, and so on), in the same colour it has everywhere else on the page
+- the measured speed
+- how many of the four feeds (map, scan, pose, command) are live, as `3/4`
+
+If the link drops, the strip says `LINK LOST` and replaces the numbers with `--`, rather than leaving the last ones showing.
+
+A stale number with nothing marking it as stale is indistinguishable from a current one.
+
+**The sidebar becomes a sheet you pull up from the bottom.** It has three positions:
+
+| Position | What you see |
+|---|---|
+| closed | the grab handle, the connection line, and the banner explaining anything odd about the picture |
+| half | the sheet over the bottom half of the screen — the sections, with the map still visible above |
+| full | the sheet over almost the whole screen, for working in the tuning and processes panels |
+
+Drag the handle at the top of the sheet to move it, and it settles into whichever position you left it nearest.
+
+A quick flick always moves it one position in the direction you threw it, even if your finger barely travelled — otherwise a short sharp flick snaps back to where it started and feels broken.
+
+Tapping the handle cycles closed → half → full → closed. It is a real button, so a keyboard `Enter` or `Space` does the same thing.
+
+**The minimap is hidden.** It is an overview inset for a map that is already filling the screen, and the space is worth more.
+
+**The camera inset stays**, smaller, under the top strip. Tapping it still opens the recording view. Its drag-to-resize grip is switched off here — on a touchscreen that gesture only ever fired by accident.
+
+**Text and hit areas grow.** Every font size on the page comes from one of eight variables, and the phone breakpoint re-states all eight.
+
+Separately, a touchscreen of any size raises every button and row to a 40px minimum — that one applies to a tablet too.
+
+</details>
+
+<details>
+<summary><b>Why the phone sheet moves with <code>transform</code> and never <code>height</code></b> — read before changing the sheet's CSS.</summary>
+
+The sheet is always its full height. Closing it slides it down past the bottom of the screen with a CSS `transform`, leaving only the peek showing.
+
+The obvious alternative is to animate its `height`. That re-lays-out every row inside the sheet on every frame of the drag.
+
+It would do that on top of a canvas already painting telemetry at 20Hz, on the least powerful screen this page ever runs on.
+
+That is the second of the two rules written at the top of `web/style.css`, and `test/test_web_assets.py` fails if the sheet's transition ever mentions a property that can reflow the page.
+
+Two numbers have to agree between `web/style.css` and `web/panels.js`: the 640px breakpoint, and where the half position sits (46% of the sheet's height).
+
+The stylesheet decides whether the sheet styling applies at all. The script decides whether the gestures that drive it are live.
+
+If they disagree there is a window width with a sheet nobody can open. Both are pinned by tests, which read the number out of each file and compare them.
 
 </details>
 
