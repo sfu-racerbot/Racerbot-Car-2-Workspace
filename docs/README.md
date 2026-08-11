@@ -41,6 +41,7 @@ After that, follow whichever branch below matches what you're doing.
 | Doc | What's in it, and who it's for |
 |---|---|
 | [operations.md](operations.md) | Step-by-step procedures: driving, mapping, localizing, running autonomy, racing, shutting down. For anyone actually using the car. |
+| [sim-validation.md](sim-validation.md) | Test your driving code against simulated physics without the car, and watch it on the dashboard from your laptop. For anyone who changed driving code and wants to know if it works. |
 | [run-diagnostics.md](run-diagnostics.md) | Recording a run so it can be diagnosed afterwards, plus the AI-agent prompt template. For anyone debugging a run that went wrong. |
 | [odom-calibration.md](odom-calibration.md) | A browser wizard for tape-measure calibration of VESC speed odometry. For anyone whose distances read wrong. |
 | [git-setup.md](git-setup.md) | Which `src/` packages are real submodules vs. vendored code, and how to update them safely. Read before pulling upstream changes into `f1tenth_system`. |
@@ -60,7 +61,7 @@ After that, follow whichever branch below matches what you're doing.
 | [racing-autonomy.md](racing-autonomy.md) | The map-based race stack end to end: SLAM, localization, racing line, velocity profile, pure pursuit, overtaking. The biggest doc here; it opens with a plain-language summary. |
 | [web-dashboard.md](web-dashboard.md) | The browser dashboard: what it shows, how it works, and live parameter tuning. Safe to run alongside anything. |
 | [simulator.md](simulator.md) | The no-ROS simulator that tests controller *math* directly. |
-| [ros-simulator.md](ros-simulator.md) | The same physics behind the real ROS topics, so whole launch files can be validated without the car. Includes the interlock that stops it running beside real hardware. |
+| [ros-simulator.md](ros-simulator.md) | The same physics behind the real ROS topics, so whole launch files can be validated without the car. Includes the interlock that stops it running beside real hardware. For the step-by-step workflow, see [sim-validation.md](sim-validation.md). |
 | [sim-fidelity-audit.md](sim-fidelity-audit.md) | How closely the simulator matches this physical car, and where it doesn't. Read before trusting a simulator result. |
 | [../tools/f1tenth_sim/README.md](../tools/f1tenth_sim/README.md) | Our fidelity layer over stock F1TENTH Gym — this car's real parameters, a friction circle, the real servo, and collision detection that actually fires. What it changed, and what it then found. |
 

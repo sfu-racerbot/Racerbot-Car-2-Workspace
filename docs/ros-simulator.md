@@ -3,6 +3,7 @@
 > **Who this is for:** anyone who wants to run the real driving stack — launch files, SLAM, the dashboard — without the physical car.
 > **Read first:** [concepts.md](concepts.md), and [simulator.md](simulator.md) for the other, simpler simulator and how the two differ.
 > **You'll be able to:** run and validate whole launch files against simulated physics, and understand the interlock that stops this running beside real hardware.
+> **Looking for the steps?** [sim-validation.md](sim-validation.md) is the step-by-step workflow — set up, run your own node, connect the dashboard, get a verdict. This doc is the reference behind it.
 
 `tools/f1tenth_sim/run_validation.py` ([docs/simulator.md](simulator.md))
 calls the controllers' *math* directly and skips ROS entirely. That is the
@@ -150,12 +151,27 @@ Runs three scenarios, each end to end, and exits non-zero if any fails:
 | `obstacle` | one parked car on the racing line | the racing controller gets past a static obstacle rather than latching stopped in front of it |
 | `traffic` | two slower cars | mapping with moving traffic, and racing among it without contact |
 
-Each scenario picks the track it needs. `traffic` runs on `indoor_wide`
-because "can the car get past this" is a question about the *corridor*, not
-the controller: `gap_follow` inflates every obstacle by
-`car_width/2 + safety_margin`, which demands 0.67m of width, and a car in
-the middle of `indoor_oval`'s 1.8m corridor leaves 0.6m either side and is
-simply a roadblock. Failing that proves nothing about the code.
+**All three scenarios run on `indoor_wide`**, overriding the launch files'
+`indoor_oval` default, because what limits them is the *corridor* rather
+than the controller:
+
+- **Racing at all.** The line comes from `gap_follow`, which drives
+  0.25-0.35m from a corner's wall, and pure pursuit's cross-track error
+  through a corner near this car's turning circle measured 0.39-0.57m at
+  2.5-3.0 m/s. On `indoor_oval`'s 1.8m corridor those do not both fit, and
+  the car touches the wall -- a true statement about the course, not a
+  defect to gate a regression suite on.
+- **Getting past anything.** `gap_follow` inflates every obstacle by
+  `car_width/2 + safety_margin`, which demands 0.67m of width, and a car in
+  the middle of a 1.8m corridor leaves 0.6m either side and is simply a
+  roadblock. Failing that proves nothing about the code.
+
+Run `--track indoor_oval` or `--track indoor_tight` deliberately to ask the
+narrower question: does the pipeline still map, clean up, and *refuse*
+correctly. Note the consequence for a hand-run demo -- launching
+`sim_auto_map_race_launch.py` on its `indoor_oval` default and watching the
+car wedge itself into a corner during the racing phase is the expected
+result, not a regression. Pass `track:=indoor_wide` to watch it race.
 
 Each scenario is judged on:
 

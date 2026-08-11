@@ -509,6 +509,31 @@ ros2 launch racerbot_launch dashboard_test_launch.py
 
 This is for bench-testing the dashboard and sensors only. For actual driving, use `bringup_launch.py` plus a control layer as usual, and `web_dashboard_launch.py` on its own if you also want the dashboard alongside them (see [operations.md](operations.md)).
 
+### Watching the simulator instead of the car
+
+The dashboard works against [`racerbot_sim`](ros-simulator.md) with **no configuration change at all**. It subscribes to topics and the simulator publishes the same topic names the hardware does — `/scan`, `/odom`, `/ackermann_cmd`, `/joy`, `/drive_intent` — so neither side needs to know about the other.
+
+That makes this the easiest way to see the dashboard fill in without touching the car, and the easiest way to see what a driving node is deciding.
+
+**Terminal 1, from `~/racerbot-ws`** — the whole race stack plus the dashboard, in one command:
+
+```bash
+ros2 launch racerbot_sim sim_auto_map_race_launch.py track:=indoor_wide dashboard:=true
+```
+
+**Working when:** `http://<car-ip>:8080/` shows the map drawing itself as the simulated car maps the track, then the car racing on the finished map.
+
+For a control layer of your own on top of the simulator, start `sim_bringup_launch.py`, your node, and `web_dashboard_launch.py` in three terminals instead — the same three-terminal shape as the car.
+
+Two differences from a real run, both expected and neither a fault:
+
+- **The camera panel reads `camera offline`.** There is no simulated camera.
+- **The map stays empty unless something publishes `/map`.** `gap_follow` alone doesn't; SLAM and the full race stack do.
+
+The step-by-step version of all of this, including what to check and how to read the result, is in **[sim-validation.md](sim-validation.md)**.
+
+> **The simulator refuses to run beside the real car's drivers**, because it forges a held LB deadman and an imaginary LiDAR. That interlock is described in [ros-simulator.md](ros-simulator.md#it-refuses-to-run-next-to-the-car). Don't defeat it.
+
 ### Finding the car's address, and viewing through a forwarded port
 
 **Use the car's real network address, not `localhost`, whenever you can.**
