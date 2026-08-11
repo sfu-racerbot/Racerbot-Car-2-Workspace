@@ -1,5 +1,5 @@
 {
-  "gap_follow_direct": {
+  "gap_follow_direct_before_algorithm_changes": {
     "command": "tools/racerbot_sim/run_gap_follow_validation.py --track asb_10000",
     "controller": "gap_follow",
     "track": "asb_10000",
@@ -13,7 +13,45 @@
       "ever_contacted": true
     },
     "driven_metres": 121.45,
-    "driving_seconds": 66.3
+    "driving_seconds": 66.3,
+    "average_speed_mps": 1.832
+  },
+  "gap_follow_direct_after_algorithm_changes": {
+    "command": "tools/racerbot_sim/run_gap_follow_validation.py --track asb_10000",
+    "controller": "gap_follow",
+    "track": "asb_10000",
+    "seed": 12345,
+    "passed": false,
+    "failure": "hit a wall (197 steps in contact)",
+    "sim": {
+      "sim_time_s": 68.6,
+      "distance_travelled_m": 135.082,
+      "wall_contact_steps": 197,
+      "ever_contacted": true
+    },
+    "driven_metres": 130.25,
+    "driving_seconds": 69.7,
+    "average_speed_mps": 1.869,
+    "note": "gap_switch_margin (hysteresis) + corner_speed 0.8->1.1 + corner_speed_wide, cornering anticipation left off (see gap_follow's README, 'Three additions from a real-hallway report'). Wall contact -6%, speed +2% -- this course is uniformly narrow (1.5m corridor, 1.2m corner radius near the car's own turning-circle floor), so the improvement is modest and geometry-limited, consistent with docs/ros-simulator.md's asb_10000 section. None of the weave-fix's actual value (does the car look less 'drunk') is measurable from this aggregate distance/contact metric -- that needs a real low-speed run to judge."
+  },
+  "gap_follow_direct_indoor_wide_before_and_after": {
+    "command": "tools/racerbot_sim/run_gap_follow_validation.py --track indoor_wide",
+    "controller": "gap_follow",
+    "track": "indoor_wide",
+    "seed": 12345,
+    "before": {
+      "distance_travelled_m": 54.64,
+      "duration_s": 31.4,
+      "wall_contact_steps": 0,
+      "average_speed_mps": 1.74
+    },
+    "after": {
+      "distance_travelled_m": 132.64,
+      "duration_s": 69.3,
+      "wall_contact_steps": 0,
+      "average_speed_mps": 1.914
+    },
+    "note": "Clean win on the wide course: +10% average speed, wall contact still zero both ways. Driven almost entirely by corner_speed_wide/corner_speed, since the margin never shrinks on a corridor this wide (width_factor stays at 1.0) and cornering anticipation is off. An earlier run with cornering anticipation left ON measured a ~25% average-speed *regression* here (1.43m/s) for no matching safety benefit -- see gap_follow's README for why, and why it now ships disabled."
   },
   "auto_map_race_solo": {
     "command": "tools/racerbot_sim/run_auto_map_validation.py --scenario solo --track asb_10000",
@@ -53,6 +91,7 @@
       "num_agents": 1
     },
     "racing_seconds": 65.9,
-    "raced_metres": 0.0
+    "raced_metres": 0.0,
+    "note": "Predates the gap_follow algorithm changes above (mapping-phase controller only, unaffected by them at the time this was measured). Not re-run -- pure_pursuit's racing-phase result on this course is a separate question from gap_follow's, and this scenario's own finding (mapping/handover works, racing phase couldn't progress on this narrow course) stands regardless."
   }
 }

@@ -163,6 +163,20 @@ reason above: `run_auto_map_validation.py --track asb_10000` already is
 the direct test for it, since pure_pursuit needs a localized pose and the
 automatic pipeline is what supplies one in this simulator today.
 
+**Update:** a real-hallway report on this course (too slow, corners taken
+too slowly and too tightly, "driving kind of drunk") led to three
+`gap_follow` algorithm changes -- gap-selection hysteresis, a
+curvature-justified `corner_speed` raise, and live corridor-width sensing
+-- documented in full in [`src/gap_follow/README.md`](../src/gap_follow/README.md#three-additions-from-a-real-hallway-report)
+with the before/after numbers on both `asb_10000` and `indoor_wide` in
+[asb-10000-sim-results.json](asb-10000-sim-results.json). Short version: a
+clean win on `indoor_wide` (+10% average speed, still 0 wall contact); a
+modest one on `asb_10000` itself (wall contact -6%, speed +2%) since this
+course's corners are limited by curvature near the car's own turning
+circle, which none of the three changes touch. **None of this is validated
+on the real car yet** -- wheels off the ground, then floor, low speed,
+before trusting it.
+
 ## Seeing what the dashboard sees
 
 "The SLAM map looked really glitchy" is the way a mapping run is usually

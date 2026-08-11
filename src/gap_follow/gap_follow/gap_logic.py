@@ -24,9 +24,13 @@ The processing pipeline, in the order the node applies it:
   disparity_extend    -> widen every obstacle *edge* by half a car width
   safety_bubble       -> zero out a car-width bubble around the closest hit
   find_gap_with...    -> preferred deep gap, then a slow corner fallback
+                         (with hysteresis against the previous tick's aim)
   aim_within_gap      -> which beam inside that gap to steer at
+  near_gap_bearing    -> the same gap's near-only bearing, for anticipation
   side_wall_distance  -> perpendicular distance to the wall on one side
   corridor_centering  -> bounded cross-track bias, faded in on straights
+  corridor_width_fac. -> how open the sensed corridor is, as a 0..1 fade
+  scale_between       -> blend a margin/speed between its narrow/wide values
 """
 
 import math
@@ -423,7 +427,8 @@ def safety_bubble(window: np.ndarray, closest_idx: int, closest_dist: float,
 
 
 def find_best_gap(window: np.ndarray, min_gap_distance: float,
-                  angle_increment: float = 0.0, min_gap_width_m: float = 0.0):
+                  angle_increment: float = 0.0, min_gap_width_m: float = 0.0,
+                  previous_target_idx: int = None, switch_margin: float = 1.0):
     """Pick the best drivable opening, not just the widest one.
 
     A shallow dead end (e.g. a ~1m doorway alcove) can be angularly
@@ -436,6 +441,21 @@ def find_best_gap(window: np.ndarray, min_gap_distance: float,
     If `min_gap_width_m` is set (and `angle_increment` supplied), candidates
     narrower than the conservative chord at their nearest depth are rejected.
     Returns (start, end) indices into `window`, or (None, None).
+
+    `previous_target_idx`/`switch_margin` add hysteresis to which candidate
+    wins: if the previous tick's aim still falls inside a still-open
+    candidate, that candidate is kept unless another one scores at least
+    `switch_margin` times better (1.0, the default, disables this -- plain
+    best-score, unchanged behaviour). Two similarly-open candidates trading
+    the top score by a beam of LiDAR noise is exactly what flips the aim,
+    and therefore the steering command, at scan rate -- see
+    aim_within_gap's docstring for the 2026-07-27 incident this generalizes
+    the fix for, and corridor_centering_bias's own ramps-not-switches
+    reasoning, which this mirrors for a discrete choice instead of a
+    continuous term. Hysteresis only ever chooses *among* candidates that
+    already passed every filter above (depth, post-inflation width) -- it
+    cannot keep the car aimed somewhere that stopped being safe, only
+    reduce how often it re-aims somewhere equally safe for no real reason.
     """
     free = window > min_gap_distance
     candidates = []
@@ -471,13 +491,20 @@ def find_best_gap(window: np.ndarray, min_gap_distance: float,
         avg_depth = float(np.mean(segment))
         return width * avg_depth
 
-    best_start, best_end = max(candidates, key=score)
-    return best_start, best_end
+    best = max(candidates, key=score)
+    if previous_target_idx is not None and switch_margin > 1.0:
+        sticky = next((run for run in candidates
+                       if run[0] <= previous_target_idx <= run[1]), None)
+        if (sticky is not None and sticky != best
+                and score(best) < score(sticky) * switch_margin):
+            best = sticky
+    return best
 
 
 def find_gap_with_fallback(window: np.ndarray, preferred_distance: float,
                            fallback_distance: float, angle_increment: float,
-                           min_gap_width_m: float):
+                           min_gap_width_m: float, previous_target_idx: int = None,
+                           switch_margin: float = 1.0):
     """Find a deep gap first, then a nearer safe opening for tight corners.
 
     A fixed deep-range threshold can deadlock follow-the-gap immediately
@@ -485,12 +512,20 @@ def find_gap_with_fallback(window: np.ndarray, preferred_distance: float,
     everything beyond the corner. The fallback relaxes only the visibility
     depth; disparity extension and the post-inflation width requirement still
     apply. Returns ``(start, end, used_fallback)``.
+
+    `previous_target_idx`/`switch_margin` pass straight through to
+    find_best_gap -- see its docstring. Applied independently within each
+    tier (preferred vs fallback), not across the switch between them: which
+    tier is even tried is already a depth-based structural decision, not a
+    noisy tie between similar candidates.
     """
     start, end = find_best_gap(
         window,
         preferred_distance,
         angle_increment=angle_increment,
         min_gap_width_m=min_gap_width_m,
+        previous_target_idx=previous_target_idx,
+        switch_margin=switch_margin,
     )
     if start is not None:
         return start, end, False
@@ -502,6 +537,8 @@ def find_gap_with_fallback(window: np.ndarray, preferred_distance: float,
         fallback_distance,
         angle_increment=angle_increment,
         min_gap_width_m=min_gap_width_m,
+        previous_target_idx=previous_target_idx,
+        switch_margin=switch_margin,
     )
     return start, end, start is not None
 
@@ -547,6 +584,39 @@ def aim_within_gap(window, gap_start, gap_end, beam_angles):
         depths >= deepest - max(1e-6, 0.05 * deepest))[0]
     angles = beam_angles[gap_start:gap_end + 1][near_deepest]
     return gap_start + int(near_deepest[int(np.argmin(np.abs(angles)))])
+
+
+def near_gap_bearing(window, gap_start, gap_end, beam_angles, near_depth: float):
+    """Mean bearing of the chosen gap's own near-only sub-extent, or None.
+
+    aim_within_gap answers "which way to steer" from the *whole* gap,
+    weighted toward its deepest point -- correct for steering, but that
+    same depth-weighting is what makes it a poor anticipation signal: a
+    bend that is about to matter can sit entirely beyond the depth this
+    restricts to, so the two disagree earliest exactly when a corner is
+    approaching and hasn't been steered into yet. Comparing this to the
+    real aim (aim_within_gap's own result) is the caller's job -- see
+    gap_follow_node.py's cornering-anticipation speed cap -- because a
+    small numeric difference is meaningless without knowing whether the
+    gap it came from was actually the fallback or the preferred one, which
+    only the caller still has.
+
+    Returns ``None`` when there is nothing to compare against: no beam in
+    the gap is within ``near_depth`` (no near view at all), or every beam
+    is (the "near" and "whole gap" views are the same thing -- a small
+    room, not a corridor with something beyond the near view to diverge
+    from).
+    """
+    if gap_start is None:
+        return None
+    if not math.isfinite(near_depth) or near_depth <= 0.0:
+        raise ValueError('near_depth must be finite and positive')
+    segment = window[gap_start:gap_end + 1]
+    seg_angles = beam_angles[gap_start:gap_end + 1]
+    near = segment <= near_depth
+    if not np.any(near) or np.all(near):
+        return None
+    return float(np.mean(seg_angles[near]))
 
 
 def side_wall_distance(clean: np.ndarray, valid: np.ndarray,
@@ -680,3 +750,45 @@ def corridor_centering_bias(left_distance: float, right_distance: float,
     bias = -gain * offset_from_middle
     bias = float(min(max_bias, max(-max_bias, bias)))
     return weight * bias, weight
+
+
+def corridor_width_factor(left_distance: float, right_distance: float,
+                          narrow_width: float, reference_width: float) -> float:
+    """How open the sensed corridor is right now, as a 0..1 fade.
+
+    1.0 at ``reference_width`` or wider -- the width today's static
+    defaults (``safety_margin``, ``corner_speed``) are already tuned for,
+    so nothing changes. 0.0 at ``narrow_width`` or tighter. Linear between.
+
+    An unbounded or missing side is not a corridor to measure -- returns
+    1.0, the same "assume the wide, already-validated defaults, do not
+    loosen anything" answer ``corridor_centering_bias`` gives for an open
+    side. In practice this means the adaptation mostly acts on narrow
+    *straights*, where both walls are reliably in view, and quietly steps
+    back to today's proven behaviour deep in a blind corner where one side
+    can drop out of the scan window -- which is also where extra caution
+    is most warranted, not less.
+    """
+    if not (math.isfinite(narrow_width) and math.isfinite(reference_width)):
+        raise ValueError('narrow_width and reference_width must be finite')
+    if not (0.0 < narrow_width < reference_width):
+        raise ValueError('narrow_width must be positive and less than reference_width')
+    if not (math.isfinite(left_distance) and math.isfinite(right_distance)):
+        return 1.0
+    measured_width = left_distance + right_distance
+    return _ramp(measured_width, reference_width, narrow_width)
+
+
+def scale_between(width_factor: float, narrow_value: float, wide_value: float) -> float:
+    """Linear blend from ``narrow_value`` (width_factor=0) to ``wide_value`` (1).
+
+    The one piece of arithmetic both adaptive knobs below share -- the
+    margin shrinks toward ``narrow_value`` and the corner-speed cap grows
+    toward ``wide_value`` using the same ``width_factor``, so this is
+    written and tested once rather than twice.
+    """
+    if not all(math.isfinite(v) for v in (width_factor, narrow_value, wide_value)):
+        raise ValueError('scale_between inputs must be finite')
+    if not (0.0 <= width_factor <= 1.0):
+        raise ValueError('width_factor must be in [0, 1]')
+    return narrow_value + width_factor * (wide_value - narrow_value)

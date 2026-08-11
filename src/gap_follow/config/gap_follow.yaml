@@ -12,12 +12,34 @@ gap_follow_node:
     # If no 2m-deep gap exists at a blind/tight corner, accept a nearer
     # post-inflation corridor and crawl through it instead of deadlocking.
     fallback_min_gap_distance: 0.8
+    # How much better a new candidate gap must score than the one
+    # containing the previous tick's aim before the car re-aims at it --
+    # see gap_logic.find_best_gap. Added after a real-hallway report of the
+    # car "driving kind of drunk, side to side": gap selection had no
+    # damping at all, unlike corridor centering's fade-in/out ramps, so two
+    # similarly-scored candidates trading first place on ordinary LiDAR
+    # noise could flip the steering command every scan. 1.2 is a bounded
+    # first answer (needs a genuine 20% edge to win), not a value measured
+    # against a real weaving log -- validate low-speed before trusting it.
+    gap_switch_margin: 1.2
     # The cap that actually governs most of a lap here. On the 2026-08-06
     # run the car was in the corner fallback for ~120 of its ~150 driving
     # ticks, so it spent most of its time pinned to this value rather than to
     # max_speed. Raised with max_speed so corners are quicker, not just
     # straights; the curvature and clearance ceilings still apply on top.
-    corner_speed: 0.8
+    #
+    # Raised again from 0.8 after a real-hallway report of corners taken
+    # "too slowly and too tightly": 0.8 was the actual binding constraint
+    # on that 2026-08-06 run (pinned there ~80% of the time), well below
+    # what max_lateral_accel already permits independently -- at this
+    # car's near-rack-limit corner curvature (~0.82/m, see
+    # docs/asb-10000-sim-results.json), curvature_speed_limit alone already
+    # caps speed to sqrt(max_lateral_accel / 0.82) =~ 1.1m/s, so raising
+    # corner_speed to exactly that does not remove a safety ceiling, it
+    # only stops being the *tighter* one for a car that can already go
+    # this fast in that curvature on this car's own turning-circle math.
+    # Not measured on this exact hallway -- validate low-speed first.
+    corner_speed: 1.1
     max_speed: 2.5
     min_speed: 0.8
     # Symmetric achievable envelope from the calibrated servo mapping.
@@ -60,6 +82,51 @@ gap_follow_node:
     # Costs gap width, so raise it further only alongside
     # min_centerline_gap_width / fallback_min_gap_distance.
     safety_margin: 0.18
+    # --- Adaptive corridor width (docs/asb-10000-sim-results.json) ---
+    # Live per-tick ceiling on corner_speed (and, if configured to, a floor
+    # on safety_margin), from the same side_wall_distance measurement
+    # corridor centering already takes. Measured on indoor_wide: a clean
+    # win, ~9% higher average speed with wall contact still zero, since it
+    # never touches the margin there.
+    #
+    # min_safety_margin below defaults to safety_margin, i.e. margin
+    # shrinking is a no-op out of the box: measured on the ASB 10000-level
+    # course's real 1.5m hallway (uniformly narrow, not narrow-in-spots),
+    # shrinking the margin there sensed as "narrow" almost continuously and
+    # just drove the car permanently closer to the walls -- wall contact
+    # rose with no speed or distance gain, because what limited that course
+    # was corner curvature near the car's own turning circle, not a
+    # margin-driven "no gap found" stop. Lower min_safety_margin in a
+    # per-course config only where the geometry is narrow-in-spots, not
+    # narrow throughout.
+    #
+    # Deliberately config-only, not in live_tuning's dashboard catalogue:
+    # min_safety_margin and corner_speed_wide are coupled to safety_margin/
+    # corner_speed/max_speed (gap_follow_node._validate_adaptive_width_
+    # parameters), and those three are already live-tunable. Restart to
+    # change this rather than risk the pair drifting out of the relation
+    # the node checked at startup.
+    enable_adaptive_width: true
+    # Sensed corridor width (left + right side distance) at or below which
+    # corner_speed tops out (and the margin would bottom out, if lowered
+    # below safety_margin). 1.4m is indoor_tight's corridor -- the
+    # narrowest layout already validated in the simulator
+    # (src/racerbot_sim/racerbot_sim/tracks.py).
+    adaptive_width_narrow: 1.4
+    # Sensed width at or above which nothing changes: both values are
+    # exactly today's static defaults. 2.6m is indoor_wide's corridor --
+    # the one those defaults are already tuned against.
+    adaptive_width_reference: 2.6
+    # Off by default -- see the comment above enable_adaptive_width. NOT the
+    # old pre-0.18 regime if you do lower this for a course: safety_margin's
+    # own comment above records that a smaller margin than today's default
+    # left the car "clipping corner apexes and then sitting ~0.08m off the
+    # wall".
+    min_safety_margin: 0.18
+    # The ceiling corner_speed may rise to on a sensed-wide bend -- one the
+    # fallback gap took for lack of forward visibility, not lack of room.
+    # corner_speed itself remains the floor; this only ever adds capability.
+    corner_speed_wide: 1.4
     disparity_threshold: 0.4
     # Obstacles are already inflated by half-width + margin on both sides.
     # Requiring another car width here was double-padding tight openings.
@@ -78,6 +145,28 @@ gap_follow_node:
     # the no-gap stop all still stop the car outright; this only lets a car
     # that has found an exit inch toward it.
     escape_creep_speed: 0.25
+
+    # --- Cornering anticipation ---
+    # An extra speed cap from how much the chosen gap's near-only bearing
+    # disagrees with aim_within_gap's own choice -- see
+    # gap_follow_node.py's comment on this declared parameter for the full
+    # reasoning and the mechanism this is meant to add.
+    #
+    # Ships OFF: measured on indoor_wide (0 wall contact either way), this
+    # capped speed on 49 of 65 driving ticks and was the actually-binding
+    # cap on most of them, for about a 25% average speed drop versus the
+    # same run with only the corner_speed_wide change above -- a wide
+    # gap's own angular span naturally leans toward whichever edge is more
+    # open, which reads as "a bend is coming" even in a straight, open
+    # room. Needs a better-normalized trigger before this is worth
+    # enabling; the mechanism and its tests stay in place for that.
+    enable_cornering_anticipation: false
+    # Deliberately above min_gap_distance (2.0m) -- see the code comment
+    # next to this parameter's declaration in gap_follow_node.py for why
+    # a value below it would make the whole feature silently inert until
+    # the car was already committed to the fallback gap. 2.5m matches
+    # centering_full_forward_depth's own "genuine stretch ahead" threshold.
+    anticipation_near_depth: 2.5
 
     # --- Corridor centering on straights ---
     # Follow-the-gap only ever answers "which way do I point". On a straight

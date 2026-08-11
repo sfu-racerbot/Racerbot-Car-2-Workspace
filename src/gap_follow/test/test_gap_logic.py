@@ -439,6 +439,126 @@ def test_gap_fallback_still_rejects_boxed_in_scene():
     assert not used_fallback
 
 
+# ============================================================================
+# find_best_gap hysteresis: sticking with the previous aim through a noisy
+# near-tie, instead of re-picking the top score every tick regardless
+# ============================================================================
+
+def _two_candidates(a_width=20, b_width=21):
+    """Two same-depth candidates at indices [10, 10+a_width) and
+    [50, 50+b_width): B scores a_width/b_width - 1 fraction better than A."""
+    window = np.full(100, 0.5)
+    window[10:10 + a_width] = 2.0
+    window[50:50 + b_width] = 2.0
+    return window
+
+
+def test_hysteresis_is_a_no_op_with_no_previous_target():
+    window = _two_candidates()
+    assert gap_logic.find_best_gap(window, 0.6, angle_increment=0.01) == (50, 70)
+
+
+def test_hysteresis_is_a_no_op_at_the_default_switch_margin():
+    window = _two_candidates()
+    assert gap_logic.find_best_gap(
+        window, 0.6, angle_increment=0.01,
+        previous_target_idx=15, switch_margin=1.0) == (50, 70)
+
+
+def test_hysteresis_keeps_the_previous_gap_through_a_small_score_edge():
+    """B (score 42) beats A (score 40) by 5% -- under the 20% margin, so
+    the previous tick's aim (inside A) is kept rather than flipping to B."""
+    window = _two_candidates()  # A: 20*2.0=40, B: 21*2.0=42
+    start, end = gap_logic.find_best_gap(
+        window, 0.6, angle_increment=0.01,
+        previous_target_idx=15, switch_margin=1.2)
+    assert (start, end) == (10, 29), 'stayed with A despite B scoring slightly higher'
+
+
+def test_hysteresis_still_switches_for_a_real_improvement():
+    """B now scores 50% better than A -- past the 20% margin, so the car
+    does re-aim even though the previous tick was in A."""
+    window = _two_candidates(a_width=20, b_width=30)  # A: 40, B: 60
+    start, end = gap_logic.find_best_gap(
+        window, 0.6, angle_increment=0.01,
+        previous_target_idx=15, switch_margin=1.2)
+    assert (start, end) == (50, 79), 'a real improvement must still win'
+
+
+def test_hysteresis_falls_through_when_the_previous_target_has_no_gap_left():
+    window = _two_candidates()
+    start, end = gap_logic.find_best_gap(
+        window, 0.6, angle_increment=0.01,
+        previous_target_idx=40, switch_margin=1.2)  # 40 is in neither candidate
+    assert (start, end) == (50, 70), 'nothing to stick to, so plain best score wins'
+
+
+def test_hysteresis_never_picks_a_candidate_that_failed_the_width_filter():
+    """The sticky candidate still has to have passed min_gap_width_m --
+    hysteresis chooses only among already-safe options, never resurrects
+    one that was filtered out."""
+    window = np.full(100, 0.5)
+    window[10:12] = 2.0    # A: 2 beams -- 0.04m post-inflation, fails the filter
+    window[50:70] = 2.0    # B: 20 beams -- 0.40m, the only surviving candidate
+    start, end = gap_logic.find_best_gap(
+        window, 0.6, angle_increment=0.01, min_gap_width_m=0.10,
+        previous_target_idx=10, switch_margin=1.2)
+    assert (start, end) == (50, 69)
+
+
+def test_find_gap_with_fallback_applies_hysteresis_within_the_preferred_tier():
+    window = _two_candidates()
+    start, end, used_fallback = gap_logic.find_gap_with_fallback(
+        window, preferred_distance=0.6, fallback_distance=0.3,
+        angle_increment=0.01, min_gap_width_m=0.0,
+        previous_target_idx=15, switch_margin=1.2)
+    assert (start, end) == (10, 29)
+    assert not used_fallback
+
+
+# ============================================================================
+# near_gap_bearing: an early look at a bend, for cornering anticipation
+# ============================================================================
+
+def test_near_gap_bearing_uses_only_the_close_beams():
+    """10 near beams (1.0m) around bearing ~0.045rad, 10 far beams (5.0m)
+    already swung to ~0.545rad -- simulating a bend the far/deep view (what
+    actually steers, per aim_within_gap) has picked up on but the near
+    view has not reached yet."""
+    window = np.concatenate([np.full(10, 1.0), np.full(10, 5.0)])
+    beam_angles = np.concatenate([
+        np.linspace(0.0, 0.09, 10), np.linspace(0.5, 0.59, 10)])
+    bearing = gap_logic.near_gap_bearing(window, 0, 19, beam_angles, near_depth=1.5)
+    assert bearing == pytest.approx(float(np.mean(beam_angles[:10])))
+
+
+def test_near_gap_bearing_is_none_with_no_near_beams():
+    """Nothing to compare against -- there is no early look here at all,
+    not the same thing as "no divergence"."""
+    window = np.full(20, 5.0)
+    beam_angles = np.linspace(0.0, 1.0, 20)
+    assert gap_logic.near_gap_bearing(window, 0, 19, beam_angles, near_depth=1.0) is None
+
+
+def test_near_gap_bearing_is_none_when_the_whole_gap_is_near():
+    """A small room, not a corridor with something beyond the near view."""
+    window = np.full(20, 1.0)
+    beam_angles = np.linspace(0.0, 1.0, 20)
+    assert gap_logic.near_gap_bearing(window, 0, 19, beam_angles, near_depth=5.0) is None
+
+
+def test_near_gap_bearing_is_none_without_a_gap():
+    assert gap_logic.near_gap_bearing(np.zeros(5), None, None, np.zeros(5), 1.0) is None
+
+
+def test_near_gap_bearing_rejects_a_non_positive_near_depth():
+    window, beam_angles = np.full(10, 1.0), np.linspace(0.0, 1.0, 10)
+    with pytest.raises(ValueError):
+        gap_logic.near_gap_bearing(window, 0, 9, beam_angles, near_depth=0.0)
+    with pytest.raises(ValueError):
+        gap_logic.near_gap_bearing(window, 0, 9, beam_angles, near_depth=-1.0)
+
+
 def test_post_inflation_gap_does_not_require_second_full_car_width():
     # Disparity extension has already removed half-width + margin from each
     # obstacle edge. A 0.12m remaining center corridor is valid; applying the
@@ -734,3 +854,59 @@ def test_centering_never_leaves_the_corridor():
     for start in (0.7, -0.7):
         history = _drive_corridor(width=2.0, start_offset=start)
         assert np.abs(history).max() <= abs(start) + 1e-9, 'must not go wider than it started'
+
+
+# ============================================================================
+# corridor_width_factor / scale_between: adapting to a sensed corridor width
+# ============================================================================
+
+NARROW, REFERENCE = 1.4, 2.6
+
+
+def test_width_factor_is_one_at_or_above_the_reference_width():
+    assert gap_logic.corridor_width_factor(1.3, 1.3, NARROW, REFERENCE) == pytest.approx(1.0)
+    assert gap_logic.corridor_width_factor(2.0, 2.0, NARROW, REFERENCE) == pytest.approx(1.0)
+
+
+def test_width_factor_is_zero_at_or_below_the_narrow_width():
+    assert gap_logic.corridor_width_factor(0.7, 0.7, NARROW, REFERENCE) == pytest.approx(0.0)
+    assert gap_logic.corridor_width_factor(0.3, 0.3, NARROW, REFERENCE) == pytest.approx(0.0)
+
+
+def test_width_factor_is_linear_between_them():
+    # 2.0m is (2.0-1.4)/(2.6-1.4) = 0.5 of the way from narrow to reference.
+    assert gap_logic.corridor_width_factor(1.0, 1.0, NARROW, REFERENCE) == pytest.approx(0.5)
+
+
+def test_width_factor_ignores_a_side_that_is_not_a_wall():
+    """The safe default when a side is unbounded: assume the wide,
+    already-validated static tuning, do not loosen anything. This is what
+    keeps the adaptation from acting on ambiguous mid-corner sensing."""
+    assert gap_logic.corridor_width_factor(0.5, math.inf, NARROW, REFERENCE) == pytest.approx(1.0)
+    assert gap_logic.corridor_width_factor(math.inf, math.inf, NARROW, REFERENCE) == pytest.approx(1.0)
+
+
+def test_width_factor_rejects_a_narrow_width_that_does_not_fit():
+    with pytest.raises(ValueError):
+        gap_logic.corridor_width_factor(1.0, 1.0, 2.6, 1.4)
+    with pytest.raises(ValueError):
+        gap_logic.corridor_width_factor(1.0, 1.0, 0.0, 2.6)
+
+
+def test_scale_between_endpoints():
+    assert gap_logic.scale_between(0.0, 0.12, 0.18) == pytest.approx(0.12)
+    assert gap_logic.scale_between(1.0, 0.12, 0.18) == pytest.approx(0.18)
+    assert gap_logic.scale_between(0.5, 0.12, 0.18) == pytest.approx(0.15)
+
+
+def test_scale_between_works_growing_or_shrinking():
+    # safety_margin shrinks narrow->wide; corner_speed grows narrow->wide.
+    # Same helper, opposite ordering of its two endpoints.
+    assert gap_logic.scale_between(0.25, 0.8, 1.4) == pytest.approx(0.95)
+
+
+def test_scale_between_rejects_a_width_factor_outside_zero_one():
+    with pytest.raises(ValueError):
+        gap_logic.scale_between(-0.01, 0.12, 0.18)
+    with pytest.raises(ValueError):
+        gap_logic.scale_between(1.01, 0.12, 0.18)
