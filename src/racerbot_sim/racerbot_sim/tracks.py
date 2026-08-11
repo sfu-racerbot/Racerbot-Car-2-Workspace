@@ -186,6 +186,27 @@ LAYOUTS = {
     # Bigger loop for two- and three-car traffic, where cars need somewhere
     # to actually complete a pass.
     'indoor_wide': dict(half_x=7.0, half_y=4.5, radius=2.5, corridor_width=2.6),
+    # The real course this car is test-driven on: the hallway loop around
+    # the office block on the Applied Sciences Building's 10000 level (see
+    # docs/Applied_Science_Building_10000_Level.pdf) -- start near 10863,
+    # right at 10851, right at 10911, down the 10957 hallway, right at
+    # 10869, and back. That is four right turns closing a loop, which is
+    # exactly this generator's shape, so no new geometry code was needed --
+    # only sizing it to the real hallway.
+    #
+    # The floor plan gives no coordinates to trace, only the printed
+    # structural column-grid dimensions (bays of 4-8.5m); this loop spans
+    # roughly two bays each way, which is where half_x/half_y below come
+    # from -- a size estimate, not a survey. corridor_width=1.5 is the
+    # team's on-the-ground measurement of the actual hallway -- narrower
+    # than indoor_oval/wide, though indoor_tight (1.4m) is narrower still.
+    # radius is set just past the 1.22m turning-circle floor (see
+    # test_layout_corners_are_inside_the_cars_turning_circle in
+    # test_tracks.py) to mimic the corridor's real right-angle corners as
+    # tightly as this car can actually take them -- second only to
+    # indoor_tight's 1.1m -- so expect wall contact on this one to be
+    # informative about the real hallway, not a bug.
+    'asb_10000': dict(half_x=7.5, half_y=5.5, radius=1.2, corridor_width=1.5),
 }
 
 

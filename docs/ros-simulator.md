@@ -83,7 +83,7 @@ that depends on a thousandth of a radian will vary with it.
 
 | Argument | Default | What it does |
 |---|---|---|
-| `track` | `indoor_oval` | `indoor_oval` (30m lap, 1.8m corridor), `indoor_tight` (27m, 1.4m), `indoor_wide` (42m, 2.6m — the one this car can actually *race*, see below) |
+| `track` | `indoor_oval` | `indoor_oval` (30m lap, 1.8m corridor), `indoor_tight` (27m, 1.4m), `indoor_wide` (42m, 2.6m — the one this car can actually *race*, see below), `asb_10000` (50m, 1.5m — the real hallway loop this car is test-driven on, see below) |
 | `opponents` | *(none)* | `;`-separated `offset_m,speed_mps,lateral_m`. Speed `0` parks that car on the line as a static obstacle |
 | `hold_deadman` | `true` | `false` proves the car stays stopped with LB released |
 | `release_after_sec` | `-1` | Release the synthetic LB this far into the run |
@@ -104,6 +104,64 @@ validation under four minutes.
 Their corner radii are all comfortably outside the car's own 1.22m minimum
 turning circle, which the real course this car is driven on is *not* —
 see [racing-autonomy.md](racing-autonomy.md#what-a-recorded-lap-actually-looks-like).
+
+### `asb_10000` — the real course
+
+The other layouts are generic; `asb_10000` is a specific place: the
+hallway loop around the office block on the Applied Sciences Building's
+10000 level, where this car is actually test-driven (floor plan:
+[Applied_Science_Building_10000_Level.pdf](Applied_Science_Building_10000_Level.pdf)).
+The loop, as driven: start near 10863 → right at 10851 → right at 10911 →
+down the 10957 hallway → right at 10869 → back to start — four right
+turns closing a loop, which is exactly `rounded_rectangle_centerline`'s
+shape, so this track needed no new geometry, only the right size and
+corridor width for it. (Room 10911 doesn't appear on the scanned floor
+plan itself — the nearest labels there are 10912.1–10912.4 and 10913 —
+so that corner is taken on the team's word over the drawing.)
+
+Two things this layout does *not* claim:
+
+- **The size is a grid estimate, not a survey.** The floor plan has no
+  coordinates to trace, only the printed structural column-grid
+  dimensions (bays of 4–8.5m). The loop spans roughly two bays each way,
+  which is what `half_x`/`half_y` in `tracks.py` are sized from. Treat the
+  50m lap figure as approximate.
+- **The corridor is intentionally narrow — second-tightest of any layout
+  here, after `indoor_tight`.** `corridor_width=1.5` is what the team
+  reports for the actual hallway, and the corner `radius` (1.2m) is set
+  just past the car's 1.22m turning-circle floor to mimic the hallway's
+  real right-angle corners as tightly as this car can actually take them.
+  Both `gap_follow` and `pure_pursuit` are already known (see the
+  validation table above) to touch the wall on corridors narrower than
+  `indoor_wide`'s 2.6m; on `asb_10000`, expect that, and read it as a
+  statement about the real hallway rather than a regression.
+
+#### Measured (2026-08-10, seed 12345)
+
+```bash
+tools/racerbot_sim/run_gap_follow_validation.py --track asb_10000
+tools/racerbot_sim/run_auto_map_validation.py --scenario solo --track asb_10000
+```
+
+Full numbers: [asb-10000-sim-results.json](asb-10000-sim-results.json).
+
+| Test | Result |
+|---|---|
+| `gap_follow`, direct (no map, no SLAM) | Drove 121m (~2.4 laps of the ~50m course) in 66s, but 209 control ticks (~5.2s total) were in wall contact — the corners the docs above already flagged as too tight for the 0.25-0.35m clearance this controller drives at. |
+| `pure_pursuit`, full auto-map-race pipeline | Reached every phase — SLAM up, mapping lap closed, line cleaned, profile written, map saved, handover — with the accepted line already at 0.817 of the 0.821/m rack limit (needing 14.8° of the car's 14.9° of steering). Once racing, wall contact recurred and the car covered ~0m net distance, cycling through `body_contact`/`emergency_clearance`/`racing_controller_stop` safety stops (plus one map-subtraction false positive that read a SLAM artifact as an opponent to overtake). |
+
+Neither result is a regression to chase: it is the same corridor-width
+statement the docs already made (`auto_map_race.yaml`: *"on a 1.8m indoor
+corridor the car runs wide and touches the wall, at any speed where the
+error exceeds the room"*), now measured on the real course instead of a
+generic one, and this hallway is narrower still. Racing it for real would
+start with a slower `supervisor_config` (see `auto_map_race_launch.py`'s
+docstring) — a tuning question, not a course-validity one.
+
+`run_gap_follow_validation.py` has no `pure_pursuit` equivalent for the
+reason above: `run_auto_map_validation.py --track asb_10000` already is
+the direct test for it, since pure_pursuit needs a localized pose and the
+automatic pipeline is what supplies one in this simulator today.
 
 ## Seeing what the dashboard sees
 

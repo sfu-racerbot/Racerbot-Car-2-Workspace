@@ -1,0 +1,58 @@
+{
+  "gap_follow_direct": {
+    "command": "tools/racerbot_sim/run_gap_follow_validation.py --track asb_10000",
+    "controller": "gap_follow",
+    "track": "asb_10000",
+    "seed": 12345,
+    "passed": false,
+    "failure": "hit a wall (209 steps in contact)",
+    "sim": {
+      "sim_time_s": 64.9,
+      "distance_travelled_m": 125.811,
+      "wall_contact_steps": 209,
+      "ever_contacted": true
+    },
+    "driven_metres": 121.45,
+    "driving_seconds": 66.3
+  },
+  "auto_map_race_solo": {
+    "command": "tools/racerbot_sim/run_auto_map_validation.py --scenario solo --track asb_10000",
+    "scenario": "solo",
+    "track": "asb_10000",
+    "seed": 12345,
+    "passed": false,
+    "phases": {
+      "slam_up": 7.0,
+      "mapping_lap_1": 57.1,
+      "line_cleaned": 104.2,
+      "profile_written": 104.2,
+      "map_saved": 113.2,
+      "profile_loaded": 113.2,
+      "racing": 115.2
+    },
+    "failure": "hit a wall (209 steps in contact)",
+    "cleanup": {
+      "points": 317.0,
+      "length_m": 47.5,
+      "harmonics": 21.0,
+      "deviation_m": 0.06,
+      "peak_curvature": 0.817,
+      "rack_limit": 0.821,
+      "steering_deg": 14.8,
+      "over_limit_pct": 0.0,
+      "seam_deg": 7.0,
+      "text": "317 points over 47.5m (from 285 recorded, 285 after trimming to one lap); kept 21 harmonics (nothing shorter than 2.26m), moving the line at most 0.06m off the recorded one; peak curvature 0.817/m of the 0.821/m the rack can reach (needs 14.8deg steering, limit 14.9deg) on 0.0% of waypoints; seam heading error 7.0deg; closest wall 0.00m, needs 0.00m (relaxed: the driven line itself measured 0.00m, so the map has phantom obstacles in it -- other cars, most likely)"
+    },
+    "sim": {
+      "sim_time_s": 171.0,
+      "distance_travelled_m": 96.142,
+      "wall_contact_steps": 209,
+      "ever_contacted": true,
+      "opponent_wall_contact": false,
+      "car_contact_steps": 0,
+      "num_agents": 1
+    },
+    "racing_seconds": 65.9,
+    "raced_metres": 0.0
+  }
+}

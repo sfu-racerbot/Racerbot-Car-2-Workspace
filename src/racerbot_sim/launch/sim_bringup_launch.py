@@ -39,7 +39,9 @@ def generate_launch_description():
     arguments = [
         DeclareLaunchArgument(
             'track', default_value='indoor_oval',
-            description='Generated closed-loop layout: indoor_oval, indoor_tight, indoor_wide.'),
+            description=(
+                'Generated closed-loop layout: indoor_oval, indoor_tight, '
+                'indoor_wide, asb_10000.')),
         DeclareLaunchArgument(
             'opponents', default_value='',
             description=(
