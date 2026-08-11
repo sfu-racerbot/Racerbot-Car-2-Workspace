@@ -23,6 +23,7 @@ from nav_msgs.msg import Odometry
 from rclpy.duration import Duration
 from sensor_msgs.msg import Joy, LaserScan
 
+from gap_follow import gap_logic
 from gap_follow.gap_follow_node import GapFollowNode
 
 
@@ -560,6 +561,253 @@ def test_centering_refuses_to_start_with_too_much_authority():
                      '-p', 'centering_max_steering:=0.25'])
     try:
         with pytest.raises(ValueError, match='centering_max_steering'):
+            GapFollowNode()
+    finally:
+        rclpy.shutdown()
+
+
+# ============================================================================
+# Adaptive corridor width -- shrink the gap-selection margin and raise the
+# fallback corner-speed cap on a sensed-narrow straight (see gap_logic's
+# corridor_width_factor/scale_between for the pure math; this is the wiring).
+# ============================================================================
+
+def test_adaptive_width_margin_is_a_no_op_by_default_even_on_a_narrow_straight(node):
+    """Shipped behaviour (config/gap_follow.yaml): min_safety_margin
+    defaults to safety_margin, so the margin never actually shrinks --
+    measured worse, not better, on a uniformly narrow real course (see
+    docs/asb-10000-sim-results.json). corner_speed_wide is the part that
+    ships active; test_adaptive_width_raises_the_corner_speed_ceiling_on_a_
+    wide_bend below covers it."""
+    assert node.min_safety_margin == pytest.approx(node.safety_margin)
+    _ready(node, speed=1.0)
+    node.scan_callback(_corridor_scan(left_dist=0.70, right_dist=0.70))  # 1.4m total
+    assert node.width_factor == pytest.approx(0.0)
+    assert node.effective_safety_margin == pytest.approx(node.safety_margin)
+
+
+def test_adaptive_width_leaves_the_margin_alone_on_a_sensed_wide_corridor(node):
+    _ready(node, speed=1.0)
+    node.scan_callback(_corridor_scan(left_dist=1.50, right_dist=1.50))  # 3.0m total
+    assert node.width_factor == pytest.approx(1.0)
+    assert node.effective_safety_margin == pytest.approx(node.safety_margin)
+
+
+def test_adaptive_width_margin_still_scales_linearly_when_configured_to_shrink(node):
+    """The interpolation itself is still correct if a future per-course
+    config lowers min_safety_margin below safety_margin -- exercised
+    directly here since it no longer happens with the shipped defaults."""
+    node.min_safety_margin = 0.12
+    _ready(node, speed=1.0)
+    node.scan_callback(_corridor_scan(left_dist=1.00, right_dist=1.00))  # 2.0m: halfway
+    assert node.width_factor == pytest.approx(0.5, abs=0.02)
+    expected = (node.min_safety_margin + node.safety_margin) / 2.0
+    assert node.effective_safety_margin == pytest.approx(expected, abs=0.005)
+
+
+def test_disabling_adaptive_width_holds_the_static_corner_speed_on_a_wide_bend(node):
+    """Margin is unaffected by enable_adaptive_width either way under the
+    shipped defaults (min_safety_margin == safety_margin already), so the
+    differentiating case is corner_speed on a *wide* corridor -- disabled
+    holds the floor, enabled reaches the ceiling."""
+    node.enable_adaptive_width = False
+    _ready(node, speed=1.0)
+    node.scan_callback(_corridor_scan(left_dist=1.50, right_dist=1.50))  # wide
+    assert node.width_factor == pytest.approx(1.0)
+    assert node.effective_safety_margin == pytest.approx(node.safety_margin)
+    assert node.effective_corner_speed == pytest.approx(node.corner_speed)
+
+
+def test_adaptive_width_raises_the_corner_speed_ceiling_on_a_wide_bend(node):
+    """corner_speed itself is the floor -- today's tuned narrow-corner
+    behaviour is unchanged. corner_speed_wide is the ceiling a fallback
+    gap taken for lack of forward visibility (not lack of room) may reach."""
+    _, narrow_margin, narrow_corner_speed = node._adaptive_width(0.70, 0.70)
+    _, wide_margin, wide_corner_speed = node._adaptive_width(1.50, 1.50)
+    assert narrow_corner_speed == pytest.approx(node.corner_speed)
+    assert wide_corner_speed == pytest.approx(node.corner_speed_wide)
+    assert wide_corner_speed > narrow_corner_speed
+
+
+def test_adaptive_width_ignores_an_open_side_and_holds_the_static_defaults(node):
+    """One side unbounded is not a corridor to measure -- treated as "wide"
+    (width_factor=1.0), the same "assume the already-validated defaults"
+    answer corridor centering gives for an open side. For the margin, wide
+    *is* the static default, so nothing moves; corner_speed's wide end is
+    its ceiling, so it is the one that rises here, same as a genuinely
+    measured-wide corridor would."""
+    width_factor, margin, corner_speed = node._adaptive_width(0.70, math.inf)
+    assert width_factor == pytest.approx(1.0)
+    assert margin == pytest.approx(node.safety_margin)
+    assert corner_speed == pytest.approx(node.corner_speed_wide)
+
+
+def test_smaller_effective_margin_recovers_a_gap_a_static_one_would_miss(node):
+    """The mechanism the ASB 10000-level course exercised (see
+    docs/asb-10000-sim-results.json): at the static 0.18m margin,
+    disparity_extend's inflation converging from both sides of a narrow
+    opening can fully bridge it, reporting no gap at all. The same opening
+    at the adaptive floor (0.12m) leaves enough of it standing to find a
+    preferred gap instead of stopping. These exact widths (a 94-beam
+    opening at 0.01rad spacing, walls at 0.6m) were chosen so the static
+    margin's disparity reach (51 beams each side, fully bridging it) and
+    the adaptive floor's reach (43 beams each side, leaving an 8-beam
+    sliver) land on opposite sides of that bridge -- not a coincidence of
+    this car's real car_width/margin numbers, so this is pinned rather than
+    computed from them."""
+    n = 600
+    angle_increment = 0.01
+    beam_angles = np.zeros(n)
+    window = np.full(n, 0.6)
+    window[150:244] = 2.2
+    window_valid = np.ones(n, dtype=bool)
+
+    node.effective_safety_margin = node.safety_margin
+    _, _, gap_start, _, _, _, _ = node._select_gap(
+        window.copy(), window_valid, angle_increment, beam_angles)
+    assert gap_start is None, 'the static margin should fully bridge this opening'
+
+    node.effective_safety_margin = 0.12  # a margin a per-course config could set
+    _, _, gap_start, _, used_fallback, _, _ = node._select_gap(
+        window.copy(), window_valid, angle_increment, beam_angles)
+    assert gap_start is not None, 'a smaller margin should leave the opening standing'
+    assert not used_fallback, 'the surviving sliver still clears the preferred depth'
+
+
+def test_adaptive_width_refuses_a_floor_above_the_static_margin():
+    """min_safety_margin is a floor the margin may shrink to, not a value
+    it may exceed -- this feature only ever narrows toward it, never widens
+    the margin beyond safety_margin on a sensed-wide corridor."""
+    rclpy.init(args=['--ros-args',
+                     '-p', 'safety_margin:=0.18',
+                     '-p', 'min_safety_margin:=0.20'])
+    try:
+        with pytest.raises(ValueError, match='min_safety_margin'):
+            GapFollowNode()
+    finally:
+        rclpy.shutdown()
+
+
+def test_adaptive_width_refuses_a_narrow_reference_that_does_not_fit():
+    rclpy.init(args=['--ros-args',
+                     '-p', 'adaptive_width_narrow:=2.6',
+                     '-p', 'adaptive_width_reference:=1.4'])
+    try:
+        with pytest.raises(ValueError, match='adaptive_width_narrow'):
+            GapFollowNode()
+    finally:
+        rclpy.shutdown()
+
+
+def test_adaptive_width_refuses_a_corner_speed_ceiling_below_its_floor():
+    rclpy.init(args=['--ros-args',
+                     '-p', 'corner_speed:=0.8',
+                     '-p', 'corner_speed_wide:=0.5'])
+    try:
+        with pytest.raises(ValueError, match='corner_speed_wide'):
+            GapFollowNode()
+    finally:
+        rclpy.shutdown()
+
+
+# ============================================================================
+# Gap-selection hysteresis and cornering anticipation -- both added after a
+# real-hallway report of the car "driving kind of drunk, side to side" and
+# taking corners "too slowly and too tightly" (see
+# docs/asb-10000-sim-results.json for the course this was measured against).
+# ============================================================================
+
+def test_select_gap_hysteresis_keeps_the_previous_gap_through_a_small_edge(node):
+    """Same shape as gap_logic's own hysteresis tests, run through the real
+    node method (self.previous_target_idx/self.gap_switch_margin) rather
+    than the pure function directly, to prove the node actually reads its
+    own state instead of just having the mechanism available unused. Sized
+    well past disparity_extend's inflation reach at the default margin so
+    that reach isn't what the assertion is really about."""
+    n = 2000
+    angle_increment = 0.01
+    window = np.full(n, 1.5)   # background, below min_gap_distance (2.0)
+    window[500:900] = 3.0     # A: 400 wide, score 1200
+    window[1200:1621] = 3.0   # B: 421 wide, score 1263 -- ~5% better than A
+    window_valid = np.ones(n, dtype=bool)
+    beam_angles = np.zeros(n)
+
+    node.effective_safety_margin = node.safety_margin
+    node.gap_switch_margin = 1.2
+    node.previous_target_idx = 700  # inside A
+    _, _, gap_start, gap_end, _, _, _ = node._select_gap(
+        window.copy(), window_valid, angle_increment, beam_angles)
+    assert gap_start < 900, 'kept A despite B scoring slightly higher'
+
+
+def test_select_gap_hysteresis_is_a_no_op_with_no_previous_target(node):
+    n = 2000
+    angle_increment = 0.01
+    window = np.full(n, 1.5)
+    window[500:900] = 3.0     # A
+    window[1200:1621] = 3.0   # B -- the plain best score
+    window_valid = np.ones(n, dtype=bool)
+    beam_angles = np.zeros(n)
+
+    node.effective_safety_margin = node.safety_margin
+    node.gap_switch_margin = 1.2
+    node.previous_target_idx = None  # nothing to stick to yet (a fresh node)
+    _, _, gap_start, gap_end, _, _, _ = node._select_gap(
+        window.copy(), window_valid, angle_increment, beam_angles)
+    assert gap_start > 1000, 'no previous target means plain best score wins'
+
+
+def test_cornering_anticipation_caps_speed_beyond_ordinary_curvature(node):
+    """A gap whose near portion (<=anticipation_near_depth) points one way
+    and whose overall angular span points another -- the shape a bend just
+    coming into view produces, well before the car's actual steering (the
+    span's midpoint) reflects it. Deliberately oversized and exaggerated
+    (not a realistic LiDAR geometry) so the construction survives
+    disparity_extend's inflation intact; this is a wiring test; realistic
+    magnitudes are covered by gap_logic's own near_gap_bearing tests.
+    Confirms the wiring end to end: _select_gap -> near_gap_bearing,
+    combined with the same steering_gain/clip/tan/wheelbase/
+    curvature_speed_limit chain scan_callback uses, produces a cap below
+    what the ordinary curvature-only reading (from target_angle alone)
+    would give."""
+    # A realistic 1081-beam, 270deg scan (Hokuyo UST-10LX geometry), so the
+    # angles involved stay physically plausible even though the scene
+    # itself (a symmetric near-left/far-right split) is a stress-test
+    # shape rather than a real corridor.
+    n = 1081
+    angle_increment = math.radians(270) / (n - 1)
+    beam_angles = -math.radians(135) + np.arange(n, dtype=np.float64) * angle_increment
+    mid = n // 2
+    window = np.full(n, 1.5)   # background, below min_gap_distance (2.0)
+    window[mid - 150:mid] = 2.2   # near (<= anticipation_near_depth default 2.5): left
+    window[mid:mid + 150] = 4.0   # far: right
+    window_valid = np.ones(n, dtype=bool)
+
+    node.effective_safety_margin = node.safety_margin
+    node.previous_target_idx = None
+    (_, _, gap_start, gap_end, _, target,
+     near_bearing) = node._select_gap(window, window_valid, angle_increment, beam_angles)
+    assert gap_start is not None and near_bearing is not None
+    target_angle = beam_angles[target]
+    assert near_bearing < target_angle, 'near view should lag the wider far span'
+
+    def capped_speed(delta):
+        steering = float(np.clip(node.steering_gain * delta,
+                                 -node.max_steering_angle, node.max_steering_angle))
+        return gap_logic.curvature_speed_limit(
+            math.tan(steering) / node.wheelbase, node.max_lateral_accel, node.max_speed)
+
+    curve_only = capped_speed(target_angle)
+    anticipated = capped_speed(target_angle - near_bearing)
+    assert anticipated < curve_only, (
+        'a genuine near/far disagreement must cap speed further than the '
+        'ordinary curvature reading alone')
+
+
+def test_cornering_anticipation_near_depth_must_exceed_zero():
+    rclpy.init(args=['--ros-args', '-p', 'anticipation_near_depth:=0.0'])
+    try:
+        with pytest.raises(ValueError, match='anticipation_near_depth'):
             GapFollowNode()
     finally:
         rclpy.shutdown()
