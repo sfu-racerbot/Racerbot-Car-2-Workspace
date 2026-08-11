@@ -770,6 +770,29 @@ html, body {
   pointer-events: auto;
 }
 
+#credit {
+  flex: none;
+  margin-top: 5px;
+  font-family: var(--mono);
+  font-size: var(--fs-nano);
+  letter-spacing: 0.03em;
+  color: var(--ink-faint);
+  pointer-events: auto;
+}
+
+#credit a {
+  color: var(--ink-faint);
+  text-decoration: underline;
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 2px;
+}
+
+#credit a:hover,
+#credit a:focus-visible {
+  color: var(--accent);
+  text-decoration-color: var(--accent);
+}
+
 /* --- Buttons: one recipe, used everywhere ------------------------- */
 #help button,
 .stopwatch-controls button,

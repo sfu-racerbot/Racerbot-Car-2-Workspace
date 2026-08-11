@@ -345,7 +345,7 @@ The left sidebar (`#overlay`) is a `position: fixed` box bounded to the
 viewport (`max-height: calc(100vh - 24px)`), split into a pinned masthead
 and link state, one scroll region (`#panels`) holding the `feeds`,
 `intent`, `vehicle`, `LB stopwatch`, `system` and `live tuning` sections,
-and a pinned footer (`#mode-banner` + `#help`). Those three parts, and the
+and a pinned footer (`#mode-banner` + `#help` + `#credit`). Those three parts, and the
 fact that `#overlay` is *not* `pointer-events: none`, are pinned by
 [`test/test_web_assets.py`](test/test_web_assets.py) — read that file
 before restructuring the sidebar. WiFi gets a small 4-bar icon
