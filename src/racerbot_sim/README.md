@@ -12,6 +12,7 @@ Full documentation: **[docs/ros-simulator.md](../../docs/ros-simulator.md)**.
 ```bash
 ros2 launch racerbot_sim sim_auto_map_race_launch.py dashboard:=true
 tools/racerbot_sim/run_auto_map_validation.py --scenario all
+tools/racerbot_sim/run_gap_follow_validation.py --track indoor_wide
 ```
 
 ## Safety

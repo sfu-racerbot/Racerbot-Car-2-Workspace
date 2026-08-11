@@ -327,7 +327,7 @@ def main(argv=None) -> int:
     parser.add_argument('--scenario', default='all',
                         choices=['all', 'solo', 'obstacle', 'traffic'])
     parser.add_argument('--track', default=None,
-                        help=('indoor_oval, indoor_tight or indoor_wide. '
+                        help=('indoor_oval, indoor_tight, indoor_wide or asb_10000. '
                               'Default: whichever the scenario needs.'))
     parser.add_argument('--seed', type=int, default=12345)
     parser.add_argument('--mapping-laps', type=int, default=2)
