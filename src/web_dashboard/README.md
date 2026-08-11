@@ -33,6 +33,7 @@ for the user-facing account and `enable_tuning: false` to remove it.
 | [`web_dashboard/stopwatch.py`](web_dashboard/stopwatch.py) | ROS-free deadman-gated stopwatch state machine, including joystick timeout handling. |
 | [`web_dashboard/netbind.py`](web_dashboard/netbind.py) | One decision: whether the configured `host` means "every interface". `0.0.0.0` binds IPv4 *only*, which left the dashboard unreachable at the car's Tailscale IPv6 address, so the wildcards are turned into "bind with no address" and get both families. No ROS imports (see [`test/test_netbind.py`](test/test_netbind.py)). |
 | [`web_dashboard/tuning.py`](web_dashboard/tuning.py) | Live-tuning support: parsing a node's advertised catalogue, clamping a browser request, and the comment-preserving YAML writer. No ROS/Tornado imports either (see [`test/test_tuning.py`](test/test_tuning.py)). |
+| [`web_dashboard/proccontrol.py`](web_dashboard/proccontrol.py) | Finding driving processes in `/proc`, deciding which may be stopped, and the `SIGINT`→`SIGTERM`→`SIGKILL` escalation. Holds `PROTECTED`, the actuation-path names no config can make killable. No ROS/Tornado imports; tested against a fake `/proc` (see [`test/test_proccontrol.py`](test/test_proccontrol.py)). |
 | [`web_dashboard/dashboard_node.py`](web_dashboard/dashboard_node.py) | The ROS2 node: subscribes to map/scan/pose/command/odom/joy, runs a [Tornado](https://www.tornadoweb.org/) web + WebSocket server, and bridges its two threads. |
 | [`web/index.html`](web/index.html), [`web/dashboard.js`](web/dashboard.js), [`web/style.css`](web/style.css) | The main browser dashboard — plain HTML/JS/CSS, no build step. |
 | [`web/panels.js`](web/panels.js) | The window manager: popping a section out of the info panel, dragging, magnetic snapping, 8-way resizing, and the saved layout. Touches no telemetry — it only moves boxes. Its geometry is tested under node (see [`test/browser/panels_test.js`](test/browser/panels_test.js)). |
@@ -46,6 +47,7 @@ for the user-facing account and `enable_tuning: false` to remove it.
 - Also samples CPU%/mem%/CPU temp/WiFi signal/uptime on a timer (`psutil` + `/sys/class/thermal` + `/proc/net/wireless`).
 - **Publishes:** nothing, to any topic. Browser input can enable/reset the dashboard-local stopwatch (which never leaves this process) and — once armed — change live-tunable parameters on the nodes in `tuning_nodes`.
 - **Calls (services):** `/<node>/get_parameters` and `/<node>/set_parameters` for each node in `tuning_nodes`, and nothing else.
+- **Signals (not ROS at all):** with `enable_process_control`, sends `SIGINT`/`SIGTERM`/`SIGKILL` to the operating-system processes of the driving nodes named in `killable_nodes`. Never to anything in `proccontrol.PROTECTED`, never to itself or its own ancestors, never to another user's processes, and only to a pid a fresh scan has just re-vetted. See [Stopping a driving process](#stopping-a-driving-process-proccontrolpy).
 
 ## Two concurrency models, one process
 
@@ -495,6 +497,112 @@ in `src/`. Without `--symlink-install` this would land in `install/` and be
 overwritten by the next build — the panel reports the exact path it wrote,
 so that case is visible rather than silent.
 
+## Stopping a driving process (`proccontrol.py`)
+
+The second write path, and the only one that doesn't touch ROS at all.
+
+It exists because `Ctrl+C` does not reliably tear a launch down.
+
+A node wedged in a callback, a `ros2 launch` that lost track of a child,
+or a terminal closed out from under a launch all leave a node spinning,
+subscribed, and still publishing to `/drive`.
+
+The next run then comes up beside the stale one, and two controllers
+fight over the car.
+
+**This is not an emergency stop, and the code says so in three places on
+purpose.** Killing a driving node does not brake the car; it removes what
+was commanding it.
+
+The chain is: `/drive` goes silent, and `ackermann_mux` drops the input
+after its 0.2s timeout.
+
+`ackermann_mux` then publishes *nothing*. It only ever publishes from
+inside a subscription callback — see
+`ackermann_mux/include/ackermann_mux/topic_handle.hpp`.
+
+`vesc_driver` has no watchdog of its own — nothing that notices commands
+stopped arriving and zeroes the output.
+
+So the VESC (the motor controller,
+[glossary](../../docs/glossary.md#vesc)) holds its last command until the
+VESC *firmware's* own motor timeout releases it.
+
+The stop is still releasing LB, which actively publishes zeroes at
+priority 100.
+
+### The protected set is the whole safety argument
+
+`proccontrol.PROTECTED` is refused before the allowlist is consulted, and
+`sanitize_allowlist()` strips it out of `killable_nodes` at startup with a
+warning rather than honouring it.
+
+The asymmetry is the reason.
+
+Killing a driving *algorithm* leaves a car with no algorithm. Nothing is
+asking it to move, which is safe.
+
+Killing anything in the *actuation path* leaves a car that is still
+moving and can no longer be told to stop. Kill `ackermann_mux` mid-run
+and releasing LB does nothing at all, because there is nothing left to
+carry the zeroes to the VESC.
+
+So: the VESC chain, `ackermann_mux`, `joy_node`/`joy_teleop`,
+`bringup_launch.py`, `teleop_launch.py`, and the dashboard itself.
+
+### Four bounds on the write path
+
+1. **Stop only, never start.** No code path here spawns a process.
+2. **Nothing in `PROTECTED`**, whatever the config says.
+3. **Never itself, its own ancestors, or another user's processes.**
+   `ancestors()` walks `PPid:` up to init to work out which pids are the
+   dashboard's own chain.
+4. **Every pid is re-vetted against a fresh scan at the moment of the
+   stop**, in `_begin_stop()`. The browser sends a number; that number is
+   only signalled if a scan performed *right then* independently agrees
+   it is a stoppable driving process.
+
+   That is what makes a stale tab, a replayed message, or a hand-rolled
+   client posting `{"pid": 1}` harmless. It closes pid reuse too, since
+   the re-scan reads the process's current cmdline.
+
+### Two things that only showed up when it was run for real
+
+Both were invisible to the unit tests and both are now regression-tested.
+
+**An installed `ament_python` node is not named `*.py`.** It is a
+setuptools console-script — a shebang file named exactly
+`pure_pursuit_node` — so its `/proc` cmdline is
+`/usr/bin/python3 /…/pure_pursuit_node`.
+
+An earlier `classify()` required a `.py` extension after the interpreter,
+and so found *nothing* on a real car. Nearly every node here is Python.
+
+**A zombie still answers signal 0.** A process that has exited but whose
+parent has not reaped it keeps its `/proc` entry, so a naive liveness
+check calls it alive forever.
+
+The escalation then reported "survived SIGINT, SIGTERM, SIGKILL, try a
+reboot" about a process it had just successfully killed.
+
+That is the *common* case here, not an exotic one. What gets stopped is
+usually the child of a wedged `ros2 launch`, and a wedged launch is
+precisely a parent that does not reap. `alive()` checks `State: Z` first.
+
+### Threading
+
+Same contract as tuning. Browsers hand requests to a `queue.Queue` from
+the IOLoop thread; everything that reads `/proc` or sends a signal runs on
+the rclpy thread, on a timer.
+
+`StopJob` is a state machine advanced by an external clock rather than
+something that sleeps, and that is deliberate.
+
+The escalation waits seconds between signals, and this is the thread also
+serving telemetry. Blocking it to wait for a `SIGINT` to land would
+freeze the map, the scan and the pose for every connected browser — while
+the car is moving.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -506,4 +614,8 @@ so that case is visible rather than silent.
 | `stats` never shows real numbers | The running `dashboard_node` process predates a rebuild — Python files aren't hot-reloaded, so restart `ros2 launch web_dashboard web_dashboard_launch.py` after any `colcon build` that touches this package |
 | `temp`/`wifi` show `n/a` | No readable `cpu-thermal` thermal zone / no wireless interface on this machine (e.g. developing on a laptop docked to Ethernet) — expected, not a bug |
 | Camera inset shows "camera offline" | `usb_cam_stream` isn't running, or is on a different port than the hardcoded `CAMERA_PORT` (`9090`) in `dashboard.js` |
+| The processes panel is missing | `enable_process_control: false`, or a running `dashboard_node` that predates this feature — restart it after `colcon build` |
+| A driving node you're running isn't listed | Its process name isn't in `killable_nodes`. Check what it really is with `ps -eo pid,args \| grep <name>`; a node started with `-r __node:=<other>` is matched on the remapped name |
+| A stop says "refused — in the actuation path" | Working as intended: that process is in `proccontrol.PROTECTED` and no config makes it stoppable. See [the protected set](#the-protected-set-is-the-whole-safety-argument) |
+| A stop reports "survived SIGINT, SIGTERM, SIGKILL" | The process is blocked in an uninterruptible kernel wait, usually on a USB/serial device that stopped responding. Nothing in userspace can end it; reboot |
 | Reachable at the car's `100.x.x.x` address but not at its Tailscale hostname | An IPv4-only listener: MagicDNS publishes the car's IPv6 address too and browsers often try it first. `ss -tlnp \| grep 8080` should show *two* lines (IPv4 and IPv6); one line means a build predating [`netbind.py`](web_dashboard/netbind.py) — rebuild and relaunch. If both are listening, check `tailscale status` and that `tailscale debug prefs` reports `"ShieldsUp": false` |

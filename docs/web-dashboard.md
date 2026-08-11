@@ -14,7 +14,8 @@ No RViz. No ROS install on the viewing device. No login. Just a URL.
 
 - **Streams map updates as changes, not frames.** A full [occupancy grid](glossary.md#occupancy-grid) — the map, stored as a big array of "free / wall / unknown" cells — is 819 kB/s on the wire; after the first send, updates run about **0.04 kB/s**. Total dashboard traffic dropped from **7.1 Mbit/s to 0.45 Mbit/s** — measured, not estimated.
 - **Live parameter tuning with no rebuild.** Change a driving node's speeds, geometry or safety margins from a phone and the running node applies them on its next control tick. The old loop — stop, `Ctrl+C`, edit YAML, rebuild, relaunch, re-seed localization — becomes a slider.
-- **Read-only by construction.** The [node](glossary.md#node) publishes to **no ROS [topic](glossary.md#topic) at all**. It cannot steer, accelerate or brake, so it's safe to leave running during a race. The one write path (tuning) is a bounded service call, not a publisher.
+- **Read-only by construction.** The [node](glossary.md#node) publishes to **no ROS [topic](glossary.md#topic) at all**. It cannot steer, accelerate or brake, so it's safe to leave running during a race. The two write paths (tuning, and stopping a process) are a bounded service call and a bounded signal — neither is a publisher.
+- **Clears the stale processes `Ctrl+C` left behind.** A `Ctrl+C` that looked like it worked often leaves a driving node alive and still publishing to `/drive`, so the next run fights it. The [processes panel](#stopping-a-driving-process) lists what is really running and ends it — escalating when a node ignores `SIGINT`, and refusing anything in the actuation path.
 - **Shows the algorithm's *intent*, not just its output.** A curved arrow ahead of the car draws where the controller plans to go, how fast, and which constraint is currently holding it back — so you can catch a wrong plan while it's still only a plan.
 - **Works at every stage.** Nothing else running? You still get live [LiDAR](glossary.md#lidar). [SLAM](glossary.md#slam) up? The map builds in front of you. Once [localization](glossary.md#localization) has a fix, everything locks to world coordinates.
 - **Runs on a phone.** One plain JS file, no build step, no framework. A 2048×2048 keyframe is 4.2 million cells, drawn through a palette lookup so a phone can keep up.
@@ -75,9 +76,13 @@ So the workspace's [mandatory LB-deadman policy](architecture.md#workspace-polic
 
 Leave it running at all times, alongside anything else in this workspace: `bringup_launch.py`, SLAM, localization, `gap_follow`, `pure_pursuit`, all of it.
 
-> **It is not purely a *viewer* any more, though.** [Live parameter tuning](#live-parameter-tuning) — on by default — lets it call the standard `/<node>/set_parameters` service on this workspace's driving nodes.
+> **It is not purely a *viewer* any more, though.** Two features reach the car rather than just watching it, and both are on by default.
 >
-> That is a real path to the car. Read [that section](#live-parameter-tuning) and the [security note](#security-note) before using it at a shared venue. Set `enable_tuning: false` for the strictly read-only dashboard.
+> [Live parameter tuning](#live-parameter-tuning) calls the standard `/<node>/set_parameters` service on this workspace's driving nodes.
+>
+> [Stopping a driving process](#stopping-a-driving-process) can end a driving node's operating-system process — never anything in the actuation path, and it can only stop things, never start them.
+>
+> Both are real paths to the car. Read those sections and the [security note](#security-note) before using this at a shared venue. `enable_tuning: false` and `enable_process_control: false` give you the strictly read-only dashboard back.
 
 ---
 
@@ -431,6 +436,8 @@ ros2 node list | grep slam
 
 **Working when:** exactly one result.
 
+Two results means a previous launch is still running. The [processes panel](#stopping-a-driving-process) lists leftovers like that and can end them without leaving the browser.
+
 <details>
 <summary><b>Frame corruption, and why it is now impossible to miss</b> — the guard against a header/payload desync. Read if you're changing the protocol.</summary>
 
@@ -753,6 +760,118 @@ Same order as any other change to driving behavior ([writing-your-own-node.md](w
 
 ---
 
+## Stopping a driving process
+
+> **This is not an emergency stop.** To stop the car right now, **let go of LB**. That is the only control that makes the car brake on command. Everything in this section is for clearing up *afterwards*, or between runs.
+
+Open the **processes** panel at the bottom of the sidebar. It lists the driving programs running on the car right now, and gives each one a **stop** button.
+
+It exists because `Ctrl+C` does not reliably clean up.
+
+You press `Ctrl+C` in the terminal running `pure_pursuit_launch.py`, the logs stop scrolling, and the terminal comes back — so it looks finished. Sometimes it isn't. The [node](glossary.md#node) is still running, still [subscribed](glossary.md#topic), and still publishing steering and speed commands to `/drive`.
+
+Start the next run on top of that and you now have two controllers arguing over one car.
+
+### Using it
+
+1. Open the dashboard at `http://<car-ip>:8080/`.
+2. Expand the **processes** section in the sidebar.
+3. Find the node you want gone and press **stop**.
+4. The button changes to **confirm?**. Press it again within four seconds.
+
+**Working when:** the status line under the list reads `pure_pursuit_node: stopped`, and the row disappears from the list within about two seconds.
+
+The two-press confirm is there because an accidental tap on a phone should not silently end a run that was going fine. It is not there because stopping is dangerous — a stop you didn't mean is the *safe* direction for a mistake to go.
+
+### What the button actually does
+
+It sends the process the same signal `Ctrl+C` sends, and then stops being polite about it:
+
+| Step | Signal | What it means |
+|---|---|---|
+| 1 | `SIGINT` | Exactly what `Ctrl+C` sends. A healthy node shuts down cleanly here. |
+| 2 | `SIGTERM` | "Please exit." Sent 2 seconds later, if the node ignored step 1. |
+| 3 | `SIGKILL` | Not ignorable. The kernel ends the process; it gets no say. |
+
+Each step waits `process_stop_grace_sec` (2 seconds by default) before escalating.
+
+**If a stop needed more than `SIGINT`, that is worth knowing about** — it means that node ignores `Ctrl+C`, which is a bug in the node. The dashboard tells you which signals it had to use rather than hiding it behind a tick.
+
+### What it will refuse to stop
+
+Some programs are listed but greyed out, with a reason instead of a button. The dashboard will not stop these no matter what you put in the config file:
+
+- `ackermann_mux` — the referee that decides which commands reach the motor
+- `joy_teleop` and `joy_node` — what reads your gamepad, including LB
+- the VESC chain (`vesc_driver_node`, `ackermann_to_vesc_node`, `vesc_to_odom_node`) — what talks to the motor controller
+- `bringup_launch.py` and `teleop_launch.py` — the launches that own all of the above
+- the dashboard itself
+
+**The reason is worth understanding, because it is the whole safety argument for this feature.**
+
+Stopping a *driving algorithm* leaves a car with no algorithm. Nothing is commanding it, so nothing is asking it to move. That is safe.
+
+Stopping the *mux* leaves a car that is still moving and can no longer be told anything. Releasing LB normally works by publishing zero-speed commands at a higher priority than the autonomy — but if the mux is gone, there is nothing left to carry those zeroes to the motor. You would have removed the brake, not applied it.
+
+So the actuation path is refused before the allowlist is even consulted. Adding `ackermann_mux` to `killable_nodes` does not enable it; it logs a warning at startup and is ignored.
+
+### Why this is not an emergency stop
+
+This matters enough to spell out, because the panel has a red-adjacent look and people reach for the nearest button in a panic.
+
+Killing a driving node does not brake the car. It removes the thing that was commanding the car. Here is the actual chain of events:
+
+1. The driving node dies, so `/drive` goes quiet.
+2. After 0.2 seconds, `ackermann_mux` drops that input.
+3. `ackermann_mux` then publishes **nothing at all** — it only ever sends a command when one arrives, so silence in means silence out.
+4. `vesc_driver_node` has no timeout of its own, so the [VESC](glossary.md#vesc) keeps applying its last command.
+5. The VESC's own *firmware* timeout eventually releases the motor.
+
+So the car coasts to a stop over some distance, on a timeout that lives in the motor controller's firmware rather than in any code in this workspace.
+
+**Releasing LB is different, and better.** It actively publishes zero speed at priority 100, which overrides `/drive` immediately. That is a command to stop, not an absence of commands.
+
+<details>
+<summary><b>Two things that make the stop safe to expose to a browser</b> — the server-side checks. Read if you're reviewing this feature or changing it.</summary>
+
+**Every pid is re-checked at the moment you press stop.** The browser sends a process ID number. The dashboard does not trust it. It re-scans the running processes right then, in its own process, and only signals that ID if that fresh scan independently concludes it is a stoppable driving process.
+
+This is what makes a stale browser tab, a replayed message, or a hand-written WebSocket client posting `{"pid": 1}` harmless. It also closes the pid-reuse hole: the re-scan reads the process's *current* command line, not a remembered one.
+
+**It can only ever stop, never start.** There is no code path here that launches anything. The panel cannot bring a driving node up, only take one down.
+
+Beyond that, the dashboard will not signal itself, will not signal whatever process started it, and will not signal anything owned by a different user account.
+
+</details>
+
+### Clearing a stale process from a previous session
+
+The scan looks at the whole machine, not just at things this dashboard started. That is deliberate, and it is the main thing the panel is for.
+
+A leftover `pure_pursuit_node` from a run an hour ago shows up in the list exactly like a fresh one, and stops the same way. So does a stale `gym_bridge_node` from a simulator session — which matters more than it sounds, because [`racerbot_sim`](ros-simulator.md) forges the LB signal and publishes its own `/scan`.
+
+If you would rather do it from a terminal, the equivalent check is still:
+
+**Terminal 1, from `~/racerbot-ws`:**
+
+```bash
+ros2 node list
+```
+
+**Working when:** you see only the nodes you expect. A driving node you thought you had stopped means you have found the problem.
+
+See also ["Two stacks running at once"](#3-two-stacks-running-at-once), which is what this looks like from the map's point of view.
+
+### Turning it off
+
+Set `enable_process_control: false` in `config/web_dashboard.yaml`. The panel disappears and the capability is never created.
+
+The list of what may be stopped is `killable_nodes`, in the same file. It ships covering this workspace's driving nodes, teammates' nodes from `racerbot_a`/`racerbot_b`, and the two simulator nodes.
+
+`urg_node`, `particle_filter` and `slam_toolbox` are deliberately **not** in that list. None of them can move the car, but killing one mid-run quietly degrades a *running* controller instead of stopping it — `pure_pursuit` with a frozen pose is more dangerous than `pure_pursuit` with no pose. Add them yourself if you want them.
+
+---
+
 ## Parameter reference
 
 <details>
@@ -787,6 +906,10 @@ All in `src/web_dashboard/config/web_dashboard.yaml`. A few entries mention [TF]
 | `tuning_refresh_sec` | `2.0` | How often node presence and current values are re-read |
 | `tuning_request_rate_hz` | `20.0` | How quickly a released slider reaches the car |
 | `tuning_service_timeout_sec` | `3.0` | When to give up on an unanswered parameter service call |
+| `enable_process_control` | `true` | Whether [stopping a driving process](#stopping-a-driving-process) exists at all. `false` removes the panel and the capability |
+| `killable_nodes` | driving nodes only — see the YAML | The only process names a browser may stop. Anything in the actuation path (`ackermann_mux`, `joy_teleop`, `joy_node`, the VESC chain, `bringup_launch.py`, `teleop_launch.py`) is refused whatever you put here, and logs a warning at startup. See `web_dashboard/proccontrol.py`'s `PROTECTED` |
+| `process_stop_grace_sec` | `2.0` | How long a process gets to honour each signal before the next one — `SIGINT`, then `SIGTERM`, then `SIGKILL` |
+| `process_scan_interval_sec` | `2.0` | How often the running-process list is refreshed |
 
 </details>
 
@@ -810,10 +933,19 @@ And, if `usb_cam_stream` is running, the camera feed.
 >
 > What none of that protects against is someone who can already reach this port and means harm. An armed session is a session in which whoever is on the LAN can change how the car drives, within those bounds.
 
+> **[Stopping a driving process](#stopping-a-driving-process) also reaches the car, and is bounded differently.**
+>
+> It can only ever *stop* something, never start it, and it refuses anything in the actuation path — so the worst it can do is end a run early, not make the car move.
+>
+> That is why it has no arm step, unlike tuning: an accidental stop is the safe direction for a mistake. It does still ask for a second press to confirm.
+>
+> On a shared network, though, "anyone on this WiFi can end your race" is a real thing to weigh. Set `enable_process_control: false` if that trade isn't worth it to you.
+
 **So, concretely:**
 
 - Don't port-forward this to the open internet.
 - On a venue's shared WiFi, prefer `enable_tuning: false` — or at least `tuning_allow_save: false`.
+- Consider `enable_process_control: false` there too, for the reason just above.
 - For remote-but-still-private access, this machine already has a `tailscale0` interface configured (see [hardware-reference.md](hardware-reference.md)). Use the car's Tailscale address instead of exposing the port publicly.
 
 ---
@@ -828,6 +960,8 @@ And, if `usb_cam_stream` is running, the camera feed.
 - **No rotated map origins.** The renderer assumes the map's origin orientation is identity — true for every map this workspace's tooling produces. A map saved with a rotated origin would render misaligned.
 - **Live tuning reaches only nodes that opt in.** A node has to advertise a `live_tunable_spec` parameter *and* be listed in `tuning_nodes`. That is the intended scope — this workspace's own driving code. It does mean a new driving node gets no panel until it declares a catalogue; see `src/gap_follow/gap_follow/live_tuning.py` for the pattern.
 - **A saved tune edits tracked files.** "Save" writes into `src/*/config/*.yaml`, which are git-tracked and shared. Review with `git diff` before committing, or set `tuning_allow_save: false`.
+- **Stopping a process is not an emergency stop, and cannot be made into one.** It removes what was commanding the car; the car then coasts until the VESC firmware's own motor timeout releases the motor. Releasing LB remains the only control that actively commands a stop. See [that section](#why-this-is-not-an-emergency-stop).
+- **A process that survives `SIGKILL` cannot be cleared from here.** That means it is stuck in an uninterruptible kernel wait — usually blocked on a USB or serial device that has stopped responding. Nothing in userspace can end it; the dashboard says so plainly and a reboot is the next step.
 - **Camera port (`9090`) is hardcoded in `dashboard.js`** (`CAMERA_PORT`), not a `config/web_dashboard.yaml` parameter. It's the browser, not `dashboard_node`, that connects to the camera stream directly, so this is a JS constant, not a launch-time ROS parameter. Edit it directly if `usb_cam_stream` is ever reconfigured to a different port.
 - **Exactly one car per dashboard.** The camera page is recording-friendly, but recording itself is intentionally left to the browser or OS. The dashboard focuses on live LIDAR, localization, vehicle telemetry, system health, and camera data with almost no moving parts.
 
@@ -841,6 +975,7 @@ src/web_dashboard/
 │   ├── protocol.py          # wire-format conversion, framework-agnostic, unit-tested
 │   ├── stopwatch.py         # LB/freshness-gated timer logic, unit-tested
 │   ├── tuning.py            # spec parsing + comment-preserving YAML writer, unit-tested
+│   ├── proccontrol.py       # find/stop driving processes; the protected set, unit-tested
 │   └── dashboard_node.py    # ROS2 node + Tornado web/WebSocket server
 ├── web/
 │   ├── index.html / dashboard.js / style.css

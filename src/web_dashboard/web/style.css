@@ -1679,6 +1679,130 @@ body.panels-narrow .section-detach {
 .intent-log-line.intent-stop { color: var(--bad); }
 
 /* ------------------------------------------------------------------ */
+/* Processes: what is running, and what may be stopped.
+/*
+/* Styled as instrumentation rather than as a big red button on purpose.
+/* Stopping a driving node is cleanup, not an emergency stop -- the car
+/* coasts on the VESC's firmware timeout afterwards rather than braking --
+/* and a control that *looks* like an e-stop is one people will reach for
+/* in the moment when they should be releasing LB instead. Hence: amber
+/* for the armed confirm, never red; and the plain-language warning line
+/* sits above the list, not tucked in a tooltip. */
+/* ------------------------------------------------------------------ */
+.proc-note {
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--warn);
+  border-left: 2px solid var(--warn);
+  padding: 4px 0 4px 7px;
+  margin-bottom: 7px;
+}
+
+.proc-note strong { color: var(--ink-bright); }
+
+.proc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.proc-empty {
+  color: var(--ink-faint);
+  font-size: 11px;
+  font-style: italic;
+}
+
+/* name / pid / button on one line, with the reason wrapping underneath
+   for a protected row. */
+.proc-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: var(--well);
+  border: 1px solid var(--line-soft);
+  border-radius: 2px;
+}
+
+.proc-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proc-kind {
+  margin-left: 5px;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.proc-meta {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-dim);
+}
+
+/* A protected row is dimmed, not hidden: "the mux is running and you may
+   not kill it from here" is worth seeing. */
+.proc-row-protected { opacity: 0.72; }
+
+.proc-row-protected .proc-name { color: var(--ink-dim); }
+
+.proc-reason {
+  grid-column: 1 / -1;
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: var(--ink-faint);
+}
+
+.proc-stop {
+  background: rgba(61, 220, 255, 0.07);
+  color: var(--accent);
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  padding: 3px 9px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.proc-stop:hover {
+  background: rgba(61, 220, 255, 0.18);
+  color: var(--ink-bright);
+  border-color: var(--accent);
+}
+
+/* Armed, waiting for the second press. Amber = caution, and it is
+   visibly a different button from the one just pressed, so nobody
+   confirms by reflex without registering that something changed. */
+.proc-stop-armed,
+.proc-stop-armed:hover {
+  background: rgba(255, 182, 54, 0.16);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.proc-status {
+  margin-top: 6px;
+  min-height: 1.2em;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--ink-dim);
+}
+
+.proc-status-good { color: var(--go); }
+.proc-status-bad { color: var(--bad); }
+
+/* ------------------------------------------------------------------ */
 /* Tightening up where there is genuinely no room. The sidebar always
    fits now -- it scrolls -- but scrolling to reach something is worse
    than seeing it, so give back what vertical space we can. */

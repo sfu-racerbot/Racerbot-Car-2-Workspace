@@ -107,3 +107,54 @@ web_dashboard_node:
     tuning_refresh_sec: 2.0          # how often node presence/values are re-read
     tuning_request_rate_hz: 20.0     # how quickly a moved slider reaches the car
     tuning_service_timeout_sec: 3.0  # give up on an unanswered parameter service call
+
+    # --- Stopping driving processes ---
+    # The "stop" panel: find the driving nodes actually running on this
+    # machine and end them, including ones a Ctrl+C failed to clear that are
+    # still publishing to /drive. It sends SIGINT first -- exactly what
+    # Ctrl+C sends -- then SIGTERM, then SIGKILL.
+    #
+    # THIS IS NOT AN EMERGENCY STOP. Stopping a driving node does not brake
+    # the car; it removes whatever was commanding it, and the VESC then holds
+    # its last command until the VESC firmware's own motor timeout releases
+    # it. The emergency stop is releasing LB, which actively publishes zeroes
+    # at a higher priority. See docs/web-dashboard.md.
+    #
+    # Set false to remove the panel and the capability entirely.
+    enable_process_control: true
+    # The only process names a browser can ever stop.
+    #
+    # Anything in the actuation path is refused no matter what you put here
+    # -- ackermann_mux, joy_teleop, joy_node, the VESC chain, bringup_launch
+    # and teleop_launch. Adding one of those below does not enable it; it
+    # logs a warning at startup and is ignored. The reason is asymmetry:
+    # killing a driving algorithm leaves a car with no algorithm, which is
+    # safe, while killing the mux leaves a moving car that releasing LB can
+    # no longer stop. See web_dashboard/proccontrol.py's PROTECTED.
+    #
+    # urg_node, particle_filter and slam_toolbox are deliberately absent:
+    # none can move the car, but killing one mid-run degrades a *running*
+    # controller rather than stopping it, and pure_pursuit with a frozen pose
+    # is worse than pure_pursuit with no pose. Add them if you want them.
+    killable_nodes:
+      # this workspace
+      - pure_pursuit_node
+      - gap_follow_node
+      - auto_map_race_node
+      # racerbot_a / racerbot_b
+      - gap_finder_node
+      - ftg_node
+      - follow_the_gap_node
+      - reactive_node
+      - wall_follow_node
+      - safety_node
+      # racerbot_sim -- a stale one forges LB and fakes a /scan
+      - gym_bridge_node
+      - sim_joy_node
+      # the launches that own the above
+      - pure_pursuit_launch.py
+      - gap_follow_launch.py
+      - auto_map_race_launch.py
+      - sim_launch.py
+    process_stop_grace_sec: 2.0      # per signal, before escalating to the next
+    process_scan_interval_sec: 2.0   # how often the running-process list refreshes

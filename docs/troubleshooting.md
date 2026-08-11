@@ -355,6 +355,10 @@ That's what `racerbot_launch/launch/slam_launch.py` does now, mirroring upstream
 
 **You shouldn't need to `pkill` anything** to switch between manual driving and autonomy any more. `Ctrl+C` whichever control-layer terminal is running instead — `teleop_launch.py`, `gap_follow_launch.py`, or `pure_pursuit_launch.py`. See [operations.md](operations.md#the-two-layer-pattern-used-in-every-procedure-below).
 
+> **If that `Ctrl+C` didn't actually clear it, don't reach for `pkill`.** A node wedged in a callback can survive `Ctrl+C` and keep publishing to `/drive`, which is what makes the next run misbehave.
+>
+> The dashboard's [processes panel](web-dashboard.md#stopping-a-driving-process) lists what is really still running and ends it, escalating past `SIGINT` on its own. It refuses to touch `joy_node`, `joy_teleop` and the rest of the actuation path, so it cannot cause the cascade described below.
+
 But if you reach for `pkill -f joy_teleop` out of habit — from before `teleop_launch.py` existed as its own file — know that it's a trap.
 
 **Why it kills both.** `joy_node` is launched with `--params-file .../joy_teleop.yaml` — the same config file `joy_teleop` uses, just a different top-level key inside it. So **`joy_node`'s own command line contains the literal substring `joy_teleop`**.

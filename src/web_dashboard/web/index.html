@@ -230,6 +230,36 @@
           </div>
         </div>
       </details>
+
+      <!-- Stopping driving processes.
+
+           Collapsed by default and placed last, deliberately: this is
+           cleanup tooling, not an instrument you watch while driving, and
+           it must not sit under a thumb on a phone that is being held
+           while the car runs.
+
+           The warning line is not decoration. People will reach for the
+           nearest red-looking button in a panic, and this one does NOT
+           brake the car -- it removes whatever was commanding it, after
+           which the VESC coasts on its own firmware timeout. Releasing LB
+           is the stop. That sentence stays on the page. -->
+      <details class="section" data-section="processes" id="processes-section">
+        <summary class="section-head">
+          <span id="dot-processes" class="dot dot-gray"></span>
+          <span class="section-name">processes</span>
+          <span class="section-digest" id="digest-processes"></span>
+        </summary>
+        <div class="section-body">
+          <div class="proc-note">
+            Not an emergency stop &mdash; <strong>release LB</strong> to stop the car.
+            This ends the process that is driving, and the car then coasts.
+          </div>
+          <div id="proc-list" class="proc-list">
+            <div class="proc-empty">looking for driving processes...</div>
+          </div>
+          <div id="proc-status" class="proc-status" role="status" aria-live="polite"></div>
+        </div>
+      </details>
     </div>
 
     <!-- Pinned below the scroll region: a banner explaining why the picture

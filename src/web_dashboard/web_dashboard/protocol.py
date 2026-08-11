@@ -411,3 +411,41 @@ def tuning_armed_message(armed: bool) -> dict:
         'armed': bool(armed),
         'stamp': time.time(),
     }
+
+
+def process_state_message(targets, enabled: bool) -> dict:
+    """Which driving processes are running, and which may be stopped.
+
+    Carries the refused ones too, each with its reason. "pure_pursuit is
+    up and you may not kill it from here, because it is the mux" is a
+    far more useful thing to put in front of a person at trackside than
+    a silently shorter list.
+    """
+    return {
+        'type': 'processes',
+        'enabled': bool(enabled),
+        'targets': [t.as_dict() if hasattr(t, 'as_dict') else t
+                    for t in targets],
+        'stamp': time.time(),
+    }
+
+
+def process_result_message(pid: int, name: str, ok: bool, detail: str,
+                           sent=(), done: bool = True) -> dict:
+    """Progress of one stop request, echoed to every tab.
+
+    `sent` is the escalation so far (['SIGINT', 'SIGTERM', ...]) because
+    "this needed a SIGKILL" is exactly the diagnostic the person watching
+    wants: a node that never answers Ctrl+C is a bug in that node, and
+    hiding the escalation behind a green tick would hide the bug too.
+    """
+    return {
+        'type': 'process_result',
+        'pid': int(pid),
+        'name': str(name),
+        'ok': bool(ok),
+        'done': bool(done),
+        'detail': str(detail),
+        'sent': list(sent),
+        'stamp': time.time(),
+    }

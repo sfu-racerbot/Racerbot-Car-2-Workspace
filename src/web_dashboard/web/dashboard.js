@@ -112,6 +112,10 @@
     stats: null, // { cpuPercent, memPercent, cpuTempC, uptimeS, wifiDbm, receivedAt }
     tuning: null, // { enabled, allowSave, nodes: [...] } -- see protocol.tuning_state_message
     tuningArmed: false, // server-confirmed, never assumed from the checkbox
+    // { enabled, targets: [...] } -- see protocol.process_state_message.
+    // null until the first snapshot arrives, which is why the panel starts
+    // out saying "looking for..." rather than "none running".
+    processes: null,
     // What the driving node says it is *trying* to do -- see
     // docs/drive-intent.md. `intent` is the raw schema payload; `reason`
     // is held separately because the car only re-sends the (sometimes
@@ -317,6 +321,11 @@
       applyTuningResult(header);
     } else if (header.type === 'tuning_saved') {
       showTuningSaveResult(header);
+    } else if (header.type === 'processes') {
+      state.processes = { enabled: header.enabled, targets: header.targets || [] };
+      renderProcesses();
+    } else if (header.type === 'process_result') {
+      applyProcessResult(header);
     } else if (header.type === 'stats') {
       state.stats = {
         cpuPercent: header.cpu_percent,
@@ -1866,6 +1875,180 @@
     ws.send(JSON.stringify(Object.assign({ type: 'tuning_control' }, payload)));
   }
 
+  // ---------------------------------------------------------------------
+  // Stopping driving processes.
+  //
+  // Two-step by design: the first press arms *that one button* and starts
+  // a 4-second countdown, the second actually sends. Not because stopping
+  // is dangerous -- a mistaken stop is the safe direction, which is
+  // exactly why this needs no server-side arm the way tuning does -- but
+  // because "which pid did I just kill?" is a horrible question to have
+  // to answer at trackside, and a fat-fingered scroll on a phone should
+  // not silently end a run that was going fine.
+  // ---------------------------------------------------------------------
+
+  const PROC_CONFIRM_MS = 4000;
+  const procPending = new Map();   // pid -> timeout id for the armed state
+
+  function sendProcessControl(payload) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify(Object.assign({ type: 'process_control' }, payload)));
+  }
+
+  function setProcStatus(text, ok) {
+    const element = document.getElementById('proc-status');
+    if (!element) return;
+    element.textContent = text || '';
+    element.classList.toggle('proc-status-bad', ok === false);
+    element.classList.toggle('proc-status-good', ok === true);
+  }
+
+  function applyProcessResult(header) {
+    const label = header.name || `pid ${header.pid}`;
+    const escalation = (header.sent || []).length > 1
+      ? ` (needed ${header.sent.join(' -> ')})`
+      : '';
+    if (!header.done) {
+      setProcStatus(`${label}: ${header.detail}`);
+      return;
+    }
+    setProcStatus(
+      header.ok ? `${label}: ${header.detail}${escalation}`
+                : `${label}: ${header.detail}`,
+      header.ok);
+    // A stop that needed more than a SIGINT is a bug in that node worth
+    // seeing in the console too, not just in a line that scrolls away.
+    if (header.ok && (header.sent || []).length > 1) {
+      console.warn(`[racerbot] ${label} ignored SIGINT; escalated via `
+                   + `${header.sent.join(' -> ')}`);
+    }
+  }
+
+  function renderProcesses() {
+    const listEl = document.getElementById('proc-list');
+    const sectionEl = document.getElementById('processes-section');
+    if (!listEl) return;
+    const info = state.processes;
+
+    if (!info || !info.enabled) {
+      if (sectionEl) sectionEl.hidden = true;
+      setDigest('processes', '--');
+      return;
+    }
+    if (sectionEl) sectionEl.hidden = false;
+
+    const targets = info.targets || [];
+    const stoppable = targets.filter((t) => !t.protected);
+    setDigest('processes', targets.length
+      ? `${stoppable.length}/${targets.length} stoppable`
+      : 'none running');
+    // Cyan-family green means "something is running", grey means nothing
+    // is. Deliberately never red: a driving node being up is not a fault,
+    // and red on this page is reserved for what the car has decided.
+    const dot = document.getElementById('dot-processes');
+    if (dot) dot.className = 'dot ' + (targets.length ? 'dot-green' : 'dot-gray');
+
+    if (!targets.length) {
+      listEl.innerHTML = '';
+      const empty = document.createElement('div');
+      empty.className = 'proc-empty';
+      empty.textContent = 'no driving processes running';
+      listEl.appendChild(empty);
+      return;
+    }
+
+    listEl.innerHTML = '';
+    for (const target of targets) {
+      listEl.appendChild(buildProcRow(target));
+    }
+  }
+
+  // The one decision in this panel worth testing away from the DOM: does
+  // this row get a stop control at all? Pulled out as a pure function so
+  // browser/proc_panel_test.js can assert the invariant directly --
+  // a protected target must never produce a button, however the server
+  // labelled it. The server refuses those pids anyway (it re-scans and
+  // re-vets before signalling), so this is the second of two locks, not
+  // the only one.
+  function procRowPlan(target) {
+    // Fails closed. A target with no pid, or no target at all, is
+    // something this page does not understand, and the answer to "should
+    // I offer to kill a process I cannot identify" is no.
+    const known = !!(target && Number.isFinite(Number(target.pid)));
+    const protectedRow = !known || !!target.protected;
+    return {
+      stoppable: !protectedRow,
+      name: (target && target.name) || '(unknown)',
+      meta: known ? `pid ${target.pid}` : 'no pid',
+      reason: protectedRow
+        ? ((target && target.reason) || (known ? 'protected' : 'unrecognised entry'))
+        : '',
+    };
+  }
+
+  function buildProcRow(target) {
+    const plan = procRowPlan(target);
+    const row = document.createElement('div');
+    row.className = 'proc-row' + (plan.stoppable ? '' : ' proc-row-protected');
+
+    const name = document.createElement('div');
+    name.className = 'proc-name';
+    name.textContent = plan.name;
+    const kind = document.createElement('span');
+    kind.className = 'proc-kind';
+    kind.textContent = target.kind === 'launch' ? 'launch' : 'node';
+    name.appendChild(kind);
+
+    const meta = document.createElement('div');
+    meta.className = 'proc-meta';
+    meta.textContent = plan.meta;
+    // The full cmdline only as a tooltip: it is how you tell two copies of
+    // the same node apart (different worktrees, different params), but it
+    // is far too long to sit in a phone-width sidebar.
+    meta.title = target.cmdline || '';
+
+    row.appendChild(name);
+    row.appendChild(meta);
+
+    if (!plan.stoppable) {
+      const why = document.createElement('div');
+      why.className = 'proc-reason';
+      why.textContent = plan.reason;
+      row.appendChild(why);
+      return row;
+    }
+
+    const button = document.createElement('button');
+    button.className = 'proc-stop';
+    button.textContent = 'stop';
+    button.addEventListener('click', () => onStopClicked(target, button));
+    row.appendChild(button);
+    return row;
+  }
+
+  if (typeof window !== 'undefined') window.__procRowPlan = procRowPlan;
+
+  function onStopClicked(target, button) {
+    if (procPending.has(target.pid)) {
+      clearTimeout(procPending.get(target.pid));
+      procPending.delete(target.pid);
+      button.classList.remove('proc-stop-armed');
+      button.textContent = 'stop';
+      setProcStatus(`stopping ${target.name}...`);
+      sendProcessControl({ action: 'stop', pid: target.pid });
+      return;
+    }
+    button.classList.add('proc-stop-armed');
+    button.textContent = 'confirm?';
+    setProcStatus(`press again to stop ${target.name} (pid ${target.pid})`);
+    procPending.set(target.pid, setTimeout(() => {
+      procPending.delete(target.pid);
+      button.classList.remove('proc-stop-armed');
+      button.textContent = 'stop';
+      setProcStatus('');
+    }, PROC_CONFIRM_MS));
+  }
+
   function sendTuningSet(node, name, value) {
     sendTuningControl({ action: 'set', node, name, value });
   }
@@ -2342,6 +2525,7 @@
     stopwatch: document.getElementById('digest-stopwatch'),
     system: document.getElementById('digest-system'),
     tuning: document.getElementById('digest-tuning'),
+    processes: document.getElementById('digest-processes'),
   };
 
   function restoreSectionState() {

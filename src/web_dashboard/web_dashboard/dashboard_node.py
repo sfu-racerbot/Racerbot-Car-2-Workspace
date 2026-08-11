@@ -39,6 +39,33 @@ Set `enable_tuning: false` to remove the service clients entirely and get
 the strictly-read-only node back. See docs/web-dashboard.md's security
 note before exposing this to a network you don't control.
 
+There is a second write path, and it does not touch ROS at all. With
+`enable_process_control` (the default), this node can also find and stop
+the *operating system processes* of the driving nodes listed in
+`killable_nodes` -- the "stop" panel. It exists because Ctrl+C routinely
+fails to bring a launch down cleanly, leaving a stale controller still
+publishing to /drive that the next run then fights with. It is bounded on
+four sides too:
+
+  1. It can only ever *stop*, never start. There is no path here that
+     spawns a process, and the escalation is SIGINT (exactly what Ctrl+C
+     sends) before SIGTERM before SIGKILL.
+  2. Nothing in the actuation path can be stopped, whatever the config
+     says -- see proccontrol.PROTECTED. Killing a driving algorithm
+     leaves a car with no algorithm, which is safe; killing ackermann_mux
+     or joy_teleop leaves a moving car that releasing LB can no longer
+     stop, which is not.
+  3. It cannot signal the dashboard itself, its own parent chain, or
+     anything owned by another user.
+  4. Only pids the *current* scan has already vetted are ever signalled;
+     a browser cannot post an arbitrary number and have it honoured.
+
+**This is not an emergency stop and must not be used as one.** Stopping a
+driving node does not brake the car -- it removes what was commanding it,
+and the VESC then holds its last command until the VESC firmware's own
+motor timeout releases it. The emergency stop is, as ever, releasing LB.
+Full reasoning in proccontrol.py's docstring.
+
 Two concurrency models have to coexist in one process here:
   - rclpy's own executor, which calls this node's subscription callbacks.
   - Tornado's IOLoop (asyncio-based), which runs the web server and every
@@ -87,7 +114,7 @@ import tornado.websocket
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 
 from drive_intent import schema as intent_schema
-from web_dashboard import netbind, protocol, tuning
+from web_dashboard import netbind, proccontrol, protocol, tuning
 from web_dashboard.batching import TelemetryBatcher
 from web_dashboard.mapstream import MapGeometry, MapStreamer
 from web_dashboard.stopwatch import DeadmanStopwatch
@@ -287,6 +314,24 @@ class DashboardWebSocket(tornado.websocket.WebSocketHandler):
             self.node.handle_stopwatch_control(
                 payload.get('action'), payload.get('enabled'))
             return
+        if kind == 'process_control':
+            # Deliberately *not* behind the tuning arm. Arming exists so a
+            # pocket-tap cannot change how a moving car drives; the worst
+            # a mistaken press does here is stop a driving node, which is
+            # the direction of travel you want a mistake to go in. The UI
+            # still asks for a confirm, and the server still re-vets every
+            # pid against a fresh scan before signalling anything.
+            if not self.node.enable_process_control:
+                self.write_message(json.dumps(protocol.process_result_message(
+                    0, '', False, 'stopping processes is disabled on this '
+                                  'dashboard (enable_process_control is false)')))
+                return
+            action = payload.get('action')
+            if action == 'stop':
+                self.node.request_process_stop(payload.get('pid'))
+            elif action == 'refresh':
+                self.node.request_process_refresh()
+            return
         if kind != 'tuning_control':
             return
 
@@ -400,6 +445,19 @@ class DashboardNode(Node):
         self.declare_parameter('tuning_request_rate_hz', 20.0)
         self.declare_parameter('tuning_service_timeout_sec', 3.0)
 
+        # --- Stopping driving processes (see the module docstring) ---
+        self.declare_parameter('enable_process_control', True)
+        # The only process names a browser can ever stop. PROTECTED wins
+        # over anything added here -- putting `ackermann_mux` in this list
+        # does not make it stoppable, it logs a warning and is ignored.
+        self.declare_parameter('killable_nodes', list(proccontrol.DEFAULT_KILLABLE))
+        # How long a process gets to honour each signal before the next
+        # one. 2s is comfortably longer than a healthy rclpy shutdown and
+        # short enough that clearing a wedged node stays a trackside
+        # operation rather than a coffee break.
+        self.declare_parameter('process_stop_grace_sec', 2.0)
+        self.declare_parameter('process_scan_interval_sec', 2.0)
+
         self.map_topic = self.get_parameter('map_topic').value
         self.scan_topic = self.get_parameter('scan_topic').value
         # dict.fromkeys() rather than set(): de-duplicate without shuffling
@@ -434,6 +492,18 @@ class DashboardNode(Node):
             1.0, float(self.get_parameter('tuning_request_rate_hz').value))
         self.tuning_service_timeout_sec = max(
             0.5, float(self.get_parameter('tuning_service_timeout_sec').value))
+        self.enable_process_control = bool(
+            self.get_parameter('enable_process_control').value)
+        # sanitize_allowlist strips anything in the actuation path and
+        # says so loudly -- a config that tries to make the mux killable
+        # is a mistake worth a warning in the launch log, not a silent
+        # no-op and not something to honour.
+        self.killable_nodes = proccontrol.sanitize_allowlist(
+            self.get_parameter('killable_nodes').value, self.get_logger())
+        self.process_stop_grace_sec = max(
+            0.5, float(self.get_parameter('process_stop_grace_sec').value))
+        self.process_scan_interval_sec = max(
+            0.5, float(self.get_parameter('process_scan_interval_sec').value))
 
         # Latest-known state, re-sent in full to any newly connected
         # browser tab (send_initial_state) so it isn't stuck waiting for
@@ -517,6 +587,7 @@ class DashboardNode(Node):
             1.0 / self.telemetry_rate_hz, self._flush_telemetry)
 
         self._setup_tuning()
+        self._setup_process_control()
 
         self.get_logger().info(
             f"web_dashboard_node ready: map={self.map_topic} scan={self.scan_topic} "
@@ -524,6 +595,7 @@ class DashboardNode(Node):
             f"drive={self.drive_topic} odom={self.odom_topic} "
             f"joy={self.joy_topic} (LB index {self.deadman_button}). "
             f"live tuning {self._tuning_summary()}. "
+            f"process control {self._process_control_summary()}. "
             f"Once the web server starts, open http://<this car's IP>:{self.port}/ in a browser."
         )
 
@@ -1035,6 +1107,157 @@ class DashboardNode(Node):
         self._tuning_requests.put(('refresh', None, None, None))
 
     # ------------------------------------------------------------------------
+    # Stopping driving processes.
+    #
+    # Same threading contract as tuning: browsers hand requests in through
+    # a queue from the IOLoop thread, and everything that actually looks
+    # at /proc or sends a signal happens on the rclpy thread, on a timer.
+    #
+    # A stop is a state machine rather than a sleep for a specific reason:
+    # the escalation has to wait a couple of seconds between signals, and
+    # this thread is also serving telemetry. Blocking it to wait for a
+    # SIGINT to land would freeze the map, the scan, and the pose for
+    # every connected browser -- while the car is moving.
+    # ------------------------------------------------------------------------
+
+    def _setup_process_control(self):
+        self._process_requests = queue.Queue()
+        self._process_jobs = {}          # pid -> StopJob
+        self._last_process_json = None
+        self._last_process_targets = []
+        if not self.enable_process_control:
+            # One "disabled" snapshot rather than nothing, so the browser
+            # hides the panel outright instead of showing an empty list
+            # that looks like "nothing is running".
+            self._last_process_json = json.dumps(
+                protocol.process_state_message([], False))
+            return
+        self.process_scan_timer = self.create_timer(
+            self.process_scan_interval_sec, self._process_scan_callback)
+        # Much faster than the scan: this drains browser requests and
+        # steps running escalations, and a stop button that takes two
+        # seconds to do anything visible is one people press twice.
+        self.process_drain_timer = self.create_timer(
+            0.1, self._process_drain_callback)
+
+    def _process_control_summary(self):
+        if not self.enable_process_control:
+            return 'DISABLED (enable_process_control is false)'
+        return (f'enabled for {", ".join(self.killable_nodes) or "(no nodes)"}'
+                f' -- the actuation path is never stoppable')
+
+    def _scan_processes(self):
+        """Look at /proc. Runs on the rclpy thread."""
+        return proccontrol.scan(allowlist=self.killable_nodes)
+
+    def _process_scan_callback(self):
+        """Re-scan, and broadcast only when the picture actually changed.
+
+        Comparing the rendered JSON rather than the object list keeps a
+        2Hz timer from pushing an identical frame to every browser
+        forever -- the same reasoning as the tuning refresh.
+        """
+        try:
+            targets = self._scan_processes()
+        except Exception as exc:  # noqa: BLE001
+            # A scan that throws must not take the dashboard down with
+            # it: this is a convenience panel bolted to a telemetry tool.
+            self.get_logger().warn(f'process scan failed: {exc}')
+            return
+        self._last_process_targets = targets
+        message = protocol.process_state_message(targets, True)
+        # Drop the timestamp before comparing, or nothing is ever equal.
+        rendered = json.dumps([t.as_dict() for t in targets], sort_keys=True)
+        if rendered != getattr(self, '_last_process_digest', None):
+            self._last_process_digest = rendered
+            self._last_process_json = json.dumps(message)
+            self._broadcast(message)
+        elif self._last_process_json is None:
+            self._last_process_json = json.dumps(message)
+
+    def _process_drain_callback(self):
+        """Start queued stops and step the ones already running."""
+        while True:
+            try:
+                action, pid = self._process_requests.get_nowait()
+            except queue.Empty:
+                break
+            if action == 'refresh':
+                self._last_process_digest = None
+                self._process_scan_callback()
+            elif action == 'stop':
+                self._begin_stop(pid)
+
+        if not self._process_jobs:
+            return
+        now = time.monotonic()
+        for job in list(self._process_jobs.values()):
+            if job.advance(now):
+                self._broadcast(protocol.process_result_message(
+                    job.pid, job.name, job.ok, job.detail, job.sent, job.done))
+            if job.done:
+                self._process_jobs.pop(job.pid, None)
+                # Re-scan promptly so the panel reflects reality rather
+                # than waiting out the next scan interval.
+                self._last_process_digest = None
+                self._process_scan_callback()
+
+    def _begin_stop(self, pid):
+        """Vet a pid against a *fresh* scan, then start the escalation.
+
+        Re-scanning here rather than trusting the last broadcast is the
+        whole security model of this feature. A browser sends a number;
+        that number is only ever signalled if a scan performed right now,
+        in this process, independently concludes it is a stoppable
+        driving process. A stale panel, a replayed message, or a
+        hand-rolled WebSocket client posting `{"pid": 1}` all land here
+        and are refused -- and pid reuse cannot smuggle something else
+        through, because the re-scan reads the *current* cmdline.
+        """
+        try:
+            targets = self._scan_processes()
+        except Exception as exc:  # noqa: BLE001
+            self._broadcast(protocol.process_result_message(
+                pid, '', False, f'could not scan processes: {exc}'))
+            return
+        self._last_process_targets = targets
+
+        target = proccontrol.find(targets, pid)
+        if target is None:
+            self._broadcast(protocol.process_result_message(
+                pid, '', False,
+                f'pid {pid} is not a driving process this dashboard '
+                f'recognises (it may have already exited)'))
+            return
+        if target.protected:
+            self.get_logger().warn(
+                f'refused a browser request to stop pid {pid} '
+                f'({target.name}): {target.reason}')
+            self._broadcast(protocol.process_result_message(
+                pid, target.name, False, f'refused -- {target.reason}'))
+            return
+        if pid in self._process_jobs:
+            return
+
+        self.get_logger().warn(
+            f'stopping {target.name} (pid {pid}) at a browser request')
+        self._process_jobs[pid] = proccontrol.StopJob(
+            pid, target.name, self.process_stop_grace_sec, time.monotonic())
+
+    # --- Entry points called from the IOLoop thread ---
+
+    def request_process_stop(self, pid):
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return
+        if pid > 1:
+            self._process_requests.put(('stop', pid))
+
+    def request_process_refresh(self):
+        self._process_requests.put(('refresh', None))
+
+    # ------------------------------------------------------------------------
     # Bridging ROS callbacks (rclpy thread) -> the Tornado IOLoop thread.
     # ------------------------------------------------------------------------
 
@@ -1158,6 +1381,10 @@ class DashboardNode(Node):
         if self._last_tuning_json is not None:
             client.write_message(self._last_tuning_json)
         client.write_message(json.dumps(protocol.tuning_armed_message(False)))
+        # Same treatment for the process list: the last snapshot the rclpy
+        # thread published, as a plain string.
+        if self._last_process_json is not None:
+            client.write_message(self._last_process_json)
 
     # ------------------------------------------------------------------------
     # Web server
