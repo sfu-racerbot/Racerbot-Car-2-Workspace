@@ -340,39 +340,38 @@ Two details are load-bearing if you edit them:
   over the dial for the same reason: `9%` becoming `100%` cannot move the
   dial or its neighbours.
 
-### Ambient motion, and where it stops
+### Motion is an accent, and never covers anything
 
-The page has a layer of motion that is deliberately *not* informational:
+There is a small amount of decorative motion: a slowly turning tick ring
+around each dial, and the diamond reticle in the masthead. That is the
+whole list.
 
-- a sweep bar crossing the viewport, like a sensor display redrawing;
-- a radar wedge turning over the minimap;
-- a slow breath on each panel's corner brackets;
-- a spark running down the rule beside each open section;
-- a turning tick ring around each dial;
-- a ring pinging outward from the link dot.
+Three rules bound it, and the first is the one that matters:
 
-None of it says anything about the car. It exists so a page full of
-numbers that happen not to be changing still reads as live rather than as
-frozen.
+- **Nothing decorative is ever drawn over the canvas or the minimap.**
+  That is where the LIDAR points, the car marker and the map live, and
+  they are the reason the page exists.
 
-Three constraints keep it honest, and all three matter:
+  An earlier pass had a sweep bar crossing the whole viewport and a radar
+  wedge turning over the minimap. Both washed over exactly the data you
+  open this page to look at. Do not put them back.
 
-- **It animates `transform`, `opacity` or a 1px repaint — never layout.**
-  Same rule as everything else here. The sweep and the radar wedge get
-  their own compositor layer (the GPU handles them separately), so the
-  map underneath is never redrawn for them.
-- **It is cyan — the "this is the system" accent — and never
-  green/amber/red.** A red sweep over the minimap would read as something
-  the car detected. The one exception is the dial alarm, which *is* a
-  state: a ring at its limit breathes, because a thermally throttling
-  Jetson is worth interrupting someone about.
-- **It switches off where it costs something.** The phone breakpoint
-  (`max-width: 640px`) drops the viewport sweep and the radar wedge —
-  always-on compositing work, paid for by a canvas already painting at
-  20 Hz on the weakest GPU this page runs on. `prefers-reduced-motion`
-  drops the lot. The dial alarm survives both.
+- **Accents are small, slow, and off to one side.** A tick ring is a few
+  pixels of dashed hairline outside a dial it is not part of. If an effect
+  is large enough to notice while you are reading a number, it is too
+  large.
 
-One last thing, which is not ambient and is worth not undoing.
+- **It animates `transform` or `opacity` only, and it stops where it
+  costs something.** The phone breakpoint (`max-width: 640px`) and
+  `prefers-reduced-motion` both switch the decorative loops off.
+
+Two animations are *not* decoration and stay on everywhere.
+
+The breath on the link dot is the only thing distinguishing "connected"
+from "connected and frozen". And the dial alarm fires because a Jetson at
+its thermal limit is worth interrupting someone about.
+
+One last thing, which is not motion at all and is worth not undoing.
 
 The lit rule marking an open section lives in an 8px gutter that
 `#panels` reserves on the left. It used to be an inset shadow on the

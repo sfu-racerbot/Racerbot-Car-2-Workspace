@@ -218,36 +218,6 @@ html, body {
 .frame-tl::after, .frame-bl::after { left: 28px; }
 .frame-tr::after, .frame-br::after { right: 28px; }
 
-/* The refresh sweep. One bar, travelling top to bottom on a long cycle,
-   the way a sensor display redraws itself. It is a transform on a fixed,
-   pointer-events:none layer, so it composites on the GPU and costs the
-   canvas underneath nothing -- but it is still a full-viewport layer,
-   which is why the phone breakpoint at the bottom of this file switches
-   it off. */
-.frame-scan {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  height: 150px;
-  background-image: linear-gradient(
-    to bottom,
-    transparent 0%,
-    rgba(61, 220, 255, 0.030) 62%,
-    rgba(140, 230, 255, 0.075) 92%,
-    transparent 100%);
-  box-shadow: 0 1px 0 rgba(61, 220, 255, 0.13);
-  animation: frame-scan 9s linear infinite;
-  will-change: transform;
-}
-
-@keyframes frame-scan {
-  0%   { transform: translateY(-150px); opacity: 0; }
-  10%  { opacity: 1; }
-  86%  { opacity: 1; }
-  100% { transform: translateY(100vh); opacity: 0; }
-}
-
 .frame-tl { top: 8px;    left: 8px;    border-top-width: 2px; border-left-width: 2px; }
 .frame-tr { top: 8px;    right: 8px;   border-top-width: 2px; border-right-width: 2px; }
 .frame-bl { bottom: 8px; left: 8px;    border-bottom-width: 2px; border-left-width: 2px; }
@@ -313,20 +283,6 @@ html, body {
      else here earns colour by meaning something; this is the frame
      itself, so it gets the house accent and nothing else does. */
   filter: drop-shadow(0 0 4px rgba(61, 220, 255, 0.45));
-  /* A slow breath, offset per corner below so a panel's two brackets are
-     never in step -- in step they read as the whole panel flashing, out
-     of step they read as an instrument idling. Opacity only: it cannot
-     move the bracket or anything near it. */
-  animation: bracket-breathe 4.4s ease-in-out infinite;
-}
-
-@keyframes bracket-breathe {
-  0%, 100% { opacity: 0.85; }
-  50%      { opacity: 0.48; }
-}
-
-.hud-panel::after {
-  animation-delay: -2.2s;
 }
 
 .hud-panel::before {
@@ -541,10 +497,6 @@ html, body {
   border-radius: 50%;
   display: inline-block;
   flex: none;
-  /* So the link dot's ping ring below has something to be positioned
-     against. The ring is absolutely positioned, so it still cannot
-     reflow the row it sits in. */
-  position: relative;
   /* Only colour/shadow transition -- never size, which would reflow the
      row it sits in. */
   transition: background-color 140ms linear, box-shadow 140ms linear;
@@ -565,28 +517,6 @@ html, body {
   animation: hud-pulse 2.4s ease-in-out infinite;
 }
 
-/* A ring expanding out of the link dot, once per breath. Same argument as
-   the breath itself: this is the one element whose entire job is to
-   distinguish "connected" from "connected and frozen", and a ring leaving
-   the dot is the least ambiguous way to say the link is still alive.
-   transform + opacity on an absolutely positioned ::after -- the row it
-   sits in cannot feel it. */
-#conn-dot.dot-green::after,
-#strip-dot.dot-green::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 1px solid var(--go);
-  pointer-events: none;
-  animation: dot-ping 2.4s ease-out infinite;
-}
-
-@keyframes dot-ping {
-  0%   { transform: scale(1);   opacity: 0.75; }
-  70%  { transform: scale(2.6); opacity: 0; }
-  100% { transform: scale(2.6); opacity: 0; }
-}
 
 @keyframes hud-pulse {
   0%, 100% { opacity: 1; }
@@ -691,48 +621,10 @@ html, body {
   pointer-events: none;
 }
 
-/* A spark running down the rule of each open section, staggered so the
-   sidebar reads as several instruments rather than one blinking one.
-   Ambient only: it says the surface is live, never anything about the
-   data. It animates background-position on a 1px-wide element -- the
-   cheapest repaint on the page, and it cannot touch layout. */
-.section[open]::before {
-  content: "";
-  position: absolute;
-  left: -7px;
-  top: 2px;
-  bottom: 2px;
-  width: 1px;
-  background-image: linear-gradient(to bottom,
-    transparent 0%, var(--accent) 45%, transparent 100%);
-  background-repeat: no-repeat;
-  background-size: 100% 34px;
-  background-position: 50% -34px;
-  pointer-events: none;
-  animation: rule-spark 5.2s ease-in-out infinite;
-}
-
-@keyframes rule-spark {
-  0%   { background-position: 50% -34px; opacity: 0; }
-  12%  { opacity: 1; }
-  88%  { opacity: 1; }
-  100% { background-position: 50% calc(100% + 34px); opacity: 0; }
-}
-
-/* Negative delays start each one already part-way through its cycle, so
-   they are out of step from the first frame rather than falling into step
-   only after the first loop. */
-.section:nth-child(2)[open]::before { animation-delay: -0.9s; }
-.section:nth-child(3)[open]::before { animation-delay: -1.8s; }
-.section:nth-child(4)[open]::before { animation-delay: -2.7s; }
-.section:nth-child(5)[open]::before { animation-delay: -3.6s; }
-.section:nth-child(6)[open]::before { animation-delay: -4.5s; }
-
 /* Inside a popped-out panel the rule answers a question nobody is asking:
    the title bar already says what this is, and there is no list of other
    sections to be legible against. It is also where the old version was at
    its worst, straight through the middle of the contents. */
-.float-body .section[open]::before,
 .float-body .section[open]::after {
   display: none;
 }
@@ -1441,54 +1333,6 @@ body.panels-narrow .section-detach {
   display: block;
   width: 100%;
   height: 100%;
-}
-
-/* --- Radar sweep over the overview ---------------------------------
- *
- * The one place on this page where a movie-HUD flourish costs nothing:
- * the minimap is an overview, not an instrument you read a number off,
- * and #minimap-panel is already overflow:hidden so the wedge is clipped
- * to it for free.
- *
- * Two rules keep it from lying. It is cyan -- the "this is the system"
- * accent -- and never go/caution/stop, so it cannot be mistaken for
- * something the car detected. And it is alpha only, over the canvas,
- * turning on its own compositor layer: the map underneath is never
- * redrawn for it.
- */
-.radar-sweep {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.radar-sweep::before {
-  content: "";
-  position: absolute;
-  /* Square and centred, larger than the panel in both axes. A conic
-     gradient painted into a non-square box sweeps at an uneven angular
-     rate -- it visibly speeds up across the short axis. */
-  top: 50%;
-  left: 50%;
-  width: 200%;
-  aspect-ratio: 1;
-  transform: translate(-50%, -50%) rotate(0deg);
-  transform-origin: 50% 50%;
-  background: conic-gradient(
-    from 0deg,
-    rgba(61, 220, 255, 0.16) 0deg,
-    rgba(61, 220, 255, 0.05) 22deg,
-    transparent 46deg,
-    transparent 360deg);
-  animation: radar-sweep 4.5s linear infinite;
-  will-change: transform;
-}
-
-@keyframes radar-sweep {
-  from { transform: translate(-50%, -50%) rotate(0deg); }
-  to   { transform: translate(-50%, -50%) rotate(360deg); }
 }
 
 /* While no stream is connected the <img> is a BROKEN image -- its src is
@@ -2571,25 +2415,15 @@ body.sheet-dragging .sheet-grip-bar {
      add nothing there. */
   .frame-corner { display: none; }
 
-  /* --- ambient motion, off ------------------------------------------
-     Everything below is mood. On a phone it is mood being paid for by
-     the map, which is already painting telemetry at 20Hz on the least
-     powerful GPU this page runs on -- the full-viewport sweep and the
-     conic wedge are exactly the kind of always-on compositing that
-     showed up as dropped frames rather than as a slow effect.
+  /* The two decorative loops that are left stop here. Both are small,
+     but a phone is already painting telemetry at 20Hz on the least
+     powerful GPU this page runs on, and neither is worth a frame of it.
 
      The gauge alarm is deliberately NOT in this list: it is the only
-     animation here that means something (a Jetson at its thermal
+     animation on the page that means something (a Jetson at its thermal
      limit), and that is worth a phone frame. */
-  .frame-scan { display: none; }
-  .radar-sweep { display: none; }
-  .section[open]::before { display: none; }
   .gauge-ticks,
-  #brand-mark,
-  .hud-panel::before,
-  .hud-panel::after,
-  #conn-dot.dot-green::after,
-  #strip-dot.dot-green::after { animation: none; }
+  #brand-mark { animation: none; }
 
   /* --- the sheet --------------------------------------------------- */
   #overlay {
@@ -2780,23 +2614,13 @@ body.sheet-dragging .sheet-grip-bar {
   #strip-dot.dot-green { animation: none; }
   .tuning-param.applied { animation: none; }
 
-  /* The purely ambient layers go away entirely rather than freezing:
-     a stopped sweep bar parked across the middle of the map, or a
-     half-drawn radar wedge, is worse than no sweep at all. */
-  .frame-scan { display: none; }
-  .radar-sweep { display: none; }
-  .section[open]::before { display: none; }
-  #conn-dot.dot-green::after,
-  #strip-dot.dot-green::after { display: none; }
-
-  /* These have a correct resting state to hold, so they just stop. The
-     gauge alarm included: the arc is already red, which is the reading --
-     the breath was only ever how loudly it said it. */
+  /* All three have a correct resting state to hold, so they just stop
+     rather than disappearing. The gauge alarm included: the arc is
+     already red, which is the reading -- the breath was only ever how
+     loudly it said it. */
   .gauge-ticks,
   .gauge-arc.gauge-bad,
-  #brand-mark,
-  .hud-panel::before,
-  .hud-panel::after { animation: none; }
+  #brand-mark { animation: none; }
 
   *, *::before, *::after {
     transition-duration: 0.01ms !important;

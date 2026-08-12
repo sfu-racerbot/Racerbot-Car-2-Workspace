@@ -22,10 +22,6 @@
     <span class="frame-corner frame-tr"></span>
     <span class="frame-corner frame-bl"></span>
     <span class="frame-corner frame-br"></span>
-    <!-- A refresh bar sweeping down the viewport, the way a sensor
-         display redraws. Ambient only, and a transform, so it composites
-         on its own layer and never touches the map underneath. -->
-    <span class="frame-scan"></span>
   </div>
 
   <!-- PHONE LAYOUT ONLY (style.css hides it everywhere else).
@@ -382,10 +378,6 @@
   <div id="minimap-panel" class="hud-panel">
     <div class="panel-label">map</div>
     <canvas id="minimap"></canvas>
-    <!-- A radar sweep over the overview. Deliberately a single low-alpha
-         cyan wedge and never a state colour, so it cannot be misread as
-         something the car detected -- it is the housing, not the data. -->
-    <span class="radar-sweep" aria-hidden="true"></span>
     <div id="minimap-placeholder" class="panel-placeholder">no map yet</div>
   </div>
 
