@@ -305,6 +305,85 @@ The canvas half of the palette is the `HUD` constant near the top of
 `dashboard.js`. Canvas cannot read CSS custom properties, so those values
 are duplicated by hand — **change one, change the other.**
 
+### The system dials
+
+The `system` section shows CPU, memory and temperature as three rings
+rather than as three numbers in a row.
+
+The number has not gone anywhere — it is printed in the middle of its own
+ring. The ring is a *second encoding* of the same value: the text answers
+"exactly how hot", the ring answers "close to the limit?" from across a
+pit box without reading anything.
+
+Colour still follows the rule above — it is state, never decoration:
+
+| Ring | Cyan below | Amber from | Red from |
+|---|---|---|---|
+| `cpu` | 75% | 75% | 90% |
+| `mem` | 80% | 80% | 92% |
+| `temp` | 70°C | 70°C | 85°C |
+
+Percentages fill the ring directly. Temperature has no natural 0–100%
+range, so its ring maps 20°C (roughly ambient) to 100°C (where a Jetson
+throttles itself) — `TEMP_MIN_C`/`TEMP_MAX_C` in `dashboard.js`. A board
+with no readable thermal zone still shows `n/a` and an empty ring.
+
+Two details are load-bearing if you edit them:
+
+- The `<circle>` elements carry `pathLength="100"`. That normalises the
+  SVG dash units to percent, so neither the stylesheet nor `setGauge()`
+  has to know the circle's radius. Change `r` freely; change
+  `pathLength` and both sides break at once.
+- `setGauge()` moves **`stroke-dashoffset` only** — a paint-only
+  property. That is what keeps a 1 Hz stats packet from reflowing the
+  sidebar, which is rule 2 above. The value text is absolutely positioned
+  over the dial for the same reason: `9%` becoming `100%` cannot move the
+  dial or its neighbours.
+
+### Ambient motion, and where it stops
+
+The page has a layer of motion that is deliberately *not* informational:
+
+- a sweep bar crossing the viewport, like a sensor display redrawing;
+- a radar wedge turning over the minimap;
+- a slow breath on each panel's corner brackets;
+- a spark running down the rule beside each open section;
+- a turning tick ring around each dial;
+- a ring pinging outward from the link dot.
+
+None of it says anything about the car. It exists so a page full of
+numbers that happen not to be changing still reads as live rather than as
+frozen.
+
+Three constraints keep it honest, and all three matter:
+
+- **It animates `transform`, `opacity` or a 1px repaint — never layout.**
+  Same rule as everything else here. The sweep and the radar wedge get
+  their own compositor layer (the GPU handles them separately), so the
+  map underneath is never redrawn for them.
+- **It is cyan — the "this is the system" accent — and never
+  green/amber/red.** A red sweep over the minimap would read as something
+  the car detected. The one exception is the dial alarm, which *is* a
+  state: a ring at its limit breathes, because a thermally throttling
+  Jetson is worth interrupting someone about.
+- **It switches off where it costs something.** The phone breakpoint
+  (`max-width: 640px`) drops the viewport sweep and the radar wedge —
+  always-on compositing work, paid for by a canvas already painting at
+  20 Hz on the weakest GPU this page runs on. `prefers-reduced-motion`
+  drops the lot. The dial alarm survives both.
+
+One last thing, which is not ambient and is worth not undoing.
+
+The lit rule marking an open section lives in an 8px gutter that
+`#panels` reserves on the left. It used to be an inset shadow on the
+section itself.
+
+An inset shadow is drawn *inside* the box, so it landed a 1px cyan line
+across the first character of every label under it. Inside a popped-out
+panel — where the section header is hidden and the body starts at the top
+— it ran straight down the middle of the stopwatch digits. It read as a
+rendering fault, because it was one.
+
 ### Detachable panels (`web/panels.js`)
 
 Any section can be popped out of the info panel into a floating panel,

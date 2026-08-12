@@ -218,6 +218,36 @@ html, body {
 .frame-tl::after, .frame-bl::after { left: 28px; }
 .frame-tr::after, .frame-br::after { right: 28px; }
 
+/* The refresh sweep. One bar, travelling top to bottom on a long cycle,
+   the way a sensor display redraws itself. It is a transform on a fixed,
+   pointer-events:none layer, so it composites on the GPU and costs the
+   canvas underneath nothing -- but it is still a full-viewport layer,
+   which is why the phone breakpoint at the bottom of this file switches
+   it off. */
+.frame-scan {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 150px;
+  background-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    rgba(61, 220, 255, 0.030) 62%,
+    rgba(140, 230, 255, 0.075) 92%,
+    transparent 100%);
+  box-shadow: 0 1px 0 rgba(61, 220, 255, 0.13);
+  animation: frame-scan 9s linear infinite;
+  will-change: transform;
+}
+
+@keyframes frame-scan {
+  0%   { transform: translateY(-150px); opacity: 0; }
+  10%  { opacity: 1; }
+  86%  { opacity: 1; }
+  100% { transform: translateY(100vh); opacity: 0; }
+}
+
 .frame-tl { top: 8px;    left: 8px;    border-top-width: 2px; border-left-width: 2px; }
 .frame-tr { top: 8px;    right: 8px;   border-top-width: 2px; border-right-width: 2px; }
 .frame-bl { bottom: 8px; left: 8px;    border-bottom-width: 2px; border-left-width: 2px; }
@@ -283,6 +313,20 @@ html, body {
      else here earns colour by meaning something; this is the frame
      itself, so it gets the house accent and nothing else does. */
   filter: drop-shadow(0 0 4px rgba(61, 220, 255, 0.45));
+  /* A slow breath, offset per corner below so a panel's two brackets are
+     never in step -- in step they read as the whole panel flashing, out
+     of step they read as an instrument idling. Opacity only: it cannot
+     move the bracket or anything near it. */
+  animation: bracket-breathe 4.4s ease-in-out infinite;
+}
+
+@keyframes bracket-breathe {
+  0%, 100% { opacity: 0.85; }
+  50%      { opacity: 0.48; }
+}
+
+.hud-panel::after {
+  animation-delay: -2.2s;
 }
 
 .hud-panel::before {
@@ -388,8 +432,16 @@ html, body {
   width: 8px;
   height: 8px;
   border: 1.5px solid var(--accent);
+  /* Kept as the static fallback: reduced motion drops the animation and
+     this is the angle the mark is supposed to sit at. */
   transform: rotate(45deg);
   box-shadow: 0 0 8px rgba(61, 220, 255, 0.55);
+  animation: reticle-spin 11s linear infinite;
+}
+
+@keyframes reticle-spin {
+  from { transform: rotate(45deg); }
+  to   { transform: rotate(405deg); }
 }
 
 #brand-name {
@@ -422,8 +474,13 @@ html, body {
      opening far enough to need a scrollbar shifts every row left by ~8px
      -- a jump on a page whose whole job is to be readable at a glance. */
   scrollbar-gutter: stable;
-  margin: 0 -4px;
-  padding: 0 4px;
+  /* The negative margin/positive padding pair keeps the sections aligned
+     with the pinned masthead above them while giving the open-section
+     rule (see .section[open]::after) 8px of dead space of its own on the
+     left. The rule used to be an inset shadow drawn over the section
+     itself, i.e. over the first character of every label in it. */
+  margin: 0 -8px;
+  padding: 0 8px;
 }
 
 /* Default scrollbars are effectively invisible on this dark theme, which
@@ -484,6 +541,10 @@ html, body {
   border-radius: 50%;
   display: inline-block;
   flex: none;
+  /* So the link dot's ping ring below has something to be positioned
+     against. The ring is absolutely positioned, so it still cannot
+     reflow the row it sits in. */
+  position: relative;
   /* Only colour/shadow transition -- never size, which would reflow the
      row it sits in. */
   transition: background-color 140ms linear, box-shadow 140ms linear;
@@ -504,6 +565,29 @@ html, body {
   animation: hud-pulse 2.4s ease-in-out infinite;
 }
 
+/* A ring expanding out of the link dot, once per breath. Same argument as
+   the breath itself: this is the one element whose entire job is to
+   distinguish "connected" from "connected and frozen", and a ring leaving
+   the dot is the least ambiguous way to say the link is still alive.
+   transform + opacity on an absolutely positioned ::after -- the row it
+   sits in cannot feel it. */
+#conn-dot.dot-green::after,
+#strip-dot.dot-green::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px solid var(--go);
+  pointer-events: none;
+  animation: dot-ping 2.4s ease-out infinite;
+}
+
+@keyframes dot-ping {
+  0%   { transform: scale(1);   opacity: 0.75; }
+  70%  { transform: scale(2.6); opacity: 0; }
+  100% { transform: scale(2.6); opacity: 0; }
+}
+
 @keyframes hud-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
@@ -520,8 +604,11 @@ html, body {
 }
 
 /* Sections are <details>, so collapsing, keyboard access and
-   screen-reader semantics come from the browser rather than from JS. */
+   screen-reader semantics come from the browser rather than from JS.
+   position:relative so the open-section rule below can be hung in the
+   gutter #panels reserves for it. */
 .section {
+  position: relative;
   margin-top: 7px;
   padding-top: 7px;
   border-top: 1px solid var(--line-soft);
@@ -580,9 +667,74 @@ html, body {
 
 /* An open section is marked by a lit rule down its left edge, so which
    parts of a long sidebar you have expanded is legible from the shape of
-   the page rather than only from six small rotated carets. */
-.section[open] {
-  box-shadow: inset 2px 0 0 -1px var(--line-strong);
+   the page rather than only from six small rotated carets.
+ *
+ * IN THE GUTTER, NOT OVER THE TEXT. This was an inset box-shadow on the
+ * section itself -- `inset 2px 0 0 -1px`, which paints a 1px line at x=1
+ * of a box whose contents also start at x=0. It struck straight through
+ * the first character of every label under it (SPEED, STEER, 10CM), and
+ * inside a popped-out panel, where the section header is hidden and the
+ * body starts at the top, it ran down the middle of the stopwatch digits.
+ * It read as a rendering fault, which is exactly what it was.
+ *
+ * -7px lands it inside the 8px #panels reserves, so it is drawn on empty
+ * background and can never overlap anything, at any content width.
+ */
+.section[open]::after {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 2px;
+  bottom: 2px;
+  width: 1px;
+  background: var(--line-strong);
+  pointer-events: none;
+}
+
+/* A spark running down the rule of each open section, staggered so the
+   sidebar reads as several instruments rather than one blinking one.
+   Ambient only: it says the surface is live, never anything about the
+   data. It animates background-position on a 1px-wide element -- the
+   cheapest repaint on the page, and it cannot touch layout. */
+.section[open]::before {
+  content: "";
+  position: absolute;
+  left: -7px;
+  top: 2px;
+  bottom: 2px;
+  width: 1px;
+  background-image: linear-gradient(to bottom,
+    transparent 0%, var(--accent) 45%, transparent 100%);
+  background-repeat: no-repeat;
+  background-size: 100% 34px;
+  background-position: 50% -34px;
+  pointer-events: none;
+  animation: rule-spark 5.2s ease-in-out infinite;
+}
+
+@keyframes rule-spark {
+  0%   { background-position: 50% -34px; opacity: 0; }
+  12%  { opacity: 1; }
+  88%  { opacity: 1; }
+  100% { background-position: 50% calc(100% + 34px); opacity: 0; }
+}
+
+/* Negative delays start each one already part-way through its cycle, so
+   they are out of step from the first frame rather than falling into step
+   only after the first loop. */
+.section:nth-child(2)[open]::before { animation-delay: -0.9s; }
+.section:nth-child(3)[open]::before { animation-delay: -1.8s; }
+.section:nth-child(4)[open]::before { animation-delay: -2.7s; }
+.section:nth-child(5)[open]::before { animation-delay: -3.6s; }
+.section:nth-child(6)[open]::before { animation-delay: -4.5s; }
+
+/* Inside a popped-out panel the rule answers a question nobody is asking:
+   the title bar already says what this is, and there is no list of other
+   sections to be legible against. It is also where the old version was at
+   its worst, straight through the middle of the contents. */
+.float-body .section[open]::before,
+.float-body .section[open]::after {
+  display: none;
 }
 
 .section[open] .section-head {
@@ -704,6 +856,143 @@ html, body {
   align-items: baseline;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+/* --- System dials --------------------------------------------------
+ *
+ * CPU, memory and temperature as rings rather than as three more numbers
+ * in a row. The number is still the authority -- it sits in the middle of
+ * its own ring, exact to the percent -- and the ring is a second encoding
+ * of it, so "is anything close to its limit" is answerable from across a
+ * pit box without reading a single digit.
+ *
+ * Colour still means state and nothing else (see the top of this file):
+ * cyan is nominal, amber is getting warm, red is at the limit. The ring
+ * being cyan is not decoration, it is the reading.
+ *
+ * Only two things ever change: the arc's stroke-dashoffset and a class
+ * name. stroke-dashoffset is paint-only, so a stats packet at 1Hz costs
+ * no layout at all, and the value text is absolutely positioned over the
+ * dial so "9%" becoming "100%" cannot move the dial or its neighbours.
+ */
+.gauges {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin: 5px 0 8px;
+  justify-items: center;
+}
+
+.gauge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+}
+
+/* The square the dial and its centred value share. Sized by the column,
+   capped so three of them cannot outgrow a 320px sidebar. */
+.gauge-face {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 76px;
+  aspect-ratio: 1;
+}
+
+.gauge-dial {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* The arc's glow is drawn outside the circle's own bounding box. */
+  overflow: visible;
+}
+
+/* The outer tick ring. It carries no value: it is the part that says the
+   instrument is live while the arc under it is holding perfectly still,
+   which on a parked car is most of the time. A transform on an SVG shape
+   composites -- it never repaints the ring. */
+.gauge-ticks {
+  fill: none;
+  stroke: rgba(64, 200, 245, 0.30);
+  stroke-width: 3;
+  stroke-dasharray: 1 5;
+  transform-origin: 50% 50%;
+  animation: gauge-ticks-spin 26s linear infinite;
+}
+
+@keyframes gauge-ticks-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* The unfilled remainder, so an empty ring still reads as a dial at 0
+   rather than as a dial that failed to draw. */
+.gauge-track {
+  fill: none;
+  stroke: rgba(64, 200, 245, 0.10);
+  stroke-width: 7;
+}
+
+.gauge-arc {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 7;
+  stroke-linecap: butt;
+  /* pathLength="100" in the markup normalises the dash units to percent,
+     so neither this file nor dashboard.js has to know the radius. */
+  stroke-dasharray: 100;
+  stroke-dashoffset: 100;   /* empty until the first stats packet lands */
+  /* Twelve o'clock, filling clockwise -- the direction every dial anyone
+     has ever read a gauge on turns. */
+  transform: rotate(-90deg);
+  transform-origin: 50% 50%;
+  transition: stroke-dashoffset 450ms cubic-bezier(0.22, 0.61, 0.36, 1),
+              stroke 240ms linear;
+  filter: drop-shadow(0 0 4px rgba(61, 220, 255, 0.45));
+}
+
+.gauge-arc.gauge-warn {
+  stroke: var(--warn);
+  filter: drop-shadow(0 0 5px rgba(255, 182, 54, 0.5));
+}
+
+/* At the limit it also breathes. This is the one animation on the page
+   that means something, so it is the only one that survives the phone
+   breakpoint below -- a thermally throttling Jetson is worth an
+   interruption. */
+.gauge-arc.gauge-bad {
+  stroke: var(--bad);
+  filter: drop-shadow(0 0 6px rgba(255, 69, 96, 0.6));
+  animation: gauge-alarm 1.1s ease-in-out infinite;
+}
+
+@keyframes gauge-alarm {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.42; }
+}
+
+.gauge-value {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: var(--fs-body-lg);
+  font-weight: 700;
+  color: var(--ink-bright);
+  text-shadow: 0 0 12px rgba(120, 200, 240, 0.3);
+  pointer-events: none;
+}
+
+.gauge-name {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
 }
 
 /* --- Signal strength ---------------------------------------------- */
@@ -1152,6 +1441,54 @@ body.panels-narrow .section-detach {
   display: block;
   width: 100%;
   height: 100%;
+}
+
+/* --- Radar sweep over the overview ---------------------------------
+ *
+ * The one place on this page where a movie-HUD flourish costs nothing:
+ * the minimap is an overview, not an instrument you read a number off,
+ * and #minimap-panel is already overflow:hidden so the wedge is clipped
+ * to it for free.
+ *
+ * Two rules keep it from lying. It is cyan -- the "this is the system"
+ * accent -- and never go/caution/stop, so it cannot be mistaken for
+ * something the car detected. And it is alpha only, over the canvas,
+ * turning on its own compositor layer: the map underneath is never
+ * redrawn for it.
+ */
+.radar-sweep {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.radar-sweep::before {
+  content: "";
+  position: absolute;
+  /* Square and centred, larger than the panel in both axes. A conic
+     gradient painted into a non-square box sweeps at an uneven angular
+     rate -- it visibly speeds up across the short axis. */
+  top: 50%;
+  left: 50%;
+  width: 200%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%) rotate(0deg);
+  transform-origin: 50% 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgba(61, 220, 255, 0.16) 0deg,
+    rgba(61, 220, 255, 0.05) 22deg,
+    transparent 46deg,
+    transparent 360deg);
+  animation: radar-sweep 4.5s linear infinite;
+  will-change: transform;
+}
+
+@keyframes radar-sweep {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to   { transform: translate(-50%, -50%) rotate(360deg); }
 }
 
 /* While no stream is connected the <img> is a BROKEN image -- its src is
@@ -2234,6 +2571,26 @@ body.sheet-dragging .sheet-grip-bar {
      add nothing there. */
   .frame-corner { display: none; }
 
+  /* --- ambient motion, off ------------------------------------------
+     Everything below is mood. On a phone it is mood being paid for by
+     the map, which is already painting telemetry at 20Hz on the least
+     powerful GPU this page runs on -- the full-viewport sweep and the
+     conic wedge are exactly the kind of always-on compositing that
+     showed up as dropped frames rather than as a slow effect.
+
+     The gauge alarm is deliberately NOT in this list: it is the only
+     animation here that means something (a Jetson at its thermal
+     limit), and that is worth a phone frame. */
+  .frame-scan { display: none; }
+  .radar-sweep { display: none; }
+  .section[open]::before { display: none; }
+  .gauge-ticks,
+  #brand-mark,
+  .hud-panel::before,
+  .hud-panel::after,
+  #conn-dot.dot-green::after,
+  #strip-dot.dot-green::after { animation: none; }
+
   /* --- the sheet --------------------------------------------------- */
   #overlay {
     top: auto;
@@ -2422,6 +2779,25 @@ body.sheet-dragging .sheet-grip-bar {
   #conn-dot.dot-green,
   #strip-dot.dot-green { animation: none; }
   .tuning-param.applied { animation: none; }
+
+  /* The purely ambient layers go away entirely rather than freezing:
+     a stopped sweep bar parked across the middle of the map, or a
+     half-drawn radar wedge, is worse than no sweep at all. */
+  .frame-scan { display: none; }
+  .radar-sweep { display: none; }
+  .section[open]::before { display: none; }
+  #conn-dot.dot-green::after,
+  #strip-dot.dot-green::after { display: none; }
+
+  /* These have a correct resting state to hold, so they just stop. The
+     gauge alarm included: the arc is already red, which is the reading --
+     the breath was only ever how loudly it said it. */
+  .gauge-ticks,
+  .gauge-arc.gauge-bad,
+  #brand-mark,
+  .hud-panel::before,
+  .hud-panel::after { animation: none; }
+
   *, *::before, *::after {
     transition-duration: 0.01ms !important;
   }
