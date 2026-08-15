@@ -305,6 +305,84 @@ The canvas half of the palette is the `HUD` constant near the top of
 `dashboard.js`. Canvas cannot read CSS custom properties, so those values
 are duplicated by hand — **change one, change the other.**
 
+### The system dials
+
+The `system` section shows CPU, memory and temperature as three rings
+rather than as three numbers in a row.
+
+The number has not gone anywhere — it is printed in the middle of its own
+ring. The ring is a *second encoding* of the same value: the text answers
+"exactly how hot", the ring answers "close to the limit?" from across a
+pit box without reading anything.
+
+Colour still follows the rule above — it is state, never decoration:
+
+| Ring | Cyan below | Amber from | Red from |
+|---|---|---|---|
+| `cpu` | 75% | 75% | 90% |
+| `mem` | 80% | 80% | 92% |
+| `temp` | 70°C | 70°C | 85°C |
+
+Percentages fill the ring directly. Temperature has no natural 0–100%
+range, so its ring maps 20°C (roughly ambient) to 100°C (where a Jetson
+throttles itself) — `TEMP_MIN_C`/`TEMP_MAX_C` in `dashboard.js`. A board
+with no readable thermal zone still shows `n/a` and an empty ring.
+
+Two details are load-bearing if you edit them:
+
+- The `<circle>` elements carry `pathLength="100"`. That normalises the
+  SVG dash units to percent, so neither the stylesheet nor `setGauge()`
+  has to know the circle's radius. Change `r` freely; change
+  `pathLength` and both sides break at once.
+- `setGauge()` moves **`stroke-dashoffset` only** — a paint-only
+  property. That is what keeps a 1 Hz stats packet from reflowing the
+  sidebar, which is rule 2 above. The value text is absolutely positioned
+  over the dial for the same reason: `9%` becoming `100%` cannot move the
+  dial or its neighbours.
+
+### Motion is an accent, and never covers anything
+
+There is a small amount of decorative motion: a slowly turning tick ring
+around each dial, and the diamond reticle in the masthead. That is the
+whole list.
+
+Three rules bound it, and the first is the one that matters:
+
+- **Nothing decorative is ever drawn over the canvas or the minimap.**
+  That is where the LIDAR points, the car marker and the map live, and
+  they are the reason the page exists.
+
+  An earlier pass had a sweep bar crossing the whole viewport and a radar
+  wedge turning over the minimap. Both washed over exactly the data you
+  open this page to look at. Do not put them back.
+
+- **Accents are small, slow, and off to one side.** A tick ring is a few
+  pixels of dashed hairline outside a dial it is not part of. If an effect
+  is large enough to notice while you are reading a number, it is too
+  large.
+
+- **It animates `transform` or `opacity` only, and it stops where it
+  costs something.** The phone breakpoint (`max-width: 640px`) and
+  `prefers-reduced-motion` both switch the decorative loops off.
+
+Two animations are *not* decoration and stay on everywhere.
+
+The breath on the link dot is the only thing distinguishing "connected"
+from "connected and frozen". And the dial alarm fires because a Jetson at
+its thermal limit is worth interrupting someone about.
+
+One last thing, which is not motion at all and is worth not undoing.
+
+The lit rule marking an open section lives in an 8px gutter that
+`#panels` reserves on the left. It used to be an inset shadow on the
+section itself.
+
+An inset shadow is drawn *inside* the box, so it landed a 1px cyan line
+across the first character of every label under it. Inside a popped-out
+panel — where the section header is hidden and the body starts at the top
+— it ran straight down the middle of the stopwatch digits. It read as a
+rendering fault, because it was one.
+
 ### Detachable panels (`web/panels.js`)
 
 Any section can be popped out of the info panel into a floating panel,

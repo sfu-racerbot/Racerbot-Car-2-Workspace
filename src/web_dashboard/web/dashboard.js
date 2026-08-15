@@ -44,6 +44,11 @@
   const infoCpu = document.getElementById('info-cpu');
   const infoMem = document.getElementById('info-mem');
   const infoTemp = document.getElementById('info-temp');
+  // The ring around each of those three. They are a second encoding of the
+  // number, never a replacement for it -- see setGauge below.
+  const arcCpu = document.getElementById('arc-cpu');
+  const arcMem = document.getElementById('arc-mem');
+  const arcTemp = document.getElementById('arc-temp');
   const infoWifiText = document.getElementById('info-wifi-text');
   const infoUptime = document.getElementById('info-uptime');
   const wifiBarEls = document.querySelectorAll('#wifi-bars .wifi-bar');
@@ -1704,6 +1709,47 @@
     });
   }
 
+  // ---------------------------------------------------------------------
+  // The three system dials.
+  //
+  // The ring is a second encoding of the number printed inside it, never a
+  // replacement for it: the text element is still written exactly as it
+  // always was, and everything here is additive. If any of this were to
+  // throw, the numbers would still be right.
+  //
+  // Nothing in here touches geometry. `pathLength="100"` in the markup
+  // normalises the arc's dash units to percent, so the only thing that
+  // moves is stroke-dashoffset -- a paint-only property. A stats packet
+  // cannot reflow the sidebar (rule 1 at the top of style.css).
+  // ---------------------------------------------------------------------
+
+  // Temperature has no natural 0-100% range, so its ring maps the band
+  // that actually matters on this board: roughly ambient at the bottom,
+  // thermal throttling at the top.
+  const TEMP_MIN_C = 20;
+  const TEMP_MAX_C = 100;
+  const tempFraction = (c) => (c - TEMP_MIN_C) / (TEMP_MAX_C - TEMP_MIN_C);
+
+  /**
+   * Point one ring at `fraction` of full scale, or empty it when
+   * `fraction` is null (no reading -- an unreadable thermal zone, or no
+   * stats at all). `warn`/`bad` are the fractions at which the ring stops
+   * being cyan; colour on this page means state, so they are the same
+   * thresholds a person would use to decide the car needs attention.
+   */
+  function setGauge(arc, fraction, warn, bad) {
+    if (!arc) return;
+    if (fraction == null || !Number.isFinite(fraction)) {
+      arc.style.strokeDashoffset = '100';
+      arc.classList.remove('gauge-warn', 'gauge-bad');
+      return;
+    }
+    const clamped = Math.max(0, Math.min(1, fraction));
+    arc.style.strokeDashoffset = String(100 - clamped * 100);
+    arc.classList.toggle('gauge-warn', clamped >= warn && clamped < bad);
+    arc.classList.toggle('gauge-bad', clamped >= bad);
+  }
+
   // Two values per row now, so each one gets the short form and keeps the
   // full detail in its tooltip. The freshness dot beside it already says
   // what "12ms ago" said, which is what made room for a second column.
@@ -1746,10 +1792,18 @@
       infoWifiText.textContent = state.stats.wifiDbm != null ? `${state.stats.wifiDbm.toFixed(0)}dBm` : 'n/a';
       infoUptime.textContent = formatUptime(state.stats.uptimeS);
       updateWifiBars(state.stats.wifiDbm);
+      setGauge(arcCpu, state.stats.cpuPercent / 100, 0.75, 0.90);
+      setGauge(arcMem, state.stats.memPercent / 100, 0.80, 0.92);
+      setGauge(arcTemp,
+        state.stats.cpuTempC == null ? null : tempFraction(state.stats.cpuTempC),
+        tempFraction(70), tempFraction(85));
     } else {
       infoCpu.textContent = infoMem.textContent = infoTemp.textContent = infoUptime.textContent = '--';
       infoWifiText.textContent = '--';
       updateWifiBars(null);
+      setGauge(arcCpu, null);
+      setGauge(arcMem, null);
+      setGauge(arcTemp, null);
     }
 
     updateIntentPanel();

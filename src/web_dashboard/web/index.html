@@ -210,19 +210,56 @@
           <span class="section-digest" id="digest-system"></span>
         </summary>
         <div class="section-body">
+          <!-- CPU, memory and temperature as rings rather than three more
+               numbers in a row. The number has not gone anywhere -- it is
+               in the middle of its own ring, and the ring is a second
+               encoding of it, so "61%" stays exact while "nearly all the
+               way round, and amber" is readable without reading.
+
+               The ids are unchanged on purpose: dashboard.js still writes
+               the same three elements, and only additionally points the
+               arcs. An arc moves by stroke-dashoffset alone, which is a
+               paint-only property -- a stats packet can never reflow the
+               sidebar (rule 1 at the top of style.css). -->
+          <div class="gauges">
+            <div class="gauge">
+              <span class="gauge-face">
+                <svg class="gauge-dial" viewBox="0 0 100 100" aria-hidden="true" focusable="false">
+                  <circle class="gauge-ticks" cx="50" cy="50" r="46" />
+                  <circle class="gauge-track" cx="50" cy="50" r="38" />
+                  <!-- pathLength normalises the dash units to percent, so
+                       nothing in the CSS or the JS has to be kept in step
+                       with r. -->
+                  <circle class="gauge-arc" id="arc-cpu" cx="50" cy="50" r="38" pathLength="100" />
+                </svg>
+                <span class="gauge-value" id="info-cpu">--</span>
+              </span>
+              <span class="gauge-name">cpu</span>
+            </div>
+            <div class="gauge">
+              <span class="gauge-face">
+                <svg class="gauge-dial" viewBox="0 0 100 100" aria-hidden="true" focusable="false">
+                  <circle class="gauge-ticks" cx="50" cy="50" r="46" />
+                  <circle class="gauge-track" cx="50" cy="50" r="38" />
+                  <circle class="gauge-arc" id="arc-mem" cx="50" cy="50" r="38" pathLength="100" />
+                </svg>
+                <span class="gauge-value" id="info-mem">--</span>
+              </span>
+              <span class="gauge-name">mem</span>
+            </div>
+            <div class="gauge">
+              <span class="gauge-face">
+                <svg class="gauge-dial" viewBox="0 0 100 100" aria-hidden="true" focusable="false">
+                  <circle class="gauge-ticks" cx="50" cy="50" r="46" />
+                  <circle class="gauge-track" cx="50" cy="50" r="38" />
+                  <circle class="gauge-arc" id="arc-temp" cx="50" cy="50" r="38" pathLength="100" />
+                </svg>
+                <span class="gauge-value" id="info-temp">--</span>
+              </span>
+              <span class="gauge-name">temp</span>
+            </div>
+          </div>
           <div class="metrics">
-            <div class="metric">
-              <span class="metric-label">cpu</span>
-              <span class="metric-value" id="info-cpu">--</span>
-            </div>
-            <div class="metric">
-              <span class="metric-label">mem</span>
-              <span class="metric-value" id="info-mem">--</span>
-            </div>
-            <div class="metric">
-              <span class="metric-label">temp</span>
-              <span class="metric-value" id="info-temp">--</span>
-            </div>
             <div class="metric">
               <span class="metric-label">up</span>
               <span class="metric-value" id="info-uptime">--</span>
