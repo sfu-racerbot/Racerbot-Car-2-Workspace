@@ -76,13 +76,17 @@ ros2 launch racerbot_launch auto_map_race_launch.py
 
 **Working when:** the log reports a closed lap, then a profiled path, then a handover to pure pursuit. Hold LB the entire time — the car does not move without it.
 
+> **Expect this to take minutes, not seconds.** The hallway loop this car maps is 126 m round and takes about 136 seconds a lap, and `mapping_laps` defaults to 2. The progress line leads with how far round the car is (`~34% round, ~83m to go`) precisely so a long run is distinguishable from a stuck one. If that percentage is climbing, keep holding LB.
+
 `auto_map_race_node` is a safety-gated command selector and a state machine. In order, it:
 
-1. Forwards cautious `gap_follow` commands while `slam_toolbox` builds the map.
+1. Forwards `gap_follow` commands while `slam_toolbox` builds the map.
 2. Detects a closed lap from the `map -> base_link` transform.
 3. Records a second lap after loop closure (the default), then writes and paces that path.
 4. Loads the result into an already-running `pure_pursuit_node`.
 5. Switches command authority after a stop interval.
+
+The mapping lap runs at `gap_follow`'s own tuned speeds. It used to be forced to 1.0 m/s, which on the 2026-08-19 run was the binding limit on 154 of 191 driving ticks — the car was obeying an override, not anything it could see. Pass `mapping_max_speed:=1.5` to cap it for a course nobody trusts yet.
 
 It also republishes the SLAM transform as `/slam_pose`, so SLAM keeps localizing the car during the race itself. That removes manual map saving, offline profiling, process restarts, particle-filter configuration, and the RViz pose seed from a first visit to a course.
 
@@ -133,6 +137,22 @@ A map-frame pose that moves more than `max_pose_jump_m` (0.12 m, i.e. 4.8 m/s at
 `LapRecorder` now applies that correction to the *already recorded* points instead — which is what a correction means. The whole map moved, including the part already driven.
 
 The recorded shape stays exactly as driven, and the start pose the closure test measures against stays attached to the same piece of track.
+
+**2b. Absorbing the correction was quietly eating the turn count.**
+
+Skipping a correction tick also skips the car's *real* turning during that tick. The 2026-08-19 run absorbed 106 corrections in a single 136-second lap and measured 335° for one genuine revolution — a 35° margin against the 300° gate, which is not much to have left.
+
+`LapRecorder` now counts turning in the `odom` frame, which `slam_toolbox` never re-optimises. Geometry still comes entirely from the map frame; only the turn counter moved.
+
+Without an `odom` transform it falls back to the old behaviour, so nothing depends on [odometry](glossary.md#odometry--odom) — the car's own estimate of how far it has moved — being up. See [localization.md](localization.md) for what that estimate is made of.
+
+**2c. A lap that would not close ran forever.**
+
+The proximity gate can go unsatisfied indefinitely. A reactive controller does not repeat its line, so a car passing consistently 1.8 m wide of a 1.5 m `closure_distance` never closes — and on a 126 m course each of those misses is another 2.3 minutes.
+
+Past `closure_widen_after_revolutions` (1.25 laps) the gate now opens in proportion to the extra turning, up to `max_closure_distance` (4.0 m). `LapRecorder.lap_points()` then trims the recording back to its **final revolution**, so a closure that needed two laps still yields a one-lap line rather than the two overlapping ones problem 1 was about.
+
+Set either parameter to `0` in `auto_map_race.yaml` for a fixed gate.
 
 **3. Nothing cleaned the line up.**
 

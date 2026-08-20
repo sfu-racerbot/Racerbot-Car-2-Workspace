@@ -20,6 +20,7 @@ Every entry here is a problem someone actually hit on this car, with the fix and
 | Autonomy publishes `/drive`, nothing moves, no errors | [Autonomy publishes, car doesn't move](#autonomy-node-publishes-to-drive-car-doesnt-move-no-errors-anywhere) |
 | Same, but `teleop_launch.py` definitely isn't running | [Stuck at 0.0/0.0 with no teleop](#autonomy-node-publishes-to-drive-ackermann_cmd-looks-fine-but-its-always-00--00-even-with-no-teleop_launchpy-running) |
 | Map didn't save after a run | [slam_toolbox result code 255](#slam_toolbox-failed-to-save-occupancy-map-result-code-255) |
+| Car never moves, "waiting for `waypoints_file`" | [The mapping controller died at startup](#auto_map_race_launchpy-never-moves-no-racing-line-profile-is-active-waiting-for-waypoints_file-to-be-loaded) |
 | Maps forever, never starts racing | [Never switches to pure pursuit](#auto_map_race_launchpy-maps-forever-and-never-switches-to-pure-pursuit) |
 | "Refusing to hand it to pure pursuit" | [Racing line rejected](#auto_map_race_launchpy-refuses-to-start-racing-refusing-to-hand-it-to-pure-pursuit) |
 | SLAM runs but produces no map at all | [slam_toolbox never configures](#slam_toolbox-starts-without-errors-but-no-map-no-map-frame-and-mapping-never-finishes) |
@@ -231,19 +232,73 @@ Shortening `map_update_interval` would also close the race, at the cost of repub
 
 ---
 
+## `auto_map_race_launch.py` never moves: "no racing-line profile is active; waiting for `waypoints_file` to be loaded"
+
+**Symptom:** the one-command run comes up, everything looks alive, and `pure_pursuit_node` repeats that line forever with the car stationary. Distinct from [maps forever](#auto_map_race_launchpy-maps-forever-and-never-switches-to-pure-pursuit): there, the car *is* driving mapping laps. Here it never moves at all.
+
+That message is correct and is not the fault. Under `auto_map_race_launch.py`, `pure_pursuit_node` deliberately starts with no racing line and holds a stop until the supervisor records one. If the car never drives a mapping lap, that wait never ends.
+
+**Check what is actually publishing the mapping commands:**
+
+```bash
+ros2 topic info /auto_map/drive -v      # "Publisher count: 0" means gap_follow_node is gone
+ros2 node list | grep gap_follow
+```
+
+A missing `gap_follow_node` is the whole failure. It exits, the supervisor gets nothing to forward, no lap is recorded, no profile is generated, and pure pursuit waits forever — one dead node, three silent-looking symptoms downstream.
+
+**Find out why it exited.** `launch.log` records the death but not the traceback:
+
+```bash
+grep -iE "died|error" ~/.ros/log/latest/launch.log
+```
+
+Then re-run just that node by hand and read the traceback. Point its drive topic somewhere harmless first, so it cannot reach the mux — the arbitrator that decides which command actually gets to the motors ([glossary.md](glossary.md)):
+
+```bash
+install/gap_follow/lib/gap_follow/gap_follow_node --ros-args \
+  --params-file install/gap_follow/share/gap_follow/config/gap_follow.yaml \
+  -p drive_topic:=/debug_null/drive
+```
+
+**Cause seen here, 2026-08-19:** an inconsistent speed set.
+
+`max_speed` is not an independent knob. `corner_speed` and `corner_speed_wide` are defined relative to it, and `_validate_adaptive_width_parameters` enforces `corner_speed <= corner_speed_wide <= max_speed` at startup.
+
+A launch file is the script that starts a set of nodes together ([glossary.md](glossary.md)). The mapping ones forced `max_speed` to `1.0` on every run, which left the packaged `corner_speed: 1.1` and `corner_speed_wide: 1.4` above it:
+
+```
+ValueError: corner_speed_wide must be finite and between corner_speed and max_speed
+```
+
+Two things changed as a result.
+
+The forced cap is gone. `mapping_max_speed` is now empty by default, so `gap_follow.yaml` governs and the sensed curvature/clearance caps do the limiting. That cap was not just fragile, it was the binding limit on 154 of the 191 driving ticks that run logged — the car spent 81% of its mapping run obeying an override rather than anything it could see.
+
+When you *do* pass a cap, it scales every setting coupled to it by the same factor (`gap_follow/speed_overrides.py`), so corners stay proportionally slower than straights at whatever speed you map at.
+
+**If you change these by hand, move them together.** Raising `corner_speed`/`corner_speed_wide` in `gap_follow.yaml` without checking every launch file that caps `max_speed` is exactly what broke it.
+
+---
+
 ## `auto_map_race_launch.py` maps forever and never switches to pure pursuit
 
 **Symptom:** the car drives cautious `gap_follow` laps indefinitely. The supervisor keeps printing `lap 1/2: ...` and the racing phase never starts.
 
-**Read the numbers in that line — each gate says which one is unmet:**
+**First check whether it is stuck or just slow.** The line now leads with a progress estimate:
 
 ```
-lap 1/2: samples=168, distance=27.2/5.0m, turn=341/300deg, elapsed=31.4/15.0s,
-departed=yes, start distance=0.43/0.75m, heading error=6.2/30.0deg,
+lap 2/2: ~34% round, ~83m to go (~90s at last lap's pace), samples=168,
+distance=27.2/5.0m, turn=341/300deg, elapsed=31.4/15.0s, departed=yes,
+start distance=0.43/1.50m, heading error=6.2/30.0deg,
 SLAM corrections absorbed=6
 ```
 
-Each `x/y` is *actual / required*. Find the one that isn't meeting its threshold:
+A lap really can take a long time. The hallway loop this car maps is **126 m round and took 136 seconds** on the 2026-08-19 run — and `mapping_laps` defaults to 2, so a normal complete run is over four minutes of driving. On that run the operator stopped a working run 47 seconds into lap 2. If the percentage is climbing, it is working; keep holding LB.
+
+The supervisor now also prints an estimate when lap 1 closes, so you know what lap 2 will cost before you commit to it.
+
+**If the percentage is not climbing, read the gates.** Each `x/y` is *actual / required*. Find the one that isn't meeting its threshold:
 
 **`start distance` never drops below its limit.** The car isn't returning close enough to where the recorder started.
 
@@ -255,9 +310,21 @@ Each `x/y` is *actual / required*. Find the one that isn't meeting its threshold
 
 **`turn` climbing far past 300 without closing.** The car is going round and round without ever satisfying the proximity gates — see `start distance` above. This is *not* a `minimum_lap_turn_deg` problem, and past two laps of turning the log says so outright.
 
+> Past `closure_widen_after_revolutions` (1.25 laps) the proximity gate now opens by itself, in proportion to the extra turning, up to `max_closure_distance` (4.0 m).
+>
+> A reactive controller does not repeat its line. A car passing consistently 1.8 m wide of a 1.5 m gate would otherwise lap forever, and on a 126 m course each of those misses costs 2.3 minutes.
+>
+> When it does close, the recording is trimmed back to its **final revolution**, so a closure that needed two laps still produces a one-lap racing line rather than two overlapping ones. The log says how many samples it trimmed.
+>
+> Set either parameter to `0` in `auto_map_race.yaml` to go back to a fixed gate.
+
 > Measured worst case: a car weaving around two slower cars drove 413 m and ten laps' worth of turning, passing 6.5 m wide of its start every time. `closure_distance` is the knob.
 
-**`SLAM corrections absorbed` in the dozens per lap.** Localisation is struggling. Look at the map in the dashboard before trusting anything downstream — a smeared map moves the start point out from under the closure test.
+**`SLAM corrections absorbed` in the dozens per lap.** Localisation is struggling. Look at the map in the dashboard before trusting anything downstream — a smeared map moves the start point out from under the closure test. See [localization.md](localization.md) for what governs how often those corrections arrive.
+
+> This no longer eats the turn count. The recorder counts turning in the `odom` frame (the coordinate system fixed to where the car powered up — see [glossary.md](glossary.md)), which SLAM never re-optimises.
+>
+> A busy pose graph therefore cannot quietly starve the `minimum_lap_turn_deg` gate. Before that change the 2026-08-19 run absorbed 106 corrections in one 136-second lap and measured 335° for a genuine revolution — a 35° margin against a 300° gate.
 
 <details>
 <summary><b>The fourth cause, fixed 2026-08-08</b> — historical, but useful if you're on an older checkout or reading old logs.</summary>

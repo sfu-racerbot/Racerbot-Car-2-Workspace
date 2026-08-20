@@ -33,6 +33,8 @@ ros2 launch racerbot_launch auto_map_race_launch.py \
 ros2 run race_diagnostics filter_log ~/.ros/racerbot_runs/<dir>/launch.log
 ```
 
+> **`auto_map_race_launch.py` already starts this for you.** It runs the probe by default (`diagnostics:=true`), so a one-command map-and-race run leaves a machine-readable record without a second terminal. The rosbag stays off there unless you pass `record_bag:=true`. Everything below still applies to any other workflow.
+
 Afterwards:
 
 ```bash

@@ -118,6 +118,22 @@ ros2 param get /ackermann_to_vesc_node speed_to_erpm_gain # must be +4614.0
 
 **Working when:** the two values are opposite in sign, exactly as shown. If they match, Fix 3 has been lost.
 
+### Not a fix: the SLAM tuning lives outside this package
+
+[SLAM](glossary.md#slam) is the software that builds a map and locates the car in it at the same time.
+
+`src/f1tenth_system/f1tenth_stack/config/f1tenth_online_async.yaml` is **unmodified**, and should stay that way.
+
+This workspace does change how `slam_toolbox` is tuned: how often it corrects the car's position, and how far it looks when trying to close a loop. Those changes live in a file this repo owns:
+
+`src/racerbot_launch/config/slam_tracking.yaml`
+
+`slam_launch.py` loads the vendored config first and then layers ours on top, so later values win. The vendored file stays clean, an upstream sync cannot take our tuning with it, and there is one place to read what this workspace changed about SLAM.
+
+**Follow the same pattern for anything else you want to change about a vendored node.** A fourth entry on the list above is a fourth thing to check after every sync; a layered override file is none.
+
+Why those particular values moved is in [localization.md](localization.md).
+
 <details>
 <summary><b>Why the two nodes need opposite signs</b> — the upstream hardcoded negation this cancels. Read before "tidying up" what looks like an inconsistency.</summary>
 

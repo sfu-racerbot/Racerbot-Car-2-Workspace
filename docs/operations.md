@@ -145,7 +145,11 @@ Same result as above, except `gap_follow` drives the lap instead of a human — 
    ros2 launch racerbot_launch autonomous_mapping_launch.py
    ```
 
-   Raise `mapping_max_speed` / `mapping_min_speed` (e.g. `mapping_max_speed:=1.5`) only once you trust the track and the car's behavior on it — see the launch file's own docstring.
+   By default the car maps at `gap_follow`'s own tuned speeds from `config/gap_follow.yaml`. Its sensed limits — curvature, clearance, the safety bubble — do the slowing down.
+
+   For a track nobody has driven yet, cap it explicitly: `mapping_max_speed:=1.5`. That is worth doing the first time and rarely after. The launch file (the script that starts a set of nodes together — see [glossary.md](glossary.md)) documents both arguments in its own docstring.
+
+   A cap also scales the settings defined relative to `max_speed` (`corner_speed`, `corner_speed_wide`). `gap_follow_node` checks their ordering at startup and [exits rather than driving](troubleshooting.md#auto_map_race_launchpy-never-moves-no-racing-line-profile-is-active-waiting-for-waypoints_file-to-be-loaded) if only `max_speed` moves, so they are moved together for you.
 
 4. **Hold LB.** The car will not move at all otherwise — this is `gap_follow`'s own deadman check, independent of the mux.
 
@@ -280,8 +284,17 @@ Generated artifacts are written to `~/.ros/racerbot_auto/<YYYYMMDD-HHMMSS>/`:
 Useful overrides:
 
 ```bash
-# Faster mapping only after a cautious physical test
+# Cap the mapping speed for a track nobody has driven yet. Uncapped by
+# default -- gap_follow.yaml governs. A cap scales corner_speed and
+# corner_speed_wide with it, since they are defined relative to max_speed and
+# the node refuses to start if only max_speed moves.
 ros2 launch racerbot_launch auto_map_race_launch.py mapping_max_speed:=1.5
+
+# Skip the run recorder (on by default; it is subscribe-only and cheap).
+ros2 launch racerbot_launch auto_map_race_launch.py diagnostics:=false
+
+# Bag the run as well -- big, because /scan dominates the size.
+ros2 launch racerbot_launch auto_map_race_launch.py record_bag:=true
 
 # Use one mapping/recording lap instead of the cleaner two-lap default
 ros2 launch racerbot_launch auto_map_race_launch.py mapping_laps:=1

@@ -6,6 +6,128 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-08-19 — Making a mapping run finish, and finish quicker
+
+Everything here came out of one run's logs (`~/.ros/log`, 2026-08-19
+18:46). Needs on-car validation.
+
+### gap_follow
+
+- **`gap_follow_node` would not start under any mapping launch file.** The
+  previous commit added `corner_speed_wide` and a startup check enforcing
+  `corner_speed <= corner_speed_wide <= max_speed`. Every mapping launch
+  file overrode `max_speed` to `1.0` and nothing else, leaving the
+  packaged `corner_speed: 1.1` / `corner_speed_wide: 1.4` above it, so the
+  node exited with `ValueError` 1.8s after launch. Nothing then published
+  `/auto_map/drive`, the supervisor recorded no lap, and
+  `pure_pursuit_node` sat in `waiting_for_profile` with the car
+  motionless — three symptoms, one dead node.
+- **New `gap_follow/speed_overrides.py`.** Pure Python, no rclpy. Given a
+  requested speed cap it scales every parameter coupled to `max_speed` by
+  the same factor and clamps the result into `[min_speed, max_speed]`,
+  preserving the ordering the node validates.
+- **The mapping speed cap is gone by default.** `mapping_max_speed` /
+  `mapping_min_speed` now default to empty, meaning "no cap": the car maps
+  at `gap_follow.yaml`'s tuned speeds and the sensed curvature/clearance
+  caps do the limiting. On the 2026-08-19 run the forced 1.0m/s cap was
+  the binding limit on **154 of 191** logged driving ticks — 81% of the
+  run was the car obeying an override rather than anything it could see.
+  Pass a number to cap it for an unfamiliar course; the coupled corner
+  caps scale with it automatically.
+
+### pure_pursuit
+
+- **Lap turning is counted in the `odom` frame.** Absorbing a SLAM
+  correction also discarded the car's real turning during that tick. The
+  run absorbed **106 corrections in one 136s lap** and measured 335° for a
+  genuine revolution, against a 300° gate. Odometry is never
+  re-optimised, so the gate no longer depends on how busy the pose graph
+  was. Falls back to map yaw when no `odom` transform exists. New
+  parameter: `odom_frame` (default `odom`).
+- **A lap that will not close now widens rather than running forever.**
+  Past `closure_widen_after_revolutions` (new, 1.25) the proximity gate
+  opens in proportion to the extra turning, up to `max_closure_distance`
+  (new, 4.0m). A reactive controller does not repeat its line, and on the
+  126m course this car maps each missed closure costs 2.3 minutes.
+- **`LapRecorder.lap_points()` trims a recording to its final
+  revolution**, so a closure that needed two laps still produces a
+  one-lap racing line instead of two overlapping ones.
+- **Lap progress is reported in plain terms.** The decision log now leads
+  with `~34% round, ~83m to go (~90s at last lap's pace)`, and the
+  supervisor prints an estimate of what lap 2 will cost when lap 1 closes.
+  The operator on 2026-08-19 stopped a working run 47s into lap 2; the
+  raw gate numbers gave no way to tell progress from a stall.
+- **Stray-return speckle is cleaned out of the saved map and the copy the
+  racing line is checked against.** New `occupancy_map.despeckle_grid()`
+  removes small occupied blobs *only* where nothing unknown sits anywhere
+  in their neighbourhood — a real object occludes and so keeps an unknown
+  shadow behind it, while a stray beam is a direction the LiDAR swept
+  clear on every other pass. Measured on this car's own saved map: 12
+  phantom blobs in clear track removed, the 34 small ones against walls
+  and the map edge deliberately kept. **Not** applied to the live `/map`
+  used for opponent detection. New parameter:
+  `map_despeckle_max_cells` (default 4).
+- **New latched `/auto_map_race/controller` topic** naming the controller
+  currently selected, for the dashboard. Read-only, published after the
+  tick's drive command, disables itself rather than the node on error.
+- **`pure_pursuit_node` broadcasts its active racing line** on a latched
+  `/racing_line` topic, once per loaded profile and never from the
+  control loop. Read-only; disables itself rather than the node on error.
+
+### web_dashboard
+
+- **The racing line is drawn on the map**, coloured by its own target
+  speed (green fast, amber slow), from a new latched `/racing_line`
+  topic that `pure_pursuit_node` publishes once per loaded profile.
+  Its presence is the visual answer to "is pure pursuit racing yet" --
+  it cannot appear until a profile is accepted. New parameters:
+  `racing_line_topic` (both nodes) and `racing_line_max_points`.
+- **The tuning panel says which node is driving.** During an
+  `auto_map_race` run both controllers are online and tunable while only
+  one drives. The driving one is sorted to the top and badged in green;
+  the other is dimmed and badged "not driving". Every live-tune write of
+  the 2026-08-19 run went to `pure_pursuit_node` while `gap_follow_node`
+  drove the entire run. New parameter: `controller_topic`.
+
+### racerbot_launch
+
+- **New `config/slam_tracking.yaml`**, layered over the vendored
+  `f1tenth_online_async.yaml` by `slam_launch.py` so the vendored file
+  stays clean and an upstream sync cannot take our tuning with it.
+  `minimum_time_interval` 0.5 → 0.2, `minimum_travel_distance` 0.5 →
+  0.25, `minimum_travel_heading` 0.5 → 0.25, `throttle_scans` 1 → 2,
+  `loop_search_maximum_distance` 3.0 → 8.0,
+  `loop_match_minimum_chain_size` 10 → 20, `ceres_loss_function` None →
+  HuberLoss. The loop-search radius is the likely reason the map was not
+  closing: the course is 126m round and stock SLAM only looked 3m for a
+  candidate. New launch argument: `slam_tracking_file`.
+- **`auto_map_race_launch.py` starts `race_diagnostics` by default**
+  (`diagnostics:=true`, `record_bag:=false`), so a run leaves pose-lag and
+  watchdog numbers instead of only terminal scrollback.
+
+### Hardware findings (no code change)
+
+- **The VESC's onboard IMU reports all zeros.** Measured directly:
+  `/sensors/imu/raw` publishes at a steady 50Hz with every gyro and
+  accelerometer axis exactly `0.0`, and no gravity vector on any axis.
+  Either the board has no IMU fitted or it is disabled in firmware
+  (VESC Tool -> App Settings -> IMU). This matters because `/odom`'s
+  heading is integrated from the *commanded* steering angle through a
+  bicycle model, with nothing measuring actual rotation — a working gyro
+  is the single biggest available improvement to it. Recorded in
+  [hardware-reference.md](docs/hardware-reference.md) with a re-check
+  procedure.
+
+### docs
+
+- **New [localization.md](docs/localization.md)** — where the position
+  estimate comes from, why it arrived late, what was tuned, and a ranked
+  plan for what would improve it next. Records that `vesc_to_odom`
+  integrates *commanded* steering angle through a bicycle model, that the
+  VESC IMU is dead, and why "fuse odom and LiDAR with an EKF" is not a
+  change: SLAM already fuses them, and an EKF between them would
+  double-count the odometry.
+
 ## 2026-08-08 — A dashboard the car can afford, and a camera worth watching
 
 ### web_dashboard

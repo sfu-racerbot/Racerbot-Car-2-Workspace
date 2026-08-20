@@ -35,6 +35,31 @@ The servo formula: `servo_position = -1.2135 × steering_angle + 0.5304`. Steeri
 
 **Servo output must be enabled in the VESC's own firmware config** — this is separate from anything in this repo and isn't visible to `ros2`/`colcon` at all. If a freshly-flashed or reset VESC has steering that does nothing despite `fault_code: 0` and a clean serial connection, check this first. Requires **VESC Tool** (official app, vesc-project.com) connected over USB — which means stopping the ROS bringup first, since only one process can hold the serial port. Full story in [troubleshooting.md](troubleshooting.md).
 
+**The onboard IMU reports all zeros.** Measured 2026-08-19: `/sensors/imu/raw` publishes steadily at **50 Hz**, and every field — all three gyro axes, all three accelerometer axes — is exactly `0.0`. There is no gravity vector on any accelerometer axis, which is the giveaway: a working IMU lying still still reads about 9.81 m/s² somewhere.
+
+So the VESC is answering the driver's IMU poll with an empty packet. That is either a board without the IMU fitted, or an IMU left disabled in the firmware — **VESC Tool → App Settings → IMU**, where a sample rate of 0 means off. Same caveat as the servo-output flag above: it can only be checked in VESC Tool, not from ROS.
+
+This matters more than it looks. The car's heading in `/odom` is integrated from the *commanded* steering angle through a bicycle model, with nothing measuring the actual rotation. A working gyro is the single biggest available improvement to that. See [localization.md](localization.md).
+
+To re-check after changing anything in VESC Tool:
+
+**Terminal 1** — the VESC driver on its own. Nothing publishes commands to it, so the car cannot move.
+
+```bash
+ros2 run vesc_driver vesc_driver_node --ros-args \
+  --params-file install/f1tenth_stack/share/f1tenth_stack/config/vesc.yaml
+```
+
+**Working when:** it logs `Connected to VESC with firmware version 7.0` and keeps running. Leave it up.
+
+**Terminal 2** — read the gyro.
+
+```bash
+ros2 topic echo /sensors/imu/raw --field angular_velocity
+```
+
+**Working when:** `z` moves when you rotate the car by hand, and the accelerometer shows roughly 9.81 on one axis at rest. All zeros means the IMU is still off.
+
 Reading or writing the VESC's app configuration (including that servo-output flag) is **not possible from this ROS stack** — `vesc_driver` only implements motor/servo *control* commands (`COMM_SET_SERVO_POS`, `COMM_SET_RPM`, etc.), not the config read/write protocol (`COMM_GET_APPCONF`/`COMM_SET_APPCONF`) that VESC Tool uses. Don't go looking for a `ros2 service`/CLI way to do this — there isn't one here.
 
 ## LiDAR — Hokuyo UST-10LX

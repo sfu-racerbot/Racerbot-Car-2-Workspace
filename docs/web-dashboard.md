@@ -747,6 +747,34 @@ Values apply on the node's very next control tick, so you can lower `max_speed`,
 - **It cannot exceed a node's own limits.** Every tunable carries a hard min/max enforced inside the node that owns it, on every update. The dashboard's sliders stop at the same bounds, but only so the UI doesn't offer a value that will bounce. **The authority is in the node** — which is why a hand-rolled `ros2 param set` hits the same wall.
 - **It cannot reach a teammate's code.** Only nodes named in `tuning_nodes` are ever probed, and they must additionally advertise a `live_tunable_spec` parameter to appear at all.
 
+### The racing line on the map
+
+Once a controller loads a racing line, the dashboard draws it over the map, coloured by the profile's own target speed: **green where it plans to be fast, amber where it plans to brake.**
+
+That colouring is the useful part. A racing line drawn in one colour tells you the shape; drawn in two it tells you where the speed profile thinks the corners are, which is what you actually want to check before letting the car run it.
+
+**The line's presence is the answer to "is pure pursuit racing yet?"** It cannot appear until a profile has been accepted, so an empty map means no profile — which on the 2026-08-19 run was true for the entire session while it looked like a slow race.
+
+The sidebar readout under **racing line** says which node loaded it, how many waypoints, how long the lap is, and its speed range.
+
+> **"Loaded" is not quite "driving".** The line appears the moment a profile is accepted. Under [`auto_map_race`](racing-autonomy.md#the-fast-path-map-and-race-from-one-launch) command authority moves a couple of seconds later, after a deliberate stop (`transition_stop_sec`). The **DRIVING** badge described below is what says the handover has actually happened.
+
+The line is latched, so a browser opened mid-race still gets it. It survives the controller exiting — reload the page to clear a stale one.
+
+Turn it off with **show racing line on map** if it clutters the view.
+
+### Which node is actually driving
+
+During an [`auto_map_race`](racing-autonomy.md#the-fast-path-map-and-race-from-one-launch) run, **both** `gap_follow_node` and `pure_pursuit_node` are running and tunable at the same time — but only one of them is driving the car at any moment. `gap_follow` drives the mapping laps; `pure_pursuit` takes over for the race.
+
+The panel says which. The one in control is sorted to the top and badged **DRIVING** in green; the other is dimmed and badged **NOT DRIVING**.
+
+**Why it's there:** on the 2026-08-19 run every live-tune change went to `pure_pursuit_node` while `gap_follow_node` drove every metre of the run. The car was under `gap_follow` the whole time, so nothing the operator changed did anything — and `pure_pursuit` was parked waiting for a racing line, so it did nothing there either. The panel gave no clue.
+
+The badge comes from `auto_map_race_node`, which publishes the controller it has selected on a latched topic. It reports which controller is *selected*, not whether the car is currently moving, so it does not flicker every time the car stops or LB is released.
+
+**No badge at all is normal.** Run `gap_follow_launch.py` or `pure_pursuit_launch.py` on its own and there is only one driving node, nothing to confuse it with, and nothing publishing that topic.
+
 ### Arming
 
 Every control is inert until you flip **arm changes** at the top of the panel, and it starts disarmed on **every page load**. A reload, a dropped WiFi link, or a phone going to sleep all disarm it.
