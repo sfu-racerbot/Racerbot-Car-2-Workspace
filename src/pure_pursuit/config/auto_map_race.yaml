@@ -4,8 +4,19 @@ auto_map_race_node:
     racing_drive_topic: /auto_race/drive
     drive_topic: /drive
     pose_topic: /slam_pose
+    # Read-only: names the controller currently selected (gap_follow_node
+    # while mapping, pure_pursuit_node while racing) so the dashboard's
+    # tuning panel can say which node's knobs actually reach the car.
+    # Latched, published only on change. See auto_map_race_node.
+    controller_topic: /auto_map_race/controller
     map_frame: map
     base_frame: base_link
+    # Frame the lap recorder counts turning in. Odometry is never
+    # re-optimised, so the turn gate stops depending on how busy SLAM's
+    # pose graph was -- the 2026-08-19 run absorbed 106 corrections in one
+    # 136s lap and measured 335deg for a genuine revolution, against a
+    # 300deg gate. Geometry still comes entirely from map_frame.
+    odom_frame: odom
     control_rate_hz: 40.0
     command_timeout_sec: 0.5
     # Print every state change immediately and periodically repeat the current
@@ -48,6 +59,16 @@ auto_map_race_node:
     # geometry (LapRecorder._reanchor). 0 disables.
     max_pose_jump_m: 0.12
     closure_heading_deg: 30.0
+    # A reactive controller does not repeat its line, so the car can lap
+    # a course indefinitely passing just outside a fixed closure_distance
+    # -- and every miss costs a full revolution, about 2.3 minutes on the
+    # 126m course this car actually maps. Past this many revolutions the
+    # proximity gate opens in proportion to the extra turning, up to
+    # max_closure_distance; the recording is then trimmed back to its
+    # final revolution so the raceline is still one lap. Set either to 0
+    # to restore a fixed gate.
+    closure_widen_after_revolutions: 1.25
+    max_closure_distance: 4.0
     transition_stop_sec: 2.0
     # slam_toolbox's save_map/serialize_map block its executor, freezing the
     # map->odom TF (and so /slam_pose) while they run. Racing does not start
@@ -135,6 +156,17 @@ auto_map_race_node:
     map_topic: /map
     profile_wall_clearance: 0.20
     profile_map_occupied_threshold: 50
+    # Stray-return cleanup, in cells, at the 0.05m map resolution: 4 cells
+    # is a 10cm patch. Applied to the map written to disk and to the copy
+    # the generated racing line is checked against -- NOT to the live /map
+    # pure_pursuit uses for opponent detection, which must keep every
+    # obstacle the mapper reported. Only blobs with clear observed space
+    # all around them are removed: a real object occludes and so keeps an
+    # unknown shadow behind it, while a stray beam is a direction the
+    # LiDAR swept clear on every other pass. Set 0 to disable.
+    # Measured on this car's own saved map: 12 phantom blobs in clear
+    # track removed, 34 near walls and the map edge deliberately kept.
+    map_despeckle_max_cells: 4
     pure_pursuit_node_name: pure_pursuit_node
 
     enable_deadman: true

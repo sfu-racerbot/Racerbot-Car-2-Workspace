@@ -419,3 +419,191 @@ def test_turn_gate_rejects_a_there_and_back_again_run():
     closed = [recorder.update(x, y, yaw, 0.1 * i)
               for i, (x, y, yaw) in enumerate(out + back, start=1)]
     assert not any(closed)
+
+
+# ============================================================================
+# What the 2026-08-19 run exposed: one legitimate lap of the course this car
+# actually maps is 126m and 136s, it absorbed 106 SLAM corrections along the
+# way, and it measured 335deg of turning against a 300deg gate.
+# ============================================================================
+
+def test_odom_turn_survives_corrections_that_map_turn_loses():
+    """The turn gate must not depend on how busy the pose graph was.
+
+    Counting map yaw skips a correction tick, because across a re-anchor
+    the yaw change is the map's and not the car's -- and the car's own
+    turning during that tick goes with it. 106 corrections in one lap left
+    only a 35deg margin against the 300deg gate. Odometry is never
+    re-optimised, so it counts the real turning either way.
+    """
+    def run(with_odom):
+        recorder = LapRecorder(
+            spacing=0.15, min_distance=1.0, departure_distance=1.0,
+            closure_distance=0.4, closure_heading_rad=math.radians(30.0),
+            min_duration_sec=0.0, max_pose_jump=0.12)
+        odom_yaw = 0.0
+        recorder.update(0.0, 0.0, 0.0, 0.0,
+                        odom_yaw if with_odom else None)
+        x = y = 0.0
+        for index in range(1, 121):
+            # A steady 1deg per tick turn, with the map yanked sideways
+            # every tenth tick.
+            odom_yaw += math.radians(1.0)
+            x += 0.025 * math.cos(odom_yaw)
+            y += 0.025 * math.sin(odom_yaw)
+            shifted_y = y + (0.8 if index % 10 == 0 else 0.0)
+            recorder.update(x, shifted_y, odom_yaw, index * 0.025,
+                            odom_yaw if with_odom else None)
+        return recorder
+
+    with_odom = run(True)
+    without = run(False)
+    assert with_odom.reanchor_count >= 10
+    # 120 ticks at 1deg each is 120deg of real turning.
+    assert math.degrees(with_odom.turn) == pytest.approx(120.0, abs=0.5)
+    # Counting map yaw loses roughly one tick of turning per correction.
+    assert math.degrees(without.turn) < math.degrees(with_odom.turn) - 8.0
+
+
+def test_odom_turn_ignores_a_correction_that_only_rotates_the_map():
+    """A pure map rotation is not the car turning, whatever the map says."""
+    recorder = LapRecorder(
+        spacing=0.15, min_distance=1.0, departure_distance=1.0,
+        closure_distance=0.4, closure_heading_rad=math.radians(30.0),
+        min_duration_sec=0.0, max_pose_jump=0.12)
+    recorder.update(0.0, 0.0, 0.0, 0.0, 0.0)
+    for index in range(1, 41):
+        recorder.update(index * 0.025, 0.0, 0.0, index * 0.025, 0.0)
+    # The pose graph re-optimises: same car, map rotated 90 degrees.
+    recorder.update(0.0, 39 * 0.025, math.pi / 2, 1.05, 0.0)
+    assert recorder.reanchor_count == 1
+    assert recorder.turn == pytest.approx(0.0, abs=1e-9)
+
+
+def test_missing_odom_falls_back_to_the_previous_behaviour():
+    """Odometry not up yet is not a reason to stop counting turns."""
+    recorder = LapRecorder(
+        spacing=0.15, min_distance=5.0, departure_distance=1.0,
+        closure_distance=0.4, closure_heading_rad=math.radians(30.0),
+        min_duration_sec=0.0, min_turn_rad=math.radians(300.0))
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    closed = [recorder.update(x, y, yaw, 0.1 * i)
+              for i, (x, y, yaw) in enumerate(_square_lap(), start=1)]
+    assert closed[-1]
+
+
+def test_a_lap_that_misses_a_fixed_gate_still_closes_once_widened():
+    """The failure mode that costs a whole revolution per miss.
+
+    A reactive controller does not repeat its line, so the car can lap a
+    course indefinitely passing consistently just outside a fixed
+    closure_distance. On a 126m course each of those misses is another 2.3
+    minutes, which is what an operator reads as "it never switches".
+    """
+    def run(widen):
+        recorder = LapRecorder(
+            spacing=0.15, min_distance=5.0, departure_distance=1.0,
+            closure_distance=0.4, closure_heading_rad=math.radians(30.0),
+            min_duration_sec=0.0, min_turn_rad=math.radians(300.0),
+            closure_widen_after_revolutions=1.25 if widen else 0.0,
+            max_closure_distance=4.0 if widen else 0.0)
+        recorder.update(0.0, 0.0, 0.0, 0.0)
+        closed = []
+        # Three laps of the square, every one of them passing 1.0m wide of
+        # the start -- outside the 0.4m gate, inside the widened one.
+        for lap in range(3):
+            for x, y, yaw in _square_lap():
+                closed.append(recorder.update(x, y + 1.0, yaw, 0.1 * len(closed)))
+        return recorder, closed
+
+    fixed, fixed_closed = run(False)
+    assert not any(fixed_closed), 'a 1.0m miss never satisfies a 0.4m gate'
+    assert fixed.revolutions > 2.5
+
+    widened, widened_closed = run(True)
+    assert any(widened_closed), 'the gate must open rather than lap forever'
+    assert widened.closest_approach == pytest.approx(1.0, abs=0.3)
+
+
+def test_widening_is_off_when_either_parameter_is_zero():
+    recorder = LapRecorder(
+        spacing=0.15, min_distance=5.0, departure_distance=1.0,
+        closure_distance=0.4, closure_heading_rad=math.radians(30.0),
+        min_duration_sec=0.0, min_turn_rad=math.radians(300.0),
+        closure_widen_after_revolutions=0.0, max_closure_distance=4.0)
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    for _ in range(3):
+        for x, y, yaw in _square_lap():
+            recorder.update(x, y + 1.0, yaw, 0.1)
+    assert recorder.effective_closure_distance == 0.4
+
+
+def test_lap_points_trims_a_multi_revolution_recording_to_one_lap():
+    """Two overlapping laps are not a racing line.
+
+    A line fitted through both self-intersects, and the speed profile then
+    brakes for corners the car will not be in.
+    """
+    recorder = LapRecorder(
+        spacing=0.15, min_distance=5.0, departure_distance=1.0,
+        closure_distance=0.4, closure_heading_rad=math.radians(30.0),
+        min_duration_sec=0.0, min_turn_rad=math.radians(300.0),
+        closure_widen_after_revolutions=1.25, max_closure_distance=4.0)
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    for lap in range(3):
+        for x, y, yaw in _square_lap():
+            recorder.update(x, y + 1.0, yaw, 0.1 * lap)
+
+    trimmed = recorder.lap_points()
+    assert len(trimmed) < len(recorder.points)
+    # One lap of this square is 64 samples. Landing within a sample or two
+    # of that is the whole point; landing a straight either side of it is
+    # the float-tolerance bug this asserts against.
+    assert 60 <= len(trimmed) <= 70
+    # And it is the *end* of the recording that is kept.
+    assert trimmed[-1] == recorder.points[-1]
+
+
+def test_lap_points_returns_a_single_revolution_untouched():
+    """The normal case must not be trimmed at all."""
+    recorder = LapRecorder(
+        spacing=0.15, min_distance=5.0, departure_distance=1.0,
+        closure_distance=0.4, closure_heading_rad=math.radians(30.0),
+        min_duration_sec=0.0, min_turn_rad=math.radians(300.0),
+        closure_widen_after_revolutions=1.25, max_closure_distance=4.0)
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    for x, y, yaw in _square_lap():
+        recorder.update(x, y, yaw, 0.1)
+    assert recorder.lap_points() == recorder.points
+
+
+def test_lap_points_trims_a_clockwise_recording_too():
+    """Turning is signed, and half the courses go the other way."""
+    recorder = LapRecorder(
+        spacing=0.15, min_distance=5.0, departure_distance=1.0,
+        closure_distance=0.4, closure_heading_rad=math.radians(30.0),
+        min_duration_sec=0.0, min_turn_rad=math.radians(300.0),
+        closure_widen_after_revolutions=1.25, max_closure_distance=4.0)
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    for lap in range(3):
+        for x, y, yaw in _square_lap():
+            recorder.update(x, -(y + 1.0), -yaw, 0.1 * lap)
+    assert recorder.turn < 0.0
+    trimmed = recorder.lap_points()
+    assert 60 <= len(trimmed) <= 70
+    assert trimmed[-1] == recorder.points[-1]
+
+
+def test_closest_approach_only_counts_after_departing():
+    """Sitting at the start is not a near miss."""
+    recorder = LapRecorder(
+        spacing=0.15, min_distance=5.0, departure_distance=1.0,
+        closure_distance=0.4, closure_heading_rad=math.radians(30.0),
+        min_duration_sec=0.0, min_turn_rad=math.radians(300.0))
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    for index in range(1, 10):
+        recorder.update(0.01 * index, 0.0, 0.0, 0.01 * index)
+    assert not math.isfinite(recorder.closest_approach)
+    for x, y, yaw in _square_lap():
+        recorder.update(x, y + 1.0, yaw, 1.0)
+    assert recorder.closest_approach == pytest.approx(1.0, abs=0.3)

@@ -25,6 +25,7 @@ from rclpy.qos import (QoSDurabilityPolicy, QoSProfile,
                        QoSReliabilityPolicy)
 from rclpy.parameter_client import AsyncParameterClient
 from sensor_msgs.msg import Joy
+from std_msgs.msg import String
 from slam_toolbox.srv import SaveMap, SerializePoseGraph
 from tf2_ros import Buffer, TransformException, TransformListener
 
@@ -56,12 +57,34 @@ class LapRecorder:
     laps this car has recorded are two revolutions. Accumulated yaw closes
     that hole: by the turning-tangent theorem one lap of a closed circuit is
     2*pi of turning whatever its size.
+
+    **Turning is counted in the odom frame where one is available.** The
+    reanchor above deliberately skips the yaw change on a correction tick,
+    because in the map frame that change is the map's and not the car's --
+    but the car's own real turning during that tick is thrown away with it.
+    The 2026-08-19 run absorbed 106 corrections in a single 136s lap and
+    measured 335deg of turning for one genuine revolution, a 35deg margin
+    against a 300deg gate. Odometry is not re-optimised, so `odom_yaw`
+    accumulates the real turning and the gate stops depending on how busy
+    the pose graph was. The map frame stays in charge of all *geometry*;
+    only the turn counter moves.
+
+    **A lap that will not close is trimmed rather than left to run.** The
+    proximity gate can go unsatisfied indefinitely -- a reactive controller
+    does not repeat its line, and one pass 1.8m wide of a 1.5m gate costs a
+    whole extra revolution. On the 126m course this car actually maps that
+    is 2.3 minutes per miss. So the gate widens once the car is clearly
+    past one revolution without closing, and `lap_points` then trims the
+    recording back to its final revolution, because a raceline recorded
+    over two overlapping laps is not a raceline.
     """
 
     def __init__(self, spacing: float, min_distance: float,
                  departure_distance: float, closure_distance: float,
                  closure_heading_rad: float, min_duration_sec: float,
-                 min_turn_rad: float = 0.0, max_pose_jump: float = 0.0):
+                 min_turn_rad: float = 0.0, max_pose_jump: float = 0.0,
+                 closure_widen_after_revolutions: float = 0.0,
+                 max_closure_distance: float = 0.0):
         self.spacing = spacing
         self.min_distance = min_distance
         self.departure_distance = departure_distance
@@ -70,15 +93,24 @@ class LapRecorder:
         self.min_duration_sec = min_duration_sec
         self.min_turn_rad = min_turn_rad
         self.max_pose_jump = max_pose_jump
+        # Revolutions past the first after which the proximity gate starts
+        # opening up, and the ceiling it opens to. 0 for either disables
+        # widening entirely and restores the fixed gate.
+        self.closure_widen_after_revolutions = closure_widen_after_revolutions
+        self.max_closure_distance = max(max_closure_distance, closure_distance)
         self.reset()
 
     def reset(self):
         self.points = []
+        # Signed accumulated turn as of each entry in `points`, so the
+        # recording can be trimmed back to its final revolution.
+        self.point_turn = []
         self.start = None
         self.start_yaw = None
         self.start_time = None
         self.last_sample = None
         self.last_pose = None
+        self.last_odom_yaw = None
         self.distance = 0.0
         self.turn = 0.0
         self.departed = False
@@ -88,6 +120,67 @@ class LapRecorder:
         self.elapsed = 0.0
         self.distance_from_start = 0.0
         self.heading_error = 0.0
+        # Closest the car has come back to its start since departing, so a
+        # near miss is reportable rather than invisible.
+        self.closest_approach = float('inf')
+
+    @property
+    def revolutions(self) -> float:
+        """Turning done so far, in laps of a closed circuit (2*pi each)."""
+        return abs(self.turn) / (2.0 * math.pi)
+
+    @property
+    def effective_closure_distance(self) -> float:
+        """The proximity gate actually in force this tick.
+
+        Fixed at `closure_distance` for the first revolution and a bit
+        beyond, then opened in proportion to the extra turning done, up to
+        `max_closure_distance`. A reactive controller does not repeat its
+        line, so the car can lap a course all day passing consistently
+        just outside a fixed gate -- and each of those misses costs a
+        whole revolution, 2.3 minutes on the 126m course this car maps.
+        Widening trades a looser idea of "back where we started" for
+        actually finishing; `lap_points` then trims the extra away.
+        """
+        after = self.closure_widen_after_revolutions
+        if after <= 0.0 or self.max_closure_distance <= self.closure_distance:
+            return self.closure_distance
+        excess = self.revolutions - after
+        if excess <= 0.0:
+            return self.closure_distance
+        return min(self.max_closure_distance,
+                   self.closure_distance * (1.0 + excess))
+
+    def lap_points(self):
+        """The recording, trimmed to its final revolution.
+
+        A closure that took two revolutions produces two overlapping laps
+        of points, and a raceline fitted through both is not a raceline --
+        it self-intersects, and the speed profile then brakes for corners
+        the car will not be in. Keeping the last 2*pi of turning yields
+        exactly one lap ending where the closure fired, whatever happened
+        before it. A lap that closed in one revolution or less is returned
+        whole, which is the normal case and unchanged.
+        """
+        if len(self.points) < 3 or len(self.point_turn) != len(self.points):
+            return list(self.points)
+        total = self.point_turn[-1]
+        direction = 1.0 if total >= 0.0 else -1.0
+        target = total - direction * 2.0 * math.pi
+        # Turning is constant along a straight, so many samples share the
+        # exact target value and the boundary lands on a whole plateau of
+        # them. Without the tolerance the accumulated float error decides
+        # which end of that plateau wins, and a 16-sample straight gets
+        # kept or dropped on the last bit of a mantissa.
+        limit = direction * target + 1e-9
+        start_index = 0
+        for index, turn in enumerate(self.point_turn):
+            if direction * turn <= limit:
+                start_index = index
+        if start_index == 0:
+            return list(self.points)
+        trimmed = list(self.points[start_index:])
+        return trimmed if len(trimmed) >= 3 else list(self.points)
 
     def _reanchor(self, x: float, y: float, yaw: float):
         """Move everything already recorded into the corrected map frame.
@@ -115,7 +208,16 @@ class LapRecorder:
             self.last_sample = np.array(moved(self.last_sample), dtype=np.float64)
         self.reanchor_count += 1
 
-    def update(self, x: float, y: float, yaw: float, now_sec: float) -> bool:
+    def update(self, x: float, y: float, yaw: float, now_sec: float,
+               odom_yaw: float = None) -> bool:
+        """Feed one localisation pose in. True means the lap just closed.
+
+        `odom_yaw` is the same instant's heading in the odom frame. It is
+        optional -- without it the turn counter falls back to map yaw and
+        behaves exactly as it did before -- but supplying it is what makes
+        the turn gate independent of how often SLAM re-optimises, since
+        odometry is never re-optimised. See the class docstring.
+        """
         point = np.array([x, y], dtype=np.float64)
         if self.start is None:
             self.start = point
@@ -123,7 +225,9 @@ class LapRecorder:
             self.start_time = now_sec
             self.last_sample = point
             self.last_pose = (x, y, yaw)
+            self.last_odom_yaw = odom_yaw
             self.points.append((x, y))
+            self.point_turn.append(self.turn)
             return False
 
         jumped = (
@@ -132,23 +236,33 @@ class LapRecorder:
         )
         if jumped:
             self._reanchor(x, y, yaw)
-        else:
-            # Accumulated yaw, not path heading: yaw comes straight from
-            # localisation and does not have the sampled path's sensitivity
-            # to noise at 0.15m spacing. Skipped across a re-anchor, where
-            # the yaw change is the map's, not the car's.
+        # Accumulated yaw, not path heading: yaw comes straight from
+        # localisation and does not have the sampled path's sensitivity
+        # to noise at 0.15m spacing.
+        if odom_yaw is not None and self.last_odom_yaw is not None:
+            # Odometry is not re-optimised, so this is the car's own
+            # turning whether or not the pose graph moved this tick.
+            self.turn += angle_difference(odom_yaw, self.last_odom_yaw)
+        elif not jumped:
+            # Map yaw, and only when the map did not move under us -- across
+            # a re-anchor the yaw change is the map's, not the car's.
             self.turn += angle_difference(yaw, self.last_pose[2])
         self.last_pose = (x, y, yaw)
+        if odom_yaw is not None:
+            self.last_odom_yaw = odom_yaw
 
         distance_from_last = float(np.linalg.norm(point - self.last_sample))
         if distance_from_last >= self.spacing:
             self.distance += distance_from_last
             self.last_sample = point
             self.points.append((x, y))
+            self.point_turn.append(self.turn)
 
         distance_from_start = float(np.linalg.norm(point - self.start))
         if distance_from_start >= self.departure_distance:
             self.departed = True
+        if self.departed:
+            self.closest_approach = min(self.closest_approach, distance_from_start)
 
         self.elapsed = now_sec - self.start_time
         self.distance_from_start = distance_from_start
@@ -158,7 +272,7 @@ class LapRecorder:
             and self.distance >= self.min_distance
             and abs(self.turn) >= self.min_turn_rad
             and self.elapsed >= self.min_duration_sec
-            and self.distance_from_start <= self.closure_distance
+            and self.distance_from_start <= self.effective_closure_distance
             and self.heading_error <= self.closure_heading_rad
             and len(self.points) >= 3
         )
@@ -174,8 +288,10 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('racing_drive_topic', '/auto_race/drive')
         self.declare_parameter('drive_topic', '/drive')
         self.declare_parameter('pose_topic', '/slam_pose')
+        self.declare_parameter('controller_topic', '/auto_map_race/controller')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
+        self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('control_rate_hz', 40.0)
         self.declare_parameter('command_timeout_sec', 0.5)
         self.declare_parameter('waypoint_spacing', 0.15)
@@ -196,6 +312,8 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('departure_distance', 2.0)
         self.declare_parameter('closure_distance', 0.75)
         self.declare_parameter('closure_heading_deg', 30.0)
+        self.declare_parameter('closure_widen_after_revolutions', 1.25)
+        self.declare_parameter('max_closure_distance', 4.0)
         self.declare_parameter('transition_stop_sec', 2.0)
         self.declare_parameter('map_save_timeout_sec', 20.0)
         # slam_toolbox's SaveMap runs nav2's map_saver inline, and map_saver
@@ -230,6 +348,7 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('profile_wall_clearance', 0.30)
         self.declare_parameter('profile_map_occupied_threshold', 50)
+        self.declare_parameter('map_despeckle_max_cells', 4)
         self.declare_parameter('enable_deadman', True)
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('deadman_button', 4)
@@ -245,6 +364,7 @@ class AutoMapRaceNode(Node):
         self.pose_topic = str(value('pose_topic'))
         self.map_frame = str(value('map_frame'))
         self.base_frame = str(value('base_frame'))
+        self.odom_frame = str(value('odom_frame'))
         self.control_rate_hz = float(value('control_rate_hz'))
         self.command_timeout_sec = float(value('command_timeout_sec'))
         self.mapping_laps = max(1, int(value('mapping_laps')))
@@ -277,6 +397,7 @@ class AutoMapRaceNode(Node):
         self.profile_wall_clearance = float(value('profile_wall_clearance'))
         self.profile_map_occupied_threshold = int(
             value('profile_map_occupied_threshold'))
+        self.map_despeckle_max_cells = int(value('map_despeckle_max_cells'))
         self.latest_map = None
 
         self.recorder = LapRecorder(
@@ -288,10 +409,17 @@ class AutoMapRaceNode(Node):
             min_duration_sec=float(value('minimum_lap_duration_sec')),
             min_turn_rad=math.radians(float(value('minimum_lap_turn_deg'))),
             max_pose_jump=float(value('max_pose_jump_m')),
+            closure_widen_after_revolutions=float(
+                value('closure_widen_after_revolutions')),
+            max_closure_distance=float(value('max_closure_distance')),
         )
 
         self.state = 'mapping'
         self.completed_mapping_laps = 0
+        # Learned from the first closed lap, so progress on later laps is
+        # reported against this course rather than against nothing.
+        self.measured_lap_distance = 0.0
+        self.measured_lap_duration_sec = 0.0
         self.mapping_cmd = None
         self.mapping_cmd_time = None
         self.racing_cmd = None
@@ -325,6 +453,14 @@ class AutoMapRaceNode(Node):
         self.drive_pub = self.create_publisher(
             AckermannDriveStamped, self.drive_topic, 10)
         self.pose_pub = self.create_publisher(PoseStamped, self.pose_topic, 10)
+        # Latched: a browser that connects halfway through a run still
+        # learns who is driving, without waiting for the next handover.
+        self.controller_pub = self.create_publisher(
+            String, str(value('controller_topic')),
+            QoSProfile(depth=1,
+                       reliability=QoSReliabilityPolicy.RELIABLE,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
+        self._published_controller = None
         self.create_subscription(
             AckermannDriveStamped, self.mapping_drive_topic,
             self._mapping_drive_callback, 10)
@@ -387,7 +523,12 @@ class AutoMapRaceNode(Node):
                 self.latest_map.info.resolution,
                 self.latest_map.info.origin.position.x,
                 self.latest_map.info.origin.position.y,
-                occupied_threshold=self.profile_map_occupied_threshold)
+                occupied_threshold=self.profile_map_occupied_threshold,
+                # Phantom obstacles in otherwise clear track are a
+                # reason to reject a perfectly good racing line. Only
+                # blobs the mapper saw straight through are dropped;
+                # see occupancy_map.despeckle_grid.
+                despeckle_max_cells=self.map_despeckle_max_cells)
             field = grid.clearance_field()
         except Exception as exc:  # noqa: BLE001 - never lose the run to this
             self.get_logger().error(
@@ -454,6 +595,23 @@ class AutoMapRaceNode(Node):
         yaw = racing_math.quaternion_to_yaw(q.x, q.y, q.z, q.w)
         return pose.pose.position.x, pose.pose.position.y, yaw
 
+    def _lookup_odom_yaw(self):
+        """Heading in the odom frame, or None if odometry is not up yet.
+
+        Only the lap recorder's turn counter uses this, and only to stay
+        independent of pose-graph re-optimisation -- every piece of
+        geometry still comes from the map frame. A missing odom transform
+        is therefore not worth a warning: the recorder falls back to
+        counting map yaw exactly as it did before.
+        """
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                self.odom_frame, self.base_frame, rclpy.time.Time())
+        except TransformException:
+            return None
+        q = transform.transform.rotation
+        return racing_math.quaternion_to_yaw(q.x, q.y, q.z, q.w)
+
     def _publish_stop(self):
         self._publish_command(None)
 
@@ -464,6 +622,50 @@ class AutoMapRaceNode(Node):
         if source is not None:
             output.drive = source.drive
         self.drive_pub.publish(output)
+
+    #: Supervisor state -> the node whose knobs actually reach the car.
+    CONTROLLER_FOR_STATE = {
+        'mapping': 'gap_follow_node',
+        'racing': 'pure_pursuit_node',
+    }
+
+    def _publish_controller(self):
+        """Name the controller currently selected, for the dashboard.
+
+        Read-only diagnostic. Published strictly after this tick's drive
+        command, only when the answer changes, and wrapped in its own
+        try/except that disables the diagnostic rather than the node --
+        the contract every diagnostic published from driving code follows
+        here (docs/drive-intent.md#safety-contract-for-publishers-read-this-first).
+
+        It reports which controller is *selected*, not whether the car is
+        moving, so it does not flicker every time a stop is commanded or
+        LB is released: the question it answers is "whose parameters
+        affect this car right now", and during a mapping lap that is
+        gap_follow even while the car sits still.
+
+        This exists because of the 2026-08-19 run. The dashboard offers
+        gap_follow_node and pure_pursuit_node side by side with nothing
+        saying which one is driving, the car was under gap_follow for the
+        entire mapping phase, and every live-tune write that run went to
+        pure_pursuit -- where it changed nothing, because pure_pursuit was
+        parked in waiting_for_profile the whole time.
+        """
+        if self.controller_pub is None:
+            return
+        controller = self.CONTROLLER_FOR_STATE.get(self.state, '')
+        if controller == self._published_controller:
+            return
+        try:
+            message = String()
+            message.data = controller
+            self.controller_pub.publish(message)
+            self._published_controller = controller
+        except Exception as exc:
+            self.controller_pub = None
+            self.get_logger().warn(
+                f'controller diagnostic disabled after {type(exc).__name__}: {exc}; '
+                'the supervisor itself is unaffected')
 
     def _command_status(self, command, stamp, now_sec, source_name: str):
         if command is None or stamp is None:
@@ -494,18 +696,42 @@ class AutoMapRaceNode(Node):
         if self.recorder.start is None:
             return f'{prefix}: recorder waiting to initialize its start pose'
         return (
-            f'{prefix}: samples={len(self.recorder.points)}, '
+            f'{prefix}: {self._lap_progress_summary()}, '
+            f'samples={len(self.recorder.points)}, '
             f'distance={self.recorder.distance:.1f}/{self.recorder.min_distance:.1f}m, '
             f'turn={math.degrees(self.recorder.turn):.0f}/'
             f'{math.degrees(self.recorder.min_turn_rad):.0f}deg, '
             f'elapsed={self.recorder.elapsed:.1f}/{self.recorder.min_duration_sec:.1f}s, '
             f"departed={'yes' if self.recorder.departed else 'no'}, "
             f'start distance={self.recorder.distance_from_start:.2f}/'
-            f'{self.recorder.closure_distance:.2f}m, heading error='
+            f'{self.recorder.effective_closure_distance:.2f}m, heading error='
             f'{math.degrees(self.recorder.heading_error):.1f}/'
             f'{math.degrees(self.recorder.closure_heading_rad):.1f}deg, '
             f'SLAM corrections absorbed={self.recorder.reanchor_count}'
             + self._closure_warning())
+
+    def _lap_progress_summary(self) -> str:
+        """How far round the car is, in plain terms, first in the line.
+
+        The 2026-08-19 run printed only the raw gates, and a lap on that
+        course legitimately took 126m and 136s. With nothing saying "about
+        a third of the way round" the operator had no way to tell a lap
+        still in progress from a lap that would never close, and stopped a
+        run that was working. Turning is the measure that knows what a lap
+        is, so the fraction is turning done over one revolution; once a
+        lap has actually closed, its length is the better estimate and the
+        remaining time comes from that.
+        """
+        revolutions = self.recorder.revolutions
+        percent = min(100.0, 100.0 * revolutions)
+        summary = f'~{percent:.0f}% round'
+        if self.measured_lap_distance and self.recorder.distance > 0.0:
+            remaining = max(0.0, self.measured_lap_distance - self.recorder.distance)
+            summary += f', ~{remaining:.0f}m to go'
+            if self.measured_lap_duration_sec and self.measured_lap_distance > 0.0:
+                pace = self.measured_lap_duration_sec / self.measured_lap_distance
+                summary += f' (~{remaining * pace:.0f}s at last lap\'s pace)'
+        return summary
 
     def _closure_warning(self) -> str:
         """Say so when the car is clearly lapping but nothing is closing.
@@ -513,18 +739,36 @@ class AutoMapRaceNode(Node):
         Turning is the gate that knows what a lap is; proximity to the start
         is the one that can quietly never be satisfied, because a reactive
         controller does not repeat its line. Twice round with no closure is
-        not "still working on it", it is a gate that needs widening, and the
-        operator should not have to infer that from two numbers.
+        not "still working on it", and the operator should not have to
+        infer that from two numbers.
+
+        The gate now opens by itself past
+        `closure_widen_after_revolutions`, so this reports the widening in
+        progress and the closest the car has actually come -- which says
+        whether the proximity gate or the heading gate is the one holding
+        out, the thing the old wording left the operator to guess.
         """
         turn_gate = self.recorder.min_turn_rad
         if turn_gate <= 0.0 or abs(self.recorder.turn) < 2.0 * turn_gate:
             return ''
+        closest = self.recorder.closest_approach
+        closest_text = ('never' if not math.isfinite(closest)
+                        else f'{closest:.2f}m')
+        gate = self.recorder.effective_closure_distance
+        widened = gate > self.recorder.closure_distance
         return (
-            f' -- WARNING: {abs(self.recorder.turn) / (2.0 * math.pi):.1f} laps of '
-            f'turning with no closure. The car is not passing within '
-            f'closure_distance ({self.recorder.closure_distance:.2f}m) of where the '
-            'recorder started, or not matching its heading there. Widen '
-            'closure_distance/closure_heading_deg.')
+            f' -- WARNING: {self.recorder.revolutions:.1f} laps of turning with no '
+            f'closure. Closest the car has come back to where the recorder started '
+            f'is {closest_text}, against a gate now at {gate:.2f}m'
+            + (f' (widened from {self.recorder.closure_distance:.2f}m and still '
+               f'opening, up to {self.recorder.max_closure_distance:.2f}m)'
+               if widened else
+               ' (fixed -- closure_widen_after_revolutions/max_closure_distance '
+               'are off)')
+            + f'. Heading error there must also be within '
+            f'{math.degrees(self.recorder.closure_heading_rad):.0f}deg. The '
+            'recording will be trimmed back to its final revolution when it does '
+            'close.')
 
     def _control_loop(self):
         try:
@@ -545,7 +789,7 @@ class AutoMapRaceNode(Node):
         deadman_ok, deadman_state, deadman_detail = self._deadman_status(now_sec)
 
         if self.state == 'mapping' and pose is not None and deadman_ok:
-            if self.recorder.update(*pose, now_sec):
+            if self.recorder.update(*pose, now_sec, self._lookup_odom_yaw()):
                 self._mapping_lap_completed()
 
         if self.state == 'loading_profile':
@@ -646,6 +890,9 @@ class AutoMapRaceNode(Node):
                 level='error',
             )
 
+        # Last, after the drive command for this tick has gone out.
+        self._publish_controller()
+
     def _log_decision(self, state: str, detail: str, source, level: str = None):
         """Log selector transitions immediately and steady state periodically."""
         now_sec = self._now_sec()
@@ -677,12 +924,30 @@ class AutoMapRaceNode(Node):
 
     def _mapping_lap_completed(self):
         self.completed_mapping_laps += 1
+        self.measured_lap_distance = self.recorder.distance
+        self.measured_lap_duration_sec = self.recorder.elapsed
+        trimmed = len(self.recorder.points) - len(self.recorder.lap_points())
         self.get_logger().info(
             f'Closed mapping lap {self.completed_mapping_laps}/{self.mapping_laps} detected '
             f'({self.recorder.distance:.1f}m, {math.degrees(self.recorder.turn):.0f}deg of '
-            f'turning, {len(self.recorder.points)} samples, '
-            f'{self.recorder.reanchor_count} SLAM corrections absorbed).')
+            f'turning, {self.recorder.revolutions:.2f} revolutions, '
+            f'{len(self.recorder.points)} samples, closest approach to the start '
+            f'{self.recorder.closest_approach:.2f}m against a '
+            f'{self.recorder.effective_closure_distance:.2f}m gate, '
+            f'{self.recorder.reanchor_count} SLAM corrections absorbed'
+            + (f', trimming {trimmed} samples back to the final revolution'
+               if trimmed else '')
+            + ').')
         if self.completed_mapping_laps < self.mapping_laps:
+            # Say the cost out loud. A lap on the course this car actually
+            # maps is 126m and over two minutes, and an operator who does
+            # not know that reads a second lap as a stuck run.
+            self.get_logger().info(
+                f'Discarding that discovery lap and recording lap '
+                f'{self.completed_mapping_laps + 1}/{self.mapping_laps}, which should '
+                f'take about {self.measured_lap_distance:.0f}m and '
+                f'{self.measured_lap_duration_sec:.0f}s at the same pace. Keep holding '
+                'LB; racing starts after it closes.')
             # Discard the discovery lap. The next lap is recorded after SLAM
             # has seen the start/finish again and had a chance to close its
             # loop, yielding a cleaner map-frame raceline.
@@ -698,7 +963,10 @@ class AutoMapRaceNode(Node):
     def _write_profile(self) -> str:
         run_directory = self.output_directory / strftime('%Y%m%d-%H%M%S')
         run_directory.mkdir(parents=True, exist_ok=False)
-        xy = np.asarray(self.recorder.points, dtype=np.float64)
+        # Trimmed to the final revolution: a closure that needed more
+        # than one lap would otherwise fit a raceline through two
+        # overlapping ones. See LapRecorder.lap_points.
+        xy = np.asarray(self.recorder.lap_points(), dtype=np.float64)
         raw_path = run_directory / 'raceline_raw.csv'
         profile_path = run_directory / 'raceline_profiled.csv'
         # The unmodified recording is written first and always, whatever
@@ -872,6 +1140,39 @@ class AutoMapRaceNode(Node):
         self.get_logger().info(
             f'Requested map and pose-graph save in {self.run_directory}.')
 
+    def _despeckle_saved_map(self):
+        """Clear stray-beam blobs out of the map just written to disk.
+
+        Runs only in the `loading_profile` state, where the car is
+        deliberately stopped, and only after slam_toolbox has reported the
+        save finished -- so this touches no file anything is still writing
+        and costs the driving path nothing. Failure is logged and dropped:
+        the map is already saved and correct-if-speckled, and a cleanup
+        that did not work is not a reason to fail the run.
+        """
+        if self.map_despeckle_max_cells <= 0:
+            return
+        if not hasattr(self, 'run_directory'):
+            # Same guard _try_save_map uses: run_directory only exists once
+            # a profile has been written, and a save reported without one is
+            # not this node's map to clean.
+            return
+        map_yaml = self.run_directory / 'map.yaml'
+        try:
+            blobs, cells = occupancy_map.despeckle_map_file(
+                str(map_yaml), self.map_despeckle_max_cells)
+        except Exception as exc:  # noqa: BLE001 - never lose a saved map to cleanup
+            self.get_logger().warn(
+                f'Could not clean stray returns out of {map_yaml} '
+                f'({type(exc).__name__}: {exc}). The map is saved and usable '
+                'as it is.')
+            return
+        if blobs:
+            self.get_logger().info(
+                f'Cleaned {blobs} stray-return blob(s) ({cells} cells) out of '
+                f'{map_yaml} -- small, and with clear observed space all '
+                'around, so the LiDAR saw straight through them.')
+
     def _map_save_callback(self, future, artifact: str):
         # Count the save as settled however it ended: a failed save is still
         # a save that is no longer blocking slam_toolbox's executor, which
@@ -886,6 +1187,7 @@ class AutoMapRaceNode(Node):
             self.get_logger().info(f'Saved {artifact} successfully.')
             if artifact == 'occupancy map':
                 self.map_saved_ok = True
+                self._despeckle_saved_map()
             return
 
         self.get_logger().error(
