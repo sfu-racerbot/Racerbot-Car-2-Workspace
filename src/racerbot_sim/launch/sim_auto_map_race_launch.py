@@ -32,8 +32,10 @@ def generate_launch_description():
         DeclareLaunchArgument('hold_deadman', default_value='true'),
         DeclareLaunchArgument('release_after_sec', default_value='-1.0'),
         DeclareLaunchArgument('odom_speed_scale', default_value='1.0'),
-        DeclareLaunchArgument('mapping_max_speed', default_value='1.0'),
-        DeclareLaunchArgument('mapping_min_speed', default_value='0.4'),
+        # Empty means "no cap" -- gap_follow.yaml governs, matching the
+        # real auto_map_race_launch.py this includes.
+        DeclareLaunchArgument('mapping_max_speed', default_value=''),
+        DeclareLaunchArgument('mapping_min_speed', default_value=''),
         DeclareLaunchArgument('mapping_laps', default_value='2'),
         DeclareLaunchArgument(
             'output_directory', default_value='~/.ros/racerbot_sim/auto'),

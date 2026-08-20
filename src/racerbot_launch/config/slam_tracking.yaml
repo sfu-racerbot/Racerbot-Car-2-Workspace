@@ -1,0 +1,76 @@
+slam_toolbox:
+  ros__parameters:
+    # Workspace overrides layered on top of f1tenth_stack's
+    # f1tenth_online_async.yaml (slam_launch.py loads that first, then this).
+    #
+    # Kept here rather than edited into the vendored file on purpose:
+    # f1tenth_system is vendored as plain tracked files and already carries
+    # two local fixes that a naive upstream sync silently clobbers (see
+    # docs/git-setup.md). This file is ours, so a sync cannot take it, and
+    # what this workspace changed about SLAM is one file to read.
+    #
+    # --- Why these moved, from the 2026-08-19 run ---
+    # The complaint was that the car is slow to work out where it is on the
+    # map. The upstream defaults throttle scan matching hard: a correction to
+    # map->odom could not arrive more often than every 0.5s, and only after
+    # 0.5m of travel or 0.5rad (29deg) of turning. Between corrections the
+    # pose is pure wheel dead reckoning, so error accumulates and then
+    # arrives all at once -- auto_map_race_node absorbed 106 pose jumps over
+    # 0.12m in a single 136s lap, about one visible snap per second.
+    #
+    # Halving both gates roughly halves the uncorrected interval. It is not
+    # free: every gate opening adds a node to the pose graph, and the course
+    # this car maps is 126m round, so 0.25m spacing is ~500 nodes per lap for
+    # Ceres to optimise on an 8GB Jetson. These are the deliberately
+    # moderate step, not the floor -- measure before going lower.
+
+    # Was 0.5 (2Hz ceiling on corrections).
+    minimum_time_interval: 0.2
+    # Was 0.5m.
+    minimum_travel_distance: 0.25
+    # Was 0.5rad = 29deg, which is most of a corner on this car. Cornering is
+    # exactly where dead reckoning is worst and a correction is worth most.
+    minimum_travel_heading: 0.25
+
+    # The Hokuyo streams ~40Hz and slam_toolbox ran every scan through its
+    # tf2 message filter only to discard most of them against the time gate
+    # above -- and logged "Message Filter dropping message ... queue is full"
+    # throughout the 2026-08-19 run. Every 2nd scan is 20Hz in, still double
+    # the 5Hz the time gate can now use, with half the filter pressure.
+    throttle_scans: 2
+
+    # --- Loop closure, and why the map was not closing ---
+    # The course is a hallway loop around a building block: 126m round, with
+    # the far side 38.8m from the start (measured off the 2026-08-19 run's
+    # own lap recorder). Upstream's loop_search_maximum_distance of 3.0m is
+    # the radius in which slam_toolbox will even *look* for an earlier scan
+    # to close against. Wheel-and-steering odometry on this car has no gyro
+    # in it -- heading comes from the commanded servo angle through a bicycle
+    # model -- so after 126m the estimate is very unlikely to still be within
+    # 3m of truth when the car arrives back at the start. Nothing inside the
+    # radius means no candidate, means no closure, however good the scans are.
+    #
+    # 8.0m matches the correlation window slam_toolbox already uses to
+    # *validate* a candidate (loop_search_space_dimension, unchanged below at
+    # 8.0m, i.e. +/-4m). Searching a radius smaller than the window the
+    # matcher can correct over is simply leaving that capability unused.
+    # Raise further only with loop_search_space_dimension raised to match --
+    # a candidate found outside the correlation window cannot be verified.
+    loop_search_maximum_distance: 8.0
+
+    # Coupled to minimum_travel_distance above, and this is the coupling that
+    # is easy to miss: a "chain" is a run of consecutive scans, so its length
+    # in metres is chain_size * minimum_travel_distance. At upstream's 0.5m
+    # spacing 10 scans meant 5m of corridor as evidence for a closure. With
+    # spacing now 0.25m the same 10 scans would be only 2.5m -- half the
+    # evidence, in a building full of corridors that look alike, which is
+    # exactly where a false loop closure folds the map onto itself. 20 keeps
+    # the evidence at 5m of travel.
+    loop_match_minimum_chain_size: 20
+
+    # Robust loss on the pose-graph optimisation. With no loss function every
+    # residual is trusted equally, so one bad match drags the whole graph
+    # toward it; Huber caps how far a single outlier can pull. Upstream
+    # ships None, which is a reasonable default for a small room and a poor
+    # one for a 126m loop with ~500 nodes in it and repetitive corridors.
+    ceres_loss_function: HuberLoss

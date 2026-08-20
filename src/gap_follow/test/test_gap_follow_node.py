@@ -15,6 +15,7 @@ Each test drives the node through scan_callback/odom_callback/
 joy_callback directly -- no topics or executor involved.
 """
 import math
+import os
 
 import numpy as np
 import pytest
@@ -25,8 +26,11 @@ from sensor_msgs.msg import Joy, LaserScan
 
 from gap_follow import gap_logic
 from gap_follow.gap_follow_node import GapFollowNode
+from gap_follow.speed_overrides import mapping_speed_overrides
 
 
+PACKAGED_CONFIG = os.path.join(
+    os.path.dirname(__file__), '..', 'config', 'gap_follow.yaml')
 DEADMAN_BUTTON = 4
 MAX_STEERING = 0.26
 MAX_SPEED = 2.0
@@ -694,6 +698,47 @@ def test_adaptive_width_refuses_a_narrow_reference_that_does_not_fit():
                      '-p', 'adaptive_width_reference:=1.4'])
     try:
         with pytest.raises(ValueError, match='adaptive_width_narrow'):
+            GapFollowNode()
+    finally:
+        rclpy.shutdown()
+
+
+def test_packaged_config_plus_mapping_overrides_actually_starts():
+    """The real regression guard for 2026-08-19.
+
+    Every mapping launch file lowers max_speed for a cautious first lap.
+    Doing that alone left the packaged corner caps above the new top
+    speed, this constructor raised, gap_follow_node exited, nothing
+    published /auto_map/drive, and the whole one-command auto_map_race run
+    sat in pure_pursuit's 'waiting_for_profile' with the car motionless.
+
+    Asserted against the shipped YAML rather than the constructor's own
+    declared defaults, because the YAML is what the launch files load and
+    the two disagree -- the config's corner_speed is not the code's.
+    """
+    for mapping_max_speed in ('', 0.4, 1.0, 1.5, 2.5, 3.5):
+        speeds = mapping_speed_overrides(PACKAGED_CONFIG, mapping_max_speed, '')
+        overrides = []
+        for name, value in speeds.items():
+            overrides += ['-p', f'{name}:={value}']
+        rclpy.init(args=['--ros-args', '--params-file', PACKAGED_CONFIG] + overrides)
+        try:
+            node = GapFollowNode()
+            assert node.corner_speed <= node.corner_speed_wide <= node.max_speed
+            assert node.min_speed <= node.max_speed
+            node.destroy_node()
+        finally:
+            rclpy.shutdown()
+
+
+def test_lowering_only_max_speed_is_still_rejected():
+    """The launch-side fix must not have quietly relaxed the check itself:
+    an inconsistent set is a configuration error and the node is still
+    expected to refuse it rather than pick an interpretation."""
+    rclpy.init(args=['--ros-args', '--params-file', PACKAGED_CONFIG,
+                     '-p', 'max_speed:=1.0'])
+    try:
+        with pytest.raises(ValueError, match='corner_speed_wide'):
             GapFollowNode()
     finally:
         rclpy.shutdown()

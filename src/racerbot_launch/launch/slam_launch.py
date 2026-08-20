@@ -29,6 +29,7 @@ from launch.substitutions import AndSubstitution, LaunchConfiguration, NotSubsti
 from launch_ros.actions import LifecycleNode
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
+from launch_ros.parameter_descriptions import ParameterFile
 from lifecycle_msgs.msg import Transition
 
 
@@ -39,9 +40,25 @@ def generate_launch_description():
         'f1tenth_online_async.yaml'
     )
 
+    # Ours, layered on top: the tracking-rate tuning this workspace needs,
+    # kept out of the vendored file a naive upstream sync would clobber.
+    # See the file itself for what moved and the run that motivated it.
+    default_tracking_config = os.path.join(
+        get_package_share_directory('racerbot_launch'),
+        'config',
+        'slam_tracking.yaml'
+    )
+
     slam_params_file_arg = DeclareLaunchArgument(
         'slam_params_file', default_value=default_slam_config,
         description='Full path to the slam_toolbox parameter file to use.')
+    slam_tracking_file_arg = DeclareLaunchArgument(
+        'slam_tracking_file', default_value=default_tracking_config,
+        description=(
+            "This workspace's slam_toolbox overrides, applied over "
+            'slam_params_file. Point it at a copy to try a different tracking '
+            'rate without editing the packaged one, or at slam_params_file '
+            "itself to run the vendored defaults unmodified."))
     autostart_arg = DeclareLaunchArgument(
         'autostart', default_value='true',
         description=(
@@ -66,6 +83,10 @@ def generate_launch_description():
         output='screen',
         parameters=[
             LaunchConfiguration('slam_params_file'),
+            # Order matters: later files win, so this is where the
+            # workspace's tracking-rate tuning lands.
+            ParameterFile(LaunchConfiguration('slam_tracking_file'),
+                          allow_substs=True),
             {
                 'use_lifecycle_manager': use_lifecycle_manager,
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
@@ -102,6 +123,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         slam_params_file_arg,
+        slam_tracking_file_arg,
         autostart_arg,
         use_lifecycle_manager_arg,
         use_sim_time_arg,

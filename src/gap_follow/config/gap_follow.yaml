@@ -126,6 +126,12 @@ gap_follow_node:
     # The ceiling corner_speed may rise to on a sensed-wide bend -- one the
     # fallback gap took for lack of forward visibility, not lack of room.
     # corner_speed itself remains the floor; this only ever adds capability.
+    #
+    # Bounded above by max_speed, which the mapping launch files lower. They
+    # scale this and corner_speed by the same factor to keep the relation
+    # (gap_follow/speed_overrides.py); raising either of these without
+    # checking that helper is how gap_follow_node came to exit at startup on
+    # 2026-08-19, which stalled a whole auto_map_race run.
     corner_speed_wide: 1.4
     disparity_threshold: 0.4
     # Obstacles are already inflated by half-width + margin on both sides.

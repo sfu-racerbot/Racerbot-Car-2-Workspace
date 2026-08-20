@@ -1,8 +1,10 @@
 import os
 
 from ament_index_python.packages import get_package_share_directory
+from gap_follow.speed_overrides import mapping_speed_overrides
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
+                            OpaqueFunction)
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -25,23 +27,30 @@ def generate_launch_description():
     safety policy, not a suggestion, and it applies here exactly as it
     does to every other autonomy node.
 
-    gap_follow's own speed parameters (config/gap_follow.yaml) are
-    deliberately overridden slower here by default -- this is the car's
-    *first* look at a track it may never have driven before, and mapping
-    accuracy benefits from a slow, steady lap more than a fast one does.
-    Override mapping_max_speed/mapping_min_speed on the command line once
-    you trust the track and the car's behavior on it, e.g.:
+    gap_follow drives at its own tuned speeds (config/gap_follow.yaml) by
+    default. This used to force a 1.0m/s cap on every run, and the
+    2026-08-19 run measured what that cost: 154 of 191 driving ticks were
+    commanded at exactly that cap, so it -- not the sensed curvature or
+    clearance limits -- was what the car was obeying 81% of the time.
+
+    For a genuinely unfamiliar track, cap it explicitly:
 
         ros2 launch racerbot_launch autonomous_mapping_launch.py \\
             mapping_max_speed:=1.5 mapping_min_speed:=0.6
+
+    A cap also scales the parameters defined relative to max_speed
+    (corner_speed, corner_speed_wide), because the node validates their
+    ordering against max_speed at startup and will not run at all if only
+    max_speed moves.
     """
     max_speed_arg = DeclareLaunchArgument(
-        'mapping_max_speed', default_value='1.0',
-        description="Deliberately slower than gap_follow.yaml's own default -- a first "
-                    "autonomous lap around a possibly-unfamiliar track should be cautious."
+        'mapping_max_speed', default_value='',
+        description="Optional cap, empty by default -- gap_follow.yaml's own tuned "
+                    "speeds govern. Set a number for a cautious first lap around a "
+                    "track nobody trusts yet; the coupled corner caps scale with it."
     )
     min_speed_arg = DeclareLaunchArgument(
-        'mapping_min_speed', default_value='0.4',
+        'mapping_min_speed', default_value='',
         description='See mapping_max_speed.'
     )
 
@@ -59,18 +68,25 @@ def generate_launch_description():
     # for this specific "first look at the track" scenario. Everything
     # else (safety bubble, emergency stop, the mandatory deadman check)
     # comes from gap_follow.yaml completely unchanged.
-    gap_follow_node = Node(
-        package='gap_follow',
-        executable='gap_follow_node',
-        name='gap_follow_node',
-        output='screen',
-        parameters=[
+    # corner_speed and corner_speed_wide are defined relative to max_speed
+    # and checked against it at startup, so lowering max_speed alone is not
+    # a valid parameter set -- the node exits instead of driving. Every
+    # coupled cap comes down by the same factor here; see
+    # gap_follow/speed_overrides.py.
+    def gap_follow_node(context):
+        speeds = mapping_speed_overrides(
             gap_follow_config,
-            {
-                'max_speed': LaunchConfiguration('mapping_max_speed'),
-                'min_speed': LaunchConfiguration('mapping_min_speed'),
-            },
-        ],
-    )
+            LaunchConfiguration('mapping_max_speed').perform(context),
+            LaunchConfiguration('mapping_min_speed').perform(context))
+        return [Node(
+            package='gap_follow',
+            executable='gap_follow_node',
+            name='gap_follow_node',
+            output='screen',
+            parameters=[gap_follow_config, speeds],
+        )]
 
-    return LaunchDescription([max_speed_arg, min_speed_arg, slam_launch, gap_follow_node])
+    return LaunchDescription([
+        max_speed_arg, min_speed_arg, slam_launch,
+        OpaqueFunction(function=gap_follow_node),
+    ])
