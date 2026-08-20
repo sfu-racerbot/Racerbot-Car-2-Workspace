@@ -1720,6 +1720,35 @@ body.panels-narrow .section-detach {
   font-family: var(--mono);
 }
 
+/* Which controller is actually driving. Only ever shown when a supervisor
+   (auto_map_race_node) has named one -- with a single controller running on
+   its own launch file there is nothing to disambiguate and no badge. */
+.tuning-node-title.idle {
+  color: var(--ink-dim);
+}
+
+.tuning-node-badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: var(--fs-label);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.tuning-node-badge.driving {
+  color: #04240f;
+  background: var(--go);
+}
+
+.tuning-node-badge.idle {
+  color: var(--ink-dim);
+  background: transparent;
+  border: 1px solid var(--ink-faint);
+}
+
 .tuning-group-title {
   margin: 13px 0 4px;
   font-family: var(--mono);

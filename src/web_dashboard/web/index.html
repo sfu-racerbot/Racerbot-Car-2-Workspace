@@ -154,6 +154,17 @@
             <input type="checkbox" id="intent-toggle" checked />
             <span>show arrow on map</span>
           </label>
+          <!-- The racing line only exists once a controller has actually
+               loaded a profile, so its presence on the map is the visual
+               answer to "is pure pursuit driving yet". -->
+          <div class="intent-subtitle">racing line</div>
+          <div id="raceline-status" class="intent-reason">
+            no racing line loaded -- pure pursuit is not racing yet
+          </div>
+          <label class="intent-toggle" title="Show the loaded racing line on the map, coloured by its target speed: green fast, amber slow.">
+            <input type="checkbox" id="raceline-toggle" checked />
+            <span>show racing line on map</span>
+          </label>
           <!-- Off by default. The arrow alone answers "where is it going";
                these two answer the narrower "why is it not going there as
                fast as it wanted", which is only worth the clutter while

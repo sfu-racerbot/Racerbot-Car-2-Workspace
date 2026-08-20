@@ -86,6 +86,19 @@ web_dashboard_node:
     # as before. Set false for a strictly read-only dashboard; the panel then
     # disappears and the service clients are never even created.
     enable_tuning: true
+    # Latched topic on which auto_map_race_node names the controller it
+    # currently has selected. During an auto_map_race run both
+    # gap_follow_node and pure_pursuit_node are up and tunable at once,
+    # and only one of them is driving; the panel badges which. Nothing
+    # publishes this when a single controller runs on its own launch
+    # file, and then no badge is shown -- correctly, since there is
+    # nothing to confuse it with.
+    controller_topic: /auto_map_race/controller
+    # The racing line pure_pursuit is following, published latched by
+    # whichever controller has a profile loaded. It only exists once a
+    # profile is active, so seeing it on the map is the visual answer to
+    # 'is pure pursuit driving yet'.
+    racing_line_topic: /racing_line
     # The ONLY nodes this dashboard will probe or write to. An explicit list,
     # not bus discovery: this is what keeps it inside this workspace's own
     # driving code and away from teammates' packages and vendored drivers. A

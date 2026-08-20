@@ -69,10 +69,18 @@
   const intentFactors = document.getElementById('intent-factors');
   const intentLog = document.getElementById('intent-log');
   const intentToggle = document.getElementById('intent-toggle');
+  const racelineStatus = document.getElementById('raceline-status');
+  const racelineToggle = document.getElementById('raceline-toggle');
   const commandedToggle = document.getElementById('commanded-toggle');
 
   const modeBanner = document.getElementById('mode-banner');
   const resetViewBtn = document.getElementById('reset-view');
+
+  if (racelineToggle) {
+    racelineToggle.addEventListener('change', () => {
+      state.showRacingLine = racelineToggle.checked;
+    });
+  }
 
   if (intentToggle) {
     intentToggle.addEventListener('change', () => {
@@ -137,6 +145,11 @@
     // expensive) explanation on state changes and on a slow period, so
     // most messages deliberately arrive without one.
     intent: null,
+    // The racing line pure_pursuit is following, latched from
+    // /racing_line. Null until a controller actually loads a profile,
+    // which is exactly what makes its presence meaningful.
+    racingLine: null,
+    showRacingLine: true,
     intentReason: '',
     intentReceivedAt: 0,
     intentLog: [],   // [{ state, severity, at, heldMs }] newest first
@@ -336,6 +349,9 @@
     } else if (header.type === 'intent') {
       applyIntent(header.intent);
       scheduleRender();
+    } else if (header.type === 'racing_line') {
+      state.racingLine = header.line || null;
+      renderRacingLineStatus();
     } else if (header.type === 'tuning') {
       state.tuning = { enabled: header.enabled, allowSave: header.allow_save, nodes: header.nodes || [] };
       renderTuning();
@@ -813,6 +829,13 @@
       scan: !!state.scan, intent: !!state.intent,
     });
 
+    // Over the map, under everything live. The line is fixed geometry the
+    // car is trying to follow; the scan, intent and car are what is
+    // happening now, and they should never be hidden behind it.
+    if (state.map && state.showRacingLine && state.racingLine) {
+      drawRacingLine();
+    }
+
     if (frames.scan === 'map') {
       drawBlindSpotMapRelative();
       drawScanMapRelative();
@@ -1035,6 +1058,74 @@
     const normalized = Math.min(1, Math.max(0,
       (range - LIDAR_NEAR_M) / (LIDAR_FAR_M - LIDAR_NEAR_M)));
     return LIDAR_COLORS[Math.round(normalized * (LIDAR_COLORS.length - 1))];
+  }
+
+  // Green where the profile wants full speed, amber where it plans to be
+  // slow. Two hues only, because a racing line's whole story is "where do
+  // I have to slow down" -- a rainbow would say less.
+  function racingLineColor(v, vMin, vMax) {
+    const span = Math.max(1e-6, vMax - vMin);
+    const t = Math.max(0, Math.min(1, (v - vMin) / span));
+    // amber (255,182,54) -> green (43,245,138)
+    const r = Math.round(255 + (43 - 255) * t);
+    const g = Math.round(182 + (245 - 182) * t);
+    const b = Math.round(54 + (138 - 54) * t);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  function drawRacingLine() {
+    const line = state.racingLine;
+    const pts = line.points || [];
+    if (pts.length < 2) return;
+
+    const vMin = Number.isFinite(line.speed_min) ? line.speed_min : 0;
+    const vMax = Number.isFinite(line.speed_max) ? line.speed_max : vMin + 1;
+    const screen = pts.map((p) => worldToCanvas(p[0], p[1]));
+    if (line.closed) screen.push(screen[0]);
+
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    // A dark halo underneath, so the line stays readable over both the
+    // pale mapped ground and the dark unmapped void.
+    ctx.beginPath();
+    ctx.moveTo(screen[0][0], screen[0][1]);
+    for (let i = 1; i < screen.length; i++) ctx.lineTo(screen[i][0], screen[i][1]);
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = 6;
+    ctx.stroke();
+
+    // Then one coloured segment per waypoint pair.
+    ctx.lineWidth = 2.5;
+    for (let i = 1; i < screen.length; i++) {
+      const v = pts[Math.min(i, pts.length - 1)][2];
+      ctx.beginPath();
+      ctx.moveTo(screen[i - 1][0], screen[i - 1][1]);
+      ctx.lineTo(screen[i][0], screen[i][1]);
+      ctx.strokeStyle = racingLineColor(v, vMin, vMax);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function renderRacingLineStatus() {
+    if (!racelineStatus) return;
+    const line = state.racingLine;
+    if (!line || !(line.points || []).length) {
+      racelineStatus.textContent =
+        'no racing line loaded -- pure pursuit is not racing yet';
+      return;
+    }
+    const decimated = line.decimation > 1
+      ? `, drawn every ${line.decimation} points` : '';
+    // Deliberately says "loaded", not "racing". The line appears when a
+    // profile is accepted, which under auto_map_race is a couple of
+    // seconds before command authority actually moves (transition_stop_sec).
+    // The DRIVING badge in the tuning panel is what says it has.
+    racelineStatus.textContent =
+      `${line.node} loaded ${line.points.length} waypoints, ${line.length_m}m, `
+      + `${line.speed_min}-${line.speed_max}m/s${decimated}`;
   }
 
   function drawScanMapRelative() {
@@ -2212,7 +2303,10 @@
   // 2-second value refresh never triggers a rebuild.
   function structureSignature(nodes) {
     return JSON.stringify(nodes.map((n) => [
-      n.node, n.online, n.error || '', n.savable,
+      // `driving` is in the signature deliberately: a handover from
+      // gap_follow to pure_pursuit changes no parameter, so without this
+      // the panel would keep the old node badged as the one driving.
+      n.node, n.online, n.error || '', n.savable, !!n.driving,
       (n.params || []).map((p) => p.name),
     ]));
   }
@@ -2230,8 +2324,11 @@
     const nodes = tuning.nodes || [];
     const onlineNodes = nodes.filter((n) => n.online);
     tuningDot.className = 'dot ' + (onlineNodes.length ? 'dot-green' : 'dot-gray');
+    const drivingNode = onlineNodes.find((n) => n.driving);
     tuningSummary.textContent = onlineNodes.length
-      ? `${onlineNodes.map((n) => n.node.replace(/_node$/, '')).join(', ')} tunable`
+      ? (drivingNode
+        ? `${drivingNode.node.replace(/_node$/, '')} driving`
+        : `${onlineNodes.map((n) => n.node.replace(/_node$/, '')).join(', ')} tunable`)
       : 'no driving node running';
 
     const signature = structureSignature(nodes);
@@ -2258,10 +2355,34 @@
       return;
     }
 
-    usable.forEach((node) => {
+    // With an auto_map_race supervisor up, both controllers are online and
+    // tunable at once but only one of them is actually driving. Sort the
+    // driving one to the top and badge it, so the panel cannot be mistaken
+    // for "these knobs all reach the car" -- they do not, and on
+    // 2026-08-19 a whole run was tuned through the idle one.
+    const anyDriving = usable.some((n) => n.driving);
+    const ordered = anyDriving
+      ? usable.slice().sort((a, b) => (b.driving ? 1 : 0) - (a.driving ? 1 : 0))
+      : usable;
+
+    ordered.forEach((node) => {
       const title = document.createElement('div');
-      title.className = 'tuning-node-title';
+      title.className = 'tuning-node-title'
+        + (anyDriving ? (node.driving ? ' driving' : ' idle') : '');
       title.textContent = node.node;
+      if (anyDriving) {
+        const badge = document.createElement('span');
+        badge.className = 'tuning-node-badge'
+          + (node.driving ? ' driving' : ' idle');
+        badge.textContent = node.driving ? 'driving' : 'not driving';
+        badge.title = node.driving
+          ? 'The supervisor is forwarding this node\'s commands to the car. '
+            + 'These knobs take effect now.'
+          : 'This node is running and tunable, but the supervisor is not '
+            + 'forwarding its commands. Changing these knobs will not change '
+            + 'how the car is driving right now.';
+        title.appendChild(badge);
+      }
       tuningBody.appendChild(title);
 
       if (node.error) {

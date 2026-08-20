@@ -4,6 +4,15 @@ pure_pursuit_node:
     # on purpose -- an empty/missing waypoints file makes the node refuse
     # to start rather than silently drive nothing, or an old/wrong track.
     waypoints_file: ''
+    # Read-only broadcast of the active racing line for the dashboard to
+    # draw. Latched and published once per loaded profile, never per
+    # control tick. The line only exists once a profile is active, which
+    # is what makes seeing it on the map a reliable answer to 'is pure
+    # pursuit actually racing yet' -- on the 2026-08-19 run it never was.
+    racing_line_topic: /racing_line
+    # Waypoints are decimated to this before broadcast. A 126m course at
+    # 0.15m spacing is ~840, so this only bites on something much denser.
+    racing_line_max_points: 2000
     # Only auto_map_race_launch.py overrides this to true. In normal modes,
     # retaining false preserves fail-fast behavior for a missing raceline.
     wait_for_waypoints: false

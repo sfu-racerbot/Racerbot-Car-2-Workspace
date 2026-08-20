@@ -421,9 +421,22 @@ class DashboardNode(Node):
         # usually getting it wrong at 20Hz, and a flooded terminal would
         # bury the far more important driving logs next to it.
         self.declare_parameter('intent_warn_period_sec', 5.0)
+        # --- Racing line ---
+        # The path pure_pursuit is actually following, published latched
+        # by whichever controller has a profile loaded. Drawing it is the
+        # visual answer to 'is pure pursuit driving yet' -- the line only
+        # exists once a profile is active.
+        self.declare_parameter('racing_line_topic', '/racing_line')
 
         # --- Live parameter tuning (see the module docstring) ---
         self.declare_parameter('enable_tuning', True)
+        # Latched topic on which auto_map_race_node names the controller
+        # it currently has selected. With both gap_follow_node and
+        # pure_pursuit_node up and tunable at once during an
+        # auto_map_race run, the panel otherwise gives no clue which
+        # one's knobs actually reach the car -- and on 2026-08-19 every
+        # live-tune write of the run went to the idle one.
+        self.declare_parameter('controller_topic', '/auto_map_race/controller')
         # The *only* nodes this dashboard will ever probe or write to.
         # Deliberately an explicit list rather than "every node on the
         # graph that looks tunable": scanning the bus would mean calling
@@ -485,6 +498,13 @@ class DashboardNode(Node):
         self.laser_offset_x = float(self.get_parameter('laser_offset_x').value)
         self.laser_offset_y = float(self.get_parameter('laser_offset_y').value)
         self.enable_tuning = bool(self.get_parameter('enable_tuning').value)
+        self.controller_topic = self.get_parameter('controller_topic').value
+        self.racing_line_topic = self.get_parameter('racing_line_topic').value
+        self._last_racing_line = None
+        # Which driving node currently has control, per the supervisor.
+        # '' means nothing has said -- which is the normal answer when a
+        # single controller is running on its own launch file.
+        self._active_controller = ''
         self.tuning_allow_save = bool(self.get_parameter('tuning_allow_save').value)
         self.tuning_refresh_sec = max(
             0.2, float(self.get_parameter('tuning_refresh_sec').value))
@@ -573,6 +593,15 @@ class DashboardNode(Node):
             Odometry, self.odom_topic, self.odom_callback, 10)
         self.joy_sub = self.create_subscription(
             Joy, self.joy_topic, self.joy_callback, 10)
+        # Latched by the publisher, so connecting mid-run still learns who
+        # is driving instead of waiting for the next handover.
+        latched = QoSProfile(reliability=QoSReliabilityPolicy.RELIABLE,
+                             durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                             depth=1)
+        self.controller_sub = self.create_subscription(
+            String, self.controller_topic, self.controller_callback, latched)
+        self.racing_line_sub = self.create_subscription(
+            String, self.racing_line_topic, self.racing_line_callback, latched)
         self.stopwatch_timer = self.create_timer(
             1.0 / max(self.stopwatch_update_rate_hz, 0.1), self.stopwatch_callback)
 
@@ -1070,12 +1099,53 @@ class DashboardNode(Node):
         self._broadcast(protocol.tuning_saved_message(
             bool(written) or not skipped, detail, written))
 
+    def racing_line_callback(self, message):
+        """The active racing line, forwarded straight to every browser.
+
+        Validated only for shape, not for content: a malformed payload is
+        dropped rather than allowed to wedge the display, and the previous
+        line stays on screen. Runs on the rclpy thread like every other
+        subscription.
+        """
+        try:
+            payload = json.loads(message.data)
+            points = payload['points']
+            if not isinstance(points, list) or len(points) < 2:
+                raise ValueError(f'racing line has {len(points)} point(s), need 2+')
+        except (ValueError, TypeError, KeyError) as exc:
+            self.get_logger().warn(
+                f'Ignoring a malformed racing line on {self.racing_line_topic}: {exc}',
+                throttle_duration_sec=self.intent_warn_period_sec or 5.0)
+            return
+        self._last_racing_line = payload
+        self._broadcast(protocol.racing_line_message(payload))
+
+    def controller_callback(self, message):
+        """Remember which driving node the supervisor has selected.
+
+        Runs on the rclpy thread, like every other subscription, so it can
+        rebroadcast the tuning state directly -- see the threading
+        contract above _setup_tuning().
+        """
+        controller = str(message.data or '')
+        if controller == self._active_controller:
+            return
+        self._active_controller = controller
+        if self.enable_tuning:
+            self._broadcast_tuning_state()
+
     def _tuning_state_nodes(self):
         nodes = []
         for target in self._tuning_targets:
             nodes.append({
                 'node': target.node_name,
                 'online': target.online,
+                # True only when a supervisor has actually named this node.
+                # With no supervisor running nothing claims to be driving,
+                # which is correct: whichever controller you launched is the
+                # only one there, and the panel has nothing to disambiguate.
+                'driving': bool(self._active_controller) and (
+                    target.node_name == self._active_controller),
                 'error': target.spec_error,
                 'savable': target.config_path is not None and self.tuning_allow_save,
                 'config_path': target.config_path or '',
@@ -1371,6 +1441,9 @@ class DashboardNode(Node):
         if self._last_intent is not None:
             client.write_message(json.dumps(protocol.intent_message(
                 protocol.thin_intent_payload(self._last_intent))))
+        if self._last_racing_line is not None:
+            client.write_message(json.dumps(
+                protocol.racing_line_message(self._last_racing_line)))
         if self._last_stats is not None:
             client.write_message(json.dumps(protocol.stats_message(*self._last_stats)))
         client.write_message(json.dumps(self._stopwatch_message()))

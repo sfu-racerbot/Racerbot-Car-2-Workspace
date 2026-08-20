@@ -47,6 +47,7 @@ every autonomy node in this repo follows):
   publishes:   <drive_topic> ackermann_msgs/AckermannDriveStamped
 """
 
+import json
 import math
 import sys
 
@@ -153,6 +154,14 @@ class PurePursuitNode(Node):
         # docs/writing-your-own-node.md).
         # ------------------------------------------------------------------
         self.declare_parameter('waypoints_file', '')
+        # Read-only broadcast of the active racing line, for the dashboard.
+        # Latched and published once per profile, not per tick.
+        self.declare_parameter('racing_line_topic', '/racing_line')
+        # Hard cap on how many waypoints go out. A 126m course at 0.15m
+        # spacing is ~840, so this only bites on something much denser --
+        # and a browser redrawing the whole line every frame is the thing
+        # being protected, not the wire.
+        self.declare_parameter('racing_line_max_points', 2000)
         self.declare_parameter('wait_for_waypoints', False)
         self.declare_parameter('closed_loop', True)
         self.declare_parameter('pose_topic', '/pf/viz/inferred_pose')
@@ -536,6 +545,15 @@ class PurePursuitNode(Node):
         self.intent_pub = (
             self.create_publisher(String, self.intent_topic, 10)
             if self.publish_intent else None)
+        # Latched: the racing line changes at most once a run, and a browser
+        # opened halfway through a race still needs to see it.
+        self.racing_line_pub = self.create_publisher(
+            String, str(self.get_parameter('racing_line_topic').value),
+            QoSProfile(depth=1,
+                       reliability=QoSReliabilityPolicy.RELIABLE,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
+        self.racing_line_max_points = max(
+            2, int(self.get_parameter('racing_line_max_points').value))
         self.pose_sub = self.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 10)
         self.odom_sub = self.create_subscription(
             Odometry, self.odom_topic, self.odom_callback, 10)
@@ -558,6 +576,7 @@ class PurePursuitNode(Node):
 
         if self.profile_ready:
             self._log_profile_ready(waypoints_file)
+            self._publish_racing_line(waypoints_file)
         else:
             self.get_logger().info(
                 "pure_pursuit_node ready and stopped: waiting for an auto-generated "
@@ -609,6 +628,56 @@ class PurePursuitNode(Node):
             f"decision logs every {self.decision_log_period_sec:.1f}s "
             "(plus immediate state changes).")
 
+    def _publish_racing_line(self, source: str):
+        """Broadcast the active racing line for the dashboard to draw.
+
+        Read-only, and published once per profile rather than per control
+        tick -- this runs at startup and again whenever a new
+        `waypoints_file` is accepted, never from the control loop. Failure
+        disables the broadcast and nothing else, the same contract every
+        diagnostic published from driving code follows here (see
+        docs/drive-intent.md#safety-contract-for-publishers-read-this-first).
+
+        It exists because "is pure pursuit actually driving yet?" had no
+        visual answer. On the 2026-08-19 run pure pursuit never got control
+        at all -- it logged `waiting_for_profile` 176 times while gap_follow
+        drove the whole session -- and nothing on the dashboard made that
+        distinguishable from a slow race. A racing line on the map appears
+        exactly when a profile becomes active, so its presence *is* the
+        answer.
+
+        Latched, so a browser opened mid-race still receives it.
+        """
+        if self.racing_line_pub is None:
+            return
+        try:
+            xy = self.xy
+            speeds = self.speed_profile
+            # Decimate rather than truncate: half a racing line drawn on a
+            # map is worse than a slightly coarser whole one.
+            step = max(1, math.ceil(len(xy) / self.racing_line_max_points))
+            points = [
+                [round(float(x), 3), round(float(y), 3), round(float(v), 2)]
+                for x, y, v in zip(xy[::step, 0], xy[::step, 1], speeds[::step])
+            ]
+            payload = {
+                'node': self.get_name(),
+                'source': str(source),
+                'closed': bool(self.closed_loop),
+                'points': points,
+                'decimation': step,
+                'length_m': round(float(self.total_track_length), 2),
+                'speed_min': round(float(speeds.min()), 2) if len(speeds) else 0.0,
+                'speed_max': round(float(speeds.max()), 2) if len(speeds) else 0.0,
+                'stamp': self.get_clock().now().nanoseconds * 1e-9,
+            }
+            self.racing_line_pub.publish(String(data=json.dumps(payload)))
+        except Exception as exc:  # noqa: BLE001 - a drawing aid is never worth the node
+            self.racing_line_pub = None
+            self.get_logger().warn(
+                f'Racing-line broadcast disabled after {type(exc).__name__}: {exc}. '
+                'Driving is unaffected; the dashboard just will not draw the line.')
+
     def _parameter_callback(self, parameters):
         """Runtime parameter changes: a new racing line, or a live tune.
 
@@ -632,6 +701,7 @@ class PurePursuitNode(Node):
                 except RuntimeError as exc:
                     return SetParametersResult(successful=False, reason=str(exc))
                 self._log_profile_ready(str(parameter.value))
+                self._publish_racing_line(str(parameter.value))
                 continue
             requested[parameter.name] = parameter.value
 

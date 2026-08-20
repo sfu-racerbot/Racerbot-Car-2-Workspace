@@ -353,6 +353,21 @@ def stats_message(cpu_percent: float, mem_percent: float, cpu_temp_c, uptime_s: 
     }
 
 
+def racing_line_message(payload) -> dict:
+    """The active racing line, for drawing on the map.
+
+    Passed through as the publisher sent it rather than re-encoded: the
+    points are already rounded and decimated on the publishing side, which
+    is where the waypoint count is actually known. `None` clears the line
+    from the display, which is what a controller shutting down should do.
+    """
+    return {
+        'type': 'racing_line',
+        'line': payload,
+        'stamp': time.time(),
+    }
+
+
 def tuning_state_message(nodes, enabled: bool, allow_save: bool) -> dict:
     """The whole live-tuning picture: which driving nodes are up, what
     each will let you change, and what every knob currently reads.
