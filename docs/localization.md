@@ -218,13 +218,24 @@ De-skewing uses the odometry (ideally the EKF from item 1) to project each beam 
 
 **Do item 1 first** — de-skewing with bad odometry can be worse than not de-skewing at all.
 
-### 3. Use the particle filter for the racing phase
+### 3. Use the particle filter for the racing phase — done, 2026-08-22
 
-Already vendored here and already used by `race_launch.py`: a **particle filter** ([glossary](glossary.md)) tracks many guesses at once and keeps the ones the LiDAR agrees with. `particle_filter` does this against a *finished* map.
+A **particle filter** ([glossary](glossary.md)) tracks many guesses at once and keeps the ones the LiDAR agrees with. `particle_filter` does this against a *finished* map.
 
 That is a different and easier problem than SLAM's. SLAM builds and localizes at once; a particle filter localizes against a map that is already known and correct, so it can run much faster.
 
-The auto-map-then-race flow currently keeps `slam_toolbox` running through the racing phase. Handing over to the particle filter once the map is saved would give faster, cheaper pose updates exactly when the car is going fastest. See [racing-autonomy.md](racing-autonomy.md).
+**The auto-map-then-race flow now hands over to it automatically.** Once the map is saved, `auto_map_race_node` starts the particle filter against that map, seeds it with the pose SLAM already knows, and waits for it to settle.
+
+It then republishes *the filter's* estimate on the [topic](glossary.md#topic) that [pure pursuit](glossary.md#pure-pursuit) — the race controller — reads.
+
+`pure_pursuit_node` is not reconfigured and does not notice. The supervisor was always the thing publishing that topic, so the handover changes the source, not the wiring.
+
+Two things had to be true first, and both are now:
+
+- **It had to be affordable.** The filter's ray casting was costing 28.9 ms per scan on the CPU, against 25 ms between scans — it could not keep up. On the GPU the same work takes 6.0 ms. See [gpu-acceleration.md](gpu-acceleration.md).
+- **It had to fail safe.** No saved map, a filter that will not start, one that never converges, or one that goes quiet mid-race: each logs the reason and leaves the car racing on `slam_toolbox`, exactly as before. One lapse at racing speed demotes it for the rest of the run rather than letting the car flap between two pose sources.
+
+Turn it off with `localize_after_mapping: false` in `auto_map_race.yaml`.
 
 ### 4. Tune further, with measurements
 

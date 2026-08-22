@@ -94,10 +94,25 @@ auto_map_race_node:
     # room. Raise these only on a course wide enough to absorb the error --
     # and use `supervisor_config:=` to keep that per-course rather than
     # editing the default for the narrow one.
-    profile_max_speed: 2.0
+    #
+    # 2026-08-22: RAISED from 2.0 / 1.2 / 3.0 to match the ceilings
+    # pure_pursuit_node already enforces online (max_speed 4.0,
+    # max_lateral_accel 2.5, max_acceleration 6.0), so the profile is no
+    # longer the binding limit and the controller's own curvature cap
+    # v <= sqrt(2.5/|kappa|) becomes the backstop. Asked for deliberately,
+    # to race the newly optimized line as fast as the controller allows.
+    #
+    # READ THE PARAGRAPH ABOVE BEFORE RUNNING THIS ON A NARROW COURSE. The
+    # 0.39-0.57m cross-track error it reports was measured at 2.5-3.0 m/s --
+    # inside this range, not above it. On the 1.8m indoor corridor these
+    # numbers are expected to put the car into a wall. Use
+    # `supervisor_config:=` with a copy holding the old 2.0 / 1.2 / 3.0 for
+    # anywhere tight; this default now assumes a course wide enough to
+    # absorb half a metre of running wide.
+    profile_max_speed: 4.0
     profile_min_speed: 0.5
-    profile_max_lateral_accel: 1.2
-    profile_max_accel: 3.0
+    profile_max_lateral_accel: 2.5
+    profile_max_accel: 6.0
     # SAFETY-CRITICAL, and NOT the same knob as pure_pursuit.yaml's
     # max_braking_decel. Here it is the braking authority the *profile
     # generator* assumes the car has when deciding how late it may still be
@@ -168,6 +183,93 @@ auto_map_race_node:
     # track removed, 34 near walls and the map edge deliberately kept.
     map_despeckle_max_cells: 4
     pure_pursuit_node_name: pure_pursuit_node
+
+    # --- Minimum-curvature raceline optimization (Phase 4b, now inline) ---
+    # Without this the car races the lap gap_follow happened to drive, with
+    # the wobble filtered out. That line is safe but it is not fast: it was
+    # produced by a reactive controller aiming for the middle of the gap in
+    # front of it, which is not where the fast line goes.
+    #
+    # With it on, the recorded lap becomes a *seed*. refine_centerline walks
+    # it to the middle of the corridor it measures either side, and the
+    # optimizer then re-derives the least-curved line that fits inside the
+    # real track width. Cornering speed goes as sqrt(a_lat/|kappa|), so less
+    # curvature is directly more speed everywhere at once.
+    #
+    # Measured on a synthetic 126m circuit: mean |curvature| 0.0673 -> 0.0433,
+    # a 36% reduction, in 13.9s of the time the car is already stopped for
+    # the map save. It runs in _write_profile and cannot delay anything the
+    # car is doing, because the car is not doing anything.
+    #
+    # It fails safe. No map, a track too narrow to measure, a solver error,
+    # or a result that fails the same wall-clearance and steering checks the
+    # recording must pass -- any of these logs the reason and races the
+    # cleaned recording instead. Set false to skip it entirely.
+    optimize_raceline: true
+    # Arc-length resolution the optimization runs at. Cost scales with this;
+    # 0.30 is the TUM reference's own default.
+    optimize_spacing: 0.30
+    # Resolution of the waypoints actually handed to pure pursuit.
+    optimize_output_spacing: 0.15
+    # Re-linearisation passes. The objective should settle by 6-8; more is
+    # mostly wasted time.
+    optimize_iterations: 8
+    # Largest lateral step one pass may take, in meters. Caps how far the
+    # line can jump on a bad linearisation.
+    optimize_trust_region: 0.30
+    # Extra second-difference penalty. 0 is off, and off is right unless the
+    # line looks restless on a noisy recording -- it buys smoothness by
+    # giving up curvature, which is the thing being minimised.
+    optimize_smoothing_weight: 0.0
+    # Widths beyond this are treated as a measurement escaping through a
+    # gap in the wall rather than real track.
+    optimize_max_track_width: 6.0
+    optimize_centerline_passes: 4
+    optimize_centerline_smoothing: 3
+    # SAFETY: the corridor the optimizer is allowed to use is the measured
+    # track width minus (optimize_car_width / 2 + optimize_safety_margin) on
+    # each side. Understate either and the line is planned through space the
+    # car does not fit in. 0.31 is the car's real width; keep the margin at
+    # or above profile_wall_clearance.
+    optimize_car_width: 0.31
+    optimize_safety_margin: 0.15
+
+    # --- Handing localization to the particle filter for the race ---
+    # During mapping there is no map to localize against, so slam_toolbox
+    # has to do both jobs at once. By the racing phase the map is finished
+    # and saved, and localizing against a known-correct map is a much easier
+    # problem than building one. slam_toolbox was measured making 106 pose
+    # jumps larger than 0.12m in a single 136s lap, and dropping scans while
+    # it did -- see docs/localization.md.
+    #
+    # So once the map is on disk this node starts particle_filter against
+    # it, seeds it with the pose SLAM already knows, waits for it to settle,
+    # and then republishes *its* estimate on pose_topic instead. pure_pursuit
+    # is not reconfigured and does not notice: this node has always been the
+    # thing publishing that topic.
+    #
+    # The particle filter's ray casting runs on the GPU and is ~4.8x faster
+    # than the CPU path, which is what makes it affordable at racing speed --
+    # see docs/gpu-acceleration.md. The launch it starts re-checks that the
+    # GPU ray caster is actually usable before bringing anything up.
+    #
+    # Fails safe at every step: no saved map, a filter that will not start,
+    # one that never converges, or one that goes quiet later -- each logs the
+    # reason and leaves the car racing on slam_toolbox, as it did before this
+    # existed. Set false to skip the handover entirely.
+    localize_after_mapping: true
+    pf_pose_topic: /pf/viz/inferred_pose
+    pf_initialpose_topic: /initialpose
+    # How long the filter gets to produce pf_settle_poses before this gives
+    # up on it. It has to load and index the map first, which on a saved
+    # course map measured 0.06s but scales with map area.
+    pf_startup_timeout_sec: 45.0
+    # Consecutive poses required before the car will steer on it. At the
+    # filter's update rate this is well under a second of standing still.
+    pf_settle_poses: 20
+    # Older than this and the estimate is treated as gone, not late. One
+    # lapse demotes it back to slam_toolbox for the rest of the run.
+    pf_pose_timeout_sec: 0.5
 
     enable_deadman: true
     joy_topic: /joy

@@ -327,7 +327,7 @@ sudo jetson_clocks
 
 1. **Re-validate localization on the bench.** The library underneath it was replaced. Follow the test order in [Safety](#safety) above — this is the only item here that is not optional.
 2. **Decide the particle count deliberately.** The config ships 4000 and the ceiling is 4297. You now have a real reason to pick a number rather than inherit one.
-3. **Consider handing the racing phase to the particle filter.** [localization.md](localization.md#deep-dive-what-would-improve-this-next) has wanted this for a while, and the cost argument against it just got 4.8× weaker.
+3. **Done, 2026-08-22 — the racing phase now uses the particle filter.** `auto_map_race_launch.py` starts it against the map it just saved, seeds it from the last SLAM pose, and hands over once it settles. This is what the 4.8× bought: the filter was not affordable at 28.9 ms per scan against a 25 ms scan period. See [localization.md](localization.md#3-use-the-particle-filter-for-the-racing-phase--done-2026-08-22).
 4. **Only then, look at the camera.** Install the Jetson builds of ONNX Runtime or the Isaac ROS packages, and start with something purely advisory — a node that publishes what it thinks it sees and touches no drive command at all. Prove it out as a read-only observer first.
 
 And one thing not to do, at any point: **do not put the GPU inside the 40 Hz control path.** The measurements say there is nothing to gain, and the safety model says there is a lot to lose.

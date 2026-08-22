@@ -11,10 +11,12 @@ PoseStamped input pure pursuit expects.
 import math
 import os
 from pathlib import Path
+import shutil
+import subprocess
 from time import strftime
 
 from ackermann_msgs.msg import AckermannDriveStamped
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid
 import numpy as np
 from pure_pursuit import occupancy_map, racing_math, recorded_path
@@ -28,6 +30,31 @@ from sensor_msgs.msg import Joy
 from std_msgs.msg import String
 from slam_toolbox.srv import SaveMap, SerializePoseGraph
 from tf2_ros import Buffer, TransformException, TransformListener
+
+
+def _die_with_parent():
+    """Ask the kernel to kill this child when its parent dies.
+
+    Runs in the child between fork and exec. The localization stack spawned
+    for the racing handover is a whole `ros2 launch` tree, and if this
+    supervisor is SIGKILLed -- or the terminal running it disappears -- no
+    Python cleanup gets the chance to run. Without this the map_server and
+    particle filter survive, keep the `/map_server/map` service name, and
+    silently break the *next* run's handover, which is a miserable thing to
+    diagnose a week later.
+
+    Linux-only (this car is a Jetson). Failure to set it is not worth
+    aborting a run over: the explicit terminate on shutdown still covers
+    every ordinary exit.
+    """
+    try:
+        import ctypes
+        import signal as _signal
+        PR_SET_PDEATHSIG = 1
+        ctypes.CDLL('libc.so.6', use_errno=True).prctl(
+            PR_SET_PDEATHSIG, _signal.SIGTERM, 0, 0, 0)
+    except Exception:  # noqa: BLE001 - best effort, never block the spawn
+        pass
 
 
 def angle_difference(a: float, b: float) -> float:
@@ -349,6 +376,26 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('profile_wall_clearance', 0.30)
         self.declare_parameter('profile_map_occupied_threshold', 50)
         self.declare_parameter('map_despeckle_max_cells', 4)
+        # --- Minimum-curvature raceline optimization (docs/racing-autonomy.md
+        # Phase 4b, run inline here instead of as a separate manual step) ---
+        self.declare_parameter('optimize_raceline', True)
+        self.declare_parameter('optimize_spacing', 0.30)
+        self.declare_parameter('optimize_output_spacing', 0.15)
+        self.declare_parameter('optimize_iterations', 8)
+        self.declare_parameter('optimize_trust_region', 0.30)
+        self.declare_parameter('optimize_smoothing_weight', 0.0)
+        self.declare_parameter('optimize_max_track_width', 6.0)
+        self.declare_parameter('optimize_centerline_passes', 4)
+        self.declare_parameter('optimize_centerline_smoothing', 3)
+        self.declare_parameter('optimize_car_width', 0.31)
+        self.declare_parameter('optimize_safety_margin', 0.15)
+        # --- Handing localization to the particle filter for the race ---
+        self.declare_parameter('localize_after_mapping', True)
+        self.declare_parameter('pf_pose_topic', '/pf/viz/inferred_pose')
+        self.declare_parameter('pf_initialpose_topic', '/initialpose')
+        self.declare_parameter('pf_startup_timeout_sec', 45.0)
+        self.declare_parameter('pf_pose_timeout_sec', 0.5)
+        self.declare_parameter('pf_settle_poses', 20)
         self.declare_parameter('enable_deadman', True)
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('deadman_button', 4)
@@ -398,6 +445,33 @@ class AutoMapRaceNode(Node):
         self.profile_map_occupied_threshold = int(
             value('profile_map_occupied_threshold'))
         self.map_despeckle_max_cells = int(value('map_despeckle_max_cells'))
+        self.optimize_raceline = bool(value('optimize_raceline'))
+        self.optimize_spacing = float(value('optimize_spacing'))
+        self.optimize_output_spacing = float(value('optimize_output_spacing'))
+        self.optimize_iterations = int(value('optimize_iterations'))
+        self.optimize_trust_region = float(value('optimize_trust_region'))
+        self.optimize_smoothing_weight = float(value('optimize_smoothing_weight'))
+        self.optimize_max_track_width = float(value('optimize_max_track_width'))
+        self.optimize_centerline_passes = int(value('optimize_centerline_passes'))
+        self.optimize_centerline_smoothing = int(value('optimize_centerline_smoothing'))
+        self.optimize_car_width = float(value('optimize_car_width'))
+        self.optimize_safety_margin = float(value('optimize_safety_margin'))
+        self.localize_after_mapping = bool(value('localize_after_mapping'))
+        self.pf_pose_topic = str(value('pf_pose_topic'))
+        self.pf_initialpose_topic = str(value('pf_initialpose_topic'))
+        self.pf_startup_timeout_sec = float(value('pf_startup_timeout_sec'))
+        self.pf_pose_timeout_sec = float(value('pf_pose_timeout_sec'))
+        self.pf_settle_poses = int(value('pf_settle_poses'))
+
+        # Particle-filter handover state. `pf_active` is the one that decides
+        # which estimate the car actually steers on -- see _lookup_and_publish_pose.
+        self.pf_process = None
+        self.pf_pose = None
+        self.pf_pose_time = None
+        self.pf_pose_count = 0
+        self.pf_active = False
+        self.pf_started_at = None
+        self.pf_gave_up = False
         self.latest_map = None
 
         self.recorder = LapRecorder(
@@ -477,6 +551,11 @@ class AutoMapRaceNode(Node):
         if self.enable_deadman:
             self.create_subscription(
                 Joy, self.joy_topic, self._joy_callback, 10)
+        if self.localize_after_mapping:
+            self.create_subscription(
+                PoseStamped, self.pf_pose_topic, self._pf_pose_callback, 10)
+            self.initialpose_pub = self.create_publisher(
+                PoseWithCovarianceStamped, self.pf_initialpose_topic, 10)
 
         self.create_timer(1.0 / self.control_rate_hz, self._control_loop)
         self.get_logger().info(
@@ -511,6 +590,9 @@ class AutoMapRaceNode(Node):
         `recorded_path.prepare` reports as "not checked" rather than
         silently passing.
         """
+        # Also the grid the raceline optimizer measures track width from, so
+        # the expensive despeckle+load happens once per profile run.
+        self.profile_grid = None
         if self.latest_map is None or self.profile_wall_clearance <= 0.0:
             self.get_logger().warn(
                 'No /map received, so the generated racing line cannot be '
@@ -535,8 +617,164 @@ class AutoMapRaceNode(Node):
                 f'Could not build a clearance field from /map ({exc}); the '
                 'racing line will not be checked against the walls.')
             return None, 0.0
+        self.profile_grid = grid
         return (lambda xs, ys: grid.clearance_at(xs, ys, field),
                 self.profile_wall_clearance)
+
+    def _optimize_line(self, prepared, clearance_fn, required_clearance):
+        """The minimum-curvature line inside the mapped track, or None.
+
+        None means "race the cleaned recording instead" and is a normal
+        outcome, not an error: no map, the optimizer turned off, a track too
+        narrow to measure, or a result that failed the same two checks
+        `recorded_path.prepare` applies to the recording. Racing is never
+        blocked by this step -- the worst case is the line that would have
+        been raced anyway.
+
+        The recorded lap is the seed, not the reference. `refine_centerline`
+        walks it to the middle of the corridor it measures either side, which
+        is what turns "wherever the car drove" into something the optimizer
+        can hang a symmetric corridor off.
+        """
+        if not self.optimize_raceline:
+            return None
+        grid = getattr(self, 'profile_grid', None)
+        if grid is None:
+            self.get_logger().warn(
+                'Raceline optimization is on but there is no usable /map to '
+                'measure track width from. Racing the cleaned recording.')
+            return None
+
+        try:
+            from pure_pursuit import raceline_optimizer
+
+            centerline, width_left, width_right = raceline_optimizer.refine_centerline(
+                grid, prepared.xy, self.optimize_spacing,
+                self.optimize_max_track_width,
+                iterations=self.optimize_centerline_passes,
+                smoothing_window=self.optimize_centerline_smoothing)
+            widths = width_left + width_right
+            self.get_logger().info(
+                f'Optimizing raceline: {len(centerline)} centerline points, '
+                f'track width {widths.min():.2f}-{widths.max():.2f}m.')
+
+            result = raceline_optimizer.optimize_minimum_curvature(
+                centerline, width_left, width_right,
+                vehicle_half_width=self.optimize_car_width / 2.0,
+                safety_margin=self.optimize_safety_margin,
+                spacing=self.optimize_spacing,
+                iterations=self.optimize_iterations,
+                smoothing_weight=self.optimize_smoothing_weight,
+                trust_region=self.optimize_trust_region)
+            line = raceline_optimizer.resample_closed_path(
+                result['line'], self.optimize_output_spacing)
+        except Exception as exc:  # noqa: BLE001 - never lose the run to this
+            self.get_logger().error(
+                f'Raceline optimization failed ({exc}). Racing the cleaned '
+                'recording instead.')
+            return None
+
+        # Same two questions prepare() asks of the recording, asked of the
+        # optimized line. The optimizer already holds itself off the walls
+        # using the widths it measured -- this re-checks against the map
+        # directly, because a mismeasured width is exactly the failure that
+        # would put the line through a wall while every internal number
+        # looked healthy.
+        curvature = np.abs(racing_math.estimate_path_curvature(line, closed=True))
+        old_curvature = np.abs(racing_math.estimate_path_curvature(
+            prepared.xy, closed=True))
+        curvature_limit = recorded_path.curvature_limit(
+            self.profile_max_steering_angle, self.profile_wheelbase)
+        max_curvature = float(curvature.max())
+        old_max_curvature = float(old_curvature.max())
+
+        clearance = None
+        if clearance_fn is not None:
+            clearance = float(np.min(clearance_fn(line[:, 0], line[:, 1])))
+
+        # The whole justification for this step is lap time, so measure it
+        # rather than assuming a less-curved line is always quicker. It is
+        # not: minimum curvature buys corner speed by using the full width
+        # of the track, which lengthens the path. On a wide circuit that
+        # trade is strongly positive; on a tight little loop the extra
+        # distance can cost more than the extra speed earns. Measured on
+        # this car's own 13.3m test course, the optimized line came out
+        # 16.9m long and a second per lap SLOWER.
+        new_time = self._estimated_lap_time(line)
+        old_time = self._estimated_lap_time(prepared.xy)
+
+        detail = (
+            f'mean |curvature| {float(old_curvature.mean()):.4f} -> '
+            f'{float(curvature.mean()):.4f}, max {old_max_curvature:.3f} -> '
+            f'{max_curvature:.3f} (rack limit {curvature_limit:.3f}), '
+            f'estimated lap {old_time:.2f}s -> {new_time:.2f}s, '
+            f'{len(line)} points, '
+            + (f'min wall clearance {clearance:.2f}m'
+               if clearance is not None else 'wall clearance not checked')
+            + f", {result['clamped_fraction'] * 100:.0f}% of the track too "
+              'narrow for the car plus its margin')
+
+        # Wall clearance is the one hard refusal. This is the same question
+        # `prepare` asks of the recording, and the same answer: a line the
+        # car does not fit through is not raced, whatever else it offers.
+        if clearance is not None and clearance < required_clearance:
+            self.get_logger().error(
+                f'The optimized racing line passes {clearance:.2f}m from a '
+                f'wall, inside the {required_clearance:.2f}m required '
+                f'({detail}). Racing the cleaned recording instead.')
+            return None
+
+        # Steering is a *comparison*, not an absolute bar. `prepare` already
+        # accepts a recording that exceeds the rack and merely warns that the
+        # car will understeer there, so refusing the optimized line outright
+        # for the same fault would discard it on exactly the tight courses
+        # where the recording is no better -- silently turning this whole
+        # step off. It has to be no worse than the line it replaces.
+        if max_curvature > curvature_limit and max_curvature > old_max_curvature:
+            self.get_logger().error(
+                'The optimized racing line asks for more steering than the '
+                f'car has, and more than the recorded line does ({detail}). '
+                'Racing the cleaned recording instead.')
+            return None
+
+        if new_time >= old_time:
+            self.get_logger().warn(
+                f'The optimized racing line is not faster ({detail}). Racing '
+                'the cleaned recording instead -- this is normal on a course '
+                'too tight or too narrow for a racing line to pay for the '
+                'extra distance it travels.')
+            return None
+
+        if max_curvature > curvature_limit:
+            self.get_logger().warn(
+                f'The optimized racing line needs '
+                f'{math.degrees(math.atan(max_curvature * self.profile_wheelbase)):.1f}deg '
+                'of steering at its tightest point, past the rack limit -- but '
+                'less than the recorded line needs, and it is faster. Expect a '
+                'wide apex there.')
+
+        self.get_logger().info(f'Optimized racing line accepted: {detail}.')
+        return line
+
+    def _estimated_lap_time(self, xy) -> float:
+        """Lap time for a line under this run's own profile settings.
+
+        Same call chain _write_profile uses, so the comparison that picks a
+        line is made on the numbers the car will actually be given.
+        """
+        seg_len = racing_math.compute_segment_lengths(xy, closed=True)
+        curvature = racing_math.estimate_path_curvature(xy, closed=True)
+        speeds = racing_math.compute_velocity_profile(
+            seg_len, curvature,
+            v_max=self.profile_max_speed,
+            v_min=self.profile_min_speed,
+            a_lat_max=self.profile_max_lateral_accel,
+            a_accel_max=self.profile_max_accel,
+            a_brake_max=self.profile_max_brake,
+            closed=True,
+            smoothing_passes=self.profile_smoothing_passes,
+        )
+        return float(racing_math.estimate_lap_time(seg_len, speeds))
 
     def _joy_callback(self, msg):
         self.last_joy_time = self._now_sec()
@@ -573,7 +811,178 @@ class AutoMapRaceNode(Node):
             return False, 'deadman_released', 'LB deadman button is not held'
         return True, None, None
 
+    def _pf_pose_callback(self, msg: PoseStamped):
+        self.pf_pose = msg
+        self.pf_pose_time = self._now_sec()
+        self.pf_pose_count += 1
+
+    def _pf_pose_fresh(self, now_sec: float) -> bool:
+        return (self.pf_pose is not None
+                and self.pf_pose_time is not None
+                and (now_sec - self.pf_pose_time) <= self.pf_pose_timeout_sec)
+
+    def _start_particle_filter(self, now_sec: float):
+        """Spawn particle-filter localization against the map just saved.
+
+        Started as a child process rather than declared in the launch file
+        because the map it localizes against does not exist until this point
+        in the run -- `map_server` needs a file on disk at configure time,
+        and `particle_filter` blocks in its constructor waiting for that
+        map's service. Neither can be brought up before the map is written.
+
+        Failure here is not fatal. Everything about the handover is written
+        so that a particle filter which never starts, never converges, or
+        dies later leaves the car racing on slam_toolbox exactly as it did
+        before this existed.
+        """
+        if self.pf_process is not None or self.pf_gave_up:
+            return
+        if not hasattr(self, 'run_directory'):
+            return
+        # Path(), not `self.run_directory / ...`: the save path can time out
+        # and reach here before _write_profile has run, and tests set this
+        # attribute to a plain string.
+        map_yaml = Path(self.run_directory) / 'map.yaml'
+        if not map_yaml.is_file():
+            self.get_logger().warn(
+                f'No saved map at {map_yaml}, so localization stays on '
+                'slam_toolbox for the race.')
+            self.pf_gave_up = True
+            return
+        launcher = shutil.which('ros2')
+        if launcher is None:
+            self.get_logger().error(
+                "'ros2' is not on PATH, so the particle filter cannot be "
+                'started. Racing on slam_toolbox.')
+            self.pf_gave_up = True
+            return
+        try:
+            self.pf_process = subprocess.Popen(
+                [launcher, 'launch', 'racerbot_launch', 'localize_run_launch.py',
+                 f'map_yaml:={map_yaml}'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+                # Deliberately NOT start_new_session: staying in this
+                # process group means the Ctrl+C that stops the run reaches
+                # `ros2 launch` too, and it shuts its own nodes down in
+                # order. PDEATHSIG below is the backstop for every other way
+                # this node can die. Measured: with a new session and no
+                # PDEATHSIG, killing a sim run left map_server and the
+                # particle filter running afterwards, holding the service
+                # name that the next run's handover needs.
+                preexec_fn=_die_with_parent)
+        except OSError as exc:
+            self.get_logger().error(
+                f'Could not start particle-filter localization ({exc}). '
+                'Racing on slam_toolbox.')
+            self.pf_gave_up = True
+            return
+        self.pf_started_at = now_sec
+        self.get_logger().info(
+            f'Starting particle-filter localization against {map_yaml} '
+            f'(pid {self.pf_process.pid}); racing continues on slam_toolbox '
+            'until it has converged.')
+
+    def _seed_particle_filter(self, pose):
+        """Hand the filter the pose SLAM already knows, instead of an RViz click.
+
+        Without a seed the filter spreads its particles uniformly over every
+        free cell in the map and has to converge from scratch, which on a
+        symmetric course can settle confidently into the wrong place. The car
+        is standing still at a pose slam_toolbox has just finished refining,
+        so there is a better answer available for free.
+        """
+        if pose is None:
+            return
+        x, y, yaw = pose
+        msg = PoseWithCovarianceStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.map_frame
+        msg.pose.pose.position.x = x
+        msg.pose.pose.position.y = y
+        msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        self.initialpose_pub.publish(msg)
+
+    def _update_pf_handover(self, now_sec: float, pose):
+        """Drive the slam_toolbox -> particle filter switch, and back again.
+
+        Called every tick once the map is on disk. Three jobs, in order:
+        seed the filter while it is warming up, promote it once it has
+        produced enough consecutive poses to be believable, and demote it
+        immediately if it ever goes quiet.
+        """
+        if not self.localize_after_mapping or self.pf_gave_up:
+            return
+        if self.pf_process is None:
+            return
+
+        if self.pf_process.poll() is not None and not self.pf_active:
+            self.get_logger().error(
+                f'Particle-filter localization exited (code '
+                f'{self.pf_process.returncode}) before it was ready. Racing '
+                'on slam_toolbox.')
+            self.pf_gave_up = True
+            self.pf_process = None
+            return
+
+        if not self.pf_active:
+            # Re-seed while waiting: the filter subscribes to /initialpose
+            # after its own constructor finishes loading the map, which is
+            # seconds after this process started, so a single seed sent too
+            # early is simply dropped on the floor.
+            self._seed_particle_filter(pose)
+            if self.pf_pose_count >= self.pf_settle_poses and self._pf_pose_fresh(now_sec):
+                self.pf_active = True
+                self.get_logger().info(
+                    f'Localization handed to the particle filter after '
+                    f'{self.pf_pose_count} poses. Pure pursuit now steers on '
+                    'it; slam_toolbox remains the fallback.')
+            elif (self.pf_started_at is not None
+                    and now_sec - self.pf_started_at > self.pf_startup_timeout_sec):
+                self.get_logger().error(
+                    f'The particle filter produced {self.pf_pose_count} pose(s) '
+                    f'in {self.pf_startup_timeout_sec:.0f}s, short of the '
+                    f'{self.pf_settle_poses} needed. Racing on slam_toolbox.')
+                self.pf_gave_up = True
+            return
+
+        if not self._pf_pose_fresh(now_sec):
+            # Demotion is deliberately one-way for the rest of the run. A
+            # filter that has already gone quiet once at racing speed has
+            # not earned a second chance mid-lap, and flapping between two
+            # pose sources is worse than either of them.
+            self.get_logger().error(
+                'The particle filter stopped publishing; falling back to '
+                'slam_toolbox for the rest of the run.')
+            self.pf_active = False
+            self.pf_gave_up = True
+
+    def _stop_particle_filter(self):
+        if self.pf_process is None:
+            return
+        try:
+            self.pf_process.terminate()
+            self.pf_process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            self.pf_process.kill()
+        except OSError:
+            pass
+        self.pf_process = None
+
     def _lookup_and_publish_pose(self):
+        # Once the particle filter is trusted it becomes the pose the car
+        # steers on. pure_pursuit is not reconfigured and does not know:
+        # this node has always been the thing publishing `pose_topic`, so
+        # the handover is a change of source, not a change of wiring.
+        if self.pf_active and self.pf_pose is not None:
+            pose = PoseStamped()
+            pose.header = self.pf_pose.header
+            pose.header.frame_id = self.map_frame
+            pose.pose = self.pf_pose.pose
+            self.pose_pub.publish(pose)
+            q = pose.pose.orientation
+            return (pose.pose.position.x, pose.pose.position.y,
+                    racing_math.quaternion_to_yaw(q.x, q.y, q.z, q.w))
         try:
             transform = self.tf_buffer.lookup_transform(
                 self.map_frame, self.base_frame, rclpy.time.Time())
@@ -786,6 +1195,10 @@ class AutoMapRaceNode(Node):
     def _control_step(self):
         now_sec = self._now_sec()
         pose = self._lookup_and_publish_pose()
+        # After the pose is published, so a handover that happens this tick
+        # takes effect on the next one and the car never steers on a pose
+        # source that changed halfway through a single decision.
+        self._update_pf_handover(now_sec, pose)
         deadman_ok, deadman_state, deadman_detail = self._deadman_status(now_sec)
 
         if self.state == 'mapping' and pose is not None and deadman_ok:
@@ -809,6 +1222,10 @@ class AutoMapRaceNode(Node):
             # until both have completed (or timed out).
             self._try_save_map(now_sec)
             if self._map_save_settled(now_sec):
+                # After the save, so the filter reads the finished, despeckled
+                # map rather than a half-written one -- _map_save_callback
+                # despeckles before it counts the save as complete.
+                self._start_particle_filter(now_sec)
                 self._try_load_profile()
 
         if self.state == 'transition' and now_sec >= self.race_enable_time:
@@ -1013,7 +1430,23 @@ class AutoMapRaceNode(Node):
                 'budget. The car will understeer there and pure pursuit will pull it '
                 'back; expect a wide apex rather than a clean one.')
 
+        # The cleaned recording is a *safe* line, not a fast one -- it is
+        # wherever gap_follow happened to drive, with the wobble taken out.
+        # Phase 4b re-derives the geometrically fastest line inside the track
+        # the map actually shows. It is allowed to fail: on any problem at
+        # all this falls back to `prepared`, which is the line that would
+        # have been raced before this step existed.
         smoothed = prepared.xy
+        optimized = self._optimize_line(prepared, clearance_fn, required_clearance)
+        if optimized is not None:
+            smoothed = optimized
+            racing_math.save_xy_csv(str(run_directory / 'raceline_optimized.csv'),
+                                    optimized)
+
+        # Curvature is re-measured from whichever line won. Pacing the
+        # optimized geometry with the recorded line's curvature would ask for
+        # the old corner speeds on the new corners -- too slow where it was
+        # straightened, and too fast nowhere, so the whole point is lost.
         seg_len = racing_math.compute_segment_lengths(smoothed, closed=True)
         curvature = racing_math.estimate_path_curvature(smoothed, closed=True)
         speeds = racing_math.compute_velocity_profile(
@@ -1228,6 +1661,14 @@ def main(args=None):
         try:
             if rclpy.ok():
                 node._publish_stop()
+        except Exception:
+            pass
+        # The particle filter is a child process in its own session, so it
+        # does not get the Ctrl+C that stopped this node. Left running it
+        # would hold `map_server`'s service name and quietly break the next
+        # run's handover, which is a confusing thing to debug a week later.
+        try:
+            node._stop_particle_filter()
         except Exception:
             pass
         node.destroy_node()

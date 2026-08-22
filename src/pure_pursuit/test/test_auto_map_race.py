@@ -607,3 +607,298 @@ def test_closest_approach_only_counts_after_departing():
     for x, y, yaw in _square_lap():
         recorder.update(x, y + 1.0, yaw, 1.0)
     assert recorder.closest_approach == pytest.approx(1.0, abs=0.3)
+
+
+# ---------------------------------------------------------------------------
+# Raceline optimization (Phase 4b, run inline in _write_profile)
+# ---------------------------------------------------------------------------
+
+def _circuit_map(scale=5.0, corridor_cells=44, lumpiness=0.30, resolution=0.05):
+    """A closed circuit with corners tight enough for curvature to bind.
+
+    Deliberately not an oval. On a gentle oval every point already reaches
+    v_max, curvature never limits anything, and the only thing minimum
+    curvature can change is to make the path longer -- so the optimizer
+    correctly declines it and there is nothing to assert. A lumpy circuit
+    (r varying with cos(3*theta)) has real corners, which is where a racing
+    line is worth having.
+
+    Returns the map and a lap hugging the inside of it, as gap_follow leaves
+    one behind.
+    """
+    from pure_pursuit import occupancy_map
+    size = int(2 * scale / resolution) + 80
+    yy, xx = np.mgrid[0:size, 0:size]
+    cx = cy = size / 2.0
+    theta = np.arctan2(yy - cy, xx - cx)
+    radius = np.hypot(xx - cx, yy - cy)
+    wall = (scale / resolution) * (1.0 + lumpiness * np.cos(3 * theta))
+    grid = np.full((size, size), 100, dtype=np.int8)
+    grid[(radius > wall - corridor_cells / 2)
+         & (radius < wall + corridor_cells / 2)] = 0
+    occ = occupancy_map.OccupancyMap.from_grid_message(
+        grid.flatten().tolist(), size, size, resolution, 0.0, 0.0,
+        occupied_threshold=50, despeckle_max_cells=4)
+    t = np.linspace(0.0, 2.0 * math.pi, 400, endpoint=False)
+    r = scale * (1.0 + lumpiness * np.cos(3 * t)) - corridor_cells * resolution * 0.3
+    lap = np.stack([cx * resolution + r * np.cos(t),
+                    cy * resolution + r * np.sin(t)], 1)
+    return occ, lap
+
+
+class _Prepared:
+    def __init__(self, xy):
+        self.xy = xy
+
+
+def test_optimizer_straightens_the_line_and_keeps_it_off_the_walls():
+    node = _supervisor()
+    try:
+        occ, lap = _circuit_map()
+        node.profile_grid = occ
+        field = occ.clearance_field()
+
+        def clearance_fn(xs, ys):
+            return occ.clearance_at(xs, ys, field)
+
+        line = node._optimize_line(_Prepared(lap), clearance_fn, 0.20)
+        assert line is not None, 'a circuit with real corners must be optimizable'
+
+        from pure_pursuit import racing_math
+        before = np.abs(racing_math.estimate_path_curvature(lap, closed=True)).mean()
+        after = np.abs(racing_math.estimate_path_curvature(line, closed=True)).mean()
+        assert after < before, 'the whole point is less curvature'
+        # And the acceptance rule is lap time, not curvature: a line is only
+        # returned when it actually beats the one it would replace.
+        assert node._estimated_lap_time(line) < node._estimated_lap_time(lap)
+        # The line the car is asked to drive must clear the walls by at
+        # least what was demanded, or the optimizer has quietly traded
+        # safety for lap time.
+        assert float(np.min(clearance_fn(line[:, 0], line[:, 1]))) >= 0.20
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_optimizer_is_skipped_when_turned_off_or_mapless():
+    node = _supervisor()
+    try:
+        occ, lap = _circuit_map()
+        node.profile_grid = occ
+        node.optimize_raceline = False
+        assert node._optimize_line(_Prepared(lap), None, 0.0) is None
+
+        node.optimize_raceline = True
+        node.profile_grid = None
+        assert node._optimize_line(_Prepared(lap), None, 0.0) is None
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_optimized_line_too_close_to_a_wall_is_refused():
+    """Failing the clearance check must fall back, not race the line.
+
+    The optimizer holds itself off the walls using widths it measured
+    itself. If that measurement is wrong the line goes through a wall with
+    every internal number looking healthy, so the result is re-checked
+    against the map and a failure returns None (= race the recording).
+    """
+    node = _supervisor()
+    try:
+        occ, lap = _circuit_map()
+        node.profile_grid = occ
+        # Demand more clearance than the 2.6m corridor can offer.
+        line = node._optimize_line(
+            _Prepared(lap),
+            lambda xs, ys: np.full(len(np.atleast_1d(xs)), 0.05),
+            0.20)
+        assert line is None
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Handing localization to the particle filter
+# ---------------------------------------------------------------------------
+
+class _RunningProcess:
+    """Stands in for the spawned localization launch: alive, pid-free."""
+
+    pid = 12345
+    returncode = None
+
+    def poll(self):
+        return None
+
+
+def _pf_pose(x=1.0, y=2.0):
+    from geometry_msgs.msg import PoseStamped
+    msg = PoseStamped()
+    msg.pose.position.x = x
+    msg.pose.position.y = y
+    msg.pose.orientation.w = 1.0
+    return msg
+
+
+def test_particle_filter_is_only_trusted_after_it_settles():
+    node = _supervisor()
+    try:
+        node.pf_process = _RunningProcess()          # pretend it was started
+        node.pf_started_at = node._now_sec()
+        assert not node.pf_active
+
+        # A handful of poses is not enough to steer a car on.
+        for _ in range(node.pf_settle_poses - 1):
+            node._pf_pose_callback(_pf_pose())
+        node._update_pf_handover(node._now_sec(), (0.0, 0.0, 0.0))
+        assert not node.pf_active
+
+        node._pf_pose_callback(_pf_pose())
+        node._update_pf_handover(node._now_sec(), (0.0, 0.0, 0.0))
+        assert node.pf_active, 'enough consecutive poses must promote it'
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_a_silent_particle_filter_falls_back_to_slam_for_good():
+    node = _supervisor()
+    try:
+        node.pf_process = _RunningProcess()
+        node.pf_started_at = node._now_sec()
+        for _ in range(node.pf_settle_poses):
+            node._pf_pose_callback(_pf_pose())
+        node._update_pf_handover(node._now_sec(), (0.0, 0.0, 0.0))
+        assert node.pf_active
+
+        # Nothing published for longer than the timeout.
+        stale = node.pf_pose_time + node.pf_pose_timeout_sec + 0.1
+        node._update_pf_handover(stale, (0.0, 0.0, 0.0))
+        assert not node.pf_active
+        assert node.pf_gave_up, 'one lapse at racing speed is not forgiven'
+
+        # And it stays demoted even if poses come back.
+        for _ in range(node.pf_settle_poses):
+            node._pf_pose_callback(_pf_pose())
+        node._update_pf_handover(node.pf_pose_time, (0.0, 0.0, 0.0))
+        assert not node.pf_active
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_slow_particle_filter_is_given_up_on_at_the_timeout():
+    node = _supervisor()
+    try:
+        node.pf_process = _RunningProcess()
+        node.pf_started_at = node._now_sec()
+        node._pf_pose_callback(_pf_pose())      # one lonely pose
+        late = node._now_sec() + node.pf_startup_timeout_sec + 1.0
+        node._update_pf_handover(late, (0.0, 0.0, 0.0))
+        assert not node.pf_active
+        assert node.pf_gave_up
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_the_published_pose_follows_whichever_source_is_trusted():
+    """pure_pursuit reads one topic throughout; only the source changes."""
+    node = _supervisor()
+    try:
+        published = []
+
+        class Capture:
+            def publish(self, msg):
+                published.append(msg)
+
+        node.pose_pub = Capture()
+        node._pf_pose_callback(_pf_pose(x=7.5, y=-3.25))
+
+        # Not yet trusted: the particle filter's pose must not be used, and
+        # with no TF available this reports "no pose" as it always did.
+        node.pf_active = False
+        assert node._lookup_and_publish_pose() is None
+        assert published == []
+
+        node.pf_active = True
+        pose = node._lookup_and_publish_pose()
+        assert pose is not None
+        assert pose[0] == pytest.approx(7.5)
+        assert pose[1] == pytest.approx(-3.25)
+        assert published[-1].pose.position.x == pytest.approx(7.5)
+        assert published[-1].header.frame_id == node.map_frame
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_no_saved_map_means_no_handover_attempt():
+    node = _supervisor()
+    try:
+        node.run_directory = '/tmp/definitely-not-a-run-directory-12345'
+        node._start_particle_filter(node._now_sec())
+        assert node.pf_process is None
+        assert node.pf_gave_up, 'without a map it must commit to slam_toolbox'
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_a_slower_optimized_line_is_refused():
+    """The justification for optimizing is lap time, so lap time decides.
+
+    Minimum curvature buys corner speed by using the track's full width,
+    which makes the path longer. On a tight loop that trade loses -- this
+    car's own 13.3m test course produced a 16.9m optimized line a second
+    per lap slower. Racing it would be a regression dressed as an upgrade.
+    """
+    node = _supervisor()
+    try:
+        occ, lap = _circuit_map()
+        node.profile_grid = occ
+        field = occ.clearance_field()
+
+        def clearance_fn(xs, ys):
+            return occ.clearance_at(xs, ys, field)
+
+        # Pretend every candidate is slower than what we already have.
+        node._estimated_lap_time = lambda xy: (
+            99.0 if len(xy) != len(lap) else 1.0)
+        assert node._optimize_line(_Prepared(lap), clearance_fn, 0.20) is None
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_over_steering_is_tolerated_only_when_no_worse_than_the_recording():
+    """`prepare` accepts a recording that exceeds the rack and warns about
+    understeer. Refusing the optimized line outright for the same fault
+    would discard it on exactly the tight courses where the recording is no
+    better, quietly turning the whole step off."""
+    from pure_pursuit import racing_math, recorded_path
+    node = _supervisor()
+    try:
+        occ, lap = _circuit_map()
+        node.profile_grid = occ
+        field = occ.clearance_field()
+
+        def clearance_fn(xs, ys):
+            return occ.clearance_at(xs, ys, field)
+
+        line = node._optimize_line(_Prepared(lap), clearance_fn, 0.20)
+        assert line is not None
+        limit = recorded_path.curvature_limit(
+            node.profile_max_steering_angle, node.profile_wheelbase)
+        got = float(np.abs(
+            racing_math.estimate_path_curvature(line, closed=True)).max())
+        recorded = float(np.abs(
+            racing_math.estimate_path_curvature(lap, closed=True)).max())
+        # Accepted, so it is either inside the rack limit or no worse than
+        # the line it replaces -- never worse on both counts at once.
+        assert got <= limit or got <= recorded
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

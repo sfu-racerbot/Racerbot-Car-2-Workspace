@@ -445,6 +445,12 @@ That's a real ceiling. The recorded lap is wherever you happened to drive, and t
 
 `optimize_raceline` is the tool that closes the gap — same output format, same `waypoints_file` parameter, and no change whatsoever to `pure_pursuit_node` or any of its safety layers.
 
+> **Since 2026-08-22, `auto_map_race_launch.py` runs this step for you.** It is no longer only a manual tool.
+>
+> The supervisor optimizes the line during the handover — while the car is stopped for the map save — and races the result. See [Automatic: the optimizer inside the one-command run](#automatic-the-optimizer-inside-the-one-command-run) below.
+>
+> The manual commands here are still how you optimize a line you recorded by hand, or re-optimize a saved run with different settings.
+
 **Terminal 1, from `~/racerbot-ws`.** The normal path on this car, a saved SLAM map plus a recorded lap:
 
 ```bash
@@ -562,6 +568,33 @@ If localization is off or the map is stale, the car will crawl round its own rac
 So: roughly **half the available gain** against the mature reference implementation, at a 0.15 m clearance margin the reference was not holding. That's the honest summary.
 
 The gain against a *hand-recorded* lap — which is what you actually have for your own track — is larger than the centerline figure above, because a recorded lap is a good deal worse than a centerline.
+
+### Automatic: the optimizer inside the one-command run
+
+`auto_map_race_launch.py` runs all of the above for you, between saving the map and handing the line to pure pursuit. The car is stopped for that whole window anyway, waiting on slam_toolbox's blocking save, so the optimization is free in wall-clock terms.
+
+Turn it off with `optimize_raceline: false` in `auto_map_race.yaml`. Every knob above has an `optimize_`-prefixed parameter there.
+
+**It only races the optimized line if that line is actually better.** Three checks decide, and any of them failing means the car races the cleaned recording exactly as it did before this existed:
+
+| Check | Why it can fail | What happens |
+|---|---|---|
+| **Wall clearance** ≥ `profile_wall_clearance` | The optimizer holds itself off the walls using widths it measured itself; a mismeasured width puts the line through a wall with every internal number looking healthy | Hard refusal |
+| **Steering** within the rack, *or* no worse than the recording | Tight courses need more lock than the car has | Refused only if it is *both* over the limit and worse than the line it replaces |
+| **Estimated lap time** faster than the recording | See below — this one fires more often than you would expect | Refused, with the reason logged |
+
+That last check is the one worth understanding, because "less curvature" and "faster" are not the same thing.
+
+Minimum curvature buys corner speed by using the full width of the track, and that makes the path **longer**.
+
+The trade only pays when curvature is what is limiting your speed. If the car is already at `profile_max_speed` all the way round — a gentle, wide course — then straightening the corners wins nothing and the extra distance is a pure loss.
+
+Two measurements from this workspace make the point:
+
+- On a lumpy circuit with real corners, roughly 34 m round: **13.70 s → 12.69 s**.
+- On this car's own 13.3 m test course, the optimized line came out **16.9 m long and a second per lap slower** — correctly refused.
+
+So a log line saying the optimized line was not faster is the feature working, not failing. It means that course does not have a racing line worth the detour.
 
 ---
 

@@ -51,6 +51,17 @@ from scipy.optimize import lsq_linear
 
 from pure_pursuit import racing_math
 
+# Above this many waypoints the bounded least-squares falls back to the
+# iterative solver, because the dense design matrix stops being free.
+# 4000 unknowns is a 4000-point lap -- 600m at the 0.15m output spacing --
+# and its dense matrix is still only ~128MB. See solve_lateral_offsets.
+DENSE_SOLVER_MAX_UNKNOWNS = 4000
+
+# Measured on the Jetson: tightening this to 1e-10 costs 60% more time and
+# moves the line by 0.9mm. Loosening it to 1e-6 saves 26% and moves the line
+# by 15mm, which is starting to matter against a 0.15m safety margin.
+DENSE_SOLVER_TOLERANCE = 1e-8
+
 
 def resample_closed_path(xy: np.ndarray, spacing: float,
                          smooth: bool = True) -> np.ndarray:
@@ -250,8 +261,33 @@ def solve_lateral_offsets(a_matrix: np.ndarray, offset: np.ndarray,
         ]).tocsr()
         target = np.concatenate([target, np.zeros(n)])
 
-    result = lsq_linear(design, target, bounds=(lower, upper),
-                        method='trf', lsq_solver='lsmr', tol=1e-10)
+    # Solver choice is a speed decision, not an accuracy one -- both settings
+    # below return the same line, and the tests pin that.
+    #
+    # `lsq_linear`'s iterative 'lsmr' path exists for problems with hundreds of
+    # thousands of unknowns. A lap has one unknown per waypoint: a few hundred.
+    # At that size the iterative machinery is pure overhead -- profiled on the
+    # Jetson, a 126m circuit spent 55s inside `trf_linear`, of which 46s was
+    # 781 `lsmr` calls and ~36 million Python-level matvec dispatches through
+    # scipy's LinearOperator wrapper. The arithmetic itself is negligible.
+    #
+    # Densifying and asking for the direct solve instead is 4x faster end to
+    # end (55.7s -> 13.9s), and the resulting line differs by under 1mm with
+    # an identical mean curvature. That is what makes it affordable to run
+    # inside the auto-map-race handover, where the car is stopped and waiting.
+    #
+    # The threshold is a memory guard, not a quality one: `design` is
+    # (rows x n) float64, so the dense copy is only sane while n stays small.
+    # Anything larger keeps the old iterative path and the old cost.
+    if n <= DENSE_SOLVER_MAX_UNKNOWNS:
+        if sparse.issparse(design):
+            design = np.asarray(design.todense())
+        result = lsq_linear(design, target, bounds=(lower, upper),
+                            method='trf', lsq_solver='exact',
+                            tol=DENSE_SOLVER_TOLERANCE)
+    else:
+        result = lsq_linear(design, target, bounds=(lower, upper),
+                            method='trf', lsq_solver='lsmr', tol=1e-10)
     return np.asarray(result.x, dtype=np.float64)
 
 

@@ -6,6 +6,103 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-08-22 (later) — A racing line worth racing, and a filter to follow it with
+
+Builds on the GPU work below: with the particle filter finally affordable,
+the auto-map-race flow can hand localization over for the race, and the
+optimizer that was always sitting in the repo can run inline. Validated in
+`racerbot_sim`; **needs on-car validation**, and see the speed warning.
+
+### pure_pursuit — raceline optimization is now part of the auto flow
+
+- **`auto_map_race_node` optimizes the racing line before racing it.**
+  `_write_profile` previously cleaned up the recorded lap and paced it, but
+  never reshaped it — the car raced wherever `gap_follow` happened to drive.
+  It now feeds that cleaned lap to `raceline_optimizer` as a *seed*,
+  re-derives the minimum-curvature line inside the measured track width, and
+  paces **that**. Curvature is re-measured from whichever line wins; pacing
+  new geometry with old curvature would have thrown the gain away.
+- **It only races the optimized line if that line is genuinely better.**
+  Three gates, any failure falling back to the cleaned recording: wall
+  clearance below `profile_wall_clearance` is a hard refusal; steering past
+  the rack limit is refused only when *also* worse than the recording (which
+  `prepare` itself merely warns about, so an absolute bar would have
+  disabled the feature on exactly the tight courses it was tested on); and
+  **estimated lap time must actually improve**.
+- **That last gate matters more than it sounds.** Minimum curvature buys
+  corner speed by using the full track width, which lengthens the path, so
+  it only pays where curvature is the binding limit. Measured: a lumpy
+  ~34m circuit went 13.70s → 12.69s, but this car's own 13.3m test course
+  produced a 16.9m line a second per lap *slower* — correctly refused. A
+  "not faster" log line is the feature working.
+- New `optimize_*` parameters in `auto_map_race.yaml`, `optimize_raceline`
+  defaulting **true**. Saves `raceline_optimized.csv` beside the raw and
+  profiled files.
+
+### pure_pursuit — the optimizer is 4x faster
+
+- **`solve_lateral_offsets` forced `lsq_solver='lsmr'`.** Profiled on the
+  Jetson: a 126m circuit spent 55s in `trf_linear`, of which 46s was 781
+  `lsmr` calls and ~36 million Python-level matvec dispatches through
+  scipy's `LinearOperator` — big-sparse machinery on a few hundred unknowns.
+  Densifying and asking for the direct solve is **55.7s → 13.9s**, same line
+  to within 0.9mm, identical mean curvature. New `DENSE_SOLVER_MAX_UNKNOWNS`
+  (4000) keeps the old iterative path for anything genuinely large.
+  This is what makes the step affordable inline, while the car is stopped.
+
+### pure_pursuit + racerbot_launch — localization hands over for the race
+
+- **The racing phase now uses the particle filter, not `slam_toolbox`.**
+  Once the map is saved, `auto_map_race_node` spawns localization against
+  it, seeds `/initialpose` from the pose SLAM already knows, waits for
+  `pf_settle_poses` consecutive poses, then republishes *the filter's*
+  estimate on `pose_topic`. `pure_pursuit_node` is not reconfigured — this
+  node always owned that topic, so the handover changes the source, not the
+  wiring. `slam_toolbox` measured 106 pose jumps >0.12m in a 136s lap.
+- **Fails safe at every step**, each logging its reason and leaving the car
+  on `slam_toolbox`: no saved map, a filter that will not start, one that
+  never converges inside `pf_startup_timeout_sec`, or one that goes quiet
+  later. Demotion is one-way for the rest of the run — flapping between two
+  pose sources at speed is worse than either.
+- **New `racerbot_launch/launch/localize_run_launch.py`.** `particle_filter`'s
+  own `localize_launch.py` could not be used: it points `map_server` at the
+  map packaged *inside the submodule*, and hardcodes `use_sim_time: True`,
+  which on the real car waits on a `/clock` that never ticks. Being a
+  submodule, neither is fixable in place.
+- **The `/tf` remap in that file is load-bearing.** `particle_filter`
+  publishes `map -> laser` unconditionally with no parameter to stop it,
+  while `slam_toolbox` still publishes `map -> odom` and `laser` already
+  descends from `odom`. Two parents for one frame is a broken TF tree. Its
+  transforms go to a dead topic; only its PoseStamped output is consumed.
+  The `/map_server/map` *service* is deliberately left unremapped — moving
+  it silently breaks the pairing with `map_server`.
+- **The spawned process now dies with its parent** (`PR_SET_PDEATHSIG`).
+  Found by leaking: killing the sim validation run left `map_server` and
+  the particle filter alive afterwards, holding the service name the next
+  run's handover needs. `start_new_session=True` was the cause and is gone,
+  so an ordinary Ctrl+C now reaches `ros2 launch` and shuts it down in order.
+
+### pure_pursuit — profile speed caps raised
+
+- **`profile_max_speed` 2.0 → 4.0, `profile_max_lateral_accel` 1.2 → 2.5,
+  `profile_max_accel` 3.0 → 6.0**, matching what `pure_pursuit_node` already
+  enforces online, so the profile is no longer the binding limit. Asked for
+  deliberately, to race the optimized line as fast as the controller allows.
+- **This contradicts a measured warning that is still in the file above it.**
+  The 0.39-0.57m cross-track error recorded through a corner was measured at
+  2.5-3.0 m/s — *inside* the new range — and on a 1.8m indoor corridor these
+  values are expected to put the car into a wall. Use `supervisor_config:=`
+  with a copy holding the old 2.0/1.2/3.0 for anywhere tight.
+
+### Validation
+
+- `racerbot_sim`, `indoor_wide`, full map-then-race: optimizer accepted the
+  line (mean |curvature| 0.2454 → 0.1471, estimated lap **15.16s → 11.38s**,
+  0.30m wall clearance) in 0.44s; handover completed after 20 poses; 48
+  racing ticks at up to 4.00 m/s; **zero errors, zero collisions, the filter
+  never demoted**.
+- 274 `pure_pursuit` tests pass (10 new covering both features).
+
 ## 2026-08-22 — The GPU ray caster, which was never actually built
 
 Came out of an audit of what the Jetson's GPU is worth to this workspace
