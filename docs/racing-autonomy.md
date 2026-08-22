@@ -310,7 +310,11 @@ Without a map there is nothing to localize against, and the racing line is just 
 
 ## Phase 2: Localize against the map (Monte Carlo Localization)
 
-Also unchanged — this is `particle_filter`, already in this workspace, using `range_libc` for fast GPU-accelerated ray casting.
+Also unchanged — this is `particle_filter`, already in this workspace, using `range_libc` for fast ray casting.
+
+That ray casting runs on the Jetson's GPU. It is 4.8× faster than the CPU, and it is what lets the filter keep up with the LiDAR at all.
+
+Two things have to be right for it to work: `range_libc` must have been built with CUDA, and `max_particles` must stay under a limit. [gpu-acceleration.md](gpu-acceleration.md) covers both, including what happens if you get either wrong.
 
 See [operations.md](operations.md#localizing-against-a-saved-map) for the exact launch procedure, **including seeding it with RViz's "2D Pose Estimate"**. Pure pursuit will not drive correctly without that seed, and may drive confidently in the wrong direction.
 

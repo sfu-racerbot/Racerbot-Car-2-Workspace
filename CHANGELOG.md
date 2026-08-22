@@ -6,6 +6,72 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-08-22 — The GPU ray caster, which was never actually built
+
+Came out of an audit of what the Jetson's GPU is worth to this workspace
+(new `docs/gpu-acceleration.md`). Needs on-car validation — the library
+under localization was replaced.
+
+### range_libc (build change, not a submodule bump)
+
+- **`range_libc` was installed without CUDA, while `particle_filter` asks
+  for `range_method: 'rmgpu'`.** `PyRayMarchingGPU.__cinit__` prints a
+  warning and then returns *without constructing anything*, leaving a null
+  pointer; the config is accepted, the node starts, and the first scan
+  kills the process with `Aborted (core dumped)`. `race_launch.py` includes
+  `localize_launch.py`, so the documented race-day launch would have lost
+  localization on its first scan. Latent only because the auto-map-then-race
+  flow keeps `slam_toolbox` running through the racing phase instead.
+- **Rebuilt with `WITH_CUDA=ON`** (`cd src/range_libc/pywrapper &&
+  WITH_CUDA=ON python3 setup.py install --user`). `setup.py` already
+  carried the correct `-arch=sm_87`. `range_libc.SHOULD_USE_CUDA` now
+  reports `True`. No submodule source was modified; this is a build
+  artifact, and `colcon build` does not touch it (no `package.xml`).
+- **Measured: 4.8× on the particle filter's own sensor-update path** —
+  28.86ms → 5.96ms at the shipped 4000 particles, against a 25ms scan
+  period, so the CPU path did not fit. Raw ray casting is 10.7× (34.05ms →
+  3.19ms for 240k rays), returning bit-identical distances to the CPU
+  method (max difference exactly 0.0).
+- **CPU range methods are unchanged by the rebuild** — verified identical
+  output, so `pure_pursuit`'s map-subtraction opponent detection
+  (`map_subtraction.py`, `PyRayMarching`) is unaffected.
+
+### racerbot_launch
+
+- **`race_launch.py` now refuses to launch on a GPU config that would
+  fail**, via a new `_check_gpu_ray_caster()` run at launch-description
+  generation time. It reads `particle_filter`'s `localize.yaml` the same
+  way the file already reads `pure_pursuit.yaml`. Two checks, both only
+  when `range_method` is `'rmgpu'`:
+  - `range_libc` built without CUDA → raises with the rebuild command,
+    instead of letting the node abort on its first scan.
+  - `max_particles × rays > 262144` → raises with the computed limit.
+    Above that threshold `range_libc`'s GPU ray caster returns **silently
+    wrong ranges** rather than failing: measured, one particle over the
+    limit made 100% of returned ranges wrong, with one line on stdout.
+    Cause is two defects in `numpy_calc_range_angles` (RangeLib.h) — a
+    `ceil` that oversizes the chunk past the `CHUNK_SIZE` device buffer,
+    and an offset computed from `num_in_chunk` where it means
+    `particles_per_iter`. Both upstream, both documented in
+    `docs/gpu-acceleration.md`.
+  - New module constants `LIDAR_BEAMS` (1081, matching
+    `racerbot_sim/sim_bridge.py`) and `RANGE_LIBC_CHUNK_SIZE` (262144).
+    No new ROS parameters.
+- With the shipped `max_particles: 4000` and `angle_step: 18` (61 rays),
+  the limit computes to 4297 particles — the current config passes with
+  about 7% headroom.
+
+### docs
+
+- **New `docs/gpu-acceleration.md`** — the full audit: what is and isn't in
+  this Jetson (no DLA, no PVA, no NVENC, no CUDA in OpenCV, all verified on
+  the board), why the driving loops stay on the CPU (`gap_follow` 2.8% and
+  `pure_pursuit` 4.3% of their 25ms budget, against a 36–61µs GPU round
+  trip), and what the idle tensor cores would need to be worth using.
+- **`docs/racing-autonomy.md` corrected.** It described `range_libc` as
+  doing "fast GPU-accelerated ray casting", which was not true at the time
+  it was written. It is true now, with the two conditions stated.
+
 ## 2026-08-19 — Making a mapping run finish, and finish quicker
 
 Everything here came out of one run's logs (`~/.ros/log`, 2026-08-19

@@ -64,6 +64,7 @@ After that, follow whichever branch below matches what you're doing.
 | [simulator.md](simulator.md) | The no-ROS simulator that tests controller *math* directly. |
 | [ros-simulator.md](ros-simulator.md) | The same physics behind the real ROS topics, so whole launch files can be validated without the car. Includes the interlock that stops it running beside real hardware. For the step-by-step workflow, see [sim-validation.md](sim-validation.md). |
 | [sim-fidelity-audit.md](sim-fidelity-audit.md) | How closely the simulator matches this physical car, and where it doesn't. Read before trusting a simulator result. |
+| [gpu-acceleration.md](gpu-acceleration.md) | What the Jetson's GPU and tensor cores are worth to this workspace, measured on the car. Read before changing the particle filter's settings, or before planning anything that needs CUDA. |
 | [../tools/f1tenth_sim/README.md](../tools/f1tenth_sim/README.md) | Our fidelity layer over stock F1TENTH Gym — this car's real parameters, a friction circle, the real servo, and collision detection that actually fires. What it changed, and what it then found. |
 
 ## Look something up
