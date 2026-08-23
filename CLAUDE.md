@@ -21,14 +21,15 @@ source install/setup.bash               # every new terminal, always second
 - `--symlink-install` means edited `.py`/launch/config files take effect on next launch with no rebuild — only rebuild after touching `package.xml`, `setup.py`, C++ sources, or adding/removing files.
 - `rm -rf build install log && colcon build` is safe if the build state is ever broken (these three dirs are gitignored, pure build artifacts).
 
-Run a package's standalone (non-ROS) unit tests directly, no sourcing/build required:
+Run the tests — **source ROS first.** `gap_follow`, `pure_pursuit`, and `usb_cam_stream` each contain test files that import `rclpy`; unsourced they fail to collect, hiding **177 of the 900 tests**, including every deadman, watchdog, and node-behavior test:
 ```bash
-python3 -m pytest src/pure_pursuit/test/ -v
-python3 -m pytest src/web_dashboard/test/ -v
-python3 -m pytest src/drive_intent/test/ -v
-python3 -m pytest src/racerbot_sim/test/ -v
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
+python3 -m pytest src/<pkg>/test/ -v                              # one package
+colcon test --packages-select <pkg> && colcon test-result --verbose
 ```
-These test framework-agnostic logic pulled out of the ROS nodes (`pure_pursuit/racing_math.py`, `web_dashboard/protocol.py`, all of `drive_intent`) — the pattern to follow for any new package with non-trivial math/parsing: keep it importable without `rclpy`.
+Verified 2026-08-22: unsourced, `src/pure_pursuit/test/` collects 185 of 274 and aborts on 5 collection errors, `gap_follow` hides 70, and `usb_cam_stream` collects nothing at all. **Never reach for `--continue-on-collection-errors`** — it turns that loud abort into a green run over a fifth of the suite. Compare the collected count against `grep -c '^def test' src/<pkg>/test/*.py`.
+
+`drive_intent`, `odom_calibration`, `race_diagnostics`, `racerbot_sim`, and `web_dashboard` are pure Python and do run unsourced — that is the pattern to follow for any new package with non-trivial math or parsing: keep the logic importable without `rclpy` (`pure_pursuit/racing_math.py`, `web_dashboard/protocol.py`, all of `drive_intent`).
 
 Drive the car (manual):
 ```bash
@@ -73,6 +74,60 @@ Everything communicates over ROS2 topics only — no shared memory, no direct fu
 **Diagnostics published from a driving node** (currently only `/drive_intent`) must never be able to cost the car anything: publish strictly *after* the drive command for the tick, wrap the whole thing in one try/except that disables the diagnostic rather than the node, and read only what the control path already computed. Full contract and tests: `docs/drive-intent.md#safety-contract-for-publishers-read-this-first`.
 
 Test order for any new driving node, never skip ahead: static topic check (no driver stack running) → wheels off the ground (full stack + LB held) → floor, low speed, open space. See `docs/writing-your-own-node.md#testing-before-its-on-wheels`.
+
+## Test Quality — binding on all test work in this repo
+
+**Source of truth: [TEST_QUALITY_STANDARDS.md](TEST_QUALITY_STANDARDS.md)** — the reasoning, worked examples from this tree, and copy-paste sweeps live there. This section is the short version, meant to be re-read every session. **It governs all test-writing in this repo from now on** — new packages, edits to existing suites, and work done in future sessions by anyone, human or agent. It is not scoped to the audit that produced it.
+
+The rule behind all of it: **a test that cannot fail is worse than no test.** It costs review time, occupies the name of coverage it isn't providing, and turns "the suite is green" from evidence into noise. On a car that can hurt someone, that is a safety problem, not a tidiness one.
+
+### Hard rule 1 — prove every new test can fail, before calling it done
+
+**Before marking any new or changed test complete, break the code it covers and watch the test fail.**
+
+1. Stub the unit under test — `pass`, `return <the exact constant the test expects>`, or `raise NotImplementedError`.
+2. Run only that test.
+3. It **must** fail. If it still passes, the test is hollow — it is detecting nothing. Rewrite it.
+4. Revert the break, re-run, confirm green. Never commit a stub.
+
+`return <the expected constant>` is the case people skip and the one that catches a test that has memorised an answer instead of checking a computation. For math, geometry, and control code, also require at least one of these to be caught: flipped comparison (`<`→`<=`), negated sign, a constant changed by 10%, two adjacent same-typed args swapped, an input returned unchanged, a clamp deleted. Line coverage is not evidence — a test can execute every line of `racing_math.py` and assert nothing about any of it.
+
+A test never seen to fail is an assumption, not a test.
+
+### Hard rule 2 — never weaken a test to make a suite pass
+
+**A failing test is a finding, not an obstacle. The default response is to fix the code.**
+
+Do not widen a tolerance, weaken an equality to a bound or a bound to a type check, drop the edge case that failed, add `skip`/`xfail`, or delete the test — and never do any of these in the same change as an edit to the code it covers.
+
+If a test genuinely looks wrong after a spec change, **stop and flag it to me with your reasoning instead of editing it silently.** Say what the old test asserted, what the new behavior is, **where that behavior is written down** (a `docs/` section, datasheet, or message definition), and why the old behavior was *wrong* rather than merely inconvenient. "Flaky", "no longer relevant", "failing after the refactor", and "the new value is what the code does now" are not reasons.
+
+### Anti-pattern checklist
+
+| # | Reject a test that… |
+|---|---|
+| A1 | asserts on a mock's own `return_value`, or whose only assertion is `assert_called_*`. Mock only a real process boundary (socket, serial, clock, filesystem) — **never** our own ROS-free modules (`racing_math`, `protocol`, `netbind`, `drive_intent`); they were split out precisely so they can be called for real. |
+| A2 | would still pass against a stub — asserts only a type or shape (`isinstance`, `len(out) == 2`), only that nothing raised, or only on a value the test itself passed straight through. |
+| A3 | hardcodes today's output with no independent oracle. Every expected value must trace to a **closed form** recomputed in the test, an **invariant**, a **cited spec** (give the path), or a **recorded measurement** (name the run) — and the test must say which. An unexplained golden number is a change detector: label it `# change-detector (not an oracle)` and give the same unit a real-oracle test too. |
+| A4 | covers only the happy path. Required edges: zero, negative, exactly at the boundary and one step past it, `NaN`/`inf`, empty and single-element input; parsers also need truncated, wrong-type, unknown-field, oversized, malformed-UTF-8; scan consumers also need all-`inf`, all-zero, `NaN` beams, wrong beam count, stale stamp. For driving code the specified edge behavior is nearly always "command zero / publish nothing", never "raises whatever it happens to raise". |
+| A5 | asserts something trivially true, swallows exceptions (`except: pass`), uses `pytest.raises(Exception)` rather than a specific error with `match=`, uses a bare `pytest.approx` with no explicit tolerance and unit (`abs=1e-3  # 1 mm`), or hides its only assertion behind an `if`/loop filter that may match zero times and pass vacuously. |
+| A6 | was loosened, skipped, or deleted because it was failing — see Hard rule 2. Every `skip`/`xfail` needs a reason naming an issue or doc section and a condition for removal; prefer `xfail(strict=True)`. |
+| A7 | takes its verdict from the thing under test. Above all: gym's own collision flag never fires with this workspace's geometry — a car drove 35.5 m through a barrier unflagged. The pass/fail signal must be computed independently of the system producing the behavior. |
+| A8 | tests only the permissive side of a safety check. "LB held → the car drives" is the half that fails safely; the refusal is the half that matters. |
+| A9 | isn't run by the command people actually run. State which runner executes a new test, and check it is actually collected — never paper over a collection error with `--continue-on-collection-errors`. |
+
+### Standing requirement — the LB deadman
+
+Every node that can publish `/drive`, `/ackermann_cmd`, or `/commands/motor|servo/*` implements the deadman gate independently, so **each node needs its own four deny-path tests — another node's coverage does not transfer.** Assert the published **command**, not an internal flag:
+
+| State | Required assertion |
+|---|---|
+| LB held | non-zero command published |
+| LB released | zero command / no command |
+| `/joy` never received | zero command / no command |
+| `/joy` stale past timeout | zero command / no command |
+
+`enable_deadman:=false` is permitted in a node test **only** when the same node construction also passes `drive_topic:=/test_only/drive` — without the remap, a test publishes live commands straight into `ackermann_mux` if the driver stack is up. Never in shipped config, and never in a test whose subject *is* the deadman.
 
 ## Package anatomy (local `ament_python` packages)
 
