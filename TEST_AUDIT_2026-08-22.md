@@ -105,6 +105,37 @@ catches the bug — but each of these assertions, alone, cannot fail for the rea
 | `test_process_state_message_is_json_serialisable` | web_dashboard/test_proccontrol.py:447 | `process_state_message -> None` | assert the round-tripped payload, not just that `json.dumps` ran |
 | `test_thinning_tolerates_a_missing_or_empty_path` | web_dashboard/test_protocol_encoding.py:199 | `thin_intent_payload -> {}` | assert the returned payload's contents |
 
+## Resolution — 2026-08-23
+
+All 10 were rewritten. Each was then re-run against the exact mutant it had previously
+survived and **confirmed to fail**, per Hard rule 1 of the new `CLAUDE.md` section:
+
+| Mutant | Tests that now fail against it |
+|---|---|
+| `compute_velocity_profile -> np.full(n, v_max)` | both braking-capability tests |
+| `schema.validate -> 'constant rejection'` | all 6 refusal tests |
+| `process_state_message -> None` | the JSON round-trip test |
+| `thin_intent_payload -> {}` | the missing/empty-path test |
+
+The fixes, by shape:
+
+- **Braking invariants** — count the braking segments and assert `>= 2` after the loop, so
+  the bound can no longer go unchecked against a constant profile. The threshold is the
+  stadium's geometry (two corners), not the measured count of 9, which would be an A3
+  change detector.
+- **The six refusals** — assert *which* reason `validate` returned, built from the module's
+  own constants (`SCHEMA_VERSION`, `SEVERITIES`, `MAX_PATH_POINTS`) rather than pasted text.
+- **JSON round-trip** — decode the encoded message and assert its contents; a bare
+  `json.dumps()` is satisfied by `None` and `{}` alike.
+- **Thinning pass-through** — assert `is payload`, which is the documented contract
+  ("returns the payload unchanged (not a copy)") and pins both halves of it.
+
+Nothing was weakened: every line removed was an `is not None` or a bare `json.dumps`, each
+replaced by an exact-value assertion. Suite after the rewrites: **900 passed**.
+
+The verdict column in the table below is the state *at audit time*; these 10 rows are now
+resolved.
+
 ## Full per-test table
 
 | # | test | file:line | verifies | anti-patterns | mutation check | verdict |

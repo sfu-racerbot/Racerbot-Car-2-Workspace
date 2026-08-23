@@ -449,7 +449,15 @@ def test_process_state_message_is_json_serialisable(tmp_path):
     into the payload would raise at send time, on the rclpy thread."""
     root = make_proc(tmp_path, {100: PP_NODE})
     targets = proccontrol.scan(root, self_pid=999, uid=os.getuid())
-    json.dumps(protocol.process_state_message(targets, True))
+    message = protocol.process_state_message(targets, True)
+
+    # Round-trip and assert on what comes back. A bare json.dumps() call is
+    # satisfied by None and by {} alike, so it proves only that nothing
+    # raised -- not that the message survived encoding intact.
+    restored = json.loads(json.dumps(message))
+    assert restored['type'] == 'processes'
+    assert restored['enabled'] is True
+    assert [t['name'] for t in restored['targets']] == ['pure_pursuit_node']
 
 
 def test_process_result_message_reports_the_escalation():

@@ -218,7 +218,10 @@ def test_decode_rejects_garbage():
 
 
 def test_validate_rejects_a_non_object():
-    assert schema.validate([1, 2]) is not None
+    # oracle: spec -- validate()'s first branch. Asserting the reason rather
+    # than "something was returned" is what fails an implementation that
+    # rejects every payload with a single canned string.
+    assert schema.validate([1, 2]) == 'payload must be an object'
 
 
 @pytest.mark.parametrize('key', ['node', 'state', 'frame'])

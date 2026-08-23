@@ -197,9 +197,13 @@ def test_thinning_never_mutates_the_callers_payload():
 
 
 def test_thinning_tolerates_a_missing_or_empty_path():
+    # oracle: spec -- thin_intent_payload() "returns the payload unchanged
+    # (not a copy) when there is nothing to drop". Asserting identity pins
+    # both halves of that sentence; the old `is not None` was satisfied by
+    # any object at all, including an empty dict that had dropped the path.
     for payload in ({}, {'path': []}, {'commanded_path': []},
                     {'path': _path([(0.0, 0.0)]), 'commanded_path': []}):
-        assert protocol.thin_intent_payload(payload) is not None
+        assert protocol.thin_intent_payload(payload) is payload
 
 
 def test_thinning_leaves_every_other_field_untouched():

@@ -251,11 +251,23 @@ def test_velocity_profile_never_exceeds_braking_capability():
         a_lat_max=8.0, a_accel_max=3.0, a_brake_max=a_brake_max, closed=True)
 
     n = len(speed)
+    braking_segments = 0
     for i in range(n):
         j = (i + 1) % n
         if speed[i] > speed[j] + 1e-9:  # a braking segment: i is faster than i+1
+            braking_segments += 1
+            # oracle: closed form -- v_i^2 <= v_j^2 + 2*a*s is constant-acceleration
+            # kinematics, recomputed here rather than copied from a run.
             allowed = math.sqrt(speed[j] ** 2 + 2.0 * a_brake_max * seg_len[i]) + 1e-6
             assert speed[i] <= allowed
+
+    # oracle: invariant -- the bound above is only checked on segments where the
+    # car is slowing, so a profile with no braking at all would satisfy it
+    # vacuously. A stadium has two corners, so any correct profile brakes on at
+    # least one segment approaching each of them. (Measured here: 9 of 120.)
+    assert braking_segments >= 2, (
+        f'only {braking_segments} braking segments, so the braking bound above '
+        f'went essentially unchecked -- is the profile constant?')
 
 
 def test_velocity_profile_respects_v_max_and_v_min():
@@ -644,11 +656,21 @@ def test_friction_ellipse_profile_still_respects_braking_capability():
         a_lat_max=8.0, a_accel_max=3.0, a_brake_max=a_brake_max,
         closed=True, friction_ellipse=True)
     n = len(speed)
+    braking_segments = 0
     for i in range(n):
         j = (i + 1) % n
         if speed[i] > speed[j] + 1e-9:
+            braking_segments += 1
+            # oracle: closed form -- same constant-acceleration bound as the
+            # uncoupled case; the ellipse may only ever brake harder, not less.
             allowed = math.sqrt(speed[j] ** 2 + 2.0 * a_brake_max * seg_len[i]) + 1e-6
             assert speed[i] <= allowed
+
+    # oracle: invariant -- see the uncoupled test: without this the loop above
+    # checks nothing at all against a constant profile.
+    assert braking_segments >= 2, (
+        f'only {braking_segments} braking segments, so the braking bound above '
+        f'went essentially unchecked -- is the profile constant?')
 
 
 def test_friction_ellipse_changes_nothing_on_a_constant_curvature_loop():

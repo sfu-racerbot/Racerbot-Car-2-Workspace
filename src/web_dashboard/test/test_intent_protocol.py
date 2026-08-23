@@ -99,19 +99,29 @@ def test_undecodable_data_raises_valueerror_rather_than_something_exotic(text):
 
 
 def test_a_payload_from_a_newer_schema_is_refused_not_half_drawn():
-    assert schema.validate(valid_payload(v=2)) is not None
+    """The reason is asserted, not merely its existence: "it was refused"
+    is also true of an implementation that refuses everything, and the
+    text is what tells a teammate which side is behind."""
+    # oracle: spec -- drive_intent/schema.py validate(), version branch
+    assert schema.validate(valid_payload(v=2)) == (
+        f'unsupported schema version 2 (need {schema.SCHEMA_VERSION})')
 
 
 def test_a_missing_severity_is_refused():
     payload = valid_payload()
     del payload['severity']
-    assert schema.validate(payload) is not None
+    # oracle: spec -- validate() reports the allowed set and what arrived,
+    # so a publisher can see what to send instead.
+    assert schema.validate(payload) == (
+        f'severity must be one of {schema.SEVERITIES}, got None')
 
 
 def test_a_path_of_the_wrong_shape_is_refused():
     """The most likely mistake in a hand-rolled C++ JSON writer: emitting
     an array of arrays instead of an array of objects."""
-    assert schema.validate(valid_payload(path=[[0.0, 0.0, 1.0]])) is not None
+    # oracle: spec -- _check_points() names the offending index
+    assert schema.validate(valid_payload(path=[[0.0, 0.0, 1.0]])) == (
+        'path[0] must be an object')
 
 
 def test_a_nan_from_a_printf_style_publisher_is_refused():
@@ -120,13 +130,18 @@ def test_a_nan_from_a_printf_style_publisher_is_refused():
     way it must not reach the browser."""
     payload = json.loads(json.dumps(valid_payload()).replace(
         '"commanded_speed": 1.8', '"commanded_speed": NaN'))
-    assert schema.validate(payload) is not None
+    # oracle: spec -- validate() separates "not a number" from "not finite";
+    # this payload is the latter, and naming it is what distinguishes this
+    # test from one that merely observes some refusal.
+    assert schema.validate(payload) == 'commanded_speed must be finite'
 
 
 def test_an_oversized_path_is_refused_before_it_reaches_a_phone():
-    payload = valid_payload(
-        path=[{'x': 0.0, 'y': 0.0, 'v': 1.0}] * (schema.MAX_PATH_POINTS + 1))
-    assert schema.validate(payload) is not None
+    over = schema.MAX_PATH_POINTS + 1
+    payload = valid_payload(path=[{'x': 0.0, 'y': 0.0, 'v': 1.0}] * over)
+    # oracle: spec -- _check_points() reports the actual count against the limit
+    assert schema.validate(payload) == (
+        f'path has {over} points, over the {schema.MAX_PATH_POINTS} limit')
 
 
 def test_the_reason_may_legitimately_be_absent():
