@@ -361,3 +361,79 @@ def test_the_phone_breakpoint_rescales_every_size_in_the_scale():
 def test_the_stylesheet_has_balanced_braces():
     css = _read('style.css')
     assert css.count('{') == css.count('}'), 'unbalanced braces in style.css'
+
+
+# --------------------------------------------------------------------------
+# The measuring tool and the map panel
+# --------------------------------------------------------------------------
+
+def test_the_measure_module_loads_before_the_dashboard():
+    """dashboard.js reads window.__measure while it is initialising, so
+    measure.js has to have run first. Loaded the other way round the
+    measuring tool silently does nothing -- no error, no missing element,
+    just taps that never place a point.
+
+    (panels.js is the opposite case and loads AFTER, because it moves
+    elements dashboard.js has already looked up.)"""
+    # Matched on the <script> tags themselves, not on the first mention of
+    # each filename -- both are named in comments further up the page.
+    scripts = re.findall(r'<script\s+src="([^"]+)"', _read('index.html'))
+    assert 'measure.js' in scripts, 'index.html never loads measure.js'
+    assert 'dashboard.js' in scripts
+    assert scripts.index('measure.js') < scripts.index('dashboard.js'), (
+        f'measure.js must be loaded before dashboard.js; order is {scripts}')
+
+
+def test_the_screen_to_world_inverse_exists_exactly_once():
+    """The forward transforms have always been named functions; the inverse
+    lived inline inside zoomAt, in two copies. Re-inlining it is how the
+    world-frame and body-frame branches drift apart, and a body-frame bug
+    only shows up before a map has loaded -- when nobody is looking."""
+    js = _read('dashboard.js')
+    assert js.count('function canvasToWorld(') == 1
+    assert js.count('function canvasToBody(') == 1
+    assert js.count('function canvasToActive(') == 1
+
+
+def test_the_measurement_overlay_never_uses_a_decision_colour():
+    """Colour means state on this page, never decoration: green, amber and
+    red are reserved for what the CAR has decided. A measurement is the
+    system talking, so it is cyan -- see docs/web-dashboard.md's "Reading
+    the colours"."""
+    js = _read('dashboard.js')
+    start = js.index('function drawMeasure(')
+    end = js.index('function drawMeasureLabel(')
+    body = js[start:end] + js[end:js.index('\n  }', end)]
+    for forbidden in ('HUD.go', 'HUD.warn', 'HUD.bad'):
+        assert forbidden not in body, (
+            f'the measurement overlay uses {forbidden}, which belongs to '
+            f'what the car decided, not to an instrument reading')
+
+
+def test_the_measurement_readout_is_pinned_outside_the_scroll_region():
+    """On a phone the sidebar is a sheet that starts closed, so a running
+    total living only in the sheet would be invisible exactly when someone
+    is measuring. Same reasoning as the mode banner and the view controls."""
+    html = _read('index.html')
+    assert 'id="measure-panel"' in html
+    # It must be a sibling of the scrolling panel host, not a descendant --
+    # the section list closes before it starts.
+    assert html.index('id="measure-panel"') > html.index('data-section="maps"')
+    assert 'position: fixed' in _rule(_read('style.css'), '#measure-panel')
+
+
+def test_the_delete_confirmation_is_a_text_field_not_a_checkbox():
+    """Typing the run's name is the guard. A checkbox, or anything that can
+    be satisfied with one tap, would not be one."""
+    html = _read('index.html')
+    assert 'map-confirm-input' in _read('dashboard.js')
+    assert 'map-confirm-input' in _read('style.css')
+
+
+def test_the_three_map_actions_are_separate_blocks():
+    """Clearing a view, resetting SLAM and deleting files have wildly
+    different consequences. Putting them in one undifferentiated list is
+    how someone reaches for the wrong one."""
+    html = _read('index.html')
+    for block in ('map-clear-view', 'map-reset-slam', 'map-delete-block'):
+        assert f'id="{block}"' in html, f'{block} is missing from the map section'

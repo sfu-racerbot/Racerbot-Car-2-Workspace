@@ -464,3 +464,82 @@ def process_result_message(pid: int, name: str, ok: bool, detail: str,
         'sent': list(sent),
         'stamp': time.time(),
     }
+
+
+def saved_maps_message(runs, enabled: bool, can_delete: bool,
+                       can_reset_slam: bool, roots=()) -> dict:
+    """The saved-map panel: every run directory this dashboard can see.
+
+    Sent whole rather than as deltas, for the same reason the tuning state
+    is: it is a few kilobytes, it only moves when a run appears or changes,
+    and a browser that connects mid-session gets a complete, self-consistent
+    panel from one message instead of reassembling one from a stream it
+    partly missed.
+
+    `roots` is carried so the panel can say *where* it is looking. "No maps"
+    and "no directories configured" look identical otherwise, and they call
+    for completely different fixes.
+    """
+    return {
+        'type': 'saved_maps',
+        'enabled': bool(enabled),
+        'can_delete': bool(can_delete),
+        'can_reset_slam': bool(can_reset_slam),
+        'roots': [str(root) for root in roots],
+        'runs': [r.as_dict() if hasattr(r, 'as_dict') else r for r in runs],
+        'stamp': time.time(),
+    }
+
+
+def map_delete_result_message(run_id: str, ok: bool, detail: str,
+                              freed_bytes: int = 0) -> dict:
+    """Outcome of one delete request, echoed to every tab.
+
+    Every tab, not just the one that asked: a run vanishing from the list is
+    something the person on the other browser needs to see, and a refusal
+    they did not cause is still worth reading.
+
+    `detail` is never empty on a failure -- a refusal with no reason is a
+    panel that says nothing and invites a second press.
+    """
+    return {
+        'type': 'map_delete_result',
+        'id': str(run_id),
+        'ok': bool(ok),
+        'detail': str(detail),
+        'freed_bytes': int(freed_bytes),
+        'stamp': time.time(),
+    }
+
+
+def slam_reset_result_message(ok: bool, detail: str, done: bool = True) -> dict:
+    """Progress and outcome of a live-SLAM reset.
+
+    `done=False` is broadcast while the call is in flight, because
+    slam_toolbox handles this on its own executor: the map->odom transform,
+    and so the pose the dashboard draws from, stops updating until it
+    returns. Saying "resetting..." is what stops that freeze reading as a
+    crashed dashboard.
+    """
+    return {
+        'type': 'slam_reset_result',
+        'ok': bool(ok),
+        'done': bool(done),
+        'detail': str(detail),
+        'stamp': time.time(),
+    }
+
+
+def map_cleared_message(has_map: bool) -> dict:
+    """Answer to "clear the view": does the car still have a map to send?
+
+    Both answers are useful, which is why this exists rather than the
+    browser simply blanking its own copy. If the map comes straight back,
+    the car is still publishing it -- so the staleness was never the
+    browser's. If it stays away, nothing is publishing /map at all.
+    """
+    return {
+        'type': 'map_cleared',
+        'has_map': bool(has_map),
+        'stamp': time.time(),
+    }

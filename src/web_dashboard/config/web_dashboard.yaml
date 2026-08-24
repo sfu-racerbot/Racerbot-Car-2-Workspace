@@ -171,3 +171,61 @@ web_dashboard_node:
       - sim_launch.py
     process_stop_grace_sec: 2.0      # per signal, before escalating to the next
     process_scan_interval_sec: 2.0   # how often the running-process list refreshes
+
+    # --- Saved maps, and clearing them ---
+    # The only part of this dashboard that touches the DISK. It lists the
+    # run directories the car's own tooling writes, and can delete one --
+    # permanently, with no undo and no trash. It never writes a file.
+    #
+    # The unit is a whole run directory, never a file inside one, and that
+    # is deliberate: map.yaml names its image relatively, the racing line in
+    # the same directory was optimized against that exact grid, and the pose
+    # graph is the only way back to a map whose save raced. Deleting map.pgm
+    # while leaving map.yaml is the worst of all -- nav2's map_server then
+    # fails to configure and particle_filter blocks in its constructor
+    # waiting on /map_server/map. So a partial delete is made impossible
+    # rather than merely discouraged. See web_dashboard/mapstore.py.
+    #
+    # Set false to remove the panel and the capability entirely.
+    enable_map_delete: true
+    # The ONLY directories a browser can ever see, or delete inside.
+    #   ~/.ros/racerbot_auto      auto_map_race_node's output_directory
+    #   ~/.ros/racerbot_sim/auto  the simulator's equivalent
+    #
+    # Refused no matter what you put here: anything inside a git working
+    # tree (src/particle_filter/maps holds tracked upstream demo maps, and a
+    # browser deleting tracked files would show up as a mystery in
+    # `git status`), ~/.ros/racerbot_sim/tracks (generated simulator
+    # *inputs*, not run output -- deleting one breaks the sim), $HOME
+    # itself, and any top-level system directory. Each refusal is logged at
+    # startup and the root is ignored; see mapstore._protected_root_reason.
+    #
+    # Maps saved the manual way (`ros2 run nav2_map_server map_saver_cli -f
+    # <name>`) land in whatever directory you ran that command from, so they
+    # are not listed here -- there is no canonical place to list them from.
+    map_roots:
+      - ~/.ros/racerbot_auto
+      - ~/.ros/racerbot_sim/auto
+    # Directory sizes are cheap but not free, and a run directory only
+    # changes when a run ends.
+    map_scan_interval_sec: 10.0
+
+    # --- Resetting live SLAM ---
+    # Calls slam_toolbox's own /slam_toolbox/reset: throws away the pose
+    # graph and starts mapping again from the current scan. Useful when a
+    # mapping lap went wrong and you would rather not restart the launch.
+    #
+    # REFUSED WHILE ANY DRIVING NODE IS RUNNING, for exactly the reason
+    # slam_toolbox is absent from killable_nodes above: a controller with a
+    # frozen or jumping pose is more dangerous than one with no pose. A
+    # reset under a live controller is that same hazard with a different
+    # trigger. See proccontrol.DRIVING_CONTROLLERS.
+    #
+    # It also stalls briefly. slam_toolbox handles this on its own executor,
+    # so the map->odom transform -- and every pose derived from it -- stops
+    # updating until the call returns. That is the same freeze this
+    # workspace already documents for save_map/serialize_map in
+    # auto_map_race.yaml. Do it with the car stopped.
+    enable_slam_reset: true
+    slam_reset_service: /slam_toolbox/reset
+    slam_reset_timeout_sec: 10.0

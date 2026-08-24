@@ -6,6 +6,79 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-08-24 — Measuring on the map, and three ways to clear one
+
+Both features live entirely in `web_dashboard`. The package still creates
+**no ROS publisher** — the SLAM reset is a service client, like the existing
+live-tuning clients. Verified end to end against a running node: every
+refusal path exercised over a real WebSocket, and one throwaway run
+directory created and deleted for real. **Not yet exercised on the car with
+`slam_toolbox` actually running** — the reset path was only observed
+refusing when the service was absent.
+
+### web_dashboard — a measuring tool on the map
+
+- **Tap the map to measure.** Two taps give a point-to-point distance; more
+  keep chaining, with each leg labelled and a running total. Dragging still
+  pans and pinching still zooms — only a tap adds a point, judged on the
+  *furthest* the pointer travelled rather than where it ended, so a drag
+  that wanders and returns is not mistaken for a click.
+- **The geometry is its own file.** `web/measure.js` touches no DOM, canvas
+  or WebSocket, so `test/browser/measure_test.js` loads the real file under
+  plain node and checks it against closed forms (79 checks).
+- **`dashboard.js` gained `canvasToWorld` / `canvasToBody` /
+  `canvasToActive`.** The inverse transform previously existed only inline
+  inside `zoomAt`, in two copies; `zoomAt` now calls the extracted pair.
+- **A measurement taken before localization is cleared when a pose
+  arrives,** with a note saying why. Those points were relative to a car
+  that has since moved, and redrawing them in map coordinates would put a
+  confident-looking number in the wrong place.
+- New sidebar section `measure`, a readout pinned over the map (the phone
+  sheet starts closed), and <kbd>M</kbd> / <kbd>Esc</kbd> /
+  <kbd>Backspace</kbd>. No new parameters.
+
+### web_dashboard — clearing a map, three ways
+
+- **clear view** — the browser forgets its copy and asks for a fresh
+  keyframe. Touches nothing on the car. Both outcomes are diagnostic: the
+  map returning at once means the car is still publishing it.
+- **reset live SLAM** — calls `/slam_toolbox/reset`. **Refused while any
+  driving node is running**, on the reasoning already recorded in
+  `killable_nodes`: a controller with a frozen pose is more dangerous than
+  one with no pose. `pause_new_measurements` is hard-coded `False` and
+  deliberately not a parameter.
+- **delete a saved run** — permanently removes a run directory under
+  `map_roots`. Gated on typing the run's name exactly, plus a content
+  digest that refuses a delete from a page listing that has gone stale.
+- **The deletion unit is a whole run directory, never a file inside one.**
+  `map.yaml` names its image relatively, the racing line was optimized
+  against that grid, and the pose graph is the only route back to a map
+  whose save raced. Deleting `map.pgm` while leaving `map.yaml` makes
+  `map_server` fail to configure and `particle_filter` block in its
+  constructor — so a partial delete is made impossible rather than
+  discouraged.
+- **`delete_run` does not `rmtree` the run.** It re-classifies every entry
+  first, unlinks only what it recognised as run output, and finishes with
+  `os.rmdir`, so an unexpected file aborts the delete instead of being
+  swept up with it. `shutil` work runs on a worker thread, not the rclpy
+  thread that serves telemetry.
+- New `web_dashboard/mapstore.py` (ROS-free, 133 tests) and
+  `proccontrol.DRIVING_CONTROLLERS`. `package.xml` gains
+  `<exec_depend>slam_toolbox</exec_depend>`; the import is guarded so a
+  machine without it still gets a working dashboard.
+- **New parameters** in `config/web_dashboard.yaml`, all defaulting on:
+  `enable_map_delete` (`true`), `map_roots`
+  (`[~/.ros/racerbot_auto, ~/.ros/racerbot_sim/auto]`),
+  `map_scan_interval_sec` (`10.0`), `enable_slam_reset` (`true`),
+  `slam_reset_service` (`/slam_toolbox/reset`), `slam_reset_timeout_sec`
+  (`10.0`).
+- **Security posture is unchanged and now weaker in one direction:** this
+  port has no authentication, and deleting a map is the first irreversible
+  thing on it. `enable_map_delete: false` at a shared venue. The typed name
+  guards against a mis-tap, not against someone hostile.
+
+Tests: 232 → 400 in `web_dashboard`, still running with no ROS sourced.
+
 ## 2026-08-22 (later) — A racing line worth racing, and a filter to follow it with
 
 Builds on the GPU work below: with the particle filter finally affordable,

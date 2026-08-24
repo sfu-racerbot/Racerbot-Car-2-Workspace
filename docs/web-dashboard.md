@@ -14,8 +14,10 @@ No RViz. No ROS install on the viewing device. No login. Just a URL.
 
 - **Streams map updates as changes, not frames.** A full [occupancy grid](glossary.md#occupancy-grid) — the map, stored as a big array of "free / wall / unknown" cells — is 819 kB/s on the wire; after the first send, updates run about **0.04 kB/s**. Total dashboard traffic dropped from **7.1 Mbit/s to 0.45 Mbit/s** — measured, not estimated.
 - **Live parameter tuning with no rebuild.** Change a driving node's speeds, geometry or safety margins from a phone and the running node applies them on its next control tick. The old loop — stop, `Ctrl+C`, edit YAML, rebuild, relaunch, re-seed localization — becomes a slider.
-- **Read-only by construction.** The [node](glossary.md#node) publishes to **no ROS [topic](glossary.md#topic) at all**. It cannot steer, accelerate or brake, so it's safe to leave running during a race. The two write paths (tuning, and stopping a process) are a bounded service call and a bounded signal — neither is a publisher.
+- **Read-only by construction.** The [node](glossary.md#node) publishes to **no ROS [topic](glossary.md#topic) at all**. It cannot steer, accelerate or brake, so it's safe to leave running during a race. It has four write paths: tuning, stopping a process, resetting SLAM, and deleting a saved map. Not one of them is a publisher.
 - **Clears the stale processes `Ctrl+C` left behind.** A `Ctrl+C` that looked like it worked often leaves a driving node alive and still publishing to `/drive`, so the next run fights it. The [processes panel](#stopping-a-driving-process) lists what is really running and ends it — escalating when a node ignores `SIGINT`, and refusing anything in the actuation path.
+- **Measure anything on the map, by tapping it.** Tap two points and read the distance between them; keep tapping and it measures the whole chain, labelling each leg. Track width, the gap to a wall, how far the car stopped short — numbers you previously got by counting grid squares by eye. [See below](#measuring-a-distance-on-the-map).
+- **Clears a bad map three different ways, each with its own guard.** Forget the map in this browser, reset the live [SLAM](glossary.md#slam) session, or delete a saved run from the disk for good. A run is deleted whole — map, pose graph and racing line together — and needs its name typed to confirm. [See below](#clearing-the-map).
 - **Shows the algorithm's *intent*, not just its output.** A curved arrow ahead of the car draws where the controller plans to go, how fast, and which constraint is currently holding it back — so you can catch a wrong plan while it's still only a plan.
 - **Works at every stage.** Nothing else running? You still get live [LiDAR](glossary.md#lidar). [SLAM](glossary.md#slam) up? The map builds in front of you. Once [localization](glossary.md#localization) has a fix, everything locks to world coordinates.
 - **A real phone layout, not a shrunken desktop one.** The map fills the screen, a strip along the top always shows link/state/speed, and the sidebar becomes a sheet you drag up from the bottom in three steps. One finger pans the map, two pinch to zoom — [see below](#on-a-phone).
@@ -77,13 +79,17 @@ So the workspace's [mandatory LB-deadman policy](architecture.md#workspace-polic
 
 Leave it running at all times, alongside anything else in this workspace: `bringup_launch.py`, SLAM, localization, `gap_follow`, `pure_pursuit`, all of it.
 
-> **It is not purely a *viewer* any more, though.** Two features reach the car rather than just watching it, and both are on by default.
+> **It is not purely a *viewer* any more, though.** Four features reach the car rather than just watching it, and all four are on by default.
 >
 > [Live parameter tuning](#live-parameter-tuning) calls the standard `/<node>/set_parameters` service on this workspace's driving nodes.
 >
 > [Stopping a driving process](#stopping-a-driving-process) can end a driving node's operating-system process — never anything in the actuation path, and it can only stop things, never start them.
 >
-> Both are real paths to the car. Read those sections and the [security note](#security-note) before using this at a shared venue. `enable_tuning: false` and `enable_process_control: false` give you the strictly read-only dashboard back.
+> [Resetting live SLAM](#reset-the-live-slam-session) throws away the map `slam_toolbox` is building and starts it again. Refused while a driving node is running.
+>
+> [Deleting a saved map](#delete-a-saved-run-permanently) removes files from the disk permanently. It is the only thing on this page with no undo.
+>
+> All four are real paths to the car. Read those sections and the [security note](#security-note) before using this at a shared venue. `enable_tuning: false`, `enable_process_control: false`, `enable_slam_reset: false` and `enable_map_delete: false` give you the strictly read-only dashboard back.
 
 ---
 
@@ -192,6 +198,9 @@ The binary payload is chosen to match a JavaScript `TypedArray` byte-for-byte, s
 | Intent | what the driving node is *trying* to do: predicted path, speeds, the constraint currently binding, and the reason — see [drive-intent.md](drive-intent.md) | *(none)* |
 | Tuning | the whole panel: per node, whether it's up, its advertised catalogue, and every current value | *(none)* |
 | Tuning result / saved / armed | outcome of one change, of a save, and this connection's arm state | *(none)* |
+| Saved maps | every run directory the car can see: what each holds, its size, and whether it may be deleted | *(none)* |
+| Map delete / SLAM reset result | outcome of one delete or one reset, with the reason when refused | *(none)* |
+| Map cleared | answer to "clear the view": whether the car still has a map to send | *(none)* |
 
 All of this conversion lives in `web_dashboard/protocol.py`, deliberately kept free of any ROS, Tornado, or network imports.
 
@@ -866,6 +875,193 @@ Same order as any other change to driving behavior ([writing-your-own-node.md](w
 
 ---
 
+## Measuring a distance on the map
+
+> **What you'll be able to do:** tap two points on the map and read the distance between them, in metres.
+
+Open the **measure** panel in the sidebar and tick **measure on the map** (or just press <kbd>M</kbd>).
+
+Now every tap on the map drops a point:
+
+- **Two taps** give you one distance — a straight line from A to B, labelled with its length.
+- **Keep tapping** and it keeps going. Each leg gets its own label, and the panel shows every leg plus the running total.
+
+**Working when:** a cyan line appears between your taps with a number on it, and the total shows in the small readout at the bottom-right of the map.
+
+**Dragging still pans the map, and pinching still zooms.** Only a tap — pointer down and up in about the same place — adds a point. A drag that wanders and comes back to where it started is a drag, not a tap.
+
+| You want to | Do this |
+|---|---|
+| Add a point | Tap the map |
+| Remove the last point | **undo**, or <kbd>Backspace</kbd> |
+| Start over | **clear**, or <kbd>Esc</kbd> |
+| Put the tool away | Untick the box, press <kbd>M</kbd>, or press <kbd>Esc</kbd> with nothing measured |
+
+### What it's actually good for
+
+Track width, mostly.
+
+`pure_pursuit`'s racing-line optimizer is bounded by how much room it has to work in — `profile_wall_clearance`, 30 cm by default. So "is this section wide enough for the line I'm about to run" is a question worth answering *before* the run rather than after.
+
+After that: how far the car stopped short of a wall, how big a gap really is, whether two parts of the map that look the same distance apart actually are.
+
+### The one thing to watch out for
+
+**Before [localization](glossary.md#localization) has a fix, a measurement is relative to the car, not to the track.**
+
+With no pose, the dashboard draws the car fixed at the centre of the screen, with the [LiDAR](glossary.md#lidar) returns around it — see [What you'll actually see](#what-youll-actually-see).
+
+That picture is real, but it moves with the car.
+
+A measurement taken in it says "these two things were 1.2 m apart *at that moment*". That is still a useful answer about a gap the car is looking at. It is not a place on the map.
+
+The panel says `robot-centric` while that is true, so you don't have to remember which mode you were in.
+
+**When a localization pose does arrive, a robot-centric measurement is cleared, and the panel says why.**
+
+It is not kept and quietly redrawn in map coordinates. Those points were measured against a car that has since moved, so redrawing them would put a confident-looking number in the wrong place.
+
+A wrong number with nothing marking it as wrong is worse than no number.
+
+<details>
+<summary><b>Where the maths lives, and why it is its own file</b> — read if you are changing the tool or adding to it.</summary>
+
+Everything the tool decides is in `src/web_dashboard/web/measure.js`, which touches no DOM, no canvas and no WebSocket. `dashboard.js` owns the pointer events and the drawing; `measure.js` owns the arithmetic.
+
+That split is what lets `test/browser/measure_test.js` load the real file under plain `node` and check it for real.
+
+It checks segment lengths against a 3-4-5 triangle, the total against the sum of its parts, and the boundaries of the tap-versus-drag decision.
+
+Run it directly:
+
+**Terminal 1, from `~/racerbot-ws`:**
+
+```bash
+node src/web_dashboard/test/browser/measure_test.js
+```
+
+**Working when:** it prints a list of `ok` lines and ends with `79 checks passed`. It also runs inside the normal `pytest` run, via `test/test_measure_js.py`.
+
+Two details in there are less obvious than they look:
+
+**Rounding happens before the unit is chosen.**
+
+The obvious way to format a distance is "if it's at least 1 m, print metres, otherwise print centimetres". That prints `100 cm` for 0.999 m — it picks the unit from the unrounded number, then rounds inside it.
+
+`formatDistance` rounds to centimetres first and compares against 100, so both branches agree at the boundary.
+
+**A tap is judged on the furthest the pointer got, not where it ended.** Otherwise a drag that wanders across the map and comes back would count as a tap and drop a point in the middle of a pan.
+
+</details>
+
+---
+
+## Clearing the map
+
+Three different actions, in increasing order of consequence. They are deliberately separated in the **maps** panel, because they are not interchangeable.
+
+| Action | What it touches | Undo? |
+|---|---|---|
+| [clear view](#clear-the-view-this-browser-only) | this browser tab only | reload the page |
+| [reset live SLAM](#reset-the-live-slam-session) | the map `slam_toolbox` is building in memory | drive the lap again |
+| [delete a saved run](#delete-a-saved-run-permanently) | files on the car's disk | **none** |
+
+### Clear the view (this browser only)
+
+Press **clear view**. The browser forgets the copy of the map it is holding. Nothing on the car changes at all, so this is safe at any time and works even with everything else in this section switched off.
+
+**Working when:** the map disappears, and the status line tells you one of two things — and both are useful:
+
+- **"the car is still publishing this map, so it came straight back"** — the map you were unhappy with is the car's, not a stale copy in your browser. Look at the SLAM reset below.
+- **"nothing is publishing /map right now"** — no map source is running. That, on its own, is the answer to "why is my map blank".
+
+### Reset the live SLAM session
+
+Press **reset SLAM**. This calls `slam_toolbox`'s own reset: it throws away the [map](glossary.md#occupancy-grid) and the pose graph it has built so far and starts again from the scan it can see right now.
+
+Use it when a mapping lap went wrong — the car got bumped, the map folded over on itself, someone walked through the whole run — and you would rather not stop and restart the launch.
+
+**Working when:** the map goes blank and starts rebuilding as you drive.
+
+**Two things it will refuse to do, and both are the point:**
+
+**It refuses while a driving node is running.** `gap_follow`, `pure_pursuit`, `auto_map_race` — if one of those is up, the reset is refused and the message names it.
+
+Here is why that matters, in plain terms.
+
+A driving node steers using where it thinks the car is.
+
+Reset SLAM underneath it and that estimate does not go away. It goes *wrong*, and stays wrong, while the car keeps driving on it.
+
+**A controller with a confidently wrong position is more dangerous than one with no position at all**, because nothing about it looks broken.
+
+That is exactly the reasoning that keeps `slam_toolbox` out of the [processes panel](#what-it-will-refuse-to-stop)'s stoppable list. **Stop the driving node first.**
+
+**It refuses if nothing is advertising the service.** If `slam_toolbox` is not running there is nothing to reset, and the message says so rather than hanging.
+
+> **Do this with the car stopped.**
+>
+> `slam_toolbox` handles the reset on its own [executor](glossary.md#node). While it works, the `map`→`odom` [transform](glossary.md#tf--transform--frame) — and so the pose the dashboard draws from — stops updating for a few seconds.
+>
+> That is the same freeze this workspace already documents for saving a map (`auto_map_race.yaml`). The dashboard says `resetting SLAM...` while it waits, so the pause does not read as a crash.
+
+### Delete a saved run, permanently
+
+The bottom block lists the saved runs on the car and can delete one.
+
+**There is no undo and no trash.** That is the whole reason this block looks different from the two above it.
+
+**Using it:**
+
+1. Find the run in the list. Each row shows its name (a timestamp like `20260727-200103`), its size, the map's dimensions in metres, and **exactly what deleting it will take with it**.
+2. Type the run's name into the box. The **delete** button stays greyed out until it matches exactly — no trimming, no ignoring capitals.
+3. Press **delete**.
+
+**Working when:** the status line reads `<name>: deleted, 29.4 MB freed` and the row disappears.
+
+#### A run is deleted whole, and that is deliberate
+
+A run directory is not a folder of loose files. It is one thing:
+
+| File | What it is |
+|---|---|
+| `map.pgm` + `map.yaml` | the map itself |
+| `posegraph.posegraph` + `.data` | SLAM's working data — the only way to rebuild the map if the save went wrong |
+| `raceline_raw.csv` | the lap the car actually drove |
+| `raceline_profiled.csv` | that lap, paced — what `pure_pursuit` drives |
+| `raceline_optimized.csv` | the reshaped racing line, worked out **inside this map** |
+| `events.jsonl`, `bag/` | [run diagnostics](run-diagnostics.md), if they were recording |
+
+They depend on each other. `map.yaml` points at its image by a plain filename, so the pair only works inside its own directory. The racing line was optimized against *that* grid and checked for clearance against *those* walls.
+
+So deleting part of a run leaves wreckage:
+
+- Delete just the map and the racing line survives with nothing left to check it against. That is not hypothetical — one run on this car is already in that state, from a map save that raced, and it is useless.
+- Delete `map.pgm` but leave `map.yaml` and it is worse: the map server fails to start, and `particle_filter` then **hangs on startup** waiting for a map that will never load. Not an error message — a hang.
+
+Making a partial delete impossible is cheaper than documenting how to recover from one. The panel lists everything the directory holds before it asks you to confirm, so "this also takes the racing line" is on screen rather than discovered afterwards.
+
+#### What it will refuse to delete
+
+- **Anything outside the two configured directories** (`map_roots` — `~/.ros/racerbot_auto` and `~/.ros/racerbot_sim/auto`). The browser sends a *name*, never a path, and a name with a `/` or a `..` in it is refused outright.
+- **Anything inside a git working tree.** `src/particle_filter/maps/` holds the upstream example maps, which are tracked files. A browser deleting those would show up later as a mystery in `git status`.
+- **`~/.ros/racerbot_sim/tracks/`**, which holds the tracks the [simulator](ros-simulator.md) *reads*, not results it wrote. Deleting one breaks the simulator instead of freeing anything.
+- **A run holding a file it doesn't recognise.** The panel deletes run output. If someone has put notes in the directory, it says so and leaves it alone.
+- **A run something is using right now.** If a map server or a controller has that directory open, the delete is refused and names the process. This is the check that stops you causing the `particle_filter` hang described above.
+- **A run that changed since your page listed it.** If a map finished being written after your browser drew the list, the delete is refused and asks you to refresh — so a stale tab can't destroy a map it never showed you.
+
+#### Two things worth being honest about
+
+**Typing the name guards against a mistake, not against an attacker.** Anyone who can see the list can also type what's in it. It exists so a mis-tap on a phone cannot delete a race map — the same reason the [stop button](#using-it) asks for a second press. What actually keeps this bounded is the list of directories it will touch at all, and `enable_map_delete: false`.
+
+**Maps you saved by hand are not listed.** The manual workflow (`ros2 run nav2_map_server map_saver_cli -f <name>`, in [operations.md](operations.md)) writes the map into whatever directory you ran the command from. There is no fixed place for those to be listed from, so the dashboard doesn't try. Delete those from a terminal.
+
+#### Turning it off
+
+`enable_map_delete: false` removes the delete block. `enable_slam_reset: false` removes the reset block. `clear view` has nothing to switch off — it only ever affects your own browser.
+
+---
+
 ## Stopping a driving process
 
 > **This is not an emergency stop.** To stop the car right now, **let go of LB**. That is the only control that makes the car brake on command. Everything in this section is for clearing up *afterwards*, or between runs.
@@ -1016,6 +1212,12 @@ All in `src/web_dashboard/config/web_dashboard.yaml`. A few entries mention [TF]
 | `killable_nodes` | driving nodes only — see the YAML | The only process names a browser may stop. Anything in the actuation path (`ackermann_mux`, `joy_teleop`, `joy_node`, the VESC chain, `bringup_launch.py`, `teleop_launch.py`) is refused whatever you put here, and logs a warning at startup. See `web_dashboard/proccontrol.py`'s `PROTECTED` |
 | `process_stop_grace_sec` | `2.0` | How long a process gets to honour each signal before the next one — `SIGINT`, then `SIGTERM`, then `SIGKILL` |
 | `process_scan_interval_sec` | `2.0` | How often the running-process list is refreshed |
+| `enable_map_delete` | `true` | Whether [deleting a saved run](#delete-a-saved-run-permanently) exists at all. `false` removes the block and the capability |
+| `map_roots` | `[~/.ros/racerbot_auto, ~/.ros/racerbot_sim/auto]` | The **only** directories a browser can see or delete inside. Anything in a git working tree, `~/.ros/racerbot_sim/tracks`, `$HOME` itself and any top-level system directory are refused whatever you put here, and each refusal is logged at startup. See `web_dashboard/mapstore.py` |
+| `map_scan_interval_sec` | `10.0` | How often the saved-run list is re-read. Long because run directories only change when a run ends |
+| `enable_slam_reset` | `true` | Whether [resetting live SLAM](#reset-the-live-slam-session) exists at all |
+| `slam_reset_service` | `/slam_toolbox/reset` | The service called. `slam_launch.py` runs the node as `slam_toolbox` in the root namespace, which is where this name comes from |
+| `slam_reset_timeout_sec` | `10.0` | When to stop waiting for an unanswered reset. A timeout is reported as "no answer", never as "nothing happened" |
 
 </details>
 
@@ -1047,11 +1249,22 @@ And, if `usb_cam_stream` is running, the camera feed.
 >
 > On a shared network, though, "anyone on this WiFi can end your race" is a real thing to weigh. Set `enable_process_control: false` if that trade isn't worth it to you.
 
+> **[Deleting a saved map](#delete-a-saved-run-permanently) reaches the disk, and is the only irreversible thing here.**
+>
+> It is bounded by *place* rather than by permission. It can only ever remove a run directory inside `map_roots`; it refuses anything in a git working tree; and it refuses a directory holding a file it does not recognise.
+>
+> It cannot move the car, and cannot start anything.
+>
+> The typed name is a guard against a mis-tap, not against someone hostile — anyone who can read the list can type what is in it. On a shared network, `enable_map_delete: false` is what actually closes it.
+
+> **[Resetting live SLAM](#reset-the-live-slam-session) reaches the car**, and is refused while any driving node is running, for the reason in that section. The worst it can do otherwise is cost you a mapping lap.
+
 **So, concretely:**
 
 - Don't port-forward this to the open internet.
 - On a venue's shared WiFi, prefer `enable_tuning: false` — or at least `tuning_allow_save: false`.
 - Consider `enable_process_control: false` there too, for the reason just above.
+- **`enable_map_delete: false` at a shared venue.** "Anyone on this WiFi can end your race" is one thing. "Anyone on this WiFi can delete the map you spent the morning building" is worse, and there is no undo.
 - For remote-but-still-private access, this machine already has a `tailscale0` interface configured (see [hardware-reference.md](hardware-reference.md)). Use the car's Tailscale address instead of exposing the port publicly.
 
 ---
@@ -1069,6 +1282,11 @@ And, if `usb_cam_stream` is running, the camera feed.
 - **Stopping a process is not an emergency stop, and cannot be made into one.** It removes what was commanding the car; the car then coasts until the VESC firmware's own motor timeout releases the motor. Releasing LB remains the only control that actively commands a stop. See [that section](#why-this-is-not-an-emergency-stop).
 - **A process that survives `SIGKILL` cannot be cleared from here.** That means it is stuck in an uninterruptible kernel wait — usually blocked on a USB or serial device that has stopped responding. Nothing in userspace can end it; the dashboard says so plainly and a reboot is the next step.
 - **Camera port (`9090`) is hardcoded in `dashboard.js`** (`CAMERA_PORT`), not a `config/web_dashboard.yaml` parameter. It's the browser, not `dashboard_node`, that connects to the camera stream directly, so this is a JS constant, not a launch-time ROS parameter. Edit it directly if `usb_cam_stream` is ever reconfigured to a different port.
+- **A saved run is deleted whole, or not at all.** There is deliberately no way to remove just the pose graph, or just the map — see [why](#a-run-is-deleted-whole-and-that-is-deliberate). If you want only part of a run gone, do it from a terminal.
+- **Deleting a saved run cannot be undone.** No trash, no confirmation dialog beyond typing the name, no recovery.
+- **Maps saved by hand are not listed.** `map_saver_cli` writes into whatever directory you ran it from, so there is nowhere fixed for the dashboard to look.
+- **A measurement taken before localization has a fix is relative to the car**, not to the track, and it is cleared when a pose arrives. See [the caveat](#the-one-thing-to-watch-out-for).
+- **Resetting live SLAM stalls the pose for a few seconds** while `slam_toolbox` works, because it handles the call on its own executor. Do it with the car stopped.
 - **Exactly one car per dashboard.** The camera page is recording-friendly, but recording itself is intentionally left to the browser or OS. The dashboard focuses on live LIDAR, localization, vehicle telemetry, system health, and camera data with almost no moving parts.
 
 ---
@@ -1082,9 +1300,10 @@ src/web_dashboard/
 │   ├── stopwatch.py         # LB/freshness-gated timer logic, unit-tested
 │   ├── tuning.py            # spec parsing + comment-preserving YAML writer, unit-tested
 │   ├── proccontrol.py       # find/stop driving processes; the protected set, unit-tested
+│   ├── mapstore.py          # find/vet/delete saved runs; the protected roots, unit-tested
 │   └── dashboard_node.py    # ROS2 node + Tornado web/WebSocket server
 ├── web/
-│   ├── index.html / dashboard.js / style.css
+│   ├── index.html / dashboard.js / measure.js / style.css
 │   └── camera.html / camera.js / camera.css  # recording view
 ├── config/web_dashboard.yaml
 ├── launch/web_dashboard_launch.py

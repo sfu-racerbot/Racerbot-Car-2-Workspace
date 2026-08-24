@@ -58,6 +58,8 @@
     pose: document.getElementById('dot-pose'),
     drive: document.getElementById('dot-drive'),
     stats: document.getElementById('dot-stats'),
+    measure: document.getElementById('dot-measure'),
+    maps: document.getElementById('dot-maps'),
   };
   const intentSection = document.getElementById('intent-section');
   const intentDot = document.getElementById('dot-intent');
@@ -75,6 +77,26 @@
 
   const modeBanner = document.getElementById('mode-banner');
   const resetViewBtn = document.getElementById('reset-view');
+
+  // Measuring
+  const measureEnable = document.getElementById('measure-enable');
+  const measureList = document.getElementById('measure-list');
+  const measureStatus = document.getElementById('measure-status');
+  const measurePanel = document.getElementById('measure-panel');
+  const measureTotal = document.getElementById('measure-total');
+  const measureHint = document.getElementById('measure-hint');
+  const measureUndoBtn = document.getElementById('measure-undo');
+  const measureClearBtn = document.getElementById('measure-clear');
+  const measureNote = document.getElementById('measure-note');
+
+  // Saved maps
+  const mapsSection = document.getElementById('maps-section');
+  const mapList = document.getElementById('map-list');
+  const mapStatus = document.getElementById('map-status');
+  const mapResetBlock = document.getElementById('map-reset-block');
+  const mapDeleteBlock = document.getElementById('map-delete-block');
+  const mapClearViewBtn = document.getElementById('map-clear-view');
+  const mapResetSlamBtn = document.getElementById('map-reset-slam');
 
   if (racelineToggle) {
     racelineToggle.addEventListener('change', () => {
@@ -139,6 +161,7 @@
     // null until the first snapshot arrives, which is why the panel starts
     // out saying "looking for..." rather than "none running".
     processes: null,
+    savedMaps: null,
     // What the driving node says it is *trying* to do -- see
     // docs/drive-intent.md. `intent` is the raw schema payload; `reason`
     // is held separately because the car only re-sends the (sometimes
@@ -268,6 +291,79 @@
     ];
   }
 
+  // The inverses, for turning a click back into a position. Written once
+  // here rather than inline at each call site: zoomAt used to carry the
+  // only copy of this arithmetic, and the world-frame/body-frame split is
+  // exactly the kind of thing that drifts apart when it exists twice.
+  //
+  // `clientX/clientY` are CSS pixels; the canvas backing store is scaled by
+  // devicePixelRatio, which is why every one of these multiplies by it. The
+  // canvas fills the viewport at (0,0), so no getBoundingClientRect() is
+  // needed -- if that ever stops being true, it is needed in all three.
+  // ---------------------------------------------------------------------
+  // Measuring
+  //
+  // A chain of points on the map, with each leg's length and a running
+  // total. Two points is the point-to-point case; more keeps going.
+  //
+  // The arithmetic and every decision live in web/measure.js, which is pure
+  // and unit-tested under node. What is here is the parts that need a
+  // canvas: turning a tap into a position, and drawing.
+  // ---------------------------------------------------------------------
+  const Measure = (typeof window !== 'undefined' && window.__measure) || null;
+
+  const measure = {
+    active: false,
+    pts: [],
+    note: '',       // why the chain was cleared, when it was cleared for us
+  };
+
+  // Two points closer together than this on screen are the same point --
+  // a double-click delivers two pointerup events a pixel apart, and a
+  // zero-length leg is noise in the list.
+  const MEASURE_MIN_SEPARATION_PX = 4;
+
+  function canvasToWorld(clientX, clientY) {
+    const dpr = window.devicePixelRatio || 1;
+    const px = clientX * dpr;
+    const py = clientY * dpr;
+    return [
+      view.centerX + (px - canvas.width / 2) / view.scale,
+      view.centerY - (py - canvas.height / 2) / view.scale,
+    ];
+  }
+
+  function canvasToBody(clientX, clientY) {
+    const dpr = window.devicePixelRatio || 1;
+    const px = clientX * dpr;
+    const py = clientY * dpr;
+    // Inverse of bodyToCanvas: body +X is forward (canvas up), +Y is left
+    // (canvas left), so both axes are negated relative to the screen.
+    return [
+      view.bodyPanX + (canvas.height / 2 - py) / view.scale,
+      view.bodyPanY + (canvas.width / 2 - px) / view.scale,
+    ];
+  }
+
+  /**
+   * A click, in whichever frame the map is currently being drawn in, tagged
+   * with which one that was.
+   *
+   * The tag is the whole point. A body-frame position means "relative to
+   * where the car is right now" and stops meaning anything the moment the
+   * car moves; a map-frame one is a place on the track. They are not
+   * convertible without a pose, and quietly treating one as the other would
+   * put a wrong distance on screen with nothing marking it as wrong.
+   */
+  function canvasToActive(clientX, clientY) {
+    if (state.pose) {
+      const [x, y] = canvasToWorld(clientX, clientY);
+      return { frame: 'map', x, y };
+    }
+    const [x, y] = canvasToBody(clientX, clientY);
+    return { frame: 'body', x, y };
+  }
+
   // ---------------------------------------------------------------------
   // WebSocket connection, with automatic reconnect -- a dropped WiFi link
   // shouldn't require reloading the page.
@@ -366,6 +462,15 @@
       renderProcesses();
     } else if (header.type === 'process_result') {
       applyProcessResult(header);
+    } else if (header.type === 'saved_maps') {
+      state.savedMaps = header;
+      renderSavedMaps();
+    } else if (header.type === 'map_delete_result') {
+      applyMapDeleteResult(header);
+    } else if (header.type === 'slam_reset_result') {
+      applySlamResetResult(header);
+    } else if (header.type === 'map_cleared') {
+      applyMapCleared(header);
     } else if (header.type === 'stats') {
       state.stats = {
         cpuPercent: header.cpu_percent,
@@ -856,10 +961,108 @@
       drawCarRobotCentric();
     }
 
+    // Last, over everything: this is the tool the person is actively
+    // driving, and a label hidden behind a scan point is a label that
+    // cannot be read. Cyan throughout -- the doc's colour rule reserves
+    // green, amber and red for what the CAR has decided, and a measurement
+    // is the system talking, not a verdict about the drive.
+    drawMeasure(mapRelative);
+
     updateScaleBar();
     drawMinimap();
 
     updateStatusText();
+  }
+
+  function drawMeasure(mapRelative) {
+    if (!Measure) return;
+    // A chain taken before localization converged is relative to where the
+    // car was standing; once a pose exists it would be drawn somewhere it
+    // never was. Drop it and say so rather than showing a confident wrong
+    // line. (state.pose is set once and never cleared, so in practice this
+    // only fires body -> map, when localization first gets a fix.)
+    const frame = Measure.frameFor(measure.pts, !!state.pose);
+    if (frame === 'stale') {
+      measure.pts = [];
+      measure.note = state.pose
+        ? 'a localization pose arrived, so the robot-centric measurement was '
+          + 'cleared -- those points were relative to the car, not the map'
+        : 'the localization pose was lost, so the measurement was cleared';
+      renderMeasurePanel();
+      return;
+    }
+    if (!measure.pts.length) return;
+
+    const project = mapRelative ? worldToCanvas : bodyToCanvas;
+    const screen = measure.pts.map((p) => project(p.x, p.y));
+
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    // Dark halo under the line, same trick as the racing line: it has to
+    // read over both the pale mapped ground and the dark unmapped void.
+    if (screen.length > 1) {
+      ctx.beginPath();
+      ctx.moveTo(screen[0][0], screen[0][1]);
+      for (let i = 1; i < screen.length; i++) ctx.lineTo(screen[i][0], screen[i][1]);
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.lineWidth = 6;
+      ctx.stroke();
+      ctx.strokeStyle = HUD.accent;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      ctx.stroke();
+    }
+
+    // Vertices. The first gets a wider ring so the chain's direction is
+    // readable without labels.
+    screen.forEach(([cx, cy], index) => {
+      ctx.beginPath();
+      ctx.arc(cx, cy, index === 0 ? 6 : 4, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fill();
+      ctx.strokeStyle = HUD.accent;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    });
+
+    // One label per leg, in screen space at a fixed size -- never scaled
+    // with the view, or a zoomed-out chain would be unreadable and a
+    // zoomed-in one absurd.
+    const dpr = window.devicePixelRatio || 1;
+    const segments = Measure.segments(measure.pts);
+    for (let i = 0; i < segments.length; i++) {
+      const a = screen[i];
+      const b = screen[i + 1];
+      const plan = Measure.labelPlacement(
+        { ax: a[0], ay: a[1], bx: b[0], by: b[1] },
+        Measure.MIN_LABEL_PX * dpr);
+      // Too short to label. Its length still counts toward the total,
+      // which is always on screen in the measure panel.
+      if (!plan) continue;
+      drawMeasureLabel(plan, Measure.formatDistance(segments[i].length), dpr);
+    }
+    ctx.restore();
+  }
+
+  function drawMeasureLabel(plan, text, dpr) {
+    ctx.save();
+    ctx.translate(plan.x + plan.offsetX * dpr, plan.y + plan.offsetY * dpr);
+    ctx.rotate(plan.angle);
+    ctx.font = `${11 * dpr}px ui-monospace, Menlo, Consolas, monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const width = ctx.measureText(text).width;
+    const padX = 4 * dpr;
+    const padY = 3 * dpr;
+    const height = 12 * dpr;
+    ctx.fillStyle = 'rgba(0,0,0,0.72)';
+    ctx.fillRect(-width / 2 - padX, -height / 2 - padY,
+                 width + padX * 2, height + padY * 2);
+    ctx.fillStyle = HUD.accent;
+    ctx.fillText(text, 0, 0);
+    ctx.restore();
   }
 
   // ---------------------------------------------------------------------
@@ -1954,8 +2157,7 @@
 
     if (state.pose) {
       // World point currently under the pointer, before changing scale.
-      const worldXBefore = view.centerX + (px - canvas.width / 2) / view.scale;
-      const worldYBefore = view.centerY - (py - canvas.height / 2) / view.scale;
+      const [worldXBefore, worldYBefore] = canvasToWorld(clientX, clientY);
       view.scale = Math.min(Math.max(view.scale * factor, 2), 4000);
       view.centerX = worldXBefore - (px - canvas.width / 2) / view.scale;
       view.centerY = worldYBefore + (py - canvas.height / 2) / view.scale;
@@ -1965,8 +2167,7 @@
       // avoids leaving stale world-frame values that would otherwise make
       // the view jump the instant a pose first arrives and mapRelative
       // mode switches on.
-      const byBefore = view.bodyPanY - (px - canvas.width / 2) / view.scale;
-      const bxBefore = view.bodyPanX - (py - canvas.height / 2) / view.scale;
+      const [bxBefore, byBefore] = canvasToBody(clientX, clientY);
       view.scale = Math.min(Math.max(view.scale * factor, 2), 4000);
       view.bodyPanY = byBefore + (px - canvas.width / 2) / view.scale;
       view.bodyPanX = bxBefore + (py - canvas.height / 2) / view.scale;
@@ -2011,12 +2212,31 @@
     return Math.hypot(a.x - b.x, a.y - b.y);
   }
 
+  // The one gesture that might turn out to be a tap. Tracked separately
+  // from `pointers` because it has to outlive the pointer being lifted --
+  // that is the moment the decision is made -- and because it remembers
+  // the FURTHEST the pointer got, not where it ended. A drag out and back
+  // would otherwise drop a point in the middle of a pan.
+  let tapCandidate = null;
+
   canvas.addEventListener('pointerdown', (e) => {
     // A third finger would drag the midpoint sideways for no reason.
     if (pointers.size >= 2) return;
     e.preventDefault();     // no text selection, no native image drag
     canvas.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 1) {
+      tapCandidate = {
+        id: e.pointerId, x: e.clientX, y: e.clientY,
+        t0: performance.now(), maxTravel: 0,
+        pointerType: e.pointerType, count: 1,
+      };
+    } else if (tapCandidate) {
+      // A second finger landed. Whatever this gesture turns into, it is
+      // not a tap -- and one finger lifting early must not make the other
+      // one into a click.
+      tapCandidate.count = pointers.size;
+    }
   });
 
   canvas.addEventListener('pointermove', (e) => {
@@ -2028,16 +2248,49 @@
     const after = pointerMidpoint();
     const spreadAfter = pointerSpread();
 
+    if (tapCandidate && e.pointerId === tapCandidate.id) {
+      tapCandidate.maxTravel = Math.max(
+        tapCandidate.maxTravel,
+        Math.hypot(e.clientX - tapCandidate.x, e.clientY - tapCandidate.y));
+    }
+
     if (spreadBefore > 0 && spreadAfter > 0) {
       zoomAt(before.x, before.y, spreadAfter / spreadBefore);
     }
-    panBy(after.x - before.x, after.y - before.y);
+    // While measuring, hold the view still until the pointer has clearly
+    // committed to a drag. Without this every point placed nudges the map
+    // a pixel or two, which reads as the tool being imprecise.
+    if (!measuringStill()) {
+      panBy(after.x - before.x, after.y - before.y);
+    }
     scheduleRender();
   });
 
+  /** True while a single pointer is down, measuring, and still within the
+   *  tap slop -- i.e. it may yet turn out to be a tap rather than a pan. */
+  function measuringStill() {
+    if (!measure.active || !Measure || !tapCandidate) return false;
+    if (pointers.size !== 1) return false;
+    return tapCandidate.maxTravel <= Measure.slopFor(tapCandidate.pointerType);
+  }
+
   function endPointer(e) {
     if (!pointers.has(e.pointerId)) return;
+    const candidate = (tapCandidate && tapCandidate.id === e.pointerId)
+      ? tapCandidate : null;
     pointers.delete(e.pointerId);
+    if (candidate) tapCandidate = null;
+    // pointercancel means the browser took the gesture away (a system
+    // gesture, a scroll it decided to own). That is not a tap.
+    if (candidate && e.type === 'pointerup' && measure.active && Measure
+        && Measure.isTap({
+          maxTravelPx: candidate.maxTravel,
+          durationMs: performance.now() - candidate.t0,
+          pointerCount: candidate.count,
+          pointerType: candidate.pointerType,
+        })) {
+      addMeasurePoint(e.clientX, e.clientY);
+    }
     if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     // Lifting one finger of a pinch needs no fix-up: the next move reads
     // its "before" midpoint from the pointers still down, which is the
@@ -2066,7 +2319,14 @@
   // On a phone the reset button is inside a sheet that has to be dragged
   // up before it can be pressed, which is a lot of interaction to undo an
   // accidental pinch.
-  canvas.addEventListener('dblclick', resetView);
+  canvas.addEventListener('dblclick', (e) => {
+    // Two quick taps is how a point-to-point measurement gets made, and
+    // the browser synthesises a dblclick from a double-tap on a touchscreen
+    // too. Resetting the view out from under that would be maddening.
+    // The reset button and the M key both stay available.
+    if (measure.active) { e.preventDefault(); return; }
+    resetView();
+  });
 
   function sendStopwatchControl(action, enabled) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -2140,6 +2400,353 @@
     ws.send(JSON.stringify(Object.assign({ type: 'process_control' }, payload)));
   }
 
+
+  // ---------------------------------------------------------------------
+  // Measuring: the sidebar panel and the on-map readout
+  // ---------------------------------------------------------------------
+
+  function addMeasurePoint(clientX, clientY) {
+    if (!Measure) return;
+    const point = canvasToActive(clientX, clientY);
+    // Points from two different frames can never share a chain -- see
+    // canvasToActive. Starting a new one is the honest response.
+    if (measure.pts.length && measure.pts[0].frame !== point.frame) {
+      measure.pts = [];
+    }
+    const before = measure.pts.length;
+    measure.pts = Measure.addPoint(
+      measure.pts, point, MEASURE_MIN_SEPARATION_PX / view.scale);
+    if (measure.pts.length !== before) measure.note = '';
+    renderMeasurePanel();
+    scheduleRender();
+  }
+
+  function setMeasureActive(active) {
+    measure.active = !!active;
+    if (measureEnable) measureEnable.checked = measure.active;
+    document.body.classList.toggle('measuring', measure.active);
+    if (measurePanel) measurePanel.hidden = !measure.active;
+    canvas.style.cursor = measure.active ? 'crosshair' : '';
+    renderMeasurePanel();
+    scheduleRender();
+  }
+
+  function clearMeasure() {
+    measure.pts = [];
+    measure.note = '';
+    renderMeasurePanel();
+    scheduleRender();
+  }
+
+  function undoMeasure() {
+    if (!Measure) return;
+    measure.pts = Measure.undo(measure.pts);
+    measure.note = '';
+    renderMeasurePanel();
+    scheduleRender();
+  }
+
+  function renderMeasurePanel() {
+    if (!Measure || !measureList) return;
+    const segments = Measure.segments(measure.pts);
+    const total = Measure.total(measure.pts);
+    const totalText = measure.pts.length > 1 ? Measure.formatDistance(total) : '--';
+
+    if (measureTotal) {
+      measureTotal.textContent = measure.pts.length > 1
+        ? Measure.formatDistance(total) : '0 cm';
+    }
+    if (measureHint) {
+      measureHint.textContent = measure.pts.length === 0
+        ? 'tap the map'
+        : (measure.pts.length === 1 ? 'tap again' : `${segments.length} leg(s)`);
+    }
+    if (dots.measure) {
+      dots.measure.className = 'dot ' + (measure.active ? 'dot-green' : 'dot-gray');
+    }
+    setDigest('measure', measure.pts.length > 1 ? totalText
+      : (measure.active ? 'measuring' : '--'));
+
+    measureList.innerHTML = '';
+    if (!segments.length) {
+      const empty = document.createElement('div');
+      empty.className = 'measure-empty';
+      empty.textContent = measure.active
+        ? 'tap two points on the map' : 'measuring is off';
+      measureList.appendChild(empty);
+    } else {
+      segments.forEach((seg, index) => {
+        const row = document.createElement('div');
+        row.className = 'measure-row';
+        const name = document.createElement('span');
+        name.className = 'measure-leg';
+        name.textContent = `leg ${index + 1}`;
+        const value = document.createElement('span');
+        value.className = 'measure-value';
+        value.textContent = Measure.formatDistance(seg.length);
+        row.appendChild(name);
+        row.appendChild(value);
+        measureList.appendChild(row);
+      });
+      const row = document.createElement('div');
+      row.className = 'measure-row measure-row-total';
+      const name = document.createElement('span');
+      name.className = 'measure-leg';
+      name.textContent = 'total';
+      const value = document.createElement('span');
+      value.className = 'measure-value';
+      value.textContent = totalText;
+      row.appendChild(name);
+      row.appendChild(value);
+      measureList.appendChild(row);
+    }
+
+    if (measureStatus) {
+      // A robot-centric measurement is a statement about the picture, not
+      // about the track, and it moves with the car. Saying so beats
+      // letting someone write the number down.
+      const frameNote = (measure.pts.length && measure.pts[0].frame === 'body')
+        ? 'robot-centric -- these points are relative to the car and move with it. '
+        : '';
+      measureStatus.textContent = frameNote + measure.note;
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // Saved maps: list, delete, reset SLAM, clear view
+  // ---------------------------------------------------------------------
+
+  function sendMapControl(payload) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify(Object.assign({ type: 'map_control' }, payload)));
+  }
+
+  function formatBytes(bytes) {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n < 0) return '--';
+    if (n >= 1024 * 1024 * 1024) return `${(n / (1024 ** 3)).toFixed(1)} GB`;
+    if (n >= 1024 * 1024) return `${(n / (1024 ** 2)).toFixed(1)} MB`;
+    if (n >= 1024) return `${(n / 1024).toFixed(0)} kB`;
+    return `${n} B`;
+  }
+
+  /**
+   * The one decision this panel makes on its own: does this run get a
+   * delete control at all, and what does the row say?
+   *
+   * Pulled out as a pure function so browser/map_panel_test.js can assert
+   * the invariant directly. The server refuses these independently -- it
+   * re-scans and re-vets before removing anything -- so this is the second
+   * of two locks, not the only one. It earns its place because a control
+   * that is offered and then silently refused is worse than no control.
+   *
+   * Fails closed: a row this page cannot identify gets no delete button.
+   */
+  function mapRowPlan(run) {
+    const known = !!(run && typeof run.id === 'string' && run.id);
+    if (!known) {
+      return {
+        deletable: false, name: '(unrecognised entry)', meta: '',
+        reason: 'unrecognised entry', contents: '', citedBy: '',
+      };
+    }
+    const parts = [formatBytes(run.bytes)];
+    if (Array.isArray(run.span_m) && run.span_m.length === 2) {
+      parts.push(`${run.span_m[0].toFixed(1)} x ${run.span_m[1].toFixed(1)} m`);
+    } else if (!run.has_map) {
+      parts.push('no map');
+    }
+    return {
+      deletable: run.deletable === true,
+      name: run.id,
+      meta: parts.join(' \u00b7 '),
+      reason: run.deletable === true ? '' : (run.reason || 'not deletable'),
+      contents: (run.contents || []).join(', ') || 'nothing recognised',
+      citedBy: run.cited_by || '',
+    };
+  }
+
+  /**
+   * Is the delete button live yet?
+   *
+   * Exact string equality, deliberately: no trim, no case folding. What the
+   * server checks is precisely what the person was asked to type, and the
+   * two must not disagree about what counts as a match.
+   *
+   * And never enabled for a run the server already said is not deletable,
+   * however perfect the typing -- the two conditions compose rather than
+   * either one alone being enough.
+   */
+  function deleteConfirmState(typed, run) {
+    const plan = mapRowPlan(run);
+    if (!plan.deletable) return { enabled: false, reason: plan.reason };
+    if (typed !== plan.name) {
+      return { enabled: false, reason: `type ${plan.name} to confirm` };
+    }
+    return { enabled: true, reason: '' };
+  }
+
+  if (typeof window !== 'undefined') {
+    window.__mapRowPlan = mapRowPlan;
+    window.__deleteConfirmState = deleteConfirmState;
+  }
+
+  function renderSavedMaps() {
+    const snapshot = state.savedMaps;
+    if (!mapsSection || !mapList) return;
+    if (!snapshot) return;
+
+    mapsSection.style.display = snapshot.enabled ? '' : 'none';
+    if (!snapshot.enabled) return;
+
+    if (mapResetBlock) {
+      mapResetBlock.style.display = snapshot.can_reset_slam ? '' : 'none';
+    }
+    if (mapDeleteBlock) {
+      mapDeleteBlock.style.display = snapshot.can_delete ? '' : 'none';
+    }
+
+    const runs = snapshot.runs || [];
+    if (dots.maps) {
+      dots.maps.className = 'dot ' + (runs.length ? 'dot-green' : 'dot-gray');
+    }
+    const totalBytes = runs.reduce((sum, r) => sum + (Number(r.bytes) || 0), 0);
+    setDigest('maps', runs.length
+      ? `${runs.length} run(s), ${formatBytes(totalBytes)}` : '--');
+
+    if (!snapshot.can_delete) return;
+
+    mapList.innerHTML = '';
+    if (!runs.length) {
+      const empty = document.createElement('div');
+      empty.className = 'map-empty';
+      // "No saved runs" and "nowhere configured to look" call for
+      // completely different fixes, so they must not look the same.
+      empty.textContent = (snapshot.roots || []).length
+        ? `no saved runs under ${(snapshot.roots || []).join(', ')}`
+        : 'no map directories are configured (see map_roots)';
+      mapList.appendChild(empty);
+      return;
+    }
+    for (const run of runs) mapList.appendChild(buildMapRow(run));
+  }
+
+  function buildMapRow(run) {
+    const plan = mapRowPlan(run);
+    const row = document.createElement('div');
+    row.className = 'map-row' + (plan.deletable ? '' : ' map-row-blocked');
+
+    const name = document.createElement('div');
+    name.className = 'map-name';
+    name.textContent = plan.name;
+    row.appendChild(name);
+
+    const meta = document.createElement('div');
+    meta.className = 'map-meta';
+    meta.textContent = plan.meta;
+    meta.title = (run && run.path) || '';
+    row.appendChild(meta);
+
+    const contents = document.createElement('div');
+    contents.className = 'map-contents';
+    contents.textContent = `deletes: ${plan.contents}`;
+    row.appendChild(contents);
+
+    if (plan.citedBy) {
+      // A run some test reads as its oracle. Deleting it turns a real test
+      // into a permanent skip, which is worth knowing before, not after.
+      const cited = document.createElement('div');
+      cited.className = 'map-cited';
+      cited.textContent = `used as a test oracle by ${plan.citedBy}`;
+      row.appendChild(cited);
+    }
+
+    if (!plan.deletable) {
+      const why = document.createElement('div');
+      why.className = 'map-reason';
+      why.textContent = plan.reason;
+      row.appendChild(why);
+      return row;
+    }
+
+    const confirm = document.createElement('div');
+    confirm.className = 'map-confirm';
+    const field = document.createElement('input');
+    field.type = 'text';
+    field.className = 'map-confirm-input';
+    field.setAttribute('autocomplete', 'off');
+    field.setAttribute('spellcheck', 'false');
+    field.placeholder = `type ${plan.name}`;
+    field.setAttribute('aria-label', `type ${plan.name} to confirm deleting it`);
+    const button = document.createElement('button');
+    button.className = 'map-delete';
+    button.textContent = 'delete';
+    button.disabled = true;
+
+    const sync = () => {
+      const verdict = deleteConfirmState(field.value, run);
+      button.disabled = !verdict.enabled;
+      button.title = verdict.reason;
+    };
+    field.addEventListener('input', sync);
+    button.addEventListener('click', () => {
+      if (!deleteConfirmState(field.value, run).enabled) return;
+      setMapStatus(`deleting ${plan.name}...`);
+      sendMapControl({
+        action: 'delete', id: run.id, confirm: field.value,
+        // The digest the server published with this listing. If the run
+        // changed since -- a map finished writing, say -- the delete is
+        // refused rather than removing something never shown here.
+        digest: run.digest,
+      });
+      button.disabled = true;
+    });
+    sync();
+
+    confirm.appendChild(field);
+    confirm.appendChild(button);
+    row.appendChild(confirm);
+    return row;
+  }
+
+  function setMapStatus(text, kind) {
+    if (!mapStatus) return;
+    mapStatus.textContent = text;
+    mapStatus.className = 'map-status' + (kind ? ` map-status-${kind}` : '');
+  }
+
+  function applyMapDeleteResult(message) {
+    if (message.ok) {
+      setMapStatus(
+        `${message.id}: deleted, ${formatBytes(message.freed_bytes)} freed`,
+        'good');
+    } else {
+      setMapStatus(`${message.id || 'delete'}: ${message.detail}`, 'bad');
+    }
+  }
+
+  function applySlamResetResult(message) {
+    if (!message.done) {
+      setMapStatus(message.detail, '');
+      return;
+    }
+    setMapStatus(message.detail, message.ok ? 'good' : 'bad');
+  }
+
+  function applyMapCleared(message) {
+    // Drop our copy. applyMapPatch already returns early on a null map
+    // ("no keyframe yet; the next one brings everything"), so patches
+    // arriving before the next keyframe are ignored rather than painted
+    // onto nothing.
+    state.map = null;
+    if (message.has_map) {
+      setMapStatus('view cleared -- the car is still publishing this map, '
+                   + 'so it came straight back', '');
+    } else {
+      setMapStatus('view cleared -- nothing is publishing /map right now', '');
+    }
+    scheduleRender();
+  }
   function setProcStatus(text, ok) {
     const element = document.getElementById('proc-status');
     if (!element) return;
@@ -2807,6 +3414,8 @@
     system: document.getElementById('digest-system'),
     tuning: document.getElementById('digest-tuning'),
     processes: document.getElementById('digest-processes'),
+    measure: document.getElementById('digest-measure'),
+    maps: document.getElementById('digest-maps'),
   };
 
   function restoreSectionState() {
@@ -2884,6 +3493,62 @@
     const onlineNodes = tuning ? (tuning.nodes || []).filter((n) => n.online) : [];
     setDigest('tuning', onlineNodes.length ? `${onlineNodes.length} node(s)` : '--');
   }
+
+  // ---------------------------------------------------------------------
+  // Measuring and map controls: wiring
+  // ---------------------------------------------------------------------
+  if (measureEnable) {
+    measureEnable.addEventListener('change', () => setMeasureActive(measureEnable.checked));
+  }
+  if (measureUndoBtn) measureUndoBtn.addEventListener('click', undoMeasure);
+  if (measureClearBtn) measureClearBtn.addEventListener('click', clearMeasure);
+  if (mapClearViewBtn) {
+    mapClearViewBtn.addEventListener('click', () => {
+      setMapStatus('clearing...');
+      sendMapControl({ action: 'clear_view' });
+    });
+  }
+  if (mapResetSlamBtn) {
+    mapResetSlamBtn.addEventListener('click', () => {
+      setMapStatus('asking slam_toolbox to reset...');
+      sendMapControl({ action: 'reset_slam' });
+    });
+  }
+
+  // Keyboard, and only when the person is not typing. The delete
+  // confirmation is a text field, and "M" is a letter that appears in a
+  // run name -- toggling the measuring tool while someone types it would
+  // be its own small disaster.
+  function typingInAField() {
+    const el = document.activeElement;
+    if (!el) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || el.isContentEditable;
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (typingInAField()) return;
+    const key = e.key;
+    if (key === 'm' || key === 'M') {
+      e.preventDefault();
+      setMeasureActive(!measure.active);
+      return;
+    }
+    if (!measure.active) return;
+    if (key === 'Escape') {
+      e.preventDefault();
+      // Escape clears a measurement in progress; a second Escape, with
+      // nothing left to clear, puts the tool away.
+      if (measure.pts.length) clearMeasure();
+      else setMeasureActive(false);
+    } else if (key === 'Backspace' || key === 'Delete' || key === 'u') {
+      e.preventDefault();
+      undoMeasure();
+    }
+  });
+
+  renderMeasurePanel();
 
   // ---------------------------------------------------------------------
   // Go

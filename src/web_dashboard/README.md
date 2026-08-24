@@ -34,8 +34,10 @@ for the user-facing account and `enable_tuning: false` to remove it.
 | [`web_dashboard/netbind.py`](web_dashboard/netbind.py) | One decision: whether the configured `host` means "every interface". `0.0.0.0` binds IPv4 *only*, which left the dashboard unreachable at the car's Tailscale IPv6 address, so the wildcards are turned into "bind with no address" and get both families. No ROS imports (see [`test/test_netbind.py`](test/test_netbind.py)). |
 | [`web_dashboard/tuning.py`](web_dashboard/tuning.py) | Live-tuning support: parsing a node's advertised catalogue, clamping a browser request, and the comment-preserving YAML writer. No ROS/Tornado imports either (see [`test/test_tuning.py`](test/test_tuning.py)). |
 | [`web_dashboard/proccontrol.py`](web_dashboard/proccontrol.py) | Finding driving processes in `/proc`, deciding which may be stopped, and the `SIGINT`→`SIGTERM`→`SIGKILL` escalation. Holds `PROTECTED`, the actuation-path names no config can make killable. No ROS/Tornado imports; tested against a fake `/proc` (see [`test/test_proccontrol.py`](test/test_proccontrol.py)). |
+| [`web_dashboard/mapstore.py`](web_dashboard/mapstore.py) | Finding saved SLAM run directories, deciding which may be deleted, and deleting one. Holds the protected-root rules no config can override, and the `.pgm`/`map.yaml` header readers. No ROS/Tornado imports; tested against a `tmp_path` tree (see [`test/test_mapstore.py`](test/test_mapstore.py)). |
 | [`web_dashboard/dashboard_node.py`](web_dashboard/dashboard_node.py) | The ROS2 node: subscribes to map/scan/pose/command/odom/joy, runs a [Tornado](https://www.tornadoweb.org/) web + WebSocket server, and bridges its two threads. |
-| [`web/index.html`](web/index.html), [`web/dashboard.js`](web/dashboard.js), [`web/style.css`](web/style.css) | The main browser dashboard — plain HTML/JS/CSS, no build step. |
+| [`web/index.html`](web/index.html), [`web/dashboard.js`](web/dashboard.js), [`web/style.css`](web/style.css) | The main browser dashboard — plain HTML/JS/CSS, no build step. `measure.js` loads *before* `dashboard.js`; `panels.js` loads *after*. |
+| [`web/measure.js`](web/measure.js) | The map measuring tool's arithmetic and every decision it makes: segment lengths, the total, distance formatting, tap-versus-drag, and label placement. No DOM, no canvas, no WebSocket, so it loads under plain node (see [`test/browser/measure_test.js`](test/browser/measure_test.js)). |
 | [`web/panels.js`](web/panels.js) | The window manager: popping a section out of the info panel, dragging, magnetic snapping, 8-way resizing, and the saved layout. Touches no telemetry — it only moves boxes. Its geometry is tested under node (see [`test/browser/panels_test.js`](test/browser/panels_test.js)). |
 | [`web/camera.html`](web/camera.html), [`web/camera.js`](web/camera.js), [`web/camera.css`](web/camera.css) | Full-window camera recording view with clock and telemetry overlays. |
 | [`config/web_dashboard.yaml`](config/web_dashboard.yaml) | Every parameter, loaded at launch. |
@@ -46,7 +48,8 @@ for the user-facing account and `enable_tuning: false` to remove it.
 - **Subscribes:** map (`/map`), scan (`/scan`), pose (`/pf/viz/inferred_pose` *and* `/slam_pose`), selected command (`/ackermann_cmd`), measured odometry (`/odom`), joystick state (`/joy`), and drive intent (`/drive_intent`). Every subscription is display/timer input only.
 - Also samples CPU%/mem%/CPU temp/WiFi signal/uptime on a timer (`psutil` + `/sys/class/thermal` + `/proc/net/wireless`).
 - **Publishes:** nothing, to any topic. Browser input can enable/reset the dashboard-local stopwatch (which never leaves this process) and — once armed — change live-tunable parameters on the nodes in `tuning_nodes`.
-- **Calls (services):** `/<node>/get_parameters` and `/<node>/set_parameters` for each node in `tuning_nodes`, and nothing else.
+- **Calls (services):** `/<node>/get_parameters` and `/<node>/set_parameters` for each node in `tuning_nodes`; and, with `enable_slam_reset`, `/slam_toolbox/reset` — refused while any `proccontrol.DRIVING_CONTROLLERS` process is running. Nothing else.
+- **Touches (filesystem):** with `enable_map_delete`, removes run directories inside `map_roots` (`~/.ros/racerbot_auto`, `~/.ros/racerbot_sim/auto`). It only ever *removes*, never writes, and only files `mapstore` classified as run output. See [Deleting a saved run](#deleting-a-saved-run-mapstorepy).
 - **Signals (not ROS at all):** with `enable_process_control`, sends `SIGINT`/`SIGTERM`/`SIGKILL` to the operating-system processes of the driving nodes named in `killable_nodes`. Never to anything in `proccontrol.PROTECTED`, never to itself or its own ancestors, never to another user's processes, and only to a pid a fresh scan has just re-vetted. See [Stopping a driving process](#stopping-a-driving-process-proccontrolpy).
 
 ## Two concurrency models, one process
@@ -681,6 +684,113 @@ serving telemetry. Blocking it to wait for a `SIGINT` to land would
 freeze the map, the scan and the pose for every connected browser — while
 the car is moving.
 
+## Measuring on the map (`web/measure.js`)
+
+`measure.js` holds the arithmetic and every decision; `dashboard.js` holds the pointer events and the drawing. Nothing in `measure.js` touches the DOM, so `test/browser/measure_test.js` loads the real file under plain node.
+
+### Turning a tap into a position
+
+`dashboard.js` had named *forward* transforms (`worldToCanvas`, `bodyToCanvas`) but the inverse existed only inline inside `zoomAt`, in two copies — one per frame. Measuring needs that inverse, so it is now `canvasToWorld` / `canvasToBody`, and `zoomAt` calls them.
+
+`canvasToActive` picks between them on `state.pose` and **tags the result with which frame it came from**.
+
+That tag is why a measurement cannot silently span the two frames. A body-frame point means "relative to where the car is right now" and stops meaning anything once the car moves; a map-frame point is a place on the track.
+
+There is no conversion between them without a pose. So `frameFor` reports `stale` when the active frame no longer matches the chain, and the chain is dropped with a note rather than redrawn somewhere it never was.
+
+### Tap versus drag
+
+The canvas is a pan surface first, so a tap has to be told from a drag without either gesture feeling sticky. Three rules, all in `isTap`:
+
+- The gesture is judged on the **furthest** the pointer got from where it went down, not on where it ended. A drag that wanders and comes back would otherwise drop a point mid-pan.
+- A gesture that ever had two pointers down is never a tap, so lifting one finger of a pinch cannot become a click.
+- 8 CSS px of slop for a mouse, 14 for a finger, 500 ms maximum.
+
+While measuring, `panBy` is suppressed until the pointer clears the slop. Otherwise every point placed nudges the view a pixel or two, and the tool feels imprecise.
+
+`dblclick` also no longer resets the view while measuring, because two quick taps *is* how a point-to-point measurement gets made.
+
+### Two details that look like nitpicks and are not
+
+**`formatDistance` rounds before choosing the unit.** The obvious form picks the unit from the unrounded value and rounds inside it, which prints `100 cm` for 0.999 m. Deliberately not shared with `updateScaleBar`, whose values are round steps by construction and can never hit that boundary.
+
+**Label text folds its angle into `[-π/2, π/2]`** so a right-to-left segment is not written upside down.
+
+The offset is the segment's perpendicular, always chosen on the upper side of the screen, so a chain's labels do not flip from side to side. The node test checks that with a dot product rather than a magnitude — a sign error passes a magnitude check.
+
+---
+
+## Deleting a saved run (`mapstore.py`)
+
+Same shape as `proccontrol.py`: a ROS-free module holding the rules, a fresh re-scan at the moment of action, and a protected set that no config can override.
+
+### The unit is a run directory, and that is the safety argument
+
+A run directory is one artifact.
+
+`map.yaml` names its image *relatively*, so the pair only works inside its own directory. The racing line beside it was optimized against that grid and clearance-checked against those walls. The pose graph is the only route back to a map whose save raced.
+
+Deleting part of one leaves wreckage that is worse than either extreme:
+
+- Map gone, racing line kept → a line with nothing to verify it against. `~/.ros/racerbot_auto/20260727-202458` is already in that state from a `map_saver` race.
+- `map.pgm` gone, `map.yaml` kept → `map_server` fails to configure, the lifecycle manager stalls behind it, and `particle_filter` **blocks in its constructor** waiting on `/map_server/map`. A hang, not an error.
+
+So there is no per-file delete, and `delete_run` does not call `shutil.rmtree` on the directory.
+
+It re-classifies every entry immediately before touching anything, unlinks the files it recognised **by name**, recursively removes only a `bag/` subdirectory, and finishes with `os.rmdir`.
+
+That last call cannot succeed unless the directory really is empty. "Something else was in there" becomes an error rather than a silent recursive removal.
+
+### The protected roots are the whole safety argument
+
+`sanitize_roots` drops and logs any configured root that is:
+
+- inside a git working tree — `src/particle_filter/maps/` holds tracked upstream maps
+- `~/.ros/racerbot_sim/tracks` — generated simulator *inputs*, not run output
+- `$HOME` itself, or an ancestor of it
+- fewer than two components below `/`
+
+Putting one of those in `map_roots` does not enable it.
+
+### Six bounds on the delete path
+
+1. `is_plain_component` is a **whitelist** (`[A-Za-z0-9][A-Za-z0-9._-]*`, 255 chars). One rule rejects separators, both dot entries, a leading dot, `~`, NUL and anything non-ASCII.
+2. The run must be present in a scan taken **now**, not in whatever the browser last saw.
+3. `realpath` must still be inside a sanitized root, and the entry must not itself be a symlink — defeating a link swapped in between the scan and the press.
+4. The typed confirmation must equal the run's name **exactly**: no trim, no case fold.
+5. The published `digest` (name, size and mtime of every entry) must still match. This is what catches a stale tab — one that listed a run before `map_saver` finished would otherwise delete a map it never showed anyone. The typed name cannot see that, because the name did not change.
+6. Nothing running may have the directory in its command line (`in_use_by`, over a fresh `proccontrol.scan`), which is what stops you causing the `particle_filter` hang above.
+
+**Be honest about what the typed name is for.** Any client that can read the listing can echo the name back, so it guards against a mis-tap, not against someone hostile who can already reach the port. What actually bounds this is the root list and `enable_map_delete`.
+
+### Threading
+
+`map_control` requests follow the same contract as `_tuning_requests` and `_process_requests`: `on_message` only does a `queue.put`, and the rclpy thread drains it.
+
+The one addition is that **`shutil` work happens on a short-lived worker thread**, not on the rclpy thread. Removing a 38 MB run is quick; a 300 MB one is not, and that thread is also serving map, scan and pose to every browser.
+
+`_broadcast` is thread-safe by construction — it hands to the IOLoop — so the worker reports its own result.
+
+---
+
+## Resetting live SLAM
+
+One `call_async` to `/slam_toolbox/reset`, with `add_done_callback` — never `spin_until_future_complete`, which would deadlock against the already-spinning executor.
+
+Service readiness is checked with `service_is_ready()`, not `wait_for_service()`, for the same reason the tuning clients do: blocking that thread freezes telemetry for every browser.
+
+**Refused while any `proccontrol.DRIVING_CONTROLLERS` process is running.** That set is not a config knob. The reasoning is already written into `killable_nodes`'s comment — `slam_toolbox` is deliberately not stoppable because a controller with a frozen pose is more dangerous than one with no pose. A reset under a live controller is the same hazard with a different trigger.
+
+**`pause_new_measurements` is hard-coded `False`**, and deliberately not exposed.
+
+`True` leaves `slam_toolbox` alive but ignoring scans: a map frozen at empty while the `map`→`odom` transform keeps publishing. That is precisely the confidently-wrong-and-stationary pose this feature exists to avoid.
+
+There is also no un-pause control here, so `True` would create a state only a terminal could leave.
+
+The call stalls `slam_toolbox`'s own executor while it runs, so `done=False` is broadcast first and the timeout is reported as *"no answer — do not assume nothing happened"* rather than as a failure.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -697,3 +807,7 @@ the car is moving.
 | A stop says "refused — in the actuation path" | Working as intended: that process is in `proccontrol.PROTECTED` and no config makes it stoppable. See [the protected set](#the-protected-set-is-the-whole-safety-argument) |
 | A stop reports "survived SIGINT, SIGTERM, SIGKILL" | The process is blocked in an uninterruptible kernel wait, usually on a USB/serial device that stopped responding. Nothing in userspace can end it; reboot |
 | Reachable at the car's `100.x.x.x` address but not at its Tailscale hostname | An IPv4-only listener: MagicDNS publishes the car's IPv6 address too and browsers often try it first. `ss -tlnp \| grep 8080` should show *two* lines (IPv4 and IPv6); one line means a build predating [`netbind.py`](web_dashboard/netbind.py) — rebuild and relaunch. If both are listening, check `tailscale status` and that `tailscale debug prefs` reports `"ShieldsUp": false` |
+| A saved run is not listed | It is not under a directory in `map_roots`, or its name has a character outside `[A-Za-z0-9._-]`. Manually saved maps land in whatever directory you ran `map_saver_cli` from and are never listed. |
+| `delete refused -- this run changed` | The digest guard: the directory changed after your page listed it. Refresh and look again. |
+| `delete refused -- ... is using this run` | A `map_server` or controller has that directory open. Stop it first; deleting under it hangs `particle_filter`. |
+| `reset SLAM refused` | A driving node is running, or nothing is advertising `/slam_toolbox/reset`. The message says which. |

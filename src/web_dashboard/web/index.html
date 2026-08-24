@@ -333,6 +333,89 @@
           <div id="proc-status" class="proc-status" role="status" aria-live="polite"></div>
         </div>
       </details>
+
+      <!-- Measuring distances on the map.
+
+           Above the map section deliberately: this is an instrument you
+           reach for while looking at the map, whereas everything below is
+           housekeeping between runs. -->
+      <details class="section" data-section="measure" id="measure-section">
+        <summary class="section-head">
+          <span id="dot-measure" class="dot dot-gray"></span>
+          <span class="section-name">measure</span>
+          <span class="section-digest" id="digest-measure"></span>
+        </summary>
+        <div class="section-body">
+          <!-- The checkbox lives in the section body, never in the
+               collapsing header: a control placed in that header also
+               toggles the section open and shut, which is never what the
+               person clicking it wanted. -->
+          <label class="measure-toggle">
+            <input type="checkbox" id="measure-enable">
+            <span>measure on the map <kbd>M</kbd></span>
+          </label>
+          <div class="measure-note" id="measure-note">
+            Tap the map to drop points. Each leg is labelled; the total is
+            the whole chain. Dragging still pans.
+          </div>
+          <div id="measure-list" class="measure-list">
+            <div class="measure-empty">no points yet</div>
+          </div>
+          <div id="measure-status" class="measure-status" role="status" aria-live="polite"></div>
+        </div>
+      </details>
+
+      <!-- Clearing the map. Three actions in increasing order of
+           consequence, and they are deliberately not interchangeable:
+           the first touches nothing on the car, the second calls a service,
+           the third deletes files permanently. Collapsed by default and
+           placed last, like the processes panel above -- this is
+           housekeeping, not an instrument you watch while driving. -->
+      <details class="section" data-section="maps" id="maps-section">
+        <summary class="section-head">
+          <span id="dot-maps" class="dot dot-gray"></span>
+          <span class="section-name">maps</span>
+          <span class="section-digest" id="digest-maps"></span>
+        </summary>
+        <div class="section-body">
+
+          <div class="map-block">
+            <div class="map-block-head">clear this view</div>
+            <div class="map-note">
+              Forgets the map in <em>this browser</em> only. Nothing on the
+              car changes. If it comes straight back, the car is still
+              publishing it.
+            </div>
+            <button id="map-clear-view">clear view</button>
+          </div>
+
+          <div class="map-block" id="map-reset-block">
+            <div class="map-block-head">reset live SLAM</div>
+            <div class="map-note">
+              Throws away the map <strong>slam_toolbox</strong> is building
+              and starts again from here. Refused while a driving node is
+              running. The pose freezes for a few seconds while it works, so
+              do this with the car stopped.
+            </div>
+            <button id="map-reset-slam">reset SLAM</button>
+          </div>
+
+          <div class="map-block map-block-danger" id="map-delete-block">
+            <div class="map-block-head">delete a saved run</div>
+            <div class="map-note">
+              <strong>Permanent.</strong> No undo, no trash. A run is deleted
+              whole &mdash; the map, its pose graph and the racing line
+              recorded with it all go together, because none of them is
+              usable without the others.
+            </div>
+            <div id="map-list" class="map-list">
+              <div class="map-empty">looking for saved runs...</div>
+            </div>
+          </div>
+
+          <div id="map-status" class="map-status" role="status" aria-live="polite"></div>
+        </div>
+      </details>
     </div>
 
     <!-- Pinned below the scroll region: a banner explaining why the picture
@@ -413,6 +496,24 @@
     <div id="scale-ruler"><span id="scale-label">1 m</span></div>
   </div>
 
+  <!-- Shown only while the measuring tool is on. It lives over the map
+       rather than in the sidebar because on a phone the sheet is closed
+       by default, and a running total you cannot see is no total at
+       all. Undo and clear are the only two controls needed with a
+       measurement in progress; everything else stays in the sheet. -->
+  <div id="measure-panel" aria-label="Measurement" hidden>
+    <span class="measure-total" id="measure-total">0 cm</span>
+    <span class="measure-hint" id="measure-hint">tap the map</span>
+    <span class="measure-buttons">
+      <button id="measure-undo" title="Remove the last point (Backspace)">undo</button>
+      <button id="measure-clear" title="Start again (Esc)">clear</button>
+    </span>
+  </div>
+
+  <!-- Before dashboard.js on purpose: dashboard.js reads window.__measure
+       while it is initialising, so this file has to have run first.
+       (panels.js is the opposite case -- see below.) -->
+  <script src="measure.js"></script>
   <script src="dashboard.js"></script>
   <!-- After dashboard.js on purpose. panels.js MOVES section elements
        around the page; dashboard.js has already looked all of them up by

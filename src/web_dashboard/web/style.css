@@ -2678,3 +2678,261 @@ body.sheet-dragging .sheet-grip-bar {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ==========================================================================
+   Measuring, and the map housekeeping panel
+
+   Colour rule, as everywhere else on this page: cyan is the system talking,
+   and green/amber/red belong to what the CAR has decided. A measurement is
+   the first kind, so the overlay and its readout are cyan throughout. The
+   only warm colour down here is on the delete block, which is not a verdict
+   about the drive -- it is a warning about an irreversible action.
+   ========================================================================== */
+
+/* --- The on-map readout ------------------------------------------------
+   Over the map rather than in the sidebar, because on a phone the sheet is
+   closed by default and a running total you cannot see is no total at all.
+   Sits above the scale bar, and only exists while the tool is on. */
+#measure-panel {
+  position: fixed;
+  right: 12px;
+  bottom: 44px;
+  z-index: 11;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  backdrop-filter: blur(3px);
+}
+
+#measure-panel[hidden] { display: none; }
+
+.measure-total {
+  font-size: var(--fs-value);
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.measure-hint {
+  font-size: var(--fs-micro);
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.measure-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+/* --- The sidebar section ------------------------------------------------ */
+.measure-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-body);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.measure-note {
+  margin-top: 6px;
+  font-size: var(--fs-small);
+  color: var(--ink-dim);
+  line-height: 1.45;
+}
+
+.measure-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.measure-empty {
+  font-size: var(--fs-small);
+  color: var(--ink-dim);
+  font-style: italic;
+}
+
+.measure-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.measure-row-total {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.measure-leg {
+  font-size: var(--fs-label);
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.measure-value {
+  font-size: var(--fs-body-lg);
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.measure-row-total .measure-value {
+  font-size: var(--fs-value);
+  color: var(--ink-bright);
+}
+
+.measure-status {
+  margin-top: 6px;
+  font-size: var(--fs-small);
+  color: var(--ink-dim);
+  line-height: 1.45;
+  min-height: 1em;
+}
+
+/* --- Maps: three blocks, increasing consequence -------------------------- */
+.map-block {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.map-block:last-of-type { border-bottom: none; }
+
+.map-block-head {
+  font-size: var(--fs-label);
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+
+.map-note {
+  font-size: var(--fs-small);
+  color: var(--ink-dim);
+  line-height: 1.45;
+  margin-bottom: 6px;
+}
+
+.map-note strong { color: var(--ink-bright); }
+
+/* The delete block is marked, not hidden. It is the only control on this
+   page with no undo, and it should not look like the two above it. */
+.map-block-danger {
+  border-left: 2px solid var(--warn);
+  padding-left: 8px;
+  margin-top: 4px;
+}
+
+.map-block-danger .map-block-head { color: var(--warn); }
+
+.map-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.map-empty {
+  font-size: var(--fs-small);
+  color: var(--ink-dim);
+  font-style: italic;
+}
+
+.map-row {
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+
+.map-row-blocked { opacity: 0.72; }
+.map-row-blocked .map-name { color: var(--ink-dim); }
+
+.map-name {
+  font-size: var(--fs-body-lg);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-bright);
+}
+
+.map-meta {
+  font-size: var(--fs-micro);
+  color: var(--ink-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.map-contents {
+  margin-top: 2px;
+  font-size: var(--fs-micro);
+  color: var(--ink-dim);
+}
+
+/* A run some test reads as its oracle. Amber because deleting it quietly
+   turns a real test into a permanent skip -- worth seeing beforehand. */
+.map-cited {
+  margin-top: 2px;
+  font-size: var(--fs-micro);
+  color: var(--warn);
+}
+
+.map-reason {
+  margin-top: 4px;
+  font-size: var(--fs-small);
+  color: var(--ink-dim);
+  line-height: 1.4;
+}
+
+.map-confirm {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.map-confirm-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: var(--fs-small);
+  color: var(--ink-bright);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+
+.map-confirm-input:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.map-delete[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.map-status {
+  margin-top: 8px;
+  font-size: var(--fs-small);
+  color: var(--ink-dim);
+  line-height: 1.45;
+  min-height: 1em;
+}
+
+.map-status-good { color: var(--go); }
+.map-status-bad { color: var(--bad); }
+
+/* The crosshair belongs to the canvas, but the body class is what lets the
+   help hint and anything else respond to the tool being on. */
+body.measuring #help .help-hint::after {
+  content: ' \00b7 measuring: tap to add a point';
+  color: var(--accent);
+}

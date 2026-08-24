@@ -127,6 +127,37 @@ DEFAULT_KILLABLE = (
     'sim_launch.py',
 )
 
+# The nodes that decide where the car goes. Not a config knob and not the
+# same list as DEFAULT_KILLABLE, which is about what may be *stopped*: this
+# is about what must not have the ground moved under it.
+#
+# Used by the dashboard's live-SLAM reset. Resetting slam_toolbox throws
+# away the pose graph, so anything steering from a pose derived from it sees
+# that pose jump or freeze -- which is precisely why slam_toolbox is absent
+# from DEFAULT_KILLABLE above ("pure_pursuit with a frozen pose is more
+# dangerous than pure_pursuit with no pose"). Same hazard, different
+# trigger, so the same answer: refuse while one of these is running.
+DRIVING_CONTROLLERS = frozenset({
+    # this workspace
+    'pure_pursuit_node',
+    'gap_follow_node',
+    'auto_map_race_node',
+    # racerbot_a / racerbot_b
+    'gap_finder_node',
+    'ftg_node',
+    'follow_the_gap_node',
+    'reactive_node',
+    'wall_follow_node',
+    'safety_node',
+    # racerbot_sim -- forges LB and fakes a /scan, so a stale one drives too
+    'gym_bridge_node',
+    # the launches that own the above
+    'pure_pursuit_launch.py',
+    'gap_follow_launch.py',
+    'auto_map_race_launch.py',
+})
+
+
 # Stop escalation. SIGINT first because that is precisely what Ctrl+C
 # sends: rclpy runs its shutdown handlers, the node deregisters from the
 # graph, and a launch brings its own children down with it. Everything

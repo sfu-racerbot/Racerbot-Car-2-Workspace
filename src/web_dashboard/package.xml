@@ -19,6 +19,11 @@
   <depend>python3-psutil</depend>
   <!-- diffing occupancy grids for map patches, see mapstream.py -->
   <depend>python3-numpy</depend>
+  <!-- The Reset service for the dashboard's live-SLAM reset. exec_depend,
+       not depend: this package's tests deliberately run with no ROS
+       sourced, and the import is guarded so a machine without
+       slam_toolbox still gets a working dashboard. -->
+  <exec_depend>slam_toolbox</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

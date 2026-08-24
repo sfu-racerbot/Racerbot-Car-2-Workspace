@@ -60,7 +60,7 @@ After that, follow whichever branch below matches what you're doing.
 |---|---|
 | [racing-autonomy.md](racing-autonomy.md) | The map-based race stack end to end: SLAM, localization, racing line, velocity profile, pure pursuit, overtaking. The biggest doc here; it opens with a plain-language summary. |
 | [localization.md](localization.md) | Where the car's position estimate comes from, why it used to arrive late, what was tuned, and what would improve it next. For anyone whose car is slow to know where it is, or whose map will not close. |
-| [web-dashboard.md](web-dashboard.md) | The browser dashboard: what it shows, how it works, and live parameter tuning. Safe to run alongside anything. |
+| [web-dashboard.md](web-dashboard.md) | The browser dashboard: what it shows, how it works, live parameter tuning, measuring distances on the map, and clearing or deleting a map. Safe to run alongside anything. |
 | [simulator.md](simulator.md) | The no-ROS simulator that tests controller *math* directly. |
 | [ros-simulator.md](ros-simulator.md) | The same physics behind the real ROS topics, so whole launch files can be validated without the car. Includes the interlock that stops it running beside real hardware. For the step-by-step workflow, see [sim-validation.md](sim-validation.md). |
 | [sim-fidelity-audit.md](sim-fidelity-audit.md) | How closely the simulator matches this physical car, and where it doesn't. Read before trusting a simulator result. |

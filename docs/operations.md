@@ -119,6 +119,10 @@ Driving a track while [SLAM](glossary.md#slam) builds a map of it.
 
    **Working when:** it prints that it wrote the map, and you have `<map_name>.yaml` and `<map_name>.pgm` in the directory you ran it from.
 
+   > **Where the map ends up matters later.** This command writes into whatever directory you ran it from, so there is no fixed home for maps saved this way.
+   >
+   > That is why the [dashboard's map panel](web-dashboard.md#clearing-the-map) does not list them — it only knows the two directories the automatic flow writes to. Delete a hand-saved map from a terminal.
+
 ## Building a map autonomously (no steering required)
 
 Same result as above, except `gap_follow` drives the lap instead of a human — see [racing-autonomy.md](racing-autonomy.md#phase-1-map-the-track-slam) for why this needs no new code.

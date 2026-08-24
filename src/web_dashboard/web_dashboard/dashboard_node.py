@@ -114,10 +114,21 @@ import tornado.websocket
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 
 from drive_intent import schema as intent_schema
-from web_dashboard import netbind, proccontrol, protocol, tuning
+from web_dashboard import mapstore, netbind, proccontrol, protocol, tuning
 from web_dashboard.batching import TelemetryBatcher
 from web_dashboard.mapstream import MapGeometry, MapStreamer
 from web_dashboard.stopwatch import DeadmanStopwatch
+
+# slam_toolbox is apt-installed on this car, and auto_map_race_node imports
+# its services unguarded. This node does not, deliberately: the dashboard's
+# standing promise is that it starts at any time on any machine and degrades
+# gracefully, and refusing to launch at all because one optional capability's
+# message package is missing would break that for the other twenty things it
+# shows. Missing means the reset half reports itself unavailable.
+try:
+    from slam_toolbox.srv import Reset as SlamReset
+except ImportError:  # pragma: no cover - slam_toolbox is installed here
+    SlamReset = None
 
 
 def _read_cpu_temp_c():
@@ -296,10 +307,18 @@ class DashboardWebSocket(tornado.websocket.WebSocketHandler):
             protocol.tuning_armed_message(self.tuning_armed)))
 
     def on_message(self, message):
-        """Browser -> server. Two kinds of input are accepted: the
-        dashboard's own stopwatch (affects nothing outside this process),
-        and live tuning (reaches the driving nodes -- see the class
-        docstring and check_origin above)."""
+        """Browser -> server. Four kinds of input are accepted:
+
+          stopwatch_control  affects nothing outside this process
+          process_control    signals a driving process (never the mux)
+          tuning_control     reaches the driving nodes, behind an arm
+          map_control        clears the browser's map view, resets live
+                             SLAM, or deletes a saved run from disk
+
+        Every one of them ends in a queue hand-off or a local write. None
+        of them touches a ROS handle here -- see the threading contract at
+        the top of this file, and check_origin above for what does and does
+        not protect these."""
         if not isinstance(message, str):
             return
         try:
@@ -332,6 +351,50 @@ class DashboardWebSocket(tornado.websocket.WebSocketHandler):
             elif action == 'refresh':
                 self.node.request_process_refresh()
             return
+        if kind == 'map_control':
+            # Three actions, three gates. Nothing here touches a ROS handle
+            # or the filesystem -- every one of these ends in a queue.put()
+            # that the rclpy thread drains, and every decision that matters
+            # is made there against a scan taken at that moment.
+            action = payload.get('action')
+            if action == 'clear_view':
+                # Costs the car nothing and changes nothing on it, so it is
+                # not gated at all -- it is the browser forgetting its own
+                # copy of the map.
+                self.node.send_map_keyframe(self)
+                return
+            if action == 'refresh':
+                self.node.request_map_refresh()
+                return
+            if action == 'delete':
+                if not self.node.enable_map_delete:
+                    self.write_message(json.dumps(
+                        protocol.map_delete_result_message(
+                            payload.get('id'), False,
+                            'deleting saved maps is disabled on this '
+                            'dashboard (enable_map_delete is false)')))
+                    return
+                self.node.request_map_delete(
+                    payload.get('id'), payload.get('confirm'),
+                    payload.get('digest'))
+                return
+            if action == 'reset_slam':
+                if not self.node.enable_slam_reset:
+                    self.write_message(json.dumps(
+                        protocol.slam_reset_result_message(
+                            False, 'resetting SLAM is disabled on this '
+                                   'dashboard (enable_slam_reset is false)')))
+                    return
+                self.node.request_slam_reset()
+                return
+            # An action nobody recognises gets an answer, not silence: a
+            # button that does nothing and says nothing is one people press
+            # again, and again.
+            self.write_message(json.dumps(protocol.map_delete_result_message(
+                payload.get('id'), False,
+                f'unknown map action {str(action)[:40]!r}')))
+            return
+
         if kind != 'tuning_control':
             return
 
@@ -471,6 +534,55 @@ class DashboardNode(Node):
         self.declare_parameter('process_stop_grace_sec', 2.0)
         self.declare_parameter('process_scan_interval_sec', 2.0)
 
+        # --- Saved maps, and clearing them --------------------------------
+        # The one part of this dashboard that touches the DISK. It only ever
+        # removes, never writes, and only inside map_roots -- see
+        # web_dashboard/mapstore.py, whose module docstring carries the whole
+        # argument for why the unit is a run directory rather than a file.
+        #
+        # Set false to remove the panel and the capability entirely.
+        self.declare_parameter('enable_map_delete', True)
+        # The ONLY directories a browser can ever see or delete inside.
+        # Everything the car's own tooling writes lands in one of these two:
+        #   ~/.ros/racerbot_auto      auto_map_race_node's output_directory
+        #   ~/.ros/racerbot_sim/auto  the simulator's
+        #
+        # Anything inside a git working tree is refused whatever you put here
+        # -- src/particle_filter/maps holds tracked upstream demo maps, and a
+        # browser deleting tracked files would surface as a mystery in
+        # `git status`. So is ~/.ros/racerbot_sim/tracks, which holds
+        # generated simulator *inputs* rather than run output, and so is $HOME
+        # itself. Each refusal is logged at startup; see
+        # mapstore._protected_root_reason.
+        #
+        # Maps saved by the manual workflow (`ros2 run nav2_map_server
+        # map_saver_cli -f <name>`) land in whatever directory you ran it
+        # from, so they are deliberately NOT listed here -- there is no
+        # canonical location for them to be listed from.
+        self.declare_parameter(
+            'map_roots', ['~/.ros/racerbot_auto', '~/.ros/racerbot_sim/auto'])
+        # Directory sizes are cheap but not free, and a run directory only
+        # changes when a run ends.
+        self.declare_parameter('map_scan_interval_sec', 10.0)
+
+        # --- Resetting live SLAM ------------------------------------------
+        # Calls slam_toolbox's own /slam_toolbox/reset, which throws away the
+        # pose graph and starts mapping again from the current scan.
+        #
+        # REFUSED WHILE ANY DRIVING NODE IS RUNNING, for exactly the reason
+        # slam_toolbox is absent from killable_nodes above: a controller with
+        # a frozen or jumping pose is more dangerous than one with no pose.
+        # A reset under a live controller is that same hazard with a
+        # different trigger.
+        #
+        # It also stalls: slam_toolbox handles this on its own executor, so
+        # the map->odom transform, and every pose derived from it, stops
+        # updating until the call returns (the same freeze auto_map_race.yaml
+        # documents for save_map/serialize_map). Do it with the car stopped.
+        self.declare_parameter('enable_slam_reset', True)
+        self.declare_parameter('slam_reset_service', '/slam_toolbox/reset')
+        self.declare_parameter('slam_reset_timeout_sec', 10.0)
+
         self.map_topic = self.get_parameter('map_topic').value
         self.scan_topic = self.get_parameter('scan_topic').value
         # dict.fromkeys() rather than set(): de-duplicate without shuffling
@@ -524,6 +636,21 @@ class DashboardNode(Node):
             0.5, float(self.get_parameter('process_stop_grace_sec').value))
         self.process_scan_interval_sec = max(
             0.5, float(self.get_parameter('process_scan_interval_sec').value))
+        self.enable_map_delete = bool(
+            self.get_parameter('enable_map_delete').value)
+        # sanitize_roots drops anything that must never be managed from a
+        # browser and says so loudly -- the same contract as
+        # sanitize_allowlist above, for the same reason.
+        self.map_roots = mapstore.sanitize_roots(
+            self.get_parameter('map_roots').value, self.get_logger())
+        self.map_scan_interval_sec = max(
+            1.0, float(self.get_parameter('map_scan_interval_sec').value))
+        self.enable_slam_reset = bool(
+            self.get_parameter('enable_slam_reset').value)
+        self.slam_reset_service = str(
+            self.get_parameter('slam_reset_service').value)
+        self.slam_reset_timeout_sec = max(
+            1.0, float(self.get_parameter('slam_reset_timeout_sec').value))
 
         # Latest-known state, re-sent in full to any newly connected
         # browser tab (send_initial_state) so it isn't stuck waiting for
@@ -617,6 +744,7 @@ class DashboardNode(Node):
 
         self._setup_tuning()
         self._setup_process_control()
+        self._setup_map_control()
 
         self.get_logger().info(
             f"web_dashboard_node ready: map={self.map_topic} scan={self.scan_topic} "
@@ -625,6 +753,7 @@ class DashboardNode(Node):
             f"joy={self.joy_topic} (LB index {self.deadman_button}). "
             f"live tuning {self._tuning_summary()}. "
             f"process control {self._process_control_summary()}. "
+            f"map control {self._map_control_summary()}. "
             f"Once the web server starts, open http://<this car's IP>:{self.port}/ in a browser."
         )
 
@@ -1328,6 +1457,322 @@ class DashboardNode(Node):
         self._process_requests.put(('refresh', None))
 
     # ------------------------------------------------------------------------
+    # Saved maps, and the three ways of clearing one
+    #
+    # Three different actions with three different blast radii, so three
+    # different guards:
+    #
+    #   clear view    the browser forgets its copy. Touches nothing, needs
+    #                 no permission, works with everything below disabled.
+    #   reset SLAM    one bounded service call. Refused while any driving
+    #                 node is running.
+    #   delete a run  removes files, permanently. Refused unless the person
+    #                 typed the run's name, the run still looks exactly as
+    #                 it did when their page listed it, and nothing running
+    #                 on this machine is using it.
+    #
+    # The vetting all happens HERE, on the rclpy thread, against a scan
+    # taken at that moment -- never against what the browser claims. Same
+    # model as _begin_stop().
+    # ------------------------------------------------------------------------
+
+    def _setup_map_control(self):
+        self._map_requests = queue.Queue()
+        self._last_map_list_json = None
+        self._last_map_digest = None
+        self._map_delete_busy = False
+        self._slam_reset_deadline = None
+        self._slam_reset_client = None
+
+        if self.enable_slam_reset and SlamReset is not None:
+            self._slam_reset_client = self.create_client(
+                SlamReset, self.slam_reset_service)
+
+        if not (self.enable_map_delete or self.enable_slam_reset):
+            # One "disabled" snapshot rather than nothing, for the same
+            # reason process control sends one: an empty list looks like
+            # "this car has no saved maps", which is a different and
+            # much more alarming statement.
+            self._last_map_list_json = json.dumps(protocol.saved_maps_message(
+                [], False, False, False))
+            return
+
+        self.map_scan_timer = self.create_timer(
+            self.map_scan_interval_sec, self._map_scan_callback)
+        self.map_drain_timer = self.create_timer(0.1, self._map_drain_callback)
+
+        # Scan once now rather than waiting out the first timer tick. The
+        # interval is 10s because run directories rarely change, but a
+        # browser opened in that first 10s would otherwise sit on "looking
+        # for saved runs..." with nothing wrong -- send_initial_state has
+        # nothing to hand it until this has run once. _broadcast is a no-op
+        # this early (no IOLoop yet, and no clients), so this only fills the
+        # snapshot.
+        self._map_scan_callback()
+
+    def _map_control_summary(self):
+        if not (self.enable_map_delete or self.enable_slam_reset):
+            return 'DISABLED (enable_map_delete and enable_slam_reset are false)'
+        parts = []
+        if self.enable_map_delete:
+            parts.append('deleting runs under '
+                         + (', '.join(self.map_roots) or '(no usable roots)'))
+        if self.enable_slam_reset:
+            parts.append('resetting live SLAM'
+                         + ('' if SlamReset is not None
+                            else ' UNAVAILABLE (slam_toolbox not installed)'))
+        return 'enabled for ' + '; '.join(parts)
+
+    def _scan_maps(self):
+        """Look at the map roots. Runs on the rclpy thread."""
+        return mapstore.scan(self.map_roots)
+
+    def _map_state_message(self, runs):
+        return protocol.saved_maps_message(
+            runs,
+            enabled=self.enable_map_delete or self.enable_slam_reset,
+            can_delete=self.enable_map_delete,
+            can_reset_slam=(self.enable_slam_reset and SlamReset is not None),
+            roots=self.map_roots)
+
+    def _map_scan_callback(self):
+        """Re-read the roots, and broadcast only when something changed.
+
+        Comparing the rendered runs rather than the objects keeps a timer
+        from pushing an identical frame to every browser forever -- the
+        same reasoning as the tuning and process refreshes.
+        """
+        try:
+            runs = self._scan_maps()
+        except Exception as exc:  # noqa: BLE001
+            # A scan that throws must not take the dashboard down with it:
+            # this is a convenience panel bolted to a telemetry tool.
+            self.get_logger().warn(f'map scan failed: {exc}')
+            return
+        message = self._map_state_message(runs)
+        rendered = json.dumps([r.as_dict() for r in runs], sort_keys=True)
+        if rendered != self._last_map_digest:
+            self._last_map_digest = rendered
+            self._last_map_list_json = json.dumps(message)
+            self._broadcast(message)
+        elif self._last_map_list_json is None:
+            self._last_map_list_json = json.dumps(message)
+
+    def _map_drain_callback(self):
+        """Start queued map actions, and time out a stalled SLAM reset."""
+        while True:
+            try:
+                action, payload = self._map_requests.get_nowait()
+            except queue.Empty:
+                break
+            if action == 'refresh':
+                self._last_map_digest = None
+                self._map_scan_callback()
+            elif action == 'delete':
+                self._begin_delete(*payload)
+            elif action == 'reset_slam':
+                self._begin_slam_reset()
+
+        # slam_toolbox handles a reset on its own executor, so a wedged one
+        # answers nothing at all. Saying so beats a spinner that never
+        # stops -- and "no answer" is deliberately not "nothing happened".
+        if (self._slam_reset_deadline is not None
+                and time.monotonic() > self._slam_reset_deadline):
+            self._slam_reset_deadline = None
+            self._broadcast(protocol.slam_reset_result_message(
+                False,
+                f'no answer from {self.slam_reset_service} in '
+                f'{self.slam_reset_timeout_sec:.0f}s -- slam_toolbox may '
+                f'still be busy, so do not assume nothing happened'))
+
+    # --- Deleting a saved run --------------------------------------------
+
+    def _begin_delete(self, run_id, typed_name, digest):
+        """Vet a delete against a *fresh* scan, then hand it to a worker.
+
+        The browser sends a name and the string the person typed. It never
+        sends a path, and there is no "confirmed" boolean anywhere in the
+        protocol -- a boolean is exactly what a hand-rolled client sets to
+        true. Everything that decides whether this goes ahead is recomputed
+        here: the listing, the run's contents, and its digest.
+
+        Worth being honest about what the typed name is for. Any client
+        that can read the listing can also echo the name back, so it is a
+        guard against a mistaken tap, not against someone hostile who can
+        already reach this port. What defends against that is the same
+        thing process control relies on: the fresh re-scan, the name
+        whitelist, the root confinement, and enable_map_delete.
+        """
+        if self._map_delete_busy:
+            self._broadcast(protocol.map_delete_result_message(
+                run_id, False, 'a delete is already running'))
+            return
+        try:
+            runs = self._scan_maps()
+        except Exception as exc:  # noqa: BLE001
+            self._broadcast(protocol.map_delete_result_message(
+                run_id, False, f'could not read the map directories: {exc}'))
+            return
+
+        run, reason = mapstore.resolve_delete(
+            runs, run_id, typed_name, self.map_roots, digest)
+        if run is None:
+            self.get_logger().warn(
+                f'refused a browser request to delete "{run_id}": {reason}')
+            self._broadcast(protocol.map_delete_result_message(
+                run_id, False, reason))
+            return
+
+        # Is anything on this machine reading it right now? Deleting the map
+        # a live map_server is serving leaves particle_filter blocked in its
+        # constructor waiting on /map_server/map -- a hang, not an error.
+        try:
+            targets = proccontrol.scan(allowlist=mapstore.MAP_CONSUMERS)
+        except Exception:  # noqa: BLE001
+            targets = []
+        users = mapstore.in_use_by(targets, run.path)
+        if users:
+            named = ', '.join(f'{t.name} (pid {t.pid})' for t in users)
+            self._broadcast(protocol.map_delete_result_message(
+                run.run_id, False,
+                f'refused -- {named} is using this run right now'))
+            return
+
+        self.get_logger().warn(
+            f'deleting saved run {run.path} ({run.bytes} bytes) at a '
+            f'browser request')
+        self._map_delete_busy = True
+        # On a worker thread, not here: this thread also serves the map,
+        # the scan and the pose to every browser, and removing a 38MB run
+        # (300MB+ across a sim root) would freeze all of it. _broadcast is
+        # thread-safe by construction -- it hands to the IOLoop.
+        threading.Thread(target=self._delete_worker, args=(run,),
+                         daemon=True).start()
+
+    def _delete_worker(self, run):
+        try:
+            ok, detail, freed = mapstore.delete_run(run, self.map_roots)
+        except Exception as exc:  # noqa: BLE001
+            ok, detail, freed = False, f'delete failed: {exc}', 0
+        self._map_delete_busy = False
+        self._broadcast(protocol.map_delete_result_message(
+            run.run_id, ok, detail, freed))
+        # Re-list promptly rather than waiting out the scan interval, so
+        # the row disappears when the person is still looking at it.
+        self._map_requests.put(('refresh', None))
+
+    # --- Resetting live SLAM ---------------------------------------------
+
+    def _begin_slam_reset(self):
+        def refuse(detail):
+            self.get_logger().warn(f'refused a browser SLAM reset: {detail}')
+            self._broadcast(protocol.slam_reset_result_message(False, detail))
+
+        if self._slam_reset_client is None:
+            refuse('slam_toolbox is not installed on this machine, so there '
+                   'is no reset service to call')
+            return
+        if self._slam_reset_deadline is not None:
+            refuse('a SLAM reset is already running')
+            return
+        # Non-blocking. wait_for_service() would stall this thread, and this
+        # thread is also serving telemetry to every browser.
+        if not self._slam_reset_client.service_is_ready():
+            refuse(f'nothing is advertising {self.slam_reset_service} right '
+                   f'now -- is slam_toolbox running?')
+            return
+
+        try:
+            targets = proccontrol.scan(
+                allowlist=proccontrol.DRIVING_CONTROLLERS)
+        except Exception as exc:  # noqa: BLE001
+            refuse(f'could not check what is running: {exc}')
+            return
+        driving = [t for t in targets if not t.protected]
+        if driving:
+            named = ', '.join(f'{t.name} (pid {t.pid})' for t in driving)
+            refuse(f'refused -- {named} is running. Resetting SLAM under a '
+                   f'live controller freezes the pose it steers from rather '
+                   f'than stopping it, which is worse than leaving the map '
+                   f'alone. Stop it first.')
+            return
+
+        request = SlamReset.Request()
+        # Deliberately False, and deliberately not a parameter. True would
+        # leave slam_toolbox alive but ignoring scans -- a map frozen at
+        # empty while the map->odom transform keeps publishing, which is
+        # the confidently-wrong-and-stationary pose this whole feature is
+        # careful about. There is also no un-pause control here, so True
+        # would create a state only a terminal could leave.
+        request.pause_new_measurements = False
+
+        self._slam_reset_deadline = (time.monotonic()
+                                     + self.slam_reset_timeout_sec)
+        self.get_logger().warn('resetting live SLAM at a browser request')
+        future = self._slam_reset_client.call_async(request)
+        future.add_done_callback(self._slam_reset_done)
+        self._broadcast(protocol.slam_reset_result_message(
+            False,
+            'resetting SLAM -- the pose may freeze for a few seconds while '
+            'slam_toolbox works',
+            done=False))
+
+    def _slam_reset_done(self, future):
+        self._slam_reset_deadline = None
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self._broadcast(protocol.slam_reset_result_message(
+                False, f'the reset call failed: {exc}'))
+            return
+        # RESULT_SUCCESS is 0 -- see
+        # /opt/ros/jazzy/share/slam_toolbox/srv/Reset.srv. Any other value
+        # is reported as the raw integer rather than translated into a
+        # guess at what it meant.
+        result = int(getattr(response, 'result', 0))
+        if result == 0:
+            self._broadcast(protocol.slam_reset_result_message(
+                True, 'live SLAM reset -- the map rebuilds from here'))
+        else:
+            self._broadcast(protocol.slam_reset_result_message(
+                False, f'slam_toolbox refused the reset (result {result})'))
+
+    # --- Entry points called from the IOLoop thread ---
+
+    def request_map_refresh(self):
+        self._map_requests.put(('refresh', None))
+
+    def request_map_delete(self, run_id, typed_name, digest):
+        self._map_requests.put(('delete', (
+            '' if run_id is None else str(run_id),
+            '' if typed_name is None else str(typed_name),
+            None if digest is None else str(digest),
+        )))
+
+    def request_slam_reset(self):
+        self._map_requests.put(('reset_slam', None))
+
+    def send_map_keyframe(self, client):
+        """Re-send the map this node currently holds to ONE browser tab.
+
+        Runs on the IOLoop thread, and is exactly what send_initial_state
+        already does for a newly connected tab -- reused here so "clear the
+        view" has something to come back to.
+
+        Both outcomes tell the person something. The map reappearing means
+        the car is still publishing it, so whatever looked stale was never
+        the browser's copy. It staying away means nothing is publishing
+        /map at all.
+        """
+        frame = self._map_streamer.current_keyframe()
+        client.write_message(json.dumps(
+            protocol.map_cleared_message(frame is not None)))
+        if frame is not None:
+            header, payload = frame
+            client.write_message(json.dumps(header))
+            client.write_message(payload, binary=True)
+
+    # ------------------------------------------------------------------------
     # Bridging ROS callbacks (rclpy thread) -> the Tornado IOLoop thread.
     # ------------------------------------------------------------------------
 
@@ -1458,6 +1903,9 @@ class DashboardNode(Node):
         # thread published, as a plain string.
         if self._last_process_json is not None:
             client.write_message(self._last_process_json)
+        # Same treatment again for the saved-map list.
+        if self._last_map_list_json is not None:
+            client.write_message(self._last_map_list_json)
 
     # ------------------------------------------------------------------------
     # Web server
