@@ -1043,3 +1043,38 @@ def minimum_footprint_clearance(ranges: np.ndarray, valid: np.ndarray,
     if not np.any(usable):
         return math.inf
     return float(np.min(measured[usable] - boundaries[usable]))
+
+
+def minimum_footprint_clearance_in_cone(
+        ranges: np.ndarray, valid: np.ndarray, angles: np.ndarray,
+        boundary_distances: np.ndarray, cone_width_rad: float) -> float:
+    """Smallest body clearance inside a forward-centred angular cone.
+
+    The narrower sibling of ``minimum_footprint_clearance`` above: a
+    minimum over a strict subset of the same beams, so this always returns
+    a value ``>=`` the wider function's result on the same scan -- equality
+    (within float slop) means the point driving the wider minimum is also
+    inside this narrower cone, i.e. dead ahead rather than at the flank.
+    That comparison is the entire directional escape gate both driving
+    nodes use to tell a forward contact (escapable by steering toward a
+    gap) from a flank one (not -- steering "toward the gap" would drag the
+    body along whatever the flank is already touching).
+
+    Deliberately duplicated from ``gap_follow``'s ``gap_logic.py`` rather
+    than imported -- see ``vehicle_boundary_distances`` above for why.
+    ``gap_logic.minimum_footprint_clearance_in_cone`` is the reference
+    implementation; keep the two in sync.
+    """
+    measured = np.asarray(ranges, dtype=np.float64)
+    validity = np.asarray(valid, dtype=bool)
+    beam_angles = np.asarray(angles, dtype=np.float64)
+    boundaries = np.asarray(boundary_distances, dtype=np.float64)
+    if not (measured.shape == validity.shape == beam_angles.shape == boundaries.shape):
+        raise ValueError('all forward-clearance inputs must have matching shapes')
+    if not math.isfinite(cone_width_rad) or not (
+            0.0 < cone_width_rad <= 2.0 * math.pi):
+        raise ValueError('cone_width_rad must be finite and in (0, 2*pi]')
+
+    inside_cone = np.abs(beam_angles) <= cone_width_rad / 2.0
+    return minimum_footprint_clearance(
+        measured[inside_cone], validity[inside_cone], boundaries[inside_cone])

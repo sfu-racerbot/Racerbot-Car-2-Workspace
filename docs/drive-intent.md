@@ -220,8 +220,10 @@ does — check the source if in doubt.
 
 | Node | States |
 |---|---|
-| `gap_follow` | `gap_follow`, `corner_fallback`, `emergency_clearance`, `ttc_brake`, `no_safe_gap`, `odometry_stale`, `scan_empty`, `scan_invalid`, `scan_window_empty`, `waiting_for_scan`, `scan_stale`, `waiting_for_joy`, `deadman_released` |
-| `pure_pursuit` | `pure_pursuit`, `overtake_left`, `overtake_right`, `lidar_avoidance`, `avoidance_boxed_in`, `avoidance_scan_empty`, `body_contact`, `emergency_obstacle`, `off_racing_line`, `pose_frozen`, `pose_stale`, `waiting_for_pose`, `waiting_for_profile`, `lidar_scan_stale`, `lidar_scan_missing`, `deadman_released`, `control_exception` |
+| `gap_follow` | `gap_follow`, `corner_fallback`, `emergency_clearance`, `emergency_escape`, `ttc_brake`, `ttc_escape`, `no_safe_gap`, `odometry_stale`, `scan_empty`, `scan_invalid`, `scan_window_empty`, `waiting_for_scan`, `scan_stale`, `waiting_for_joy`, `deadman_released` |
+| `pure_pursuit` | `pure_pursuit`, `overtake_left`, `overtake_right`, `lidar_avoidance`, `avoidance_boxed_in`, `avoidance_scan_empty`, `body_contact`, `body_contact_escape`, `emergency_obstacle`, `emergency_escape`, `off_racing_line`, `off_racing_line_recovery`, `pose_frozen`, `pose_stale`, `waiting_for_pose`, `waiting_for_profile`, `lidar_scan_stale`, `lidar_scan_missing`, `deadman_released`, `control_exception` |
+
+`emergency_escape`/`ttc_escape`/`body_contact_escape`/`off_racing_line_recovery` were added 2026-08-25: a trip that has somewhere to go crawls toward it (nonzero commanded speed, `caution` severity per the derivation below) instead of latching a `stop`. See `docs/racing-autonomy.md`'s safety-layers section and `src/gap_follow/README.md`'s footprint-clearance section for what each escapes from and when it still falls back to the unconditional stop instead.
 
 `severity` is derived from the state and the **commanded** speed:
 zero speed is always `stop`; `gap_follow` and `pure_pursuit` are `drive`;

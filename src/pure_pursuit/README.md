@@ -151,9 +151,9 @@ and threshold. Set the period to `0.0` for transition-only logging.
 | `odom_timeout_sec` | `0.5` s | Past this, lookahead falls back to profiled speed. **Not** a stop watchdog |
 | `pose_timeout_sec` | `0.5` s | Localization watchdog |
 | `max_cross_track_error` | `1.0` m | Lost/kidnapped watchdog |
-| `enable_lidar_safety` / `safety_fov_deg` / `emergency_stop_distance` / `scan_timeout_sec` | `true` / `60.0°` / `0.4` m / `0.5` s | Master switch + hard emergency-stop tier |
+| `enable_lidar_safety` / `safety_fov_deg` / `emergency_stop_distance` / `scan_timeout_sec` | `true` / `60.0°` / `0.35` m (was `0.4`, cut 2026-08-25, untested on the car) / `0.5` s | Master switch + hard emergency-stop tier |
 | `enable_obstacle_avoidance` / `avoidance_fov_deg` | `true` / `60.0°` | Steer-around tier — requires `enable_lidar_safety` too |
-| `avoidance_trigger_distance` / `avoidance_fallback_trigger_distance` | `1.5` / `0.7` m | Map-filtered dynamic-object trigger / raw-scan fallback before a map is ready |
+| `avoidance_trigger_distance` / `avoidance_fallback_trigger_distance` | `1.5` / `0.6` m (was `0.7`, cut 2026-08-25) | Map-filtered dynamic-object trigger / raw-scan fallback before a map is ready |
 | `avoidance_min_gap_distance` / `avoidance_speed` | `1.0` m / `1.0` m/s | Driveable gap depth and generic avoidance speed |
 | `enable_opponent_overtake` | `true` | Master switch for opponent detection/tracking/overtaking — requires `enable_lidar_safety` too |
 | `opponent_min_width` / `opponent_max_width` | `0.15` / `0.7` m | Car-shaped cluster width bounds |

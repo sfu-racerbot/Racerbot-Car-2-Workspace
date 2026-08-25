@@ -107,7 +107,7 @@ are resolved by F1TENTH Gym and cached in `.sim/f1tenth_gym/maps`.
 
 The simulator runs at 40 Hz with a 5 ms RK4 integration step. Its vehicle is
 matched to this car's measured 0.36m wheelbase, the deliberately
-padded 0.33m × 0.58m collision body, and measured +0.26m LiDAR offset. The
+padded 0.31m × 0.58m collision body, and measured +0.26m LiDAR offset. The
 LiDAR model has 819 beams over ±135° with
 small seeded noise. (Under the default `car` profile it is 1081 beams, matching
 the Hokuyo UST-10LX — measured free. See

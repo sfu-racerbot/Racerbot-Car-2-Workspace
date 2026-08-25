@@ -25,7 +25,34 @@ auto_map_race_node:
 
     # Two laps are intentional: lap 1 discovers the course and closes the
     # SLAM loop; lap 2 records a cleaner map-frame raceline after closure.
+    # As of 2026-08-25, lap 2 is no longer accepted unconditionally -- see
+    # the adaptive-lap-count block below. mapping_laps keeps this same
+    # meaning (how many laps to record before evaluating); it is just no
+    # longer the unconditional stopping point.
     mapping_laps: 2
+    # --- Adaptive mapping-lap count (2026-08-25) ---
+    # The discovery lap (the first) is always discarded, unconditionally,
+    # never raced. Past that, a lap is accepted only if it passes the
+    # quality checks below; otherwise one more lap is recorded instead, up
+    # to this many laps total. This is a strict improvement over committing
+    # to mapping_laps' data unconditionally, which is what a fixed count
+    # used to do with no quality check at all.
+    max_mapping_laps: 3
+    # Well under the documented 106-correction pathological case from
+    # 2026-08-19. UNVALIDATED: no run this session closed even once, so
+    # tune against real "good" and "bad" lap data before trusting it.
+    mapping_lap_max_reanchors: 20
+    # Closed against the *original* fixed closure_distance gate, not one
+    # that had already widened past closure_widen_after_revolutions -- a
+    # lap that only closed because the gate opened up is a weaker signal
+    # that the car actually found its way back to the start.
+    mapping_lap_require_unwidened_closure: true
+    # Closed with heading comfortably inside closure_heading_deg's gate,
+    # not just barely under it.
+    mapping_lap_max_heading_margin_fraction: 0.5
+    # The closed lap did not need lap_points() to trim any samples -- i.e.
+    # it closed within one revolution cleanly, not two overlapping ones.
+    mapping_lap_require_no_trim: true
     waypoint_spacing: 0.15
     # A sanity floor, not the closure gate. It WAS the gate, at 20.0m, which
     # is longer than the ~15m loop this car is driven on -- so closure could
@@ -175,17 +202,25 @@ auto_map_race_node:
     map_topic: /map
     profile_wall_clearance: 0.20
     profile_map_occupied_threshold: 50
-    # Stray-return cleanup, in cells, at the 0.05m map resolution: 4 cells
-    # is a 10cm patch. Applied to the map written to disk and to the copy
-    # the generated racing line is checked against -- NOT to the live /map
-    # pure_pursuit uses for opponent detection, which must keep every
-    # obstacle the mapper reported. Only blobs with clear observed space
-    # all around them are removed: a real object occludes and so keeps an
-    # unknown shadow behind it, while a stray beam is a direction the
-    # LiDAR swept clear on every other pass. Set 0 to disable.
-    # Measured on this car's own saved map: 12 phantom blobs in clear
-    # track removed, 34 near walls and the map edge deliberately kept.
-    map_despeckle_max_cells: 4
+    # Stray-return cleanup, in cells, at the 0.05m map resolution: 8 cells
+    # is a ~20cm patch (raised from 4/10cm on 2026-08-25, per a "the map
+    # looks kinda dirty" report -- UNVALIDATED against a current map; the
+    # 4-cell figure below came from a measured blob-size breakdown, and 8
+    # has not had the same measurement done yet, so it could as easily be
+    # 6 or 12 -- re-measure before trusting it). Applied to the map written
+    # to disk and to the copy the generated racing line is checked against
+    # -- NOT to the live /map pure_pursuit uses for opponent detection,
+    # which must keep every obstacle the mapper reported. Only blobs with
+    # clear observed space all around them are removed: a real object
+    # occludes and so keeps an unknown shadow behind it, while a stray beam
+    # is a direction the LiDAR swept clear on every other pass -- so this
+    # is a strictly-scoped increase in cleanup aggressiveness, not a new
+    # risk: a real, occluding object is still never removed regardless of
+    # size. Set 0 to disable.
+    # At the old 4-cell/10cm value, measured on this car's own saved map:
+    # 12 phantom blobs in clear track removed, 34 near walls and the map
+    # edge deliberately kept.
+    map_despeckle_max_cells: 8
     pure_pursuit_node_name: pure_pursuit_node
 
     # --- Minimum-curvature raceline optimization (Phase 4b, now inline) ---
@@ -233,11 +268,31 @@ auto_map_race_node:
     # SAFETY: the corridor the optimizer is allowed to use is the measured
     # track width minus (optimize_car_width / 2 + optimize_safety_margin) on
     # each side. Understate either and the line is planned through space the
-    # car does not fit in. The car measures 0.30 m over the tires; 0.33
-    # matches the padded envelope in gap_follow.yaml / pure_pursuit.yaml.
+    # car does not fit in. The car measures 0.30 m over the tires; 0.31
+    # matches the padded envelope in gap_follow.yaml / pure_pursuit.yaml
+    # (5 mm/side padding as of 2026-08-25, cut from 14.5 mm/side).
     # Keep the margin at or above profile_wall_clearance.
-    optimize_car_width: 0.33
-    optimize_safety_margin: 0.15
+    optimize_car_width: 0.31
+    # Cut from 0.15 to 0.10 on 2026-08-25 -- deliberately the OPPOSITE of
+    # docs/racing-autonomy.md's own documented guidance for this dial
+    # ("the fast-versus-safe dial... raise it, don't lower it"). This is an
+    # intentional, user-directed departure that session, not an oversight:
+    # "the car can be riskier overall as we have the deadman switch...
+    # narrow the walls used in the route calculation to ensure it gets the
+    # best route."
+    #
+    # "Keep the margin at or above profile_wall_clearance" above refers to
+    # the COMBINED reduction (optimize_car_width/2 + optimize_safety_margin
+    # = 0.155 + 0.10 = 0.255m), not this value alone (0.10m, which is by
+    # itself below profile_wall_clearance's 0.20m and always has been --
+    # the old 0.15 was too). The combined figure is what actually bounds
+    # the corridor the optimizer plans inside, and it still clears
+    # profile_wall_clearance's separate, hard absolute refusal comfortably
+    # (0.255 > 0.20) -- that hard check (see its own comment above) is what
+    # actually enforces the floor, unconditionally, regardless of what this
+    # dial is set to; this dial only changes how often the optimizer's own
+    # line clears it on the first try.
+    optimize_safety_margin: 0.10
 
     # --- Handing localization to the particle filter for the race ---
     # During mapping there is no map to localize against, so slam_toolbox

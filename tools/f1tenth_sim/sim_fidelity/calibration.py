@@ -79,7 +79,7 @@ class CarCalibration:
     # --- Geometry -------------------------------------------------------
     wheelbase: float = 0.36
     # The padded safety envelope, used for clearance to walls.
-    width: float = 0.33
+    width: float = 0.31
     length: float = 0.58
     # The actual chassis. Contact between two cars has to use this: applying
     # the padded envelope to both bodies counts the safety margin twice and

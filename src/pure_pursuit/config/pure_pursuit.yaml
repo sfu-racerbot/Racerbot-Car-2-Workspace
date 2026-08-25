@@ -98,6 +98,20 @@ pure_pursuit_node:
     # --- Safety watchdogs ---
     pose_timeout_sec: 0.5         # stop if localization hasn't updated within this long
     max_cross_track_error: 1.0    # stop if further than this from every waypoint (lost/kidnapped)
+    # --- Off-line recovery (2026-08-25) ---
+    # Between max_cross_track_error and here, attempt a bounded recovery
+    # crawl aimed at the nearest point instead of latching a permanent stop
+    # -- chosen from a real, non-kidnapped overshoot documented in
+    # docs/racing-autonomy.md that landed in the 1.0-2.0m band, while
+    # staying well short of a genuinely lost/kidnapped pose. Beyond this,
+    # always hard-stop unconditionally, unchanged from before this session.
+    off_racing_line_recovery_max_error: 2.0
+    # A crawl, not a drive -- recovering means "aimed at the line", not
+    # "back on it".
+    off_racing_line_recovery_speed: 0.30
+    # Give up and hard-stop if recovery has not closed the error back under
+    # max_cross_track_error within this long.
+    off_racing_line_recovery_timeout_sec: 5.0
 
     # Frozen-localization watchdog. pose_timeout_sec above cannot catch a
     # pose that keeps *arriving* on time while no longer *tracking* the car
@@ -112,18 +126,21 @@ pure_pursuit_node:
     pose_frozen_min_travel: 0.05
 
     # --- Rectangular collision envelope (matches gap_follow.yaml) ---
-    # This car measures 0.30 m over the tires (2026-08-24), and 0.33 keeps
-    # the same 14.5 mm-a-side padding the old 0.31 gave the 0.281 m figure
-    # Traxxas publishes. car_length is unchanged: nobody has measured this
+    # This car measures 0.30 m over the tires (2026-08-24); car_width is that
+    # measurement plus 5 mm a side (cut from 14.5 mm/side on 2026-08-25 --
+    # negative-clearance latches in real run logs tracked the old padding
+    # almost exactly). car_length is unchanged: nobody has measured this
     # car bumper to bumper -- see gap_follow.yaml for the full note. Feeds
     # the all-round body-clearance stop below, which -- unlike
     # safety_fov_deg's forward cone -- can see a wall the car is *alongside*.
-    car_width: 0.33
+    car_width: 0.31
     car_length: 0.58
     # All-direction contact floor measured from the body, not the sensor.
-    # gap_follow uses 0.02m; 0.05m here because this controller is the one
-    # travelling at racing speed, so it gets a slightly wider margin.
-    emergency_stop_clearance: 0.05
+    # gap_follow uses 0.0m (as of 2026-08-25); 0.03m here because this
+    # controller is the one travelling at racing speed, so it deliberately
+    # keeps a wider margin than gap_follow's -- trimmed proportionally from
+    # 0.05m to track the padding cut from car_width above, not zeroed out.
+    emergency_stop_clearance: 0.03
     # Forward window for that check, matching gap_follow's forward_fov_deg.
     # NOT the full 270deg this Hokuyo sweeps: its rearmost beams look back
     # along the car and return its own chassis, which is inside the
@@ -135,7 +152,13 @@ pure_pursuit_node:
     # opponents, spun-out cars, or anything else not in the map) ---
     enable_lidar_safety: true
     safety_fov_deg: 60.0
-    emergency_stop_distance: 0.4
+    # Cut from 0.4 to 0.35 on 2026-08-25, directional per the user's
+    # general risk-tolerance mandate this session -- FLAGGED AS UNTESTED:
+    # pure_pursuit never took control in any run that day (every attempt
+    # died during gap_follow's mapping phase), so this has no real-run
+    # evidence behind it yet. Validate in racerbot_sim before trusting it
+    # on the car.
+    emergency_stop_distance: 0.35
     # Escape from that hard stop rather than latching in it. A stopped car
     # cannot clear its own safety cone -- nothing about the scene changes at
     # zero speed -- so the stop above, on its own, ends the run wherever it
@@ -151,6 +174,13 @@ pure_pursuit_node:
     # before crawling is allowed at all. Above emergency_stop_clearance, so
     # a car that is nearly touching stops instead of nudging.
     emergency_escape_clearance: 0.10
+    # --- Escape from body contact itself (tier 0, 2026-08-25) ---
+    # The strictest of the escape floors, deliberately: this tier fires
+    # closest to genuine contact (body_clearance <= emergency_stop_clearance,
+    # 0.03m), below emergency_escape_clearance above -- reusing that floor
+    # here would reject every body_contact escape before it started. Must
+    # sit below emergency_stop_clearance to ever be reachable at all.
+    body_contact_escape_clearance: 0.0
     scan_timeout_sec: 0.5
     max_range: 10.0   # range readings beyond this (and inf/NaN) are clipped/filled before any math touches them
 
@@ -164,7 +194,11 @@ pure_pursuit_node:
     avoidance_trigger_distance: 1.5
     # Before a map is available, raw scans cannot distinguish walls from
     # traffic. This shorter simulator-validated threshold limits false turns.
-    avoidance_fallback_trigger_distance: 0.7
+    # Cut from 0.7 to 0.6 on 2026-08-25: already documented (see
+    # docs/racing-autonomy.md's reactive-avoidance table) as firing on
+    # ordinary track walls before map subtraction is ready -- a known
+    # false-positive source this narrows rather than eliminates.
+    avoidance_fallback_trigger_distance: 0.6
     avoidance_min_gap_distance: 1.0
     avoidance_speed: 1.0
 
@@ -189,7 +223,9 @@ pure_pursuit_node:
     # overtake_lateral_offset toward a wall with generic avoidance suppressed
     # for the whole pass, and only reacts at emergency_stop_distance -- ending
     # up parked against the barrier. 0.70 = the 0.35 offset + half a 0.31m car
-    # + 0.15 margin. Raise it to make the car choosier about passing places;
+    # + 0.15 margin (the pre-2026-08-24 car_width -- coincidentally the same
+    # digits as the current car_width above, not the same derivation).
+    # Raise it to make the car choosier about passing places;
     # declining a pass is always safe.
     overtake_min_side_clearance: 0.70
     # meters. While passing, the offset above is applied to a waypoint this

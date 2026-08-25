@@ -323,6 +323,34 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('command_timeout_sec', 0.5)
         self.declare_parameter('waypoint_spacing', 0.15)
         self.declare_parameter('mapping_laps', 2)
+        # --- Adaptive mapping-lap count (2026-08-25) ---
+        # mapping_laps above keeps its original meaning and default (2):
+        # how many laps to record before evaluating. The discovery lap
+        # (the first) is always discarded, unconditionally, never raced --
+        # regardless of how mapping_laps/max_mapping_laps are configured.
+        # Past that, mapping_laps is no longer the unconditional stopping
+        # point: the lap recorded after it is accepted only if it passes
+        # _lap_quality_ok(), and one more lap (up to max_mapping_laps
+        # total) is recorded instead if it does not. This is a strict
+        # improvement over committing to that lap's data unconditionally,
+        # which is what the fixed mapping_laps count used to do.
+        self.declare_parameter('max_mapping_laps', 3)
+        # Well under the documented 106-correction pathological case from
+        # 2026-08-19. UNVALIDATED: no run this session closed even once, so
+        # tune against real "good" and "bad" lap data before trusting it.
+        self.declare_parameter('mapping_lap_max_reanchors', 20)
+        # Closed against the *original* fixed closure_distance gate, not
+        # one that had already widened past closure_widen_after_revolutions
+        # -- a lap that only closed because the gate opened up is a weaker
+        # signal that the car actually found its way back to the start.
+        self.declare_parameter('mapping_lap_require_unwidened_closure', True)
+        # Closed with heading comfortably inside closure_heading_deg's
+        # gate, not just barely under it.
+        self.declare_parameter('mapping_lap_max_heading_margin_fraction', 0.5)
+        # The closed lap did not need lap_points() to trim any samples --
+        # i.e. it closed within one revolution cleanly, not two
+        # overlapping ones.
+        self.declare_parameter('mapping_lap_require_no_trim', True)
         # A sanity floor only. It used to be the main closure gate at 20.0m,
         # which is longer than this car's ~15m room -- so the gate could not
         # open until the car had been round twice, and every lap it has ever
@@ -375,7 +403,7 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('profile_wall_clearance', 0.30)
         self.declare_parameter('profile_map_occupied_threshold', 50)
-        self.declare_parameter('map_despeckle_max_cells', 4)
+        self.declare_parameter('map_despeckle_max_cells', 8)
         # --- Minimum-curvature raceline optimization (docs/racing-autonomy.md
         # Phase 4b, run inline here instead of as a separate manual step) ---
         self.declare_parameter('optimize_raceline', True)
@@ -387,8 +415,8 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('optimize_max_track_width', 6.0)
         self.declare_parameter('optimize_centerline_passes', 4)
         self.declare_parameter('optimize_centerline_smoothing', 3)
-        self.declare_parameter('optimize_car_width', 0.33)
-        self.declare_parameter('optimize_safety_margin', 0.15)
+        self.declare_parameter('optimize_car_width', 0.31)
+        self.declare_parameter('optimize_safety_margin', 0.10)
         # --- Handing localization to the particle filter for the race ---
         self.declare_parameter('localize_after_mapping', True)
         self.declare_parameter('pf_pose_topic', '/pf/viz/inferred_pose')
@@ -415,6 +443,15 @@ class AutoMapRaceNode(Node):
         self.control_rate_hz = float(value('control_rate_hz'))
         self.command_timeout_sec = float(value('command_timeout_sec'))
         self.mapping_laps = max(1, int(value('mapping_laps')))
+        # Never below mapping_laps -- a ceiling under the floor it is meant
+        # to sit above would be a contradictory config, not a valid choice.
+        self.max_mapping_laps = max(self.mapping_laps, int(value('max_mapping_laps')))
+        self.mapping_lap_max_reanchors = int(value('mapping_lap_max_reanchors'))
+        self.mapping_lap_require_unwidened_closure = bool(
+            value('mapping_lap_require_unwidened_closure'))
+        self.mapping_lap_max_heading_margin_fraction = float(
+            value('mapping_lap_max_heading_margin_fraction'))
+        self.mapping_lap_require_no_trim = bool(value('mapping_lap_require_no_trim'))
         self.transition_stop_sec = float(value('transition_stop_sec'))
         self.map_save_timeout_sec = float(value('map_save_timeout_sec'))
         self.map_save_retries = max(0, int(value('map_save_retries')))
@@ -1355,7 +1392,7 @@ class AutoMapRaceNode(Node):
             + (f', trimming {trimmed} samples back to the final revolution'
                if trimmed else '')
             + ').')
-        if self.completed_mapping_laps < self.mapping_laps:
+        if self.completed_mapping_laps == 1:
             # Say the cost out loud. A lap on the course this car actually
             # maps is 126m and over two minutes, and an operator who does
             # not know that reads a second lap as a stuck run.
@@ -1365,17 +1402,84 @@ class AutoMapRaceNode(Node):
                 f'take about {self.measured_lap_distance:.0f}m and '
                 f'{self.measured_lap_duration_sec:.0f}s at the same pace. Keep holding '
                 'LB; racing starts after it closes.')
-            # Discard the discovery lap. The next lap is recorded after SLAM
-            # has seen the start/finish again and had a chance to close its
-            # loop, yielding a cleaner map-frame raceline.
+            # Discard the discovery lap, unconditionally -- never raced,
+            # regardless of how mapping_laps/max_mapping_laps are
+            # configured (see the comment above their declaration). The
+            # next lap is recorded after SLAM has seen the start/finish
+            # again and had a chance to close its loop, yielding a cleaner
+            # map-frame raceline.
             self.recorder.reset()
             return
-        self.state = 'loading_profile'
-        try:
-            self.profile_path = self._write_profile()
-        except (OSError, ValueError) as exc:
-            self.state = 'error'
-            self.get_logger().error(f'Could not generate the racing profile: {exc}')
+
+        quality_ok, failed_checks = self._lap_quality_ok()
+        at_ceiling = self.completed_mapping_laps >= self.max_mapping_laps
+        if quality_ok or at_ceiling:
+            if not quality_ok:
+                self.get_logger().warning(
+                    f'Lap {self.completed_mapping_laps} did not pass the quality '
+                    f'check ({"; ".join(failed_checks)}), but the '
+                    f'{self.max_mapping_laps}-lap ceiling is reached -- accepting '
+                    'it anyway rather than mapping indefinitely.')
+            self.state = 'loading_profile'
+            try:
+                self.profile_path = self._write_profile()
+            except (OSError, ValueError) as exc:
+                self.state = 'error'
+                self.get_logger().error(f'Could not generate the racing profile: {exc}')
+            return
+
+        # A visibly marginal lap no longer silently becomes the raceline --
+        # today's fixed mapping_laps count committed to whatever lap it
+        # landed on with no quality check at all, and a marginal raceline
+        # is plausibly itself a contributor to more wall-stops later (see
+        # section 5's finding). Record one more instead, up to the ceiling.
+        self.get_logger().info(
+            f'Lap {self.completed_mapping_laps} did not pass the quality check '
+            f'({"; ".join(failed_checks)}) and the {self.max_mapping_laps}-lap '
+            'ceiling has not been reached -- recording one more lap instead of '
+            'accepting it. Keep holding LB.')
+        self.recorder.reset()
+
+    def _lap_quality_ok(self):
+        """Whether the just-closed lap looks clean enough to accept as-is.
+
+        Every signal checked here is already computed by LapRecorder per
+        lap and already resets cleanly at lap boundaries (see
+        LapRecorder.reset) -- nothing new to instrument, and no need to
+        wire up SLAM's own loop-closure confidence or start the particle
+        filter early to get a quality signal.
+
+        Returns (ok, failed_checks) so the caller can log *which* check(s)
+        are why a lap is being re-recorded, not just that it looked
+        marginal.
+        """
+        failed = []
+        if self.recorder.reanchor_count > self.mapping_lap_max_reanchors:
+            failed.append(
+                f'reanchor_count={self.recorder.reanchor_count} > '
+                f'{self.mapping_lap_max_reanchors}')
+        if (self.mapping_lap_require_unwidened_closure
+                and self.recorder.closest_approach > self.recorder.closure_distance):
+            failed.append(
+                'closed only after the proximity gate widened '
+                f'(closest_approach={self.recorder.closest_approach:.2f}m > '
+                f'the original closure_distance={self.recorder.closure_distance:.2f}m)')
+        heading_limit_rad = (
+            self.mapping_lap_max_heading_margin_fraction
+            * self.recorder.closure_heading_rad)
+        if self.recorder.heading_error > heading_limit_rad:
+            failed.append(
+                f'heading_error={math.degrees(self.recorder.heading_error):.1f}deg > '
+                f'{math.degrees(heading_limit_rad):.1f}deg '
+                f'({self.mapping_lap_max_heading_margin_fraction:.0%} of the '
+                f'{math.degrees(self.recorder.closure_heading_rad):.0f}deg gate)')
+        if self.mapping_lap_require_no_trim:
+            trimmed = len(self.recorder.points) - len(self.recorder.lap_points())
+            if trimmed:
+                failed.append(
+                    f'{trimmed} sample(s) trimmed back to the final revolution '
+                    '(closed over more than one revolution, not one cleanly)')
+        return not failed, failed
 
     def _write_profile(self) -> str:
         run_directory = self.output_directory / strftime('%Y%m%d-%H%M%S')

@@ -73,14 +73,18 @@ gap_follow_node:
     #   laser_offset_x 0.26 m   = 0.36 - 0.10; the LiDAR sits 0.10 m behind
     #                           the FRONT AXLE. The old 0.33 m assumed 0.10 m
     #                           behind the NOSE, a different reference point.
-    # car_width keeps the same deliberate padding it always had -- 0.31 was
-    # the published 0.281 m body plus 14.5 mm a side, so 0.30 measured plus
-    # the same padding is 0.33. It is an envelope, not a measurement.
+    # car_width's padding was cut from 14.5mm/side to 5mm/side on
+    # 2026-08-25: real run logs showed emergency_clearance latching at
+    # -10mm to -13mm with nothing actually in contact, tracking the old
+    # 14.5mm padding almost exactly -- so 0.30 measured plus 5mm a side is
+    # 0.31. Still an envelope, not a measurement, just a tighter one.
+    # (The pre-2026-08-24 car_width was also 0.31 -- 14.5mm padding on the
+    # wrong 0.281m Traxxas body figure. Same digits, unrelated derivation.)
     # car_length is UNCHANGED because nobody has measured this car bumper to
     # bumper; 0.58 still contains it under the published overhang, but with
     # ~4.5 mm an end rather than the 22.5 mm it was designed for. Measure
     # rear-axle-to-nose and revisit.
-    car_width: 0.33
+    car_width: 0.31
     car_length: 0.58
     wheelbase: 0.36
     laser_offset_x: 0.26
@@ -150,10 +154,20 @@ gap_follow_node:
     # Requiring another car width here was double-padding tight openings.
     min_centerline_gap_width: 0.10
     # All-direction final contact floor, measured from the padded body.
-    emergency_stop_clearance: 0.02
+    # Dropped from 0.02 to 0.0 on 2026-08-25: real run logs showed this
+    # latching at -10mm to -13mm of "clearance" with nothing actually in
+    # contact -- false positives tracking the 14.5mm/side padding just cut
+    # from car_width above almost exactly, not real near-misses. Validate
+    # in racerbot_sim; if LiDAR-noise chatter shows up at 0.0, the
+    # documented fallback is 0.01, not the old 0.02.
+    emergency_stop_clearance: 0.0
     # Odom-independent fallback ahead of the car. Keeping this to a narrow
     # cone avoids treating a close side wall in a corner as a frontal hazard.
-    forward_stop_clearance: 0.25
+    # Cut from 0.25 to 0.20 on 2026-08-25: the 0.25m reserve was putting
+    # ordinary cornering, not just genuine near-misses, into the
+    # escape_creep_speed regime below -- a plausible source of a real report
+    # of the car "inching" around corners.
+    forward_stop_clearance: 0.20
     forward_stop_fov_deg: 60.0
     # Inside forward_stop_clearance the car crawls at this speed instead of
     # latching at zero. That cone points where the car is aimed, not where it
@@ -162,7 +176,12 @@ gap_follow_node:
     # removes the motion that would clear the cone. Contact clearance, TTC and
     # the no-gap stop all still stop the car outright; this only lets a car
     # that has found an exit inch toward it.
-    escape_creep_speed: 0.25
+    # Raised from 0.25 to 0.40 on 2026-08-25, directly addressing a real
+    # report of this crawl itself feeling like "inching" -- still within the
+    # node's own validated bound (0.0 < escape_creep_speed <=
+    # max(min_speed, 0.5), checked at startup), a pure config change with
+    # no code implication.
+    escape_creep_speed: 0.40
 
     # --- Cornering anticipation ---
     # An extra speed cap from how much the chosen gap's near-only bearing
@@ -234,11 +253,18 @@ gap_follow_node:
 
     # --- Time-to-collision automatic emergency braking ---
     enable_ttc: true
-    # Lowered from 0.5. At the 1.6m/s this car actually reaches, 0.5s meant
-    # braking 0.80m from a wall while mid-corner; 0.35s brakes at 0.56m, which
-    # still exceeds the 0.43m the clearance ceiling reserves to stop from that
+    # Lowered from 0.5, then again from 0.35 on 2026-08-25. At the 1.6m/s
+    # this car actually reaches, 0.5s meant braking 0.80m from a wall while
+    # mid-corner; 0.35s brakes at 0.56m; 0.30s brakes at 0.48m, which still
+    # exceeds the 0.43m the clearance ceiling reserves to stop from that
     # speed at max_braking_decel. The clearance-based stops are unchanged.
-    ttc_threshold_sec: 0.35
+    # The 2026-08-25 cut was prompted by a real trip that fired with only a
+    # ~2ms margin against the computed collision time at the old 0.35s
+    # threshold -- and per section 2's directional escape gate, most TTC
+    # trips now attempt to crawl out through a visible gap rather than
+    # braking to zero at all, so a trip that still does hard-stop is one
+    # that was genuinely boxed in.
+    ttc_threshold_sec: 0.30
     ttc_min_closing_speed: 0.05
     # TTC uses max(fresh odom speed, latest command when it is positive),
     # so brief odom under-reporting cannot suppress braking. A zero brake

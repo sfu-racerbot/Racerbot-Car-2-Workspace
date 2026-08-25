@@ -9,7 +9,8 @@ import numpy as np
 import rclpy
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from pure_pursuit.auto_map_race_node import angle_difference, LapRecorder  # noqa: E402
+from pure_pursuit.auto_map_race_node import (  # noqa: E402
+    angle_difference, AutoMapRaceNode, LapRecorder)
 import pytest  # noqa: E402
 
 
@@ -607,6 +608,191 @@ def test_closest_approach_only_counts_after_departing():
     for x, y, yaw in _square_lap():
         recorder.update(x, y + 1.0, yaw, 1.0)
     assert recorder.closest_approach == pytest.approx(1.0, abs=0.3)
+
+
+# ---------------------------------------------------------------------------
+# Adaptive mapping-lap count (2026-08-25): _lap_quality_ok /
+# _mapping_lap_completed. Stub-based, same pattern as _SupervisorStub above
+# -- these read a handful of scalar attributes and call _write_profile,
+# none of which need a real ROS node or a real saved map to exercise.
+# ---------------------------------------------------------------------------
+
+class _CapturingLogger:
+    def __init__(self):
+        self.infos = []
+        self.warnings = []
+        self.errors = []
+
+    def info(self, message):
+        self.infos.append(message)
+
+    def warning(self, message):
+        self.warnings.append(message)
+
+    def error(self, message):
+        self.errors.append(message)
+
+
+class _LapQualityStub:
+    """Enough of AutoMapRaceNode's surface for _lap_quality_ok and
+    _mapping_lap_completed to run against directly. _write_profile is
+    faked -- real profile generation needs a saved map and file I/O,
+    neither of which this is about -- and counts its own calls so a test
+    can assert whether a lap was actually accepted without inspecting
+    anything on disk.
+    """
+
+    def __init__(self, recorder, *, completed_mapping_laps, mapping_laps=2,
+                max_mapping_laps=3, mapping_lap_max_reanchors=20,
+                mapping_lap_require_unwidened_closure=True,
+                mapping_lap_max_heading_margin_fraction=0.5,
+                mapping_lap_require_no_trim=True):
+        self.recorder = recorder
+        self.completed_mapping_laps = completed_mapping_laps
+        self.mapping_laps = mapping_laps
+        self.max_mapping_laps = max_mapping_laps
+        self.mapping_lap_max_reanchors = mapping_lap_max_reanchors
+        self.mapping_lap_require_unwidened_closure = mapping_lap_require_unwidened_closure
+        self.mapping_lap_max_heading_margin_fraction = mapping_lap_max_heading_margin_fraction
+        self.mapping_lap_require_no_trim = mapping_lap_require_no_trim
+        self.measured_lap_distance = 0.0
+        self.measured_lap_duration_sec = 0.0
+        self.state = 'mapping'
+        self.profile_path = None
+        self.write_profile_calls = 0
+        self.logger = _CapturingLogger()
+
+    def get_logger(self):
+        return self.logger
+
+    def _write_profile(self):
+        self.write_profile_calls += 1
+        return '/fake/profile.csv'
+
+    def _lap_quality_ok(self):
+        # _mapping_lap_completed calls self._lap_quality_ok() -- delegate
+        # to the real implementation under test rather than re-declaring
+        # it, so this stub can never silently drift from what
+        # AutoMapRaceNode actually does.
+        return AutoMapRaceNode._lap_quality_ok(self)
+
+
+def _quality_recorder(**overrides):
+    """A LapRecorder with every _lap_quality_ok signal set to a passing
+    value by default. Pass one of the keys below to make exactly one
+    check fail, for the parametrized tests further down.
+    """
+    recorder = LapRecorder(
+        spacing=0.15, min_distance=5.0, departure_distance=2.0,
+        closure_distance=1.5, closure_heading_rad=math.radians(30.0),
+        min_duration_sec=15.0)
+    recorder.reanchor_count = overrides.get('reanchor_count', 5)
+    recorder.closest_approach = overrides.get('closest_approach', 1.0)
+    recorder.heading_error = overrides.get('heading_error', math.radians(5.0))
+    recorder.points = overrides.get(
+        'points', [(float(i), 0.0) for i in range(10)])
+    # Left empty by default: lap_points()'s own guard (len(point_turn) !=
+    # len(points)) then returns points unchanged, i.e. no trim -- see
+    # LapRecorder.lap_points. Only the 'trimmed' case below populates this
+    # to actually exercise a trim.
+    recorder.point_turn = overrides.get('point_turn', [])
+    return recorder
+
+
+# (name, overrides, substring expected in the one failing check's message)
+FAILING_QUALITY_CASES = [
+    ('too_many_reanchors', {'reanchor_count': 25}, 'reanchor_count'),
+    ('widened_closure', {'closest_approach': 2.0}, 'closed only after'),
+    ('heading_margin', {'heading_error': math.radians(20.0)}, 'heading_error'),
+    ('trimmed', {
+        'points': [(float(i), 0.0) for i in range(10)],
+        # total turn 9.0 rad > 2*pi: lap_points() trims back to the final
+        # revolution, dropping the first two samples -- see the docstring
+        # of LapRecorder.lap_points for why.
+        'point_turn': [float(i) for i in range(10)],
+    }, 'trimmed'),
+]
+
+
+@pytest.mark.parametrize(
+    'name,overrides,expected_substring', FAILING_QUALITY_CASES,
+    ids=[case[0] for case in FAILING_QUALITY_CASES])
+def test_lap_quality_fails_exactly_the_overridden_check(
+        name, overrides, expected_substring):
+    recorder = _quality_recorder(**overrides)
+    stub = _LapQualityStub(recorder, completed_mapping_laps=1)
+    ok, failed = AutoMapRaceNode._lap_quality_ok(stub)
+    assert ok is False
+    assert len(failed) == 1, f'expected exactly one failing check, got {failed}'
+    assert expected_substring in failed[0]
+
+
+def test_lap_quality_ok_when_every_check_passes():
+    recorder = _quality_recorder()
+    stub = _LapQualityStub(recorder, completed_mapping_laps=1)
+    ok, failed = AutoMapRaceNode._lap_quality_ok(stub)
+    assert ok is True
+    assert failed == []
+
+
+def test_discovery_lap_is_always_discarded_even_with_perfect_quality():
+    """The core invariant this whole feature exists to guarantee: lap 1 is
+    discarded unconditionally, regardless of _lap_quality_ok, regardless of
+    mapping_laps/max_mapping_laps. Confirmed with the user directly during
+    this plan: 'run after 1 or 1.5 loops' would mean racing on the
+    discovery lap itself, which is never acceptable."""
+    recorder = _quality_recorder()   # would pass every check
+    stub = _LapQualityStub(recorder, completed_mapping_laps=0, max_mapping_laps=3)
+    AutoMapRaceNode._mapping_lap_completed(stub)
+    assert stub.completed_mapping_laps == 1
+    assert stub.state == 'mapping', 'the discovery lap must never be raced'
+    assert stub.write_profile_calls == 0
+    assert stub.recorder.points == [], 'must reset to record the real first lap'
+
+
+def test_a_quality_lap_is_accepted_at_two_total_laps():
+    """Matches today's existing behaviour exactly: a clean second lap is
+    accepted without needing a third."""
+    recorder = _quality_recorder()
+    stub = _LapQualityStub(recorder, completed_mapping_laps=1, max_mapping_laps=3)
+    AutoMapRaceNode._mapping_lap_completed(stub)
+    assert stub.completed_mapping_laps == 2
+    assert stub.state == 'loading_profile'
+    assert stub.write_profile_calls == 1
+    assert stub.logger.warnings == []
+
+
+@pytest.mark.parametrize(
+    'name,overrides,expected_substring', FAILING_QUALITY_CASES,
+    ids=[case[0] for case in FAILING_QUALITY_CASES])
+def test_a_marginal_lap_records_one_more_instead_of_being_accepted(
+        name, overrides, expected_substring):
+    recorder = _quality_recorder(**overrides)
+    stub = _LapQualityStub(recorder, completed_mapping_laps=1, max_mapping_laps=3)
+    AutoMapRaceNode._mapping_lap_completed(stub)
+    assert stub.completed_mapping_laps == 2
+    assert stub.state == 'mapping', 'must not accept a marginal lap below the ceiling'
+    assert stub.write_profile_calls == 0
+    assert stub.recorder.points == [], 'must reset to record one more lap'
+
+
+def test_a_marginal_lap_is_accepted_anyway_at_the_ceiling():
+    """The ceiling forces acceptance even when every check fails at once,
+    rather than mapping indefinitely -- with a warning naming why."""
+    recorder = _quality_recorder(
+        reanchor_count=999,
+        closest_approach=999.0,
+        heading_error=math.radians(179.0),
+        points=[(float(i), 0.0) for i in range(10)],
+        point_turn=[float(i) for i in range(10)],
+    )
+    stub = _LapQualityStub(recorder, completed_mapping_laps=2, max_mapping_laps=3)
+    AutoMapRaceNode._mapping_lap_completed(stub)
+    assert stub.completed_mapping_laps == 3
+    assert stub.state == 'loading_profile', 'the ceiling must force acceptance'
+    assert stub.write_profile_calls == 1
+    assert len(stub.logger.warnings) == 1
+    assert 'reanchor_count' in stub.logger.warnings[0]
 
 
 # ---------------------------------------------------------------------------

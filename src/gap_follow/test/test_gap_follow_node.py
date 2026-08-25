@@ -400,35 +400,111 @@ def _range_for_body_clearance(node, clearance):
     return clearance + forward_boundary
 
 
-def test_ttc_brakes_at_speed_but_not_at_a_crawl(node):
-    """The TTC brake is armed only above ttc_min_brake_speed.
+def test_emergency_clearance_forward_only_crawls_out(node):
+    """INTENTIONAL BEHAVIOR CHANGE (2026-08-25): a body-contact-level
+    clearance confined to the forward cone, with a real gap elsewhere, now
+    attempts an escape instead of latching unconditionally -- the
+    emergency_clearance half of the same directional gate proven for TTC
+    below. Real run logs the day this changed showed exactly this shape
+    latching permanently: negative clearance (-10mm to -13mm) dead ahead,
+    44 times in one run, with no escape attempt at all.
+
+    Speed is asserted non-negative and bounded, NOT strictly positive: with
+    emergency_stop_clearance at 0.0 (this session's other change) and the
+    shared creep-speed formula reused unmodified, a trip this close to (or
+    past) contact always computes exactly 0 usable distance -- correctly,
+    since crawling forward from a contact-level clearance is not safe
+    regardless of what the wider scan shows. What actually changes here,
+    and what this test verifies, is that the car is no longer *latched*:
+    steering keeps re-aiming at the escape gap every tick (the old
+    unconditional _stop() freezes steering_basis instead), so the car is
+    ready to move the instant real margin reappears, and the state/log
+    correctly say an escape was found rather than that none exists. See
+    test_ttc_escapes_at_speed_but_not_at_a_crawl for the tier whose trips
+    fire at clearances comfortably above the creep floor, where the escape
+    *does* produce a real nonzero crawl.
+    """
+    _ready(node, speed=0.1)
+    published = _capture(node)
+    narrow = _wall_ahead(
+        _range_for_body_clearance(node, -0.005), half_angle_deg=10.0)
+    _tick(node, _scan(narrow))
+    assert node.last_decision_state == 'emergency_escape', (
+        'a forward-only contact-level clearance with open space either '
+        'side must attempt an escape, not report the old unconditional '
+        'emergency_clearance latch')
+    assert 0.0 <= published[-1].drive.speed <= node.escape_creep_speed + 1e-9
+    assert published[-1].drive.steering_angle != 0.0, (
+        'must actively steer toward the found gap, not freeze steering_basis '
+        'the way the old unconditional _stop() does')
+
+
+def test_emergency_clearance_flank_contact_still_hard_stops(node):
+    """The test that actually proves the directional gate is doing real
+    work, not just present: near-zero clearance at the flank (+/-90deg),
+    with the forward cone genuinely clear, must still hard-stop
+    unconditionally -- the same flank-contact protection the 2026-07-27
+    incident's fix relies on. A car touching something at its flank cannot
+    escape that contact by steering into a forward-facing gap; the
+    directional gate exists specifically so this case is never offered one.
+    """
+    _ready(node, speed=0.1)
+    published = _capture(node)
+    flank_boundary = float(gap_logic.vehicle_boundary_distances(
+        np.array([math.pi / 2.0]), node.car_width, node.car_length,
+        node.wheelbase, node.laser_offset_x, node.laser_offset_y)[0])
+    ranges = [8.0] * 541
+    ranges[-1] = flank_boundary - 0.005   # the beam at exactly +90deg
+    _tick(node, _scan(ranges))
+    assert node.last_decision_state == 'emergency_clearance', (
+        'a flank contact must still hard-stop unconditionally -- the '
+        'directional gate must not let the car steer along whatever it is '
+        'already touching at the side')
+    assert published[-1].drive.speed == 0.0
+
+
+def test_ttc_escapes_at_speed_but_not_at_a_crawl(node):
+    """The TTC tier is armed only above ttc_min_brake_speed.
 
     TTC is clearance/closing-speed, so a crawling car reaches the threshold
     on a *tiny* clearance -- exactly the state a car is in once it has eased
-    up to the inside of a corner. Braking there removes the only motion that
-    would clear the corner, and the measured 2026-08-06 run shows the result:
-    stops at 0.15-0.39m/s, several reading `odom 0.00m/s` while braking on
-    the car's own commanded speed. Above the gate the brake must still fire.
+    up to the inside of a corner. Above the gate the tier must still trip.
+
+    INTENTIONAL BEHAVIOR CHANGE (2026-08-25, this plan / the user's explicit
+    direction to escape before braking): the wall built by _wall_ahead below
+    is dead ahead with open space either side -- a directional trip -- so
+    the car now crawls toward the visible gap (state 'ttc_escape', bounded
+    to escape_creep_speed) instead of hard-stopping at zero. This is exactly
+    the "brake first, escape second" pattern the 2026-08-25 investigation
+    found in real run logs: the old code already computed and logged a
+    viable escape gap here but never acted on it. See
+    test_ttc_still_hard_stops_when_genuinely_boxed_in for proof the tier
+    still hard-stops outright when no escape actually exists, and
+    test_gap_logic.py's directional-gate tests below for the flank case
+    this change does NOT apply to.
     """
-    # 0.24m of body clearance at 1.2m/s is a 0.20s TTC, inside the 0.35s
+    # 0.24m of body clearance at 1.2m/s is a 0.20s TTC, inside the 0.30s
     # threshold, and the car is above the 0.6m/s gate.
     _ready(node, speed=1.2)
     published = _capture(node)
     _tick(node, _scan(_wall_ahead(_range_for_body_clearance(node, 0.24))))
-    assert node.last_decision_state == 'ttc_brake', \
-        'at 1.2m/s, 0.24m from the bumper must still trip the TTC brake'
-    assert published[-1].drive.speed == 0.0
+    assert node.last_decision_state == 'ttc_escape', (
+        'at 1.2m/s, 0.24m from the bumper with a visible gap either side '
+        'must trip the TTC tier and crawl toward it, not latch at zero')
+    assert 0.0 < published[-1].drive.speed <= node.escape_creep_speed + 1e-9, \
+        'the escape must be a bounded crawl -- neither zero nor full speed'
 
     # Same closing geometry, scaled to a crawl: 0.16m at 0.55m/s is a 0.29s
     # TTC, still inside the threshold, so only the speed gate can be what
-    # holds the brake off. The clearance is deliberately above the 0.125m
-    # creep reserve, so the escape creep has room to command a crawl -- this
-    # test is about the TTC gate, not about the reserve.
+    # holds the tier off. The clearance is deliberately above the 0.10m
+    # creep reserve (forward_stop_clearance/2), so the escape creep has
+    # room to command a crawl -- this test is about the TTC gate, not about
+    # the reserve.
     _ready(node, speed=0.55)
     published = _capture(node)
     _tick(node, _scan(_wall_ahead(_range_for_body_clearance(node, 0.16))))
     assert node.last_decision_state != 'ttc_brake', \
-        'below ttc_min_brake_speed the TTC brake must not be what stops the car'
+        'below ttc_min_brake_speed the TTC tier must not be what stops the car'
     assert published[-1].drive.speed > 0.0, \
         'a crawling car with a visible way out must still be able to move'
 
@@ -436,14 +512,74 @@ def test_ttc_brakes_at_speed_but_not_at_a_crawl(node):
 def test_the_crawl_case_is_the_gate_and_not_the_geometry(node):
     """Guard against the test above passing for an unrelated reason.
 
-    With the gate opened back up, the identical crawl scan must brake -- which
-    is what pins ttc_min_brake_speed as the thing that changed.
+    With the gate opened back up, the identical crawl scan must trip the TTC
+    tier again -- which is what pins ttc_min_brake_speed as the thing that
+    changed. INTENTIONAL BEHAVIOR CHANGE (2026-08-25): see
+    test_ttc_escapes_at_speed_but_not_at_a_crawl's docstring -- a directional
+    trip with a visible gap escapes rather than hard-stopping.
     """
     node.ttc_min_brake_speed = 0.0
     _ready(node, speed=0.55)
     published = _capture(node)
     _tick(node, _scan(_wall_ahead(_range_for_body_clearance(node, 0.16))))
-    assert node.last_decision_state == 'ttc_brake'
+    assert node.last_decision_state == 'ttc_escape'
+    assert 0.0 < published[-1].drive.speed <= node.escape_creep_speed + 1e-9
+
+
+def _boxed_in_ahead(node, tripped_clearance, elsewhere_raw):
+    """A forward slab at `tripped_clearance`, with the rest of the window
+    close enough that no gap clears fallback_min_gap_distance anywhere --
+    but with strictly more clearance than the slab, so the slab stays the
+    strict minimum and the scene stays directional (see the module-level
+    note in test_ttc_still_hard_stops_when_genuinely_boxed_in on why a
+    uniform *raw range* does NOT give a uniform *clearance*, and so does
+    not reliably give this).
+    """
+    n, span = 541, math.pi
+    increment = span / (n - 1)
+    forward_boundary = (
+        node.wheelbase / 2.0 + node.car_length / 2.0 - node.laser_offset_x)
+    slab_raw = tripped_clearance + forward_boundary
+    half_angle_deg = math.degrees(node.forward_stop_fov) / 2.0
+    ranges = [elsewhere_raw] * n
+    for i in range(n):
+        angle_deg = math.degrees(-span / 2.0 + i * increment)
+        if abs(angle_deg) <= half_angle_deg:
+            ranges[i] = slab_raw
+    return ranges
+
+
+def test_ttc_still_hard_stops_when_genuinely_boxed_in(node):
+    """The directional escape gate is not a licence to never hard-stop.
+
+    Identical closing geometry to the tests above (0.24m body clearance at
+    1.2m/s, well inside the TTC threshold) confined to the forward cone,
+    with the rest of the window close enough that no gap clears
+    fallback_min_gap_distance anywhere either -- so _select_gap finds no
+    gap at all and the TTC tier must fall back to its original
+    unconditional stop, exactly as before this session's change. This is
+    the test that actually proves an escape is attempted and can fail, not
+    merely that the state name changed.
+
+    NOTE on construction: a scan that is uniform in *raw range* is NOT
+    uniform in *clearance* -- the rectangular footprint's boundary distance
+    varies with beam angle (see gap_logic.vehicle_boundary_distances), so a
+    uniform scan can put the worst clearance somewhere other than dead
+    ahead and land in the pre-existing, unrelated non-directional/flank
+    branch instead of the new tripped-and-boxed-in fallback this test
+    means to exercise. Caught by Hard Rule 1: stubbing the fallback away
+    left this test passing unchanged when it was first written with a
+    uniform scan, proving it wasn't actually exercising that code --
+    _boxed_in_ahead's forward-slab-plus-margin construction was verified
+    directly against both the stubbed and real code before being used
+    here.
+    """
+    _ready(node, speed=1.2)
+    published = _capture(node)
+    _tick(node, _scan(_boxed_in_ahead(
+        node, tripped_clearance=0.24, elsewhere_raw=0.65)))
+    assert node.last_decision_state == 'ttc_brake', \
+        'boxed in on every side, the TTC tier must still hard-stop outright'
     assert published[-1].drive.speed == 0.0
 
 
@@ -677,8 +813,11 @@ def _disparity_reach_beams(node, margin, wall_range, angle_increment):
 
     Recomputed rather than restated. The reach is
     ``ceil(atan2(car_width/2 + margin, near_range) / angle_increment)``,
-    so it moves whenever the car's width does -- and it did, when the car
-    was re-measured on 2026-08-24 and car_width went 0.31 -> 0.33. The
+    so it moves whenever the car's width does -- and it has twice: first
+    when the car was re-measured on 2026-08-24 and car_width went
+    0.31 -> 0.33, then again on 2026-08-25 when the padding itself was cut
+    from 14.5mm/side to 5mm/side and it went 0.33 -> 0.31 -- a second,
+    unrelated transition that happens to land back on the same digits. The
     previous version of the test below pinned the beam counts as literals
     and silently stopped straddling the bridge it was built to straddle.
     """

@@ -75,7 +75,7 @@ Even the heaviest tested configuration runs 3.2× faster than real time in
 Worth stating plainly, because the list is longer than you might expect:
 
 - **Wheelbase 0.36 m** matches `vesc.yaml` exactly.
-- **Body 0.33 × 0.58 m** is deliberately padded beyond the real chassis, with
+- **Body 0.31 × 0.58 m** is deliberately padded beyond the real chassis, with
   the collision centre at wheelbase/2 — conservative in the right direction.
 - **LiDAR mounting** — ±135° FOV and the +0.26 m forward offset match the real
   `laser` frame.
@@ -121,7 +121,9 @@ Stopping distance scales as `v²/2a`, so the error is not subtle:
 | 4.00 m/s² | 2.00 m |
 | 3.00 m/s² | 2.67 m |
 
-**Why it matters here:** `emergency_stop_distance: 0.4` and
+**Why it matters here:** `emergency_stop_distance: 0.4` (cut to `0.35` on
+2026-08-25, per this session's risk-tolerance mandate -- this specific
+margin analysis has not been re-run against the new value) and
 `avoidance_trigger_distance: 1.5` were both validated against the 0.84 m figure.
 The layered design saves it in the common case — avoidance drops the car to
 `avoidance_speed: 1.0` at 1.5 m, and stopping from 1 m/s needs only 0.05 m even

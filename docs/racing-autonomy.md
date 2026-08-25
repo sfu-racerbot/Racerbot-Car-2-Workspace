@@ -25,7 +25,7 @@ This doc is about *why* it's built this way and *how each algorithm works*. The 
 
 **Honest limits:** the velocity profile is a single-number friction model, not vehicle dynamics. Opponent handling reasons about one car at a time, with no identity tracking across occlusions. There's no defensive driving.
 
-Two known latch-ups are documented below rather than hidden — one fixed, one still open. And a course narrower than about 2.6 m will map and profile cleanly, then still run wide at the first corner, for reasons that are [measured and explained](#how-fast-a-mapped-course-can-actually-be-raced-and-why) rather than mysterious.
+Two known latch-ups are documented below rather than hidden — both since fixed, as of 2026-08-25 (the second, `off_racing_line`, was still open when the first pass of this section was written). And a course narrower than about 2.6 m will map and profile cleanly, then still run wide at the first corner, for reasons that are [measured and explained](#how-fast-a-mapped-course-can-actually-be-raced-and-why) rather than mysterious.
 
 ### Why it exists
 
@@ -77,6 +77,8 @@ ros2 launch racerbot_launch auto_map_race_launch.py
 **Working when:** the log reports a closed lap, then a profiled path, then a handover to pure pursuit. Hold LB the entire time — the car does not move without it.
 
 > **Expect this to take minutes, not seconds.** The hallway loop this car maps is 126 m round and takes about 136 seconds a lap, and `mapping_laps` defaults to 2. The progress line leads with how far round the car is (`~34% round, ~83m to go`) precisely so a long run is distinguishable from a stuck one. If that percentage is climbing, keep holding LB.
+>
+> **The car may record a third lap on its own (2026-08-25).** The lap recorded after the discovery lap is only accepted if it passes a quality check (reanchor count, closure margin, heading margin, no multi-revolution trim — see `_lap_quality_ok`); a marginal one triggers one more automatic attempt, up to `max_mapping_laps` (default 3). This is normal, not stuck — the log names which check the lap fell short on. The discovery lap itself is never raced, whatever happens after it.
 
 `auto_map_race_node` is a safety-gated command selector and a state machine. In order, it:
 
@@ -241,17 +243,19 @@ That sounds fine until you notice that at zero speed *nothing about the scene ch
 
 Setting `emergency_escape_speed: 0.0` restores the old behaviour.
 
-### Still open: `off_racing_line` is a third latch
+**2026-08-25: `body_contact` gained the same escape.** The tier above it — all-round body clearance, not just the forward cone — used to be a pure, unconditional latch with no escape mechanism at all, which is exactly what a real day's run logs showed: negative modelled clearance (-10mm to -13mm) latching the car dead 44 times in one run, with no attempt to move. It now shares `_emergency_escape` with `emergency_obstacle` above, but gated by its own, stricter `body_contact_escape_clearance` (default 0.0m, below `emergency_escape_clearance`'s 0.10m — that floor would otherwise reject every `body_contact` escape before it started, since this tier only fires at or below `emergency_stop_clearance`, 0.03m). Both tiers also gained a **directional gate**: an escape is only attempted when the worst clearance anywhere on the body is inside the same forward cone the escape gap-search itself uses — a contact at the flank is not made safer by steering into a forward-facing gap, since that would drag the body along whatever the flank is already touching, so a flank contact still hard-stops exactly as before. Successful escapes report `body_contact_escape` / `emergency_escape` respectively; a boxed-in trip with nowhere to go still falls back to the original unconditional `body_contact` / `emergency_obstacle` stop.
 
-Observed once during simulator validation. Not fixed here, because unlike the other two its trigger is a *localisation* claim rather than a geometric one.
+### Fixed: `off_racing_line` was a third latch
 
-`max_cross_track_error` (1.0 m) stops the car when it is further than that from every waypoint — "lost or kidnapped" — and stopping is the right answer to that.
+Observed once during simulator validation, and fixed 2026-08-25 alongside the two escape mechanisms above — the same underlying shape ("a stop that cannot recover because stopping is what prevents recovery"), for a *localisation* claim rather than a geometric one.
 
-But the stop is permanent by construction. At zero speed the pose does not change, so the cross-track error does not change, so the stop never clears. In the observed run the car had been tracking the line to 0.09 m at 1.98 m/s, went past 1.0 m about five seconds later, and stayed stopped for the remaining seventy-five seconds of the racing window.
+`max_cross_track_error` (1.0 m) stops the car when it is further than that from every waypoint — "lost or kidnapped" — and stopping is the right first answer to that.
 
-Here's the part worth investigating before a race. The same log line shows pure pursuit reporting `opponent tracked: gap=3.00m` in a **solo** run.
+But the stop used to be permanent by construction: `_stop()` returned immediately, before the reactive LIDAR safety net ever ran for that tick, so even a future recovery command would have bypassed it entirely. At zero speed the pose does not change, so the cross-track error does not change, so the stop never cleared. In the observed run the car had been tracking the line to 0.09 m at 1.98 m/s, went past 1.0 m about five seconds later, and stayed stopped for the remaining seventy-five seconds of the racing window.
 
-So map-subtraction opponent detection was producing false positives on that fresh SLAM map, and a committed overtake offsets the target 0.35 m sideways. A false overtake pushing the car off its own line is a plausible route to a genuine 1 m cross-track error — and *that* would be the thing to fix, rather than the watchdog.
+The same log line pointed at the actual cause: pure pursuit reporting `opponent tracked: gap=3.00m` in a **solo** run. Map-subtraction opponent detection was producing false positives on that fresh SLAM map, and a committed overtake offsets the target 0.35 m sideways — a false overtake pushing the car off its own line is a plausible route to a genuine 1 m cross-track error. That remains worth fixing on its own terms; independently of it, the watchdog itself no longer has to be a dead end.
+
+**The fix:** a *moderate* error — past `max_cross_track_error` but at or below `off_racing_line_recovery_max_error` (default 2.0m, chosen to cover this incident's band while staying well short of a genuinely lost/kidnapped pose) — now computes a cautious command aimed directly at the nearest point on the line (zero lookahead, not the normal down-track target), capped at `off_racing_line_recovery_speed` (default 0.30 m/s), and lets it fall through to the same reactive safety net every other candidate command goes through — which is the entire mechanism that gives the net the final say over a recovery attempt too, including overriding it back to zero if something is actually in the way. `off_racing_line_recovery_timeout_sec` (default 5.0s) bounds how long a recovery may run without the error clearing before giving up and hard-stopping anyway; beyond `off_racing_line_recovery_max_error`, the car is treated as genuinely lost or kidnapped and always hard-stops, unconditionally, exactly as before this fix.
 
 All of this is exercised end to end by `tools/racerbot_sim/run_auto_map_validation.py` — see [ros-simulator.md](ros-simulator.md).
 
@@ -538,6 +542,8 @@ Where a side genuinely has no wall, the reported width falls back to the map's c
 
 **The optimizer will use every centimetre it is given** — that is what it is for. So this is the parameter that stops it apexing on the paint. Raise it, don't lower it.
 
+**`auto_map_race_node`'s own inline use of this same dial (`optimize_safety_margin` in `auto_map_race.yaml`) does the opposite as of 2026-08-25** — cut from 0.15 to 0.10, deliberately, per the user's explicit direction that session that the car can run riskier overall given the deadman switch. This is a stated, intentional departure from the guidance above for that one call site, not an oversight; the hard `profile_wall_clearance` refusal below is unchanged and still the actual floor.
+
 The finished line is then checked *independently* of anything the optimizer believed:
 
 - **Steering feasibility.** $\kappa_{max}$ against $\tan(\delta_{max})/L$ — 0.821/m, a 1.22 m radius, on this car. A line the rack cannot physically steer is worthless.
@@ -755,10 +761,11 @@ Seven independent checks, each capable of unilaterally forcing a stop or a steer
 |---|---|---|
 | **LB deadman button** (checked first, ahead of everything else) | LB not held on a live `/joy` stream within `joy_timeout_sec` (default 0.5s) | **Mandatory workspace policy** — see [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car). Stays on (`enable_deadman: true`) until the team explicitly decides the car's behavior is trustworthy enough to relax it — don't set it `false` otherwise |
 | Localization watchdog | No pose received yet, or `pose_topic` has gone quiet for more than `pose_timeout_sec` (default 0.5s) | Never drive on a stale or absent position estimate |
-| Cross-track error | Nearest waypoint is farther than `max_cross_track_error` (default 1.0m) | Car is lost, kidnapped, or localization has diverged — the steering geometry would be aiming at a point unrelated to reality |
+| Cross-track error | Nearest waypoint is farther than `max_cross_track_error` (default 1.0m) | Between here and `off_racing_line_recovery_max_error` (default 2.0m), attempts a bounded recovery crawl aimed straight at the nearest point instead of latching a stop immediately (2026-08-25 — see [Fixed: `off_racing_line` was a third latch](#fixed-off_racing_line-was-a-third-latch) below). Beyond that ceiling, or if recovery runs longer than `off_racing_line_recovery_timeout_sec` (default 5.0s) without the error clearing, the car is lost, kidnapped, or localization has diverged, and the stop is unconditional |
+| **Body contact** (checked first among the reactive tiers below) | Minimum clearance from the padded body, over *every* beam and not just a forward cone, is at or below `emergency_stop_clearance` (default 0.03m) | Structurally sees a wall the car is *alongside*, which a forward-cone minimum cannot — the 2026-07-27 collision. A contact dead ahead with a real gap elsewhere now attempts a crawl out first (`body_contact_escape`, 2026-08-25, gated by the stricter `body_contact_escape_clearance`) before falling back to the unconditional stop; a contact at the flank never gets that option |
 | Opponent detection + overtake steering | Another car detected and being closed on within `overtake_trigger_gap` (default 3.0m of *track* distance) | Not a safety check at all — a racing one. See [Racing against opponents](#racing-against-opponents-detection-tracking-and-overtaking) below. Always subordinate to the two checks after it |
-| Reactive avoidance (steer around) | An unmapped return in the 60° cone is under 1.5m; before a map is ready, raw range is under the 0.7m fallback | Map subtraction prevents ordinary walls from continuously triggering the traffic layer. A committed pass bypasses the generic 1m/s cap, while the emergency tier remains active |
-| Emergency hard stop (always wins) | Minimum range in a narrower `safety_fov_deg` cone (default 60°) is under `emergency_stop_distance` (default 0.4m), or `/scan` itself is stale/missing | Last resort, unconditional — a safety net that's gone blind is treated identically to "obstacle detected" |
+| Reactive avoidance (steer around) | An unmapped return in the 60° cone is under 1.5m; before a map is ready, raw range is under the 0.6m fallback (cut from 0.7m on 2026-08-25) | Map subtraction prevents ordinary walls from continuously triggering the traffic layer. A committed pass bypasses the generic 1m/s cap, while the emergency tier remains active |
+| Emergency hard stop (always wins) | Minimum range in a narrower `safety_fov_deg` cone (default 60°) is under `emergency_stop_distance` (default 0.35m, cut from 0.4m on 2026-08-25), or `/scan` itself is stale/missing | Last resort. A directional escape (`emergency_escape`) applies here too, same as body contact above — pre-dates this session — before the stop is unconditional |
 | Unhandled exception | Anything in the control step raises | `control_loop()` wraps the whole step in try/except; on *any* exception it publishes a stop command *before* re-raising, so an unexpected bug can't leave the last (possibly full-speed) command sitting on `/drive` forever |
 
 **Every stop in this table is published immediately and unshaped.** The acceleration and steering rate limits described in [Online command shaping](#online-command-shaping) sit on the *normal* command path only. A zero-speed command never passes through them, because rate-limiting a stop into a nonzero command would defeat the whole table.
@@ -1013,14 +1020,17 @@ All of these live in `src/pure_pursuit/config/pure_pursuit.yaml` — see that fi
 | `odom_timeout_sec` | `0.5` | Lookahead falls back to the profiled speed past this. Not a stop watchdog |
 | `pose_timeout_sec` | `0.5` | Localization watchdog |
 | `max_cross_track_error` | `1.0` | Lost/kidnapped watchdog, meters |
+| `off_racing_line_recovery_max_error` | `2.0` | Meters; above `max_cross_track_error` but at or below this, attempt a recovery crawl instead of hard-stopping immediately (2026-08-25). Beyond it, always hard-stop |
+| `off_racing_line_recovery_speed` | `0.30` | m/s; capped recovery-crawl speed, aimed straight at the nearest point on the line |
+| `off_racing_line_recovery_timeout_sec` | `5.0` | s; give up and hard-stop if recovery has not closed the error back under `max_cross_track_error` within this long |
 | `enable_lidar_safety` | `true` | Master switch for the entire reactive net below (avoidance + opponent overtaking both require this too) |
 | `safety_fov_deg` | `60.0` | Width of the narrow forward cone checked for the hard emergency stop |
-| `emergency_stop_distance` | `0.4` | Meters; hard stop, always wins |
+| `emergency_stop_distance` | `0.35` | Meters; hard stop, always wins (cut from 0.4 on 2026-08-25, untested on the car -- pure_pursuit never took control in the run that motivated it) |
 | `scan_timeout_sec` | `0.5` | LIDAR staleness watchdog |
 | `enable_obstacle_avoidance` | `true` | Steer around something close instead of just stopping, when there's room |
 | `avoidance_fov_deg` | `60.0` | Forward cone used for avoidance steering and opponent gating |
 | `avoidance_trigger_distance` | `1.5` | Meters; map-filtered dynamic-object trigger |
-| `avoidance_fallback_trigger_distance` | `0.7` | Meters; shorter raw-scan trigger before map subtraction is available |
+| `avoidance_fallback_trigger_distance` | `0.6` | Meters; shorter raw-scan trigger before map subtraction is available (cut from 0.7 on 2026-08-25 -- was already documented above as firing on ordinary walls before a map exists) |
 | `avoidance_min_gap_distance` | `1.0` | Meters; minimum depth for a gap to be considered driveable during avoidance |
 | `avoidance_speed` | `1.0` | m/s; capped speed while avoidance steering is active |
 | `enable_opponent_overtake` | `true` | See [Racing against opponents](#racing-against-opponents-detection-tracking-and-overtaking). Requires `enable_lidar_safety` too |

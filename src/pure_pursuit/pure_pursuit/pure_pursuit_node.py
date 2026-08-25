@@ -188,19 +188,43 @@ class PurePursuitNode(Node):
         self.declare_parameter('odom_timeout_sec', 0.5)
         self.declare_parameter('pose_timeout_sec', 0.5)
         self.declare_parameter('max_cross_track_error', 1.0)
+        # --- Off-line recovery (2026-08-25) ---
+        # off_racing_line used to be a permanent latch: _stop() returned
+        # immediately, before the LIDAR safety net below ever ran for that
+        # tick, so even a future recovery command would have bypassed it
+        # entirely. A *moderate* overshoot -- documented in
+        # docs/racing-autonomy.md as a real, non-kidnapped incident that
+        # landed in the 1.0-2.0m band -- now gets a bounded recovery attempt
+        # instead: a cautious command aimed straight at the nearest point on
+        # the line, still subject to the reactive safety net's final say
+        # like any other candidate command. Beyond this ceiling the car is
+        # genuinely lost or kidnapped and always hard-stops, unchanged.
+        self.declare_parameter('off_racing_line_recovery_max_error', 2.0)
+        # A crawl, not a drive -- recovering is not "back on the racing
+        # line", it is "aimed at the racing line".
+        self.declare_parameter('off_racing_line_recovery_speed', 0.30)
+        # Give up and hard-stop if recovery has not closed the error back
+        # under max_cross_track_error within this long -- a real overshoot
+        # closes in a few seconds; one that never does is not going to on
+        # its own.
+        self.declare_parameter('off_racing_line_recovery_timeout_sec', 5.0)
         # Frozen-localization watchdog: only armed once odometry is sure the
         # car is really moving, so a legitimately parked car never trips it.
         self.declare_parameter('pose_frozen_timeout_sec', 0.5)
         self.declare_parameter('pose_frozen_min_speed', 0.3)
         self.declare_parameter('pose_frozen_min_travel', 0.05)
         # Rectangular collision envelope, mirroring gap_follow's.
-        self.declare_parameter('car_width', 0.33)
+        self.declare_parameter('car_width', 0.31)
         self.declare_parameter('car_length', 0.58)
-        self.declare_parameter('emergency_stop_clearance', 0.05)
+        # Config-file values are authoritative (see pure_pursuit.yaml); these
+        # code-level fallbacks are kept in step with it, not left at their
+        # pre-2026-08-25 numbers, so a bare launch without the YAML gets the
+        # current best-known-safe tuning rather than a stale one.
+        self.declare_parameter('emergency_stop_clearance', 0.03)
         self.declare_parameter('body_clearance_fov_deg', 180.0)
         self.declare_parameter('enable_lidar_safety', True)
         self.declare_parameter('safety_fov_deg', 60.0)
-        self.declare_parameter('emergency_stop_distance', 0.4)
+        self.declare_parameter('emergency_stop_distance', 0.35)
         # --- Escape from the hard stop (see _reactive_override tier 1) ---
         # A hard stop with no way out is not a safe state, it is a stuck one:
         # at zero speed nothing about the scene changes, so the obstacle that
@@ -210,6 +234,15 @@ class PurePursuitNode(Node):
         self.declare_parameter('emergency_escape_speed', 0.25)
         self.declare_parameter('emergency_escape_min_gap', 0.8)
         self.declare_parameter('emergency_escape_clearance', 0.10)
+        # --- Escape from body contact itself (tier 0, 2026-08-25) ---
+        # The strictest of the escape floors, deliberately: this tier fires
+        # closest to genuine contact (body_clearance <= emergency_stop_
+        # clearance, 0.03m), well below emergency_escape_clearance (0.10m)
+        # above -- reusing that floor here would reject every body_contact
+        # escape before it started. 0.0 means "any positive clearance is
+        # enough to consider an escape"; set negative to disable body_contact
+        # escapes entirely while keeping tier 1's.
+        self.declare_parameter('body_contact_escape_clearance', 0.0)
         self.declare_parameter('scan_timeout_sec', 0.5)
         # --- Deadman button (workspace policy, see docs/architecture.md) ---
         self.declare_parameter('enable_deadman', True)
@@ -236,7 +269,7 @@ class PurePursuitNode(Node):
         # --- Reactive avoidance (steer around something close, not just
         # stop, when there's room) ---
         self.declare_parameter('max_range', 10.0)
-        self.declare_parameter('avoidance_fallback_trigger_distance', 0.7)
+        self.declare_parameter('avoidance_fallback_trigger_distance', 0.6)
         self.declare_parameter('enable_obstacle_avoidance', True)
         self.declare_parameter('avoidance_fov_deg', 60.0)
         self.declare_parameter('avoidance_trigger_distance', 1.5)
@@ -301,6 +334,12 @@ class PurePursuitNode(Node):
             self.get_parameter('odom_timeout_sec').value)
         self.pose_timeout_sec = float(self.get_parameter('pose_timeout_sec').value)
         self.max_cross_track_error = float(self.get_parameter('max_cross_track_error').value)
+        self.off_racing_line_recovery_max_error = float(
+            self.get_parameter('off_racing_line_recovery_max_error').value)
+        self.off_racing_line_recovery_speed = float(
+            self.get_parameter('off_racing_line_recovery_speed').value)
+        self.off_racing_line_recovery_timeout_sec = float(
+            self.get_parameter('off_racing_line_recovery_timeout_sec').value)
         self.pose_frozen_timeout_sec = float(
             self.get_parameter('pose_frozen_timeout_sec').value)
         self.pose_frozen_min_speed = float(
@@ -322,6 +361,8 @@ class PurePursuitNode(Node):
             self.get_parameter('emergency_escape_min_gap').value)
         self.emergency_escape_clearance = float(
             self.get_parameter('emergency_escape_clearance').value)
+        self.body_contact_escape_clearance = float(
+            self.get_parameter('body_contact_escape_clearance').value)
         self.scan_timeout_sec = float(self.get_parameter('scan_timeout_sec').value)
         self.enable_deadman = bool(self.get_parameter('enable_deadman').value)
         self.joy_topic = self.get_parameter('joy_topic').value
@@ -472,6 +513,7 @@ class PurePursuitNode(Node):
         self.last_pose_stamp = None       # when localization computed the pose
         self._pose_reference_xy = None    # last pose that actually travelled
         self._pose_frozen_since = None    # moving-but-not-tracking window start
+        self._off_line_recovery_since = None  # off-line recovery attempt window start
         self.prev_nearest_index = None
 
         self.last_scan = None
@@ -944,41 +986,88 @@ class PurePursuitNode(Node):
 
         # --- Watchdog 2: are we still actually near the racing line? ---
         # A large cross-track error means the car is lost, kidnapped, or
-        # localization has diverged -- driving the pure pursuit geometry
-        # anyway would aim the car at a point that may bear no relation to
-        # where it actually is.
+        # localization has diverged. Beyond off_racing_line_recovery_max_error
+        # driving the pure pursuit geometry anyway would aim the car at a
+        # point that may bear no relation to where it actually is -- that
+        # still hard-stops unconditionally, exactly as before this session.
+        #
+        # A *moderate* overshoot (documented in docs/racing-autonomy.md: a
+        # real, non-kidnapped run into the 1.0-2.0m band) is different: the
+        # car knows roughly where the track is, just not close enough to
+        # drive it normally. This used to be a permanent latch too --
+        # _stop() below returned immediately, before the reactive safety net
+        # ever ran for that tick, so even a future recovery command would
+        # have bypassed it entirely. Recovering instead means computing a
+        # cautious command aimed straight at the nearest point and letting
+        # it fall through to that same reactive net below like any other
+        # candidate command -- which is the entire mechanism that gives the
+        # net the final say over a recovery attempt too; no new integration
+        # code needed. Bounded by off_racing_line_recovery_timeout_sec: a
+        # real overshoot closes in a few seconds, and one that does not is
+        # not going to on its own.
+        recovering = False
         if cross_track_error > self.max_cross_track_error:
-            # Stay un-anchored while lost so recovery next tick starts
-            # from a clean global search, not this bad index.
-            self.prev_nearest_index = None
-            self._stop(
-                'off_racing_line',
-                f"cross-track error {cross_track_error:.2f}m exceeds "
-                f"{self.max_cross_track_error:.2f}m even after a full-line search",
-            )
-            return
+            if cross_track_error > self.off_racing_line_recovery_max_error:
+                # Stay un-anchored while lost so recovery next tick starts
+                # from a clean global search, not this bad index.
+                self.prev_nearest_index = None
+                self._off_line_recovery_since = None
+                self._stop(
+                    'off_racing_line',
+                    f"cross-track error {cross_track_error:.2f}m exceeds "
+                    f"{self.off_racing_line_recovery_max_error:.2f}m even "
+                    "after a full-line search",
+                )
+                return
+            now = self.get_clock().now()
+            if self._off_line_recovery_since is None:
+                self._off_line_recovery_since = now
+            recovery_elapsed = self._seconds_since(self._off_line_recovery_since)
+            if recovery_elapsed > self.off_racing_line_recovery_timeout_sec:
+                self.prev_nearest_index = None
+                self._off_line_recovery_since = None
+                self._stop(
+                    'off_racing_line',
+                    f"cross-track error {cross_track_error:.2f}m has not "
+                    f"recovered under {self.max_cross_track_error:.2f}m within "
+                    f"{self.off_racing_line_recovery_timeout_sec:.1f}s of "
+                    "attempting recovery",
+                )
+                return
+            recovering = True
+        else:
+            self._off_line_recovery_since = None
         self.prev_nearest_index = nearest_idx
 
-        # --- Steering: adaptive lookahead + pure pursuit geometry. ---
+        # --- Steering: adaptive lookahead + pure pursuit geometry -- or,
+        # while recovering, aimed straight at the nearest point instead
+        # (zero lookahead), at a fixed cautious speed rather than the
+        # profiled one. ---
         # Use the speed *at the car's current position on the line* (not
         # the target's) to size the lookahead -- lookahead should reflect
         # how fast we're going right now, not how fast we will be going
         # once we arrive at the target point.
         speed_here = float(self.speed_profile[nearest_idx])
-        if self._odom_fresh():
-            lookahead_speed = abs(self.current_speed)
-            lookahead_speed_source = 'fresh odometry'
+        if recovering:
+            target_idx = nearest_idx
+            lookahead = 0.0
+            lookahead_speed = 0.0
+            lookahead_speed_source = 'off-line recovery (zero lookahead)'
         else:
-            lookahead_speed = speed_here
-            lookahead_speed_source = 'profile fallback'
-        lookahead = racing_math.adaptive_lookahead(
-            lookahead_speed,
-            self.lookahead_speed_gain,
-            self.min_lookahead,
-            self.max_lookahead,
-        )
-        target_idx = racing_math.find_lookahead_index(
-            self.seg_len, nearest_idx, lookahead, closed=self.closed_loop)
+            if self._odom_fresh():
+                lookahead_speed = abs(self.current_speed)
+                lookahead_speed_source = 'fresh odometry'
+            else:
+                lookahead_speed = speed_here
+                lookahead_speed_source = 'profile fallback'
+            lookahead = racing_math.adaptive_lookahead(
+                lookahead_speed,
+                self.lookahead_speed_gain,
+                self.min_lookahead,
+                self.max_lookahead,
+            )
+            target_idx = racing_math.find_lookahead_index(
+                self.seg_len, nearest_idx, lookahead, closed=self.closed_loop)
         target_x, target_y = self.xy[target_idx]
 
         dx = target_x - self.car_x
@@ -989,10 +1078,16 @@ class PurePursuitNode(Node):
         steering_angle = steering_unclipped
         steering_angle = float(np.clip(steering_angle, -self.max_steering_angle, self.max_steering_angle))
 
-        # --- Speed: the profiled speed for where the car is right now. ---
-        speed_cmd = float(np.clip(speed_here, self.min_speed, self.max_speed))
+        # --- Speed: the profiled speed for where the car is right now --
+        # or, while recovering, a fixed cautious crawl. The profile speed
+        # at the nearest point assumes the car is actually tracking the
+        # line, which recovering is the admission it currently is not. ---
+        if recovering:
+            speed_cmd = min(self.off_racing_line_recovery_speed, self.max_speed)
+        else:
+            speed_cmd = float(np.clip(speed_here, self.min_speed, self.max_speed))
         hard_speed_cap = self.max_speed
-        decision_state = 'pure_pursuit'
+        decision_state = 'off_racing_line_recovery' if recovering else 'pure_pursuit'
         # Named ceilings for the dashboard's decision panel. Kept as
         # separate locals rather than recovered afterwards from the final
         # number, because "which limit won" is exactly the thing a single
@@ -1005,8 +1100,12 @@ class PurePursuitNode(Node):
         # *target* (not yet the final command) if another car has been
         # spotted and this car is closing in on it. Requires the reactive
         # safety net to be enabled too -- overtaking is a more assertive
-        # behavior layered on top of it, not a substitute for it. ---
-        if self.enable_lidar_safety and self.enable_opponent_overtake:
+        # behavior layered on top of it, not a substitute for it. Skipped
+        # while recovering: its track-progress-relative distances assume
+        # the car is confidently on the line, and chasing a pass while
+        # significantly off it would fight the recovery aim point instead
+        # of helping reach it. ---
+        if not recovering and self.enable_lidar_safety and self.enable_opponent_overtake:
             overtake_target = self._update_opponent_and_overtake(nearest_idx)
             if overtake_target is not None:
                 target_x, target_y = overtake_target
@@ -1030,7 +1129,11 @@ class PurePursuitNode(Node):
             f"from {lookahead_speed_source}={lookahead_speed:.2f}m/s, "
             f"profile speed={speed_here:.2f}m/s, path curvature={kappa:+.3f}/m"
             f"{clipped_text}")
-        if self.enable_lidar_safety and self.enable_opponent_overtake:
+        if not recovering and self.enable_lidar_safety and self.enable_opponent_overtake:
+            # Skipped while recovering, same as the overtake reconsideration
+            # above: last_opponent_status is stale from whichever tick last
+            # actually ran that logic, and appending it here would read as
+            # current when it is not.
             decision_detail += f"; {self.last_opponent_status}"
 
         # --- Reactive safety net: independent of everything above, and
@@ -1300,6 +1403,35 @@ class PurePursuitNode(Node):
         valid = np.isfinite(window) & (window > 0.0) & (window >= scan.range_min)
         return racing_math.minimum_footprint_clearance(window, valid, boundaries)
 
+    def _forward_body_clearance(self, scan: LaserScan) -> float:
+        """Smallest body clearance inside avoidance_fov_deg's forward cone.
+
+        The narrower sibling of _footprint_clearance's own
+        body_clearance_fov_deg window (180deg, both flanks) -- this is
+        restricted to the same forward cone _emergency_escape already
+        searches for a gap, so the two questions ("is the worst contact
+        dead ahead" and "is there somewhere to steer") are asked over
+        matching geometry. Used only to build the directional escape gate
+        for the body_contact tier; see
+        racing_math.minimum_footprint_clearance_in_cone.
+
+        Callers must call _footprint_clearance first this tick -- this
+        reuses the per-beam boundary distances it caches rather than
+        recomputing them.
+        """
+        ranges = np.asarray(scan.ranges, dtype=np.float64)
+        lo_idx, hi_idx = self._fov_indices(scan, self.body_clearance_fov_deg)
+        if hi_idx <= lo_idx:
+            return math.inf
+        window = ranges[lo_idx:hi_idx + 1]
+        boundaries = self._boundary_distances[lo_idx:hi_idx + 1]
+        beam_angles = (
+            scan.angle_min + np.arange(lo_idx, hi_idx + 1) * scan.angle_increment)
+        valid = np.isfinite(window) & (window > 0.0) & (window >= scan.range_min)
+        return racing_math.minimum_footprint_clearance_in_cone(
+            window, valid, beam_angles, boundaries,
+            math.radians(self.avoidance_fov_deg))
+
     def _dynamic_closest_in_cone(self, scan: LaserScan, fov_deg: float):
         """Closest scan return not explained by the static map.
 
@@ -1376,7 +1508,9 @@ class PurePursuitNode(Node):
         window = np.nan_to_num(window, nan=0.0, posinf=self.max_range, neginf=0.0)
         return np.clip(window, 0.0, self.max_range)
 
-    def _emergency_escape(self, scan, body_clearance: float, closest: float):
+    def _emergency_escape(self, scan, body_clearance: float,
+                          trigger_detail: str, *, clearance_floor: float,
+                          state: str):
         """Crawl toward a real opening instead of latching at a hard stop.
 
         Returns a `_reactive_override` tuple, or None to let the caller stop.
@@ -1396,17 +1530,28 @@ class PurePursuitNode(Node):
         * it only moves toward a gap that is really there -- deeper than
           `emergency_escape_min_gap` in the wider avoidance cone -- and
           never guesses a direction;
-        * it needs `emergency_escape_clearance` of room around the whole
+        * it needs more than `clearance_floor` of room around the whole
           body, measured over every beam, so a car wedged against something
           the forward cone cannot see still stops; and
         * the contact tier above still wins outright, and so does a
           stale/missing scan.
 
-        Set `emergency_escape_speed` to 0.0 to restore the old behaviour.
+        Set `emergency_escape_speed` to 0.0 to restore the old behaviour for
+        every caller -- it is the one crawl speed shared by all of them.
+
+        `trigger_detail`/`clearance_floor`/`state` are the calling tier's
+        own: this method only ever adds the *what* (the gap found and the
+        crawl command) after the caller's *why*. Two tiers share it as of
+        2026-08-25 -- emergency_obstacle (tier 1, the original caller, using
+        emergency_escape_clearance/'emergency_escape') and body_contact
+        (tier 0, using the separate, stricter body_contact_escape_clearance
+        and 'body_contact_escape', since body_contact fires at a clearance
+        already below emergency_escape_clearance and would otherwise always
+        reject the escape before it starts).
         """
         if self.emergency_escape_speed <= 0.0:
             return None
-        if body_clearance <= self.emergency_escape_clearance:
+        if body_clearance <= clearance_floor:
             return None
 
         lo_idx, hi_idx = self._fov_indices(scan, self.avoidance_fov_deg)
@@ -1424,12 +1569,10 @@ class PurePursuitNode(Node):
         return (
             angle,
             self.emergency_escape_speed,
-            'emergency_escape',
-            f"closest valid return in the {self.safety_fov_deg:.1f}deg safety cone is "
-            f"{closest:.2f}m, inside the {self.emergency_stop_distance:.2f}m emergency "
-            f"threshold, but the body still has {body_clearance:.3f}m all round and a "
-            f"{self.emergency_escape_min_gap:.2f}m opening exists at "
-            f"{math.degrees(angle):+.1f}deg -- crawling out at "
+            state,
+            f"{trigger_detail}, but the body still has {body_clearance:.3f}m "
+            f"all round and a {self.emergency_escape_min_gap:.2f}m opening "
+            f"exists at {math.degrees(angle):+.1f}deg -- crawling out at "
             f"{self.emergency_escape_speed:.2f}m/s rather than latching stopped",
         )
 
@@ -1488,28 +1631,52 @@ class PurePursuitNode(Node):
         # race controller needs it just as much.
         body_clearance = self._footprint_clearance(scan)
         if body_clearance <= self.emergency_stop_clearance:
-            return (
-                None,
-                0.0,
-                'body_contact',
+            body_contact_detail = (
                 f"minimum clearance from the car body is {body_clearance:.3f}m, at or "
                 f"below the {self.emergency_stop_clearance:.3f}m contact threshold "
-                "(measured over every beam, not just the forward cone)",
-            )
+                "(measured over every beam, not just the forward cone)")
+            # Directional escape gate, mirroring gap_follow_node's: a
+            # forward_body_clearance (avoidance_fov_deg cone) equal to the
+            # wider body_clearance (within float slop) means the worst
+            # contact anywhere on the body is dead ahead, inside the same
+            # cone _emergency_escape searches for a gap -- the one geometry
+            # an escape is sound for. A contact at the flank is NOT made
+            # safer by steering into a forward-facing gap; that would drag
+            # the body along whatever the flank is already touching. See
+            # test_wall_alongside_the_car_stops_it_although_the_forward_cone_is_clear.
+            forward_body_clearance = self._forward_body_clearance(scan)
+            directional = math.isclose(
+                forward_body_clearance, body_clearance, rel_tol=0.0, abs_tol=1e-6)
+            if directional:
+                escape = self._emergency_escape(
+                    scan, body_clearance, body_contact_detail,
+                    # Deliberately NOT emergency_escape_clearance (0.10m):
+                    # body_contact only fires at body_clearance <=
+                    # emergency_stop_clearance (0.03m), and 0.03 < 0.10, so
+                    # that floor would reject every body_contact escape
+                    # before it started. body_contact_escape_clearance is
+                    # its own, stricter floor -- see its declaration.
+                    clearance_floor=self.body_contact_escape_clearance,
+                    state='body_contact_escape',
+                )
+                if escape is not None:
+                    return escape
+            return (None, 0.0, 'body_contact', body_contact_detail)
 
         emergency_closest = self._closest_in_cone(scan, self.safety_fov_deg)
         if emergency_closest < self.emergency_stop_distance:
-            escape = self._emergency_escape(scan, body_clearance, emergency_closest)
-            if escape is not None:
-                return escape
-            return (
-                None,
-                0.0,
-                'emergency_obstacle',
+            emergency_detail = (
                 f"closest valid return in the {self.safety_fov_deg:.1f}deg safety cone is "
                 f"{emergency_closest:.2f}m, inside the "
-                f"{self.emergency_stop_distance:.2f}m emergency threshold",
+                f"{self.emergency_stop_distance:.2f}m emergency threshold")
+            escape = self._emergency_escape(
+                scan, body_clearance, emergency_detail,
+                clearance_floor=self.emergency_escape_clearance,
+                state='emergency_escape',
             )
+            if escape is not None:
+                return escape
+            return (None, 0.0, 'emergency_obstacle', emergency_detail)
 
         if not self.enable_obstacle_avoidance:
             return (

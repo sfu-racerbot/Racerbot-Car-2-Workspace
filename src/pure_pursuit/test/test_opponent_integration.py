@@ -398,10 +398,13 @@ def test_forward_cone_obstacle_crawls_out_rather_than_latching(node):
     _set_pose(node, -1.5, -1.2, 0.0)
     scan = _clear_scan()
     center = len(scan.ranges) // 2
-    # 0.15m of body clearance: well outside emergency_stop_clearance and
+    # 0.12m of body clearance: well outside emergency_stop_clearance and
     # emergency_escape_clearance, so the escape tier is allowed to act...
-    obstacle = _range_for_body_clearance(node, 0.15)
-    assert 0.15 > node.emergency_escape_clearance
+    # (cut from 0.15m on 2026-08-25 when emergency_stop_distance itself was
+    # cut from 0.4 to 0.35 -- 0.15m's raw range no longer landed inside it;
+    # see the assertion just below, which exists precisely to catch that.)
+    obstacle = _range_for_body_clearance(node, 0.12)
+    assert 0.12 > node.emergency_escape_clearance
     # ...while the raw range is still inside emergency_stop_distance, so
     # there is an emergency to escape from in the first place.
     assert obstacle < node.emergency_stop_distance, (
@@ -427,13 +430,14 @@ def test_forward_cone_hard_stop_still_fires_with_nowhere_to_go(node):
     scan = _clear_scan()
     # A wall right across the avoidance cone: inside the emergency distance
     # ahead, and nothing anywhere near emergency_escape_min_gap to aim at.
-    # Deliberately at the SAME body clearance as the escapable case above,
-    # so the only thing that differs between the two is whether an opening
-    # exists -- otherwise this could pass merely because the wall was too
-    # close for the escape tier to consider at all, which is a different
-    # reason from the one the docstring claims.
-    wall = _range_for_body_clearance(node, 0.15)
-    assert 0.15 > node.emergency_escape_clearance
+    # Deliberately at the SAME body clearance as the escapable case above
+    # (also cut from 0.15m to 0.12m on 2026-08-25, see that test), so the
+    # only thing that differs between the two is whether an opening exists
+    # -- otherwise this could pass merely because the wall was too close for
+    # the escape tier to consider at all, which is a different reason from
+    # the one the docstring claims.
+    wall = _range_for_body_clearance(node, 0.12)
+    assert 0.12 > node.emergency_escape_clearance
     assert wall < node.emergency_stop_distance
     scan.ranges = [wall] * len(scan.ranges)
     node.scan_callback(scan)
@@ -445,21 +449,122 @@ def test_forward_cone_hard_stop_still_fires_with_nowhere_to_go(node):
 def test_emergency_escape_yields_to_the_body_contact_tier(node):
     """Nearly touching means stop, not nudge -- whatever the cone shows.
 
-    emergency_escape_clearance sits above emergency_stop_clearance for
-    exactly this: a car with room to crawl may crawl; a car already against
-    something may not, even when the forward cone shows an open track to
-    aim at.
+    2026-08-25 UPDATE: body_contact gained its own directional escape this
+    session (state 'body_contact_escape', mirroring gap_follow_node), but
+    it is deliberately gated by body_contact_escape_clearance (default
+    0.0m) -- the *strictest* of every escape floor in this node, since this
+    tier fires closest to genuine contact. This scan's ~0.03m raw range
+    dead ahead computes to roughly -0.06m of body clearance (already past
+    the contact threshold, not just at it), which is below even that
+    stricter floor, so no escape is attempted and the result is the same
+    unconditional stop as before this session -- confirmed directly
+    against the real node, not merely asserted. See
+    test_body_contact_escapes_when_clearance_permits_it for a scan that
+    lands inside the escapable band (0, emergency_stop_clearance], where
+    body_contact_escape does fire, and
+    test_body_contact_still_hard_stops_when_genuinely_boxed_in for the
+    "escape considered and found impossible" case.
     """
     published = _capture_published(node)
     _set_pose(node, -1.5, -1.2, 0.0)
     scan = _clear_scan()
     center = len(scan.ranges) // 2
-    # ~0.03m from the bodywork straight ahead, with the rest of the cone open.
+    # ~0.03m from the bodywork straight ahead, with the rest of the cone
+    # open -- but note "open cone" is not what gates the escape here; the
+    # clearance itself is below body_contact_escape_clearance regardless.
     scan.ranges[center] = 0.15
     node.scan_callback(scan)
     node.control_loop()
     assert published[-1].drive.speed == 0.0
     assert node.last_decision_state == 'body_contact'
+
+
+def test_body_contact_escapes_when_clearance_permits_it(node):
+    """INTENTIONAL BEHAVIOR CHANGE (2026-08-25): a body_contact trip dead
+    ahead, with clearance inside the escapable band (above
+    body_contact_escape_clearance's 0.0m floor, still at or below
+    emergency_stop_clearance so it counts as body_contact at all) and a
+    real gap elsewhere, now crawls out instead of latching -- the
+    body_contact half of the same directional gate section 2 gave
+    gap_follow_node. Real evidence this session: pure pursuit never took
+    control in any run that day, so this is the first exercise of this
+    exact tier's escape at all; validate in racerbot_sim before trusting it
+    on the car.
+    """
+    published = _capture_published(node)
+    _set_pose(node, -1.5, -1.2, 0.0)
+    scan = _clear_scan()
+    center = len(scan.ranges) // 2
+    forward_boundary = (
+        node.wheelbase / 2.0 + node.car_length / 2.0 - node.laser_offset_x)
+    # Halfway between the two floors: above body_contact_escape_clearance
+    # (0.0), at or below emergency_stop_clearance (0.03) so this is still a
+    # body_contact trip in the first place.
+    clearance = node.body_contact_escape_clearance + (
+        node.emergency_stop_clearance - node.body_contact_escape_clearance) / 2.0
+    assert 0.0 < clearance <= node.emergency_stop_clearance, (
+        'the configured floors no longer leave an escapable band; this '
+        'test proves nothing until they do')
+    scan.ranges[center] = clearance + forward_boundary
+    node.scan_callback(scan)
+    node.control_loop()
+    assert node.last_decision_state == 'body_contact_escape', (
+        'a body contact dead ahead with room to escape and a real gap '
+        'elsewhere must crawl toward it, not latch at zero')
+    assert published[-1].drive.speed == pytest.approx(node.emergency_escape_speed)
+
+
+def test_body_contact_still_hard_stops_when_genuinely_boxed_in(node):
+    """The directional escape gate is not a licence to never hard-stop:
+    the same escapable-band clearance as the test above, dead ahead, but
+    with the rest of the avoidance cone within find_best_gap's own raw-range
+    depth threshold (emergency_escape_min_gap) too -- so no gap exists
+    anywhere in the cone _emergency_escape searches, and the tier must fall
+    back to its original unconditional stop.
+
+    NOTE on construction: filling the *whole* +/-avoidance_fov_deg/2 cone
+    uniformly at the trip clearance does NOT work here and was the first
+    thing tried -- the rectangular footprint's boundary distance grows
+    across that cone (measured: 0.210m at 0deg to 0.243m at 30deg for this
+    car), enough on its own to push the *worst* clearance in a uniform slab
+    below body_contact_escape_clearance's floor at the slab's edges, well
+    past the escapable band this test means to stay inside. Caught by
+    running the construction directly against the real node and reading
+    the logged clearance back, not by assumption. Only the single centre
+    beam is set to the trip range here; the rest of the cone is set closer
+    than emergency_escape_min_gap (blocking every gap `find_best_gap` could
+    find) but with enough clearance of its own that the centre beam stays
+    the strict minimum (directional). Window boundaries are taken from
+    node._fov_indices directly, matching what _emergency_escape itself
+    uses -- an independent angle-based loop left a beam or two at the
+    window edge unset in an earlier version of this test, which
+    find_best_gap read as a one-beam-wide "gap" at 10m depth and escaped
+    through.
+    """
+    published = _capture_published(node)
+    _set_pose(node, -1.5, -1.2, 0.0)
+    scan = _clear_scan()
+    center = len(scan.ranges) // 2
+    forward_boundary = (
+        node.wheelbase / 2.0 + node.car_length / 2.0 - node.laser_offset_x)
+    clearance = node.body_contact_escape_clearance + (
+        node.emergency_stop_clearance - node.body_contact_escape_clearance) / 2.0
+    assert 0.0 < clearance <= node.emergency_stop_clearance, (
+        'the configured floors no longer leave an escapable band; this '
+        'test proves nothing until they do')
+    lo_idx, hi_idx = node._fov_indices(scan, node.avoidance_fov_deg)
+    for i in range(lo_idx, hi_idx + 1):
+        # Below emergency_escape_min_gap (0.8m raw range), so find_best_gap
+        # finds nothing here -- but comfortably above the trip beam's own
+        # range, so the trip beam remains the global clearance minimum.
+        scan.ranges[i] = node.emergency_escape_min_gap * 0.9
+    scan.ranges[center] = clearance + forward_boundary
+    node.scan_callback(scan)
+    node.control_loop()
+    assert node.last_decision_state == 'body_contact', (
+        'boxed in on every side, body_contact must still hard-stop outright'
+    )
+    assert published[-1].drive.speed == 0.0
 
 
 def test_wall_alongside_the_car_stops_it_although_the_forward_cone_is_clear(node):
@@ -470,14 +575,27 @@ def test_wall_alongside_the_car_stops_it_although_the_forward_cone_is_clear(node
     safety net logged "LIDAR clear" and pure pursuit accelerated into the
     wall. Only a clearance measured from the car's own footprint can see
     this, which is why the body tier exists.
+
+    Confirmed unaffected by this session's directional escape gate: the
+    wall sits at ~45deg (a quarter of this scan's 361-beam length from
+    centre is a quarter of its 180deg span, not the 90deg the old comment
+    here claimed -- fixed in passing), still outside avoidance_fov_deg's
+    +/-30deg forward cone, so forward_body_clearance (measured only inside
+    that cone) reads nothing like the flank's own clearance -- directional
+    is False. See test_body_contact_flank_escape_is_refused_even_with_room
+    below for the test that isolates the directional gate itself, at
+    exactly +90deg and a clearance that would otherwise be escapable; this
+    one is also, independently, below body_contact_escape_clearance's own
+    floor (confirmed directly: -0.078m here), so on its own it does not
+    distinguish the two mechanisms.
     """
     published = _capture_published(node)
     _set_pose(node, -1.5, -1.2, 0.0)
     scan = _clear_scan()
     n = len(scan.ranges)
     center = n // 2
-    # A wall hard against the car's left flank, and nothing at all ahead.
-    quarter = n // 4          # +90deg with this helper's symmetric span
+    # A wall hard against the car's flank, and nothing at all ahead.
+    quarter = n // 4          # ~45deg with this helper's symmetric span
     for i in range(center + quarter - 12, center + quarter + 12):
         scan.ranges[i] = 0.17
     node.scan_callback(scan)
@@ -488,6 +606,34 @@ def test_wall_alongside_the_car_stops_it_although_the_forward_cone_is_clear(node
         "test is only meaningful if the forward cone really is clear")
     assert published[-1].drive.speed == 0.0, "a wall against the flank must stop the car"
     assert node.last_decision_state == 'body_contact'
+
+
+def test_body_contact_flank_escape_is_refused_even_with_room(node):
+    """The test that actually isolates the directional gate: a single beam
+    at exactly +90deg (true flank, `_footprint_clearance`'s own 180deg
+    window still sees it) with clearance *inside* the escapable band --
+    above body_contact_escape_clearance, so the floor check alone cannot
+    explain a refusal -- and the rest of the avoidance cone wide open, so a
+    gap search would trivially succeed if one were attempted. Only the
+    directional gate itself can be why this still hard-stops."""
+    published = _capture_published(node)
+    _set_pose(node, -1.5, -1.2, 0.0)
+    scan = _clear_scan()
+    flank_boundary = node.car_width / 2.0
+    clearance = node.body_contact_escape_clearance + (
+        node.emergency_stop_clearance - node.body_contact_escape_clearance) / 2.0
+    assert 0.0 < clearance <= node.emergency_stop_clearance, (
+        'the configured floors no longer leave an escapable band; this '
+        'test proves nothing until they do')
+    scan.ranges[-1] = clearance + flank_boundary   # the beam at exactly +90deg
+    node.scan_callback(scan)
+    node.control_loop()
+    assert node.last_decision_state == 'body_contact', (
+        'a flank contact must still hard-stop unconditionally, even with '
+        'clearance the escape floor alone would have permitted -- the '
+        'directional gate must not let the car steer along whatever it is '
+        'already touching at the side')
+    assert published[-1].drive.speed == 0.0
 
 
 def test_overtake_resolves_once_ego_is_past_the_opponent(node):
@@ -575,6 +721,95 @@ def test_stays_stopped_when_genuinely_lost(node):
     node.control_loop()
     assert published[-1].drive.speed == 0.0
     assert node.last_decision_state == 'off_racing_line'
+
+
+def test_off_racing_line_recovers_toward_the_nearest_point(node):
+    """INTENTIONAL BEHAVIOR CHANGE (2026-08-25): a moderate cross-track
+    error -- past max_cross_track_error but inside
+    off_racing_line_recovery_max_error -- now attempts a capped recovery
+    crawl aimed at the nearest point on the line, instead of latching a
+    permanent stop the way off_racing_line always used to. Addresses a
+    documented incident: docs/racing-autonomy.md records a real,
+    non-kidnapped overshoot that landed in exactly this 1.0-2.0m band.
+    ~1.5m off the bottom straight here, comfortably inside the (1.0, 2.0]
+    band with the default thresholds; verified directly against the real
+    node before being written into this assertion, not assumed from the
+    geometry alone.
+    """
+    published = _capture_published(node)
+    node.scan_callback(_clear_scan())
+    _set_pose(node, -1.5, -2.7, 0.0)
+    node.control_loop()
+    assert node.last_decision_state == 'off_racing_line_recovery', (
+        'a moderate off-line error must attempt a capped recovery, not '
+        'latch the old unconditional stop')
+    assert 0.0 < published[-1].drive.speed <= node.off_racing_line_recovery_speed + 1e-9
+
+
+def test_off_racing_line_recovery_yields_to_the_reactive_net(node):
+    """The reactive LIDAR safety net always has the final say, over a
+    recovery attempt exactly as over an ordinary driving tick: this is
+    what 'falls through to _reactive_override like any other candidate
+    command' actually buys, and it is worth proving directly rather than
+    trusting the claim. A close, boxed-in obstacle across the whole
+    avoidance cone -- so no escape is possible either -- must override the
+    recovery command down to a full stop.
+    """
+    published = _capture_published(node)
+    scan = _clear_scan()
+    lo_idx, hi_idx = node._fov_indices(scan, node.avoidance_fov_deg)
+    for i in range(lo_idx, hi_idx + 1):
+        # Inside emergency_stop_distance, and too close for any escape gap
+        # to be found either -- see test_body_contact_still_hard_stops_
+        # when_genuinely_boxed_in for the same construction reasoning.
+        scan.ranges[i] = 0.2
+    node.scan_callback(scan)
+    _set_pose(node, -1.5, -2.7, 0.0)   # the same moderate error as above
+    node.control_loop()
+    assert node.last_decision_state in ('emergency_obstacle', 'body_contact'), (
+        'the reactive net must win over the recovery attempt, not the '
+        'other way around')
+    assert published[-1].drive.speed == 0.0
+
+
+def test_off_racing_line_recovery_gives_up_past_its_timeout(node):
+    """A real overshoot closes within a few seconds; one that never does
+    is not going to on its own, so off_racing_line_recovery_timeout_sec
+    converts a recovery that has not paid off back into the unconditional
+    stop -- the same one that would have fired immediately before this
+    session's change.
+    """
+    published = _capture_published(node)
+    node.scan_callback(_clear_scan())
+    _set_pose(node, -1.5, -2.7, 0.0)
+    node.control_loop()
+    assert node.last_decision_state == 'off_racing_line_recovery'  # sanity
+
+    # Back-date the recovery-attempt clock past the timeout, as if the car
+    # had been stuck at this same error for that whole window, and feed
+    # one more identical tick -- the error itself has not improved.
+    node._off_line_recovery_since = node.get_clock().now() - Duration(
+        seconds=node.off_racing_line_recovery_timeout_sec + 0.5)
+    node.control_loop()
+    assert node.last_decision_state == 'off_racing_line', (
+        'recovery held past its timeout without the error clearing must '
+        'give up and hard-stop, not crawl indefinitely')
+    assert published[-1].drive.speed == 0.0
+
+
+def test_off_racing_line_recovery_has_its_own_ceiling(node):
+    """Beyond off_racing_line_recovery_max_error the car is genuinely lost
+    or kidnapped, not just running wide -- always hard-stops, distinct from
+    (and a tighter bound than) test_stays_stopped_when_genuinely_lost's
+    ~28m-off pose, which proves the same property far past any ambiguity
+    about which gate is responsible. This pose sits just past the 2.0m
+    recovery ceiling specifically."""
+    published = _capture_published(node)
+    node.scan_callback(_clear_scan())
+    _set_pose(node, -1.5, -3.4, 0.0)   # ~2.2m off the bottom straight
+    node.control_loop()
+    assert node.last_decision_state == 'off_racing_line'
+    assert published[-1].drive.speed == 0.0
 
 
 def test_overtake_survives_losing_sight_of_the_opponent_mid_pass(node):

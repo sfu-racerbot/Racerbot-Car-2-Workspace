@@ -69,11 +69,12 @@ class GapFollowNode(Node):
         # Padded collision envelope around this car's rear-axle base_link.
         # wheelbase, laser_offset_x and the 0.30 m the car measures over the
         # tires were tape-measured 2026-08-24; car_width is that 0.30 m plus
-        # 14.5 mm a side, and car_length is still an envelope over an
-        # unmeasured overall length. See docs/hardware-reference.md.
+        # 5 mm a side (cut from 14.5 mm/side on 2026-08-25 -- see
+        # docs/hardware-reference.md), and car_length is still an envelope
+        # over an unmeasured overall length.
         # The config file is authoritative -- these defaults only apply if
         # the node is launched without one.
-        self.declare_parameter('car_width', 0.33)
+        self.declare_parameter('car_width', 0.31)
         self.declare_parameter('car_length', 0.58)
         self.declare_parameter('wheelbase', 0.36)
         self.declare_parameter('laser_offset_x', 0.26)
@@ -132,12 +133,16 @@ class GapFollowNode(Node):
         # Obstacle inflation already accounts for the full car width. This
         # threshold is only the remaining centerline corridor after inflation.
         self.declare_parameter('min_centerline_gap_width', 0.10)
-        self.declare_parameter('emergency_stop_clearance', 0.02)
-        self.declare_parameter('forward_stop_clearance', 0.25)
+        # Config-file values are authoritative (see gap_follow.yaml); these
+        # code-level fallbacks are kept in step with it, not left at their
+        # pre-2026-08-25 numbers, so a bare launch without the YAML gets the
+        # current best-known-safe tuning rather than a stale one.
+        self.declare_parameter('emergency_stop_clearance', 0.0)
+        self.declare_parameter('forward_stop_clearance', 0.20)
         self.declare_parameter('forward_stop_fov_deg', 60.0)
         # Crawl allowed once inside forward_stop_clearance, so a car that has
         # found its way out of a corner can take it instead of latching.
-        self.declare_parameter('escape_creep_speed', 0.25)
+        self.declare_parameter('escape_creep_speed', 0.40)
 
         # Cornering anticipation: an extra speed cap from how much the
         # chosen gap's near-only bearing (gap_logic.near_gap_bearing)
@@ -195,7 +200,7 @@ class GapFollowNode(Node):
 
         # F1TENTH instantaneous TTC, using the safest recent speed estimate.
         self.declare_parameter('enable_ttc', True)
-        self.declare_parameter('ttc_threshold_sec', 0.35)
+        self.declare_parameter('ttc_threshold_sec', 0.30)
         self.declare_parameter('ttc_min_closing_speed', 0.05)
         self.declare_parameter('ttc_command_speed_timeout_sec', 0.5)
         self.declare_parameter('ttc_command_fallback_max_odom_speed', 0.10)
@@ -703,16 +708,12 @@ class GapFollowNode(Node):
         # rather than raw distance from the offset LiDAR origin.
         min_clearance = gap_logic.minimum_footprint_clearance(
             window, window_valid, body_boundaries)
-        if min_clearance <= self.emergency_stop_clearance:
-            self._stop(
-                'emergency_clearance',
-                f"minimum body clearance {min_clearance:.3f}m is at or below "
-                f"the {self.emergency_stop_clearance:.3f}m threshold",
-            )
-            return
 
         # Odom-independent fallback: only the forward cone gets the larger
         # fixed threshold, so a close side wall during a turn does not brake.
+        # Moved up to sit next to min_clearance -- both are needed together
+        # now, to tell contact dead ahead (escapable, see `directional` below)
+        # from contact at the flank (not).
         forward_clearance = gap_logic.minimum_footprint_clearance_in_cone(
             window,
             window_valid,
@@ -720,6 +721,35 @@ class GapFollowNode(Node):
             body_boundaries,
             self.forward_stop_fov,
         )
+        # forward_clearance is a minimum over a strict subset of the beams
+        # min_clearance is a minimum over (forward_stop_fov's cone sits
+        # entirely inside the wider forward_fov window), so
+        # forward_clearance >= min_clearance always holds. Equality (within
+        # float slop) means the single beam driving the worst clearance in
+        # the *whole* window is also inside the narrow forward cone: the
+        # obstacle is dead ahead, not alongside. That is the one geometry an
+        # escape is sound for -- a car can turn away from what is ahead of
+        # it, but a contact at the FLANK is not cleared by turning toward a
+        # forward-facing gap; that would steer along whatever the flank is
+        # already touching, not away from it. This directional gate is what
+        # preserves the existing flank-contact hard-stop unchanged; see
+        # test_emergency_clearance_flank_contact_still_hard_stops.
+        directional = math.isclose(
+            forward_clearance, min_clearance, rel_tol=0.0, abs_tol=1e-6)
+
+        emergency_tripped = False
+        emergency_detail = None
+        if min_clearance <= self.emergency_stop_clearance:
+            emergency_detail = (
+                f"minimum body clearance {min_clearance:.3f}m is at or below "
+                f"the {self.emergency_stop_clearance:.3f}m threshold")
+            if not directional:
+                self._stop('emergency_clearance', emergency_detail)
+                return
+            # Directional: don't stop yet -- an escape is attempted once,
+            # below, after the TTC tier has also had its say this tick.
+            emergency_tripped = True
+
         # Below the reserve the car creeps instead of latching. A hard stop
         # here is a trap: this cone points where the car is *aimed*, not where
         # it is *going*, so a car turning out of a corner gets frozen by the
@@ -729,14 +759,18 @@ class GapFollowNode(Node):
         # that would clear the cone, and nothing external will rescue it.
         #
         # Creeping keeps every independent layer intact: contact clearance and
-        # TTC are both checked above and still stop the car outright, and if
-        # no gap can be found at all the no_safe_gap stop below still fires.
-        # What changes is only that a car with a visible way out is allowed to
-        # inch toward it. The creep speed itself is bounded below.
+        # TTC are both checked above and still stop the car outright when
+        # there is genuinely nowhere to go (see the tripped-but-boxed-in
+        # fallback below), and if no gap can be found at all the no_safe_gap
+        # stop further down still fires. What changes is only that a car with
+        # a visible way out is allowed to inch toward it. The creep speed
+        # itself is bounded below.
         creeping = forward_clearance <= self.forward_stop_clearance
 
         # Independent speed-aware layer from F1TENTH Lab 2. A recent positive
         # command backs up fresh odometry only if it is effectively near zero.
+        ttc_tripped = False
+        ttc_detail = None
         if self.enable_ttc:
             effective_speed, recent_command_speed = self._effective_ttc_speed()
             # Below ttc_min_brake_speed the clock is not consulted at all.
@@ -778,25 +812,59 @@ class GapFollowNode(Node):
                     self.laser_offset_y,
                 )
                 if min_ttc <= self.ttc_threshold_sec:
-                    self._stop(
-                        'ttc_brake',
-                        lambda: (
-                            f"minimum footprint-aware TTC {min_ttc:.3f}s is at "
-                            f"or below the {self.ttc_threshold_sec:.3f}s "
-                            f"threshold at effective speed "
-                            f"{effective_speed:.2f}m/s "
-                            f"(odom {self.current_speed:.2f}m/s, recent command "
-                            f"{recent_command_speed:.2f}m/s)"
-                            + self._escape_report(
-                                window, window_valid, scan, lo_idx,
-                                beam_angles)),
-                    )
-                    return
+                    if not directional:
+                        # Flank case: hard stop, unchanged from before this
+                        # tier had an escape path at all.
+                        self._stop(
+                            'ttc_brake',
+                            lambda: (
+                                f"minimum footprint-aware TTC {min_ttc:.3f}s is at "
+                                f"or below the {self.ttc_threshold_sec:.3f}s "
+                                f"threshold at effective speed "
+                                f"{effective_speed:.2f}m/s "
+                                f"(odom {self.current_speed:.2f}m/s, recent command "
+                                f"{recent_command_speed:.2f}m/s)"
+                                + self._escape_report(
+                                    window, window_valid, scan, lo_idx,
+                                    beam_angles)),
+                        )
+                        return
+                    # Directional: don't stop yet, same as the emergency tier.
+                    ttc_tripped = True
+                    ttc_detail = (
+                        f"minimum footprint-aware TTC {min_ttc:.3f}s is at "
+                        f"or below the {self.ttc_threshold_sec:.3f}s "
+                        f"threshold at effective speed "
+                        f"{effective_speed:.2f}m/s "
+                        f"(odom {self.current_speed:.2f}m/s, recent command "
+                        f"{recent_command_speed:.2f}m/s)")
 
+        # Called exactly once regardless of how many tiers tripped above --
+        # this answers "is there a way out" for an escape attempt just as
+        # well as it answers the ordinary "which way to drive" question, so
+        # a trip does not pay for a second gap search the way the old
+        # ttc_brake log detail (_escape_report) used to.
         (window, closest_dist, gap_start, gap_end, used_fallback,
          target_idx_in_window, near_bearing) = self._select_gap(
             window, window_valid, scan.angle_increment, beam_angles)
+
         if gap_start is None:
+            if emergency_tripped or ttc_tripped:
+                # Tripped, directional, and genuinely boxed in: an escape
+                # was considered and does not exist, so fall back to the
+                # tripped tier's own unconditional stop -- exactly the same
+                # stop that would have fired above had this tier not been
+                # given a chance to escape first.
+                if emergency_tripped:
+                    self._stop('emergency_clearance', emergency_detail)
+                else:
+                    self._stop(
+                        'ttc_brake',
+                        lambda: ttc_detail + self._format_escape(
+                            gap_start, used_fallback, target_idx_in_window,
+                            scan, lo_idx),
+                    )
+                return
             closest_text = (
                 f"{closest_dist:.2f}m"
                 if math.isfinite(closest_dist)
@@ -811,9 +879,25 @@ class GapFollowNode(Node):
             )
             return
 
-        # Only the real driving decision updates the hysteresis basis --
-        # _escape_report below re-runs this same selection purely to
-        # describe a stop in the log, and must not make that hypothetical
+        # A trip that reaches here found a real gap: force the creep branch
+        # below regardless of forward_clearance's own value (a TTC trip can
+        # fire at a clearance wider than forward_stop_clearance, at speed --
+        # forward_clearance alone would not otherwise engage the crawl), and
+        # name the state so an escape is distinguishable from an ordinary
+        # driving tick in the log/intent stream.
+        trip_detail = None
+        if emergency_tripped:
+            creeping = True
+            trip_detail = emergency_detail
+        elif ttc_tripped:
+            creeping = True
+            trip_detail = ttc_detail
+
+        # Only the real driving decision updates the hysteresis basis -- this
+        # is that decision whether this tick is an ordinary one or an escape,
+        # since both now share this one call. _escape_report/_format_escape
+        # elsewhere re-run or reuse this same selection purely to describe a
+        # *different* tick's stop in the log, and must not make that
         # look-up count as this tick's actual aim.
         self.previous_target_idx = target_idx_in_window
 
@@ -987,7 +1071,12 @@ class GapFollowNode(Node):
             f"corner cap {self.effective_corner_speed:.2f}m/s, left "
             f"{side_left:.2f}m, right {side_right:.2f}m)"
             if self.enable_adaptive_width and self.width_factor < 1.0 else "")
-        gap_mode = 'corner_fallback' if used_fallback else 'gap_follow'
+        if emergency_tripped:
+            gap_mode = 'emergency_escape'
+        elif ttc_tripped:
+            gap_mode = 'ttc_escape'
+        else:
+            gap_mode = 'corner_fallback' if used_fallback else 'gap_follow'
         depth_text = (
             f"fallback depth {self.fallback_min_gap_distance:.2f}m"
             if used_fallback
@@ -1003,7 +1092,15 @@ class GapFollowNode(Node):
             + (f", CREEP (forward clearance {forward_clearance:.3f}m inside "
                f"the {self.forward_stop_clearance:.3f}m reserve; crawling out)"
                if creeping else ""))
+        # A trip that found a gap prefixes the *why* (the same detail the
+        # tripped tier's own unconditional stop would have used) ahead of
+        # the *what*/*where* the existing driving-decision text already
+        # builds below -- the CREEP clause in cap_text above already
+        # explains the crawl speed, so this only needs to add the reason
+        # the tier tripped in the first place.
+        trip_prefix = f'{trip_detail}; escape: ' if trip_detail else ''
         decision_detail = (
+            trip_prefix +
             f"selected {depth_text} gap "
             f"{math.degrees(gap_lo_angle):+.1f}deg to "
             f"{math.degrees(gap_hi_angle):+.1f}deg; target="
@@ -1225,21 +1322,17 @@ class GapFollowNode(Node):
         return (processed, closest_dist, gap_start, gap_end, used_fallback, target,
                 near_bearing)
 
-    def _escape_report(self, window, window_valid, scan, lo_idx,
-                       beam_angles) -> str:
-        """Say whether a stopped car can see a way out, and where.
+    def _format_escape(self, gap_start, used_fallback, target, scan,
+                       lo_idx) -> str:
+        """Pure formatting half of the escape report.
 
-        A blocking stop that prints only the clearance that tripped it cannot
-        be told apart from a genuine dead end. When the car is sitting still
-        the question that actually matters is whether it is boxed in or
-        holding station in front of an escape it has already found -- so run
-        the same gap search the driving path runs and report the answer.
-
-        Only ever called from the logging path, so the extra work happens at
-        the log rate, not the scan rate.
+        Split out of _escape_report so scan_callback's tripped-tier escape
+        attempt -- which already ran _select_gap once for the real driving
+        decision -- can describe that *same* result without paying for a
+        second gap search just to log it. _escape_report below is now a
+        thin wrapper kept for the one call site (the non-directional/flank
+        stop) that has not already run _select_gap this tick.
         """
-        _, _, gap_start, _, used_fallback, target, _ = self._select_gap(
-            window, window_valid, scan.angle_increment, beam_angles)
         if gap_start is None:
             return ('; NO ESCAPE VISIBLE: no gap clears either depth '
                     'threshold, so the car cannot steer out of this unaided')
@@ -1254,6 +1347,26 @@ class GapFollowNode(Node):
         return (f"; escape visible: {depth} gap at "
                 f"{math.degrees(target_angle):+.1f}deg, would steer "
                 f"{steering:+.3f}rad as soon as this clears")
+
+    def _escape_report(self, window, window_valid, scan, lo_idx,
+                       beam_angles) -> str:
+        """Say whether a stopped car can see a way out, and where.
+
+        A blocking stop that prints only the clearance that tripped it cannot
+        be told apart from a genuine dead end. When the car is sitting still
+        the question that actually matters is whether it is boxed in or
+        holding station in front of an escape it has already found -- so run
+        the same gap search the driving path runs and report the answer.
+
+        Only ever called from the logging path, so the extra work happens at
+        the log rate, not the scan rate. Callers that already have a
+        _select_gap result this tick (see scan_callback's tripped-tier
+        handling) should call _format_escape directly instead, to avoid
+        running the search twice.
+        """
+        _, _, gap_start, _, used_fallback, target, _ = self._select_gap(
+            window, window_valid, scan.angle_increment, beam_angles)
+        return self._format_escape(gap_start, used_fallback, target, scan, lo_idx)
 
     def _sensor_status_callback(self):
         """Explain a missing scan stream even though scan_callback is idle."""

@@ -77,9 +77,9 @@ This exists so the car never steers toward a "gap" that's actually behind or bes
 
 ### 3. Check footprint clearance and instantaneous TTC
 
-The collision model is a rectangle around `base_link` (rear axle). This car measures 0.30m over the tires and 0.36m between the axles (tape-measured 2026-08-24, see [hardware-reference.md](../../docs/hardware-reference.md#physical-dimensions-used-in-config)); the configured rectangle is deliberately inflated to 0.33m × 0.58m. `vehicle_boundary_distances()` ray-casts from the measured LiDAR origin (+0.26m forward, 0.10m behind the front axle) to that padded rectangle. Subtracting this per-beam distance from the scan produces clearance from the body rather than from the sensor.
+The collision model is a rectangle around `base_link` (rear axle). This car measures 0.30m over the tires and 0.36m between the axles (tape-measured 2026-08-24, see [hardware-reference.md](../../docs/hardware-reference.md#physical-dimensions-used-in-config)); the configured rectangle is deliberately inflated to 0.31m × 0.58m. `vehicle_boundary_distances()` ray-casts from the measured LiDAR origin (+0.26m forward, 0.10m behind the front axle) to that padded rectangle. Subtracting this per-beam distance from the scan produces clearance from the body rather than from the sensor.
 
-Collision detection has three layers. The all-direction contact floor stops at `emergency_stop_clearance` (0.02m from the body). A separate odometry-independent fallback covers `forward_stop_clearance` (0.25m) within the narrow `forward_stop_fov_deg` cone (60°, or ±30°); close side walls outside that cone do not trigger it. The speed-aware layer then evaluates every approaching beam:
+Collision detection has three layers. The all-direction contact floor stops at `emergency_stop_clearance` (0.0m from the body, cut from 0.02m on 2026-08-25). A separate odometry-independent fallback covers `forward_stop_clearance` (0.20m, cut from 0.25m on 2026-08-25) within the narrow `forward_stop_fov_deg` cone (60°, or ±30°); close side walls outside that cone do not trigger it. The speed-aware layer then evaluates every approaching beam:
 
 ```text
 iTTC = max(0, range - body_boundary) / (v_x * cos(beam_angle))
@@ -87,17 +87,38 @@ iTTC = max(0, range - body_boundary) / (v_x * cos(beam_angle))
 
 **The forward-cone layer crawls rather than latches.** Inside
 `forward_stop_clearance` the car does not command zero — it drops to
-`escape_creep_speed` (0.25m/s), still steering at the gap. That cone points
+`escape_creep_speed` (0.40m/s, raised from 0.25m/s on 2026-08-25), still steering at the gap. That cone points
 where the car is *aimed*, not where it is *going*, so a car turning out of a
 corner trips it on the wall it is already steering around; a hard stop there
 cannot be recovered from, because stopping removes the very motion that would
 clear the cone. On 2026-07-27 the car sat frozen mid-corner, 0.58m from the
 nearest wall with full lock dialled in and an exit already found, until an
 operator noticed. The crawl spends at most *half* the reserve — below that it
-tapers to zero with 0.125m of padded-body clearance still in hand — and every
+tapers to zero with 0.10m of padded-body clearance still in hand (halved from
+the 0.25m `forward_stop_clearance` cut on 2026-08-25) — and every
 independent layer is untouched: contact clearance, TTC, and the no-gap stop
 each still stop the car outright, so a genuine dead end still ends in a full
 stop. Recovery must never depend on someone noticing the car.
+
+**2026-08-25: the contact floor and TTC gained the same escape.** Both used
+to be pure, unconditional latches — real run logs the day this changed
+showed exactly that: negative modelled clearance (-10mm to -13mm) latching
+the car dead 44 times in one run with no escape attempt at all, and TTC
+logging a viable escape gap it never acted on 23 times. Now, before either
+stops the car outright, a **directional gate** asks whether the worst point
+driving the trip is dead ahead: `forward_clearance` (the same cone
+`forward_stop_clearance` uses) equalling the all-round `min_clearance`
+(within float slop) means it is — the one geometry an escape is sound for,
+since a car can turn away from what's ahead of it but cannot escape a
+contact at its *flank* by steering into a forward-facing gap (that would
+drag the body along whatever the flank is already touching, exactly the
+2026-07-27 failure mode this workspace already has regression tests for).
+Only then is an escape attempted, reusing the same gap search and creep
+mechanism described above, and logged as `DRIVE [emergency_escape]` /
+`DRIVE [ttc_escape]`. A flank trip, or a directional trip with no real gap
+to aim at, still hard-stops exactly as before — `STOP [emergency_clearance]`
+/ `STOP [ttc_brake]` are not gone, they are what a genuinely boxed-in or
+sideways contact still produces.
 
 **TTC only counts obstacles inside the corridor the car will actually sweep.**
 The radial projection above (`v * cos(angle)`) is valid for something the car
@@ -116,7 +137,7 @@ made TTC brake for the very wall it was negotiating, which then fought the
 escape creep to a standstill mid-corner. Straight-line travel is the
 zero-curvature case of the same test.
 
-Beams with no positive closing speed have infinite TTC, so a close wall exactly beside the car does not create the old closest-range corner false positive. When fresh odometry is effectively zero (at or below `ttc_command_fallback_max_odom_speed`, 0.10m/s), TTC uses the larger of odometry and the latest drive command when that command is positive and no older than `ttc_command_speed_timeout_sec` (0.5s). Once odometry reports meaningful motion, TTC uses measured speed. This catches a stuck-zero/lagging reading without treating full requested speed as instantaneous in a healthy tight corner. A zero brake command supersedes the prior positive command, preventing stale intent from latching the stop. If minimum TTC is at or below `ttc_threshold_sec` (0.35s), the node publishes zero speed and logs `STOP [ttc_brake]`. The brake is only armed above `ttc_min_brake_speed` (0.6m/s): TTC is clearance divided by closing speed, so a crawling car reaches the threshold on a few centimetres of clearance -- precisely the state of a car that has already eased up to the inside of a corner, where braking removes the only motion that would clear it. Below that speed the clearance layers own the car instead, and they are the ones built to escape: `emergency_stop_clearance` still stops on contact and the forward reserve still creeps toward a visible exit. Invalid LiDAR beams are excluded from all three checks.
+Beams with no positive closing speed have infinite TTC, so a close wall exactly beside the car does not create the old closest-range corner false positive. When fresh odometry is effectively zero (at or below `ttc_command_fallback_max_odom_speed`, 0.10m/s), TTC uses the larger of odometry and the latest drive command when that command is positive and no older than `ttc_command_speed_timeout_sec` (0.5s). Once odometry reports meaningful motion, TTC uses measured speed. This catches a stuck-zero/lagging reading without treating full requested speed as instantaneous in a healthy tight corner. A zero brake command supersedes the prior positive command, preventing stale intent from latching the stop. If minimum TTC is at or below `ttc_threshold_sec` (0.30s, cut from 0.35s on 2026-08-25), the tier trips: directional (see above), it escapes and logs `DRIVE [ttc_escape]`; otherwise (or if no gap exists) it publishes zero speed and logs `STOP [ttc_brake]`, exactly as before 2026-08-25. The brake is only armed above `ttc_min_brake_speed` (0.6m/s): TTC is clearance divided by closing speed, so a crawling car reaches the threshold on a few centimetres of clearance -- precisely the state of a car that has already eased up to the inside of a corner, where braking removes the only motion that would clear it. Below that speed the clearance layers own the car instead, and they are the ones built to escape: `emergency_stop_clearance`'s own directional gate (or the forward reserve's ordinary creep) still lets a car with a visible way out move, and still stops it outright when there genuinely is none. Invalid LiDAR beams are excluded from all three checks.
 
 ### 4. Extend obstacle edges by the car's physical clearance (disparity extender)
 
@@ -164,7 +185,7 @@ The former implementation stopped whenever no run remained continuously deeper t
 
 Candidate selection also carries hysteresis against the previous tick's aim (`gap_switch_margin`) -- see [Gap-selection hysteresis](#gap-selection-hysteresis-not-driving-drunk) below.
 
-Obstacle inflation has already removed `car_width / 2 + safety_margin` from both sides of every edge. The old candidate filter required another `car_width + safety_margin` after inflation, effectively demanding roughly a 0.9m raw opening for a 0.31m car. `min_centerline_gap_width` now checks only the small corridor remaining for candidate center points, eliminating that double-padding.
+Obstacle inflation has already removed `car_width / 2 + safety_margin` from both sides of every edge. The old candidate filter required another `car_width + safety_margin` after inflation, effectively demanding roughly a 0.9m raw opening for a 0.31m car (the pre-2026-08-24 car_width — a coincidence that it's numerically the same as the current value in the table below, not the same derivation). `min_centerline_gap_width` now checks only the small corridor remaining for candidate center points, eliminating that double-padding.
 
 ### 7. Steer at the middle of the winning gap — proportional to its bearing
 
@@ -385,7 +406,7 @@ apex, only change the car's pace approaching one.
 |---|---|---|
 | `scan_topic` / `drive_topic` / `odom_topic` | `/scan` / `/drive` / `/odom` | Sensor, command, and measured-speed topics |
 | `max_range` / `forward_fov_deg` | `10.0m` / `180°` | Scan clipping and planning window |
-| `car_width` / `car_length` | `0.33` / `0.58` m | Padded: width is the measured 0.30m over the tires plus 14.5mm a side. Length is still padding over an **unmeasured** overall length |
+| `car_width` / `car_length` | `0.31` / `0.58` m | Padded: width is the measured 0.30m over the tires plus 5mm a side (cut from 14.5mm/side on 2026-08-25). Length is still padding over an **unmeasured** overall length |
 | `wheelbase` | `0.36` m | Measured rear-to-front axle distance; also centers the padded body from rear-axle `base_link` |
 | `laser_offset_x` / `laser_offset_y` | `0.26` / `0.0` m | Measured LiDAR origin relative to `base_link` (0.10m behind the front axle) |
 | `safety_margin` / `disparity_threshold` | `0.18` / `0.4` m | Edge inflation clearance and range-jump threshold |
@@ -404,9 +425,9 @@ apex, only change the car's pace approaching one.
 | `max_acceleration` | `3.0` m/s² | Cap on how fast a speed *command* may rise; braking is never limited |
 | `max_steering_rate` | `1.0` rad/s | Cap on how fast a steering command may slew |
 | `command_slew_max_dt` | `0.10` s | Longest interval one slew step may integrate, so a scan gap isn't cashed in as a jump |
-| `emergency_stop_clearance` | `0.02` m | All-direction final contact floor measured from the padded body |
-| `forward_stop_clearance` / `forward_stop_fov_deg` | `0.25m` / `60°` | Odom-independent forward-cone braking fallback |
-| `escape_creep_speed` | `0.25` m/s | Crawl allowed *inside* `forward_stop_clearance` so a car mid-corner can drive out instead of latching. Spends at most half the reserve; contact clearance, TTC and the no-gap stop all still stop the car outright |
+| `emergency_stop_clearance` | `0.0` m (was `0.02`, cut 2026-08-25) | All-direction final contact floor measured from the padded body |
+| `forward_stop_clearance` / `forward_stop_fov_deg` | `0.20m` (was `0.25m`, cut 2026-08-25) / `60°` | Odom-independent forward-cone braking fallback |
+| `escape_creep_speed` | `0.40` m/s (was `0.25`, raised 2026-08-25) | Crawl allowed *inside* `forward_stop_clearance` so a car mid-corner can drive out instead of latching. Contact clearance, TTC and the no-gap stop all still stop the car outright |
 
 ### Turning circle vs. course width — a hard geometric limit
 
@@ -434,7 +455,7 @@ visible opening does not do. If the course has square 1 m corners, that is a
 planner/route problem, not something to tune out of this node, and the honest
 options are to round the corner, widen it, or drive it under `pure_pursuit` on
 a recorded line.
-| `enable_ttc` / `ttc_threshold_sec` | `true` / `0.35s` | Enable iTTC braking and set its trigger |
+| `enable_ttc` / `ttc_threshold_sec` | `true` / `0.30s` (was `0.35s`, cut 2026-08-25) | Enable iTTC braking and set its trigger |
 | `ttc_min_brake_speed` | `0.6m/s` | Speed below which the TTC brake is not armed at all; the clearance stops and the forward-reserve creep still run |
 | `ttc_min_closing_speed` / `odom_timeout_sec` | `0.05m/s` / `0.5s` | Ignore negligible closing rates; fail closed on stale odometry |
 | `ttc_command_speed_timeout_sec` | `0.5s` | Freshness limit for a latest positive command used as TTC backup |

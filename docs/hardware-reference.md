@@ -125,13 +125,13 @@ Change any of these and you must change all of its row together, or two parts of
 |---|---|
 | Wheelbase `0.36` | `vesc.yaml`, `pure_pursuit.yaml`, `gap_follow.yaml`, `auto_map_race.yaml` (`profile_wheelbase`), `odom_calibration.yaml`, `racerbot_sim/sim_bridge.py`, `tools/f1tenth_sim/sim_fidelity/calibration.py` |
 | LiDAR offset `0.26` | the `base_link`→`laser` static transform in `bringup_launch.py`, `no_lidar_bringup_launch.py`, `sick_bringup_launch.py`, `racerbot_sim/launch/sim_bringup_launch.py`, `racerbot_launch/launch/dashboard_test_launch.py`; and `laser_offset_x` in `gap_follow.yaml`, `pure_pursuit.yaml`, `web_dashboard.yaml` |
-| Collision width `0.33` | `gap_follow.yaml`, `pure_pursuit.yaml`, `auto_map_race.yaml` (`optimize_car_width`), both simulators |
+| Collision width `0.31` | `gap_follow.yaml`, `pure_pursuit.yaml`, `auto_map_race.yaml` (`optimize_car_width`), both simulators |
 
 ### The collision envelope is padded on purpose
 
 `car_width` and `car_length` are **not** the measured car. They are a rectangle deliberately drawn bigger than it, so a clearance of zero means "the padding is gone", not "the paint is touching".
 
-- **Width `0.33 m`** = the measured 0.30 m plus 14.5 mm on each side. That is the same padding the old `0.31 m` gave the old (wrong) 0.281 m body width, carried over to the correct measurement.
+- **Width `0.31 m`** = the measured 0.30 m plus 5 mm on each side. Cut down from 14.5 mm/side on 2026-08-25, after real run logs showed the car latching at a false `emergency_clearance` stop (-10mm to -13mm reported clearance with nothing actually in contact) that tracked the old padding almost exactly. Confusingly, the number `0.31 m` was *also* the car_width before the 2026-08-24 remeasurement — that was 14.5 mm padding on the wrong 0.281 m Traxxas body figure. Same digits, unrelated derivation; do not read one as evidence for the other.
 - **Length `0.58 m`** is **unchanged, and this is the loose end.** Nobody has measured this car bumper to bumper.
   If the overhangs are still the Traxxas-published 0.211 m total, the real car is now about 0.571 m long.
   That would leave the envelope only ~4.5 mm at each end, instead of the 22.5 mm it was designed for.

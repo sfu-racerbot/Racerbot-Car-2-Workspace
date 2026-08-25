@@ -61,7 +61,7 @@ def add_sim_python_path(workspace_root=None) -> None:
 # LiDAR offset were measured on the car 2026-08-24; CAR_WIDTH/CAR_LENGTH are
 # the padded collision envelope those configs carry, not raw dimensions.
 WHEELBASE = 0.36
-CAR_WIDTH = 0.33
+CAR_WIDTH = 0.31
 CAR_LENGTH = 0.58
 LIDAR_OFFSET_X = 0.26
 LIDAR_OFFSET_Z = 0.11

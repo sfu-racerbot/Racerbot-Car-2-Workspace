@@ -246,8 +246,9 @@ def test_best_gap_returns_none_when_boxed_in():
 # The values gap_follow.yaml actually configures, so the numbers below are
 # the distances the running car really computes. wheelbase and
 # laser_offset_x were tape-measured 2026-08-24; car_width is the measured
-# 0.30m over the tires plus 14.5mm a side of deliberate padding.
-CAR_WIDTH = 0.33
+# 0.30m over the tires plus 5mm a side of deliberate padding (cut from
+# 14.5mm/side on 2026-08-25).
+CAR_WIDTH = 0.31
 CAR_LENGTH = 0.58
 CAR_WHEELBASE = 0.36
 CAR_LASER_OFFSET_X = 0.26
@@ -267,11 +268,11 @@ def test_vehicle_boundary_matches_the_padded_rectangle():
     boundaries = _body_boundaries([0.0, math.pi / 2.0, math.pi])
     # base_link is the rear axle, and the rectangle is centred halfway along
     # the wheelbase: centre x = 0.36/2 = 0.18, so the padded 0.58m box spans
-    # x = [0.18 - 0.29, 0.18 + 0.29] = [-0.11, 0.47] and y = +/-0.165.
-    # From the LiDAR at x = 0.26 that is 0.21m to the nose, 0.165m to either
+    # x = [0.18 - 0.29, 0.18 + 0.29] = [-0.11, 0.47] and y = +/-0.155.
+    # From the LiDAR at x = 0.26 that is 0.21m to the nose, 0.155m to either
     # flank, and 0.37m to the tail.
     assert boundaries[0] == pytest.approx(0.21)
-    assert boundaries[1] == pytest.approx(0.165)
+    assert boundaries[1] == pytest.approx(0.155)
     assert boundaries[2] == pytest.approx(0.37)
 
 
