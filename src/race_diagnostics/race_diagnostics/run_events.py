@@ -39,23 +39,85 @@ CRITICAL_PATTERNS = [
         r'Requested map and pose-graph save|Saved .* successfully|'
         r'Waiting for slam_toolbox to finish saving|did not finish within')),
     ('watchdog', re.compile(
-        r'STOP \[(pose_frozen|pose_stale|body_contact|off_racing_line|'
-        r'emergency_obstacle|waiting_for_pose)\]')),
+        r'STOP \[('
+        r'pose_frozen|pose_stale|body_contact|off_racing_line|'
+        r'emergency_obstacle|waiting_for_pose|'
+        # gap_follow_node hard-stop states.
+        r'emergency_clearance|ttc_brake|no_safe_gap|scan_window_empty|'
+        r'odometry_stale|scan_empty|scan_invalid|waiting_for_scan|scan_stale|'
+        # pure_pursuit_node hard-stop states (corner_fallback is a DRIVE-mode
+        # label, not a stop, and deliberately excluded).
+        r'lidar_scan_missing|lidar_scan_stale|avoidance_scan_empty|'
+        r'avoidance_boxed_in|waiting_for_profile|control_exception|'
+        # Deadman states, independently implemented and independently
+        # logged by every node that can publish a drive command.
+        r'waiting_for_joy|joy_stale|deadman_button_missing|deadman_released'
+        r')\]')),
+    # Escape/recovery maneuvers publish a nonzero crawl speed, so
+    # _log_decision logs them as 'DRIVE [state] ...', not 'STOP [state]
+    # ...' -- deliberately NOT anchored to the STOP prefix the watchdog
+    # pattern above requires. Without this, a car choosing to escape
+    # rather than latch is invisible to this whole classification scheme;
+    # confirmed on a real run: pure_pursuit's pre-existing emergency_escape
+    # already logs this way and has been invisible to it since before this
+    # category existed. ttc_escape/body_contact_escape/
+    # off_racing_line_recovery do not exist in the driving nodes yet as of
+    # this commit; the pattern is written for the states this plan adds to
+    # gap_follow_node/pure_pursuit_node next, not just the ones live today.
+    ('escape_maneuver', re.compile(
+        r'\[(emergency_escape|ttc_escape|body_contact_escape|'
+        r'off_racing_line_recovery)\]')),
+    # auto_map_race_node's OWN stop states -- not a driving node's safety
+    # watchdog, but a supervisor narrating why it is forwarding nothing this
+    # tick: waiting for the selected controller's next command, echoing that
+    # controller's own neutral command, or a deliberate scheduled pause
+    # (loading_profile/transition_hold fire on every successful run).
+    # Discovered by testing summarize_run's new "Unclassified stops" count
+    # (section 6.3) against a real historical run: without this category,
+    # every real auto_map_race_launch.py run shows a permanent nonzero
+    # baseline from these alone, which buries the actual signal that count
+    # exists to surface. Kept out of 'watchdog' deliberately -- mixing
+    # routine bookkeeping into the safety-watchdog tally would make THAT
+    # count misleading instead.
+    ('supervisor_stop', re.compile(
+        r'STOP \[('
+        r'gap_follow_command_missing|gap_follow_command_stale|'
+        r'pure_pursuit_command_missing|pure_pursuit_command_stale|'
+        r'mapping_controller_stop|racing_controller_stop|'
+        r'loading_profile|transition_hold|'
+        r'supervisor_error|unknown_supervisor_state'
+        r')\]')),
     ('node_death', re.compile(r'process has died|Traceback|process exited')),
     ('error', re.compile(r'\[ERROR\]|Exception|rejected|[Cc]ould not|[Ff]ailed')),
 ]
 
 # Worth seeing, but emitted continuously -- one every `throttle_sec`.
 THROTTLED_PATTERNS = [
-    ('lap_progress', re.compile(r'lap \d+/\d+: samples=')),
+    # Same '(?:.*?, )?' as LAP_PROGRESS_RE below, and for the same reason:
+    # this is the gate that decides whether a line is even handed to
+    # parse_lap_progress in the first place (see summarize_run.analyze),
+    # so it went stale the same way and on the same day -- fixing
+    # LAP_PROGRESS_RE alone would leave this classify()-level check still
+    # never matching a real line, and parse_lap_progress still never
+    # called on one.
+    ('lap_progress', re.compile(r'lap \d+/\d+: (?:.*?, )?samples=')),
     ('tf_missing', re.compile(r'Waiting for map->base_link|waiting for a valid map->base_link')),
     ('scan_dropped', re.compile(r'Message Filter dropping message')),
     ('stopped', re.compile(r'STOP \[')),
 ]
 
 LAP_PROGRESS_RE = re.compile(
-    r'lap (\d+)/(\d+): samples=(\d+), distance=([\d.]+)/([\d.]+)m, '
-    r'elapsed=([\d.]+)/([\d.]+)s, departed=(\w+), '
+    # '(?:.*?, )?' absorbs auto_map_race_node's '~X% round[, ~Ym to go...]'
+    # summary between the lap prefix and 'samples=' -- present on every
+    # real line since it was added, absent on old logs and every synthetic
+    # line in this test file's history, so it has to stay optional rather
+    # than required. Non-greedy so it stops at the first ', ' immediately
+    # before 'samples=' rather than swallowing past it.
+    r'lap (\d+)/(\d+): (?:.*?, )?samples=(\d+), distance=([\d.]+)/([\d.]+)m, '
+    # Turn is signed (a lap can be driven with net counter-steer in it,
+    # see auto_map_race_node.LapRecorder) -- the gate compares its
+    # magnitude against the limit, not the raw value.
+    r'turn=(-?[\d.]+)/([\d.]+)deg, elapsed=([\d.]+)/([\d.]+)s, departed=(\w+), '
     r'start distance=([\d.]+)/([\d.]+)m, heading error=([\d.]+)/([\d.]+)deg')
 
 
@@ -110,34 +172,44 @@ def parse_lap_progress(line: str):
         return None
     g = match.groups()
 
-    def gate(value, limit, at_most=True):
+    def gate(value, limit, at_most=True, use_abs=False):
         value, limit = float(value), float(limit)
+        compare = abs(value) if use_abs else value
         return {'value': value, 'limit': limit,
-                'ok': value <= limit if at_most else value >= limit}
+                'ok': compare <= limit if at_most else compare >= limit}
 
     return {
         'lap': int(g[0]),
         'of': int(g[1]),
         'samples': int(g[2]),
         'distance': gate(g[3], g[4], at_most=False),
-        'elapsed': gate(g[5], g[6], at_most=False),
-        'departed': g[7] == 'yes',
-        'start_distance': gate(g[8], g[9]),
-        'heading_error': gate(g[10], g[11]),
+        # LapRecorder.update gates on abs(self.turn) >= min_turn_rad -- the
+        # reported value keeps its sign (a real signal: a lap driven with
+        # net counter-steer), but the gate itself compares magnitude.
+        'turn': gate(g[5], g[6], at_most=False, use_abs=True),
+        'elapsed': gate(g[7], g[8], at_most=False),
+        'departed': g[9] == 'yes',
+        'start_distance': gate(g[10], g[11]),
+        'heading_error': gate(g[12], g[13]),
     }
 
 
 def blocking_gate(progress) -> str:
     """Which single gate is keeping this lap from closing, or '' if none.
 
-    Reported in gate order so the answer is stable and actionable rather
-    than whichever failing gate happened to be checked last.
+    Reported in gate order -- matching LapRecorder.update's own boolean
+    condition order, not alphabetical or dict order -- so the answer is
+    stable and actionable rather than whichever failing gate happened to
+    be checked last. 'turn' was silently missing here until 2026-08-25
+    even though LAP_PROGRESS_RE always had a value for it once the field
+    existed in the log line -- it is the gate that was actually blocking
+    every one of that day's runs.
     """
     if progress is None:
         return ''
     if not progress['departed']:
         return 'departed'
-    for name in ('distance', 'elapsed', 'start_distance', 'heading_error'):
+    for name in ('distance', 'turn', 'elapsed', 'start_distance', 'heading_error'):
         if not progress[name]['ok']:
             return name
     return ''

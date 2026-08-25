@@ -25,8 +25,10 @@ this car, in the order they matter:
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
+from race_diagnostics import node_logs
 from race_diagnostics.run_events import (LogClassifier, RunTimeline,
                                          blocking_gate, parse_lap_progress)
 
@@ -37,6 +39,32 @@ PHASE_ORDER = [
     ('profile_loaded', 'profile accepted by pure_pursuit'),
     ('handover', 'pure pursuit took drive control'),
 ]
+
+
+def _run_time_window(run_dir: Path):
+    """(start_epoch_sec, end_epoch_sec) this run covers, best-effort.
+
+    The run directory is named from its own start time -- record_run.py
+    and auto_map_race_node.py's _write_profile both use
+    strftime('%Y%m%d-%H%M%S') -- parsed back out here rather than tracked
+    as a second, separately-written stamp. Nothing records an explicit
+    run-end time, so the end is approximated as the newest mtime among
+    whatever the run has written so far; a run that hasn't written
+    anything yet (or a directory name that doesn't parse) falls back to
+    the start time alone, and find_node_logs's own slack_sec absorbs the
+    rest.
+    """
+    try:
+        start = time.mktime(time.strptime(run_dir.name, '%Y%m%d-%H%M%S'))
+    except ValueError:
+        start = run_dir.stat().st_mtime
+    end = start
+    for path in run_dir.rglob('*'):
+        try:
+            end = max(end, path.stat().st_mtime)
+        except OSError:
+            continue
+    return start, end
 
 
 def read_events(run_dir: Path):
@@ -69,7 +97,9 @@ def analyze(run_dir: Path) -> dict:
     }
 
     for name, description in [
-            ('launch.log', "launch terminal output (needs `| tee`)"),
+            ('launch.log', 'launch terminal output (reconstructed from '
+                           '~/.ros/log/ if missing; `| tee` gives the '
+                           'authoritative copy)'),
             ('events.jsonl', 'probe event stream (pose lag lives here)'),
             ('probe.log', 'human-readable probe output'),
             ('bag', 'rosbag for offline replay'),
@@ -97,11 +127,30 @@ def analyze(run_dir: Path) -> dict:
 
     log_path = run_dir / 'launch.log'
     if log_path.exists():
+        lines = log_path.read_text(errors='replace').splitlines()
+    else:
+        # No `| tee` this run -- ROS still wrote every node's own stdout
+        # to ~/.ros/log/ on its own; find and merge it instead of giving
+        # up. See node_logs.py.
+        start_sec, end_sec = _run_time_window(run_dir)
+        found = node_logs.find_node_logs(start_sec, end_sec)
+        lines = node_logs.merged_lines(found)
+        if lines:
+            result['notes'].append(
+                f'no launch.log (no `| tee`) -- reconstructed {len(lines)} '
+                f'line(s) from {sum(len(v) for v in found.values())} '
+                f"per-node log file(s) under ~/.ros/log/ instead: "
+                f"{', '.join(sorted(found))}")
+        else:
+            result['notes'].append(
+                'no launch.log, and no matching ~/.ros/log/ node logs found '
+                "for this run's time window -- nothing to classify")
+
+    if lines:
         classifier = LogClassifier(throttle_sec=0.0)   # count everything
         timeline = RunTimeline()
         last_progress = None
-        for index, line in enumerate(log_path.read_text(
-                errors='replace').splitlines()):
+        for index, line in enumerate(lines):
             category, _ = classifier.classify(line, float(index))
             if category is None:
                 continue
@@ -150,8 +199,8 @@ def render(result: dict) -> str:
         lines.append(f'  [reached] {description}')
     for description in result['phases_missing']:
         lines.append(f'  [ NOT   ] {description}')
-    if not result['phases_reached'] and not result['phases_missing']:
-        lines.append('  (no launch.log -- cannot tell; run with `| tee`)')
+    if 'event_counts' not in result:
+        lines.append('  (no log lines to classify -- see notes below)')
     lines.append('')
 
     pose = result.get('pose') or {}
@@ -173,6 +222,24 @@ def render(result: dict) -> str:
         lines.append('## Watchdog stops (count by reason)')
         for state, count in sorted(result['watchdogs'].items(), key=lambda kv: -kv[1]):
             lines.append(f'  {state:22s} {count}')
+        lines.append('')
+
+    event_counts = result.get('event_counts')
+    if event_counts is not None:
+        # THROTTLED_PATTERNS's 'stopped' catch-all counts every 'STOP [...]'
+        # line whose state isn't one of CRITICAL_PATTERNS's named watchdog
+        # states -- i.e. every stop this report's watchdog breakdown above
+        # did NOT account for. 0 is the healthy value; a regex that has
+        # drifted out of sync with the driving nodes (exactly what section
+        # 5 of the 2026-08-25 plan found for the lap-progress regex) shows
+        # up here as a silent nonzero count instead of a wrong answer that
+        # looks like a right one.
+        unclassified = event_counts.get('stopped', 0)
+        lines.append('## Unclassified stops')
+        lines.append(
+            f'  {unclassified} STOP line(s) matched no known watchdog state '
+            "in run_events.py's CRITICAL_PATTERNS. 0 is expected; nonzero "
+            'means that pattern is missing a state and needs updating.')
         lines.append('')
 
     if result['lap_gate_blocking']:

@@ -47,10 +47,15 @@ def _setup(context, *args, **kwargs):
 
     actions = [
         LogInfo(msg=f'\n{"=" * 72}\nRecording run to: {run_dir}\n'
-                    f'Start the driving stack in another terminal WITH tee, so its\n'
-                    f'terminal output is captured too:\n\n'
+                    f'Start the driving stack in another terminal, ideally WITH tee\n'
+                    f'so its terminal output is captured directly:\n\n'
                     f'  ros2 launch racerbot_launch auto_map_race_launch.py \\\n'
                     f'    2>&1 | tee {run_dir}/launch.log\n\n'
+                    f'`| tee` is optional, not required: if you forget it, '
+                    f'summarize_run\n'
+                    f'reconstructs an equivalent log from each node\'s own '
+                    f'~/.ros/log/\n'
+                    f'file instead -- see docs/run-diagnostics.md.\n\n'
                     f'Afterwards:\n'
                     f'  ros2 run race_diagnostics summarize_run {run_dir}\n{"=" * 72}'),
         Node(

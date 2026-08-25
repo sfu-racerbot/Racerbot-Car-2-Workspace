@@ -24,7 +24,7 @@ source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
 ros2 launch race_diagnostics record_run.py
 # It prints the run directory it created, and the exact tee command to use.
 
-# --- Terminal 2: the driving stack. Note the `| tee`. ---
+# --- Terminal 2: the driving stack. Note the `| tee` (optional, see below). ---
 source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
 ros2 launch racerbot_launch auto_map_race_launch.py \
   2>&1 | tee ~/.ros/racerbot_runs/<the-dir-it-printed>/launch.log
@@ -41,10 +41,26 @@ Afterwards:
 ros2 run race_diagnostics summarize_run ~/.ros/racerbot_runs/<dir>
 ```
 
-**The `| tee` is not optional.** ROS's own `~/.ros/log/<run>/launch.log`
-captures only a fraction of what appears on screen — during the 2026-07-27
-session it held 48 lines of a run that printed several thousand. Without
-`tee`, the node output that explains the run is simply gone.
+**`| tee` is no longer strictly required, but is still the simplest option.**
+`summarize_run` can reconstruct an equivalent merged log on its own: ROS 2
+launch already writes every node's complete stdout to a loose
+`~/.ros/log/python3_<PID>_<epoch_ms>.log` file per node process, whether or
+not anyone tees anything. When `launch.log` is missing, `summarize_run`
+locates the per-node files that fall inside the run's own time window and
+merges them back into one chronological stream automatically — see
+`race_diagnostics/node_logs.py`.
+
+This is a **different** file from ROS's own aggregated
+`~/.ros/log/<run>/launch.log`, which is still close to useless and this
+reconstruction does not rely on: during the 2026-07-27 session that
+aggregated file held 48 lines of a run that printed several thousand.
+`| tee` remains the most direct way to get one complete, already-ordered
+log without depending on after-the-fact file-hunting, so keep using it
+when you remember to — the fallback exists for when you didn't.
+
+*(Housekeeping, not an action item: `~/.ros/log/` currently holds around
+19,000 of these loose per-process log files on this machine, going back
+months, and nothing prunes them.)*
 
 ---
 
@@ -131,12 +147,32 @@ It reports, in the order that matters:
    → profile loaded → pure pursuit driving. The first `[ NOT ]` is where
    to look.
 2. **Localization health** — worst pose lag, frozen-pose samples, TF losses.
-3. **Watchdog stops by reason** — which safety net fired, how often.
-4. **Which lap-closure gate is holding a lap open** — see below.
-5. **Errors and node deaths**, de-duplicated.
-6. **Missing artifacts** — itself a finding. No `map.pgm` means the
+3. **Watchdog stops by reason** — which safety net fired, how often. Every
+   hard-stop state either driving node can log is named here now, not just
+   the six that were originally listed — see `run_events.py`'s
+   `CRITICAL_PATTERNS`.
+4. **Unclassified stops** — how many `STOP [...]` lines matched no known
+   watchdog state. 0 is the expected value; a nonzero count means
+   `CRITICAL_PATTERNS` has drifted out of sync with what the driving nodes
+   actually log (exactly what happened to the lap-progress regex below,
+   before 2026-08-25) and is itself a finding worth fixing. (This
+   deliberately excludes `auto_map_race_node`'s own routine bookkeeping
+   stops — `loading_profile`, `transition_hold`, and the rest of
+   `supervisor_stop` — which fire on every ordinary run and would
+   otherwise make this count permanently, uninformatively nonzero.)
+5. **Which lap-closure gate is holding a lap open** — see below.
+6. **Errors and node deaths**, de-duplicated.
+7. **Missing artifacts** — itself a finding. No `map.pgm` means the
    occupancy save failed, which happened when slam_toolbox's executor was
-   too busy to serve its own map subscription.
+   too busy to serve its own map subscription. `launch.log` itself is no
+   longer fatal if missing — see the `| tee` note above.
+
+Escape/recovery maneuvers (`emergency_escape`, and — once landed —
+`ttc_escape`/`body_contact_escape`/`off_racing_line_recovery`) get their
+own `escape_maneuver` count too: these publish a nonzero crawl speed and
+log with the `DRIVE` prefix rather than `STOP`, so before 2026-08-25 they
+were invisible to this whole classification scheme, not merely
+miscategorized.
 
 ### The lap-closure gates
 
@@ -147,6 +183,7 @@ the log line reports every one as `value/limit`:
 |---|---|---|
 | departed the start | `departure_distance` | never leaves the start area |
 | distance travelled | `minimum_lap_distance` | loop shorter than the minimum can never close |
+| turning done | `minimum_lap_turn_deg` | repeated reactive stops keep resetting progress before a full 300° accumulates — the actual blocker on every run in the 2026-08-25 session, and silently unreported by `summarize_run` before that day's regex fix |
 | elapsed time | `minimum_lap_duration_sec` | rarely the blocker |
 | back near the start | `closure_distance` | passes the start but too wide |
 | heading matches start | `closure_heading_deg` | comes back the "wrong way round" |
