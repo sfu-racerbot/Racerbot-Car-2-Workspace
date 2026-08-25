@@ -98,6 +98,50 @@ def test_undecodable_data_raises_valueerror_rather_than_something_exotic(text):
         schema.decode(text)
 
 
+# ============================================================================
+# The controller filter (2026-08-25) -- keeps the intent panel from
+# flickering between gap_follow_node and pure_pursuit_node's independently-
+# true states during auto_map_race_node's mapping phase. Pure decision
+# logic, exercised directly here rather than through DashboardNode.
+# intent_callback (which needs rclpy -- see the module docstring above).
+# ============================================================================
+
+def test_a_message_from_the_active_controller_is_shown():
+    assert protocol.intent_from_active_controller(
+        'gap_follow_node', 'gap_follow_node',
+        controller_ever_received=True) is True
+
+
+def test_a_message_from_a_controller_that_is_not_active_is_dropped():
+    """The exact bug report this exists to fix: gap_follow_node is
+    selected, so pure_pursuit_node's truthful-but-idle
+    waiting_for_profile must not reach the panel and flicker against it."""
+    assert protocol.intent_from_active_controller(
+        'pure_pursuit_node', 'gap_follow_node',
+        controller_ever_received=True) is False
+
+
+def test_every_message_passes_when_no_supervisor_has_ever_reported():
+    """Plain pure_pursuit_launch.py or gap_follow_launch.py, alone: no
+    auto_map_race_node in the graph, no /auto_map_race/controller topic,
+    only one publisher on /drive_intent to begin with. Nothing to
+    disambiguate, so the fallback must be unfiltered -- today's behaviour,
+    unchanged. active_controller is deliberately '' here (its unset
+    default) and must still not cause a drop, unlike the next test."""
+    assert protocol.intent_from_active_controller(
+        'gap_follow_node', '', controller_ever_received=False) is True
+
+
+def test_a_blank_active_controller_still_filters_once_a_supervisor_exists():
+    """The subtlety controller_ever_received exists for: '' is not only
+    "no supervisor at all" -- it is also the real, actively-published
+    answer during some supervisor states (loading_profile, transition).
+    Once a supervisor has said anything at all, even '', a real driving
+    node's own name must not match it."""
+    assert protocol.intent_from_active_controller(
+        'gap_follow_node', '', controller_ever_received=True) is False
+
+
 def test_a_payload_from_a_newer_schema_is_refused_not_half_drawn():
     """The reason is asserted, not merely its existence: "it was refused"
     is also true of an implementation that refuses everything, and the

@@ -266,6 +266,35 @@ def thin_intent_payload(payload: dict,
     return thinned
 
 
+def intent_from_active_controller(payload_node: str, active_controller: str,
+                                  controller_ever_received: bool) -> bool:
+    """Whether an intent message from `payload_node` should reach the browser.
+
+    During auto_map_race_node's mapping phase, both gap_follow_node and
+    pure_pursuit_node are alive and each correctly, independently publishes
+    its own true state to the same /drive_intent topic at ~20Hz --
+    gap_follow reporting it's driving, pure_pursuit truthfully reporting
+    waiting_for_profile (caution) since it has no profile yet. Unfiltered,
+    the intent panel flickers between the two, which reads as a decision
+    bug even though both messages are individually correct.
+
+    `active_controller` (from /auto_map_race/controller, latched) names
+    the controller currently selected; a message from any other node is
+    dropped. But `controller_ever_received` must be checked first: with no
+    supervisor in the graph at all (plain pure_pursuit_launch.py or
+    gap_follow_launch.py, alone), that topic never arrives, there is only
+    one publisher on /drive_intent to begin with, and every message must
+    pass through exactly as it did before this filter existed -- there is
+    no ambiguity to resolve, and '' is *also* the real, actively-published
+    answer during some supervisor states (loading_profile, transition),
+    not only "no supervisor at all", so it cannot be used by itself to
+    tell the two situations apart.
+    """
+    if not controller_ever_received:
+        return True
+    return payload_node == active_controller
+
+
 def pose_message(x: float, y: float, yaw: float) -> dict:
     """The whole pose fits comfortably in JSON -- no binary payload needed."""
     return {

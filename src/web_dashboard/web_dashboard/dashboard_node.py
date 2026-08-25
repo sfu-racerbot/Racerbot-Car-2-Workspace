@@ -620,6 +620,11 @@ class DashboardNode(Node):
         # '' means nothing has said -- which is the normal answer when a
         # single controller is running on its own launch file.
         self._active_controller = ''
+        # Separate from the above: '' is also the real, actively-published
+        # answer during some supervisor states (loading_profile,
+        # transition), not just "no supervisor at all". intent_callback
+        # needs to tell those apart -- see its own comment.
+        self._controller_ever_received = False
         self.tuning_allow_save = bool(self.get_parameter('tuning_allow_save').value)
         self.tuning_refresh_sec = max(
             0.2, float(self.get_parameter('tuning_refresh_sec').value))
@@ -849,6 +854,12 @@ class DashboardNode(Node):
                 self.get_logger().warn(
                     f"ignoring malformed message on '{self.intent_topic}': "
                     f'{problem}')
+            return
+        # See protocol.intent_from_active_controller's own docstring for
+        # why this filter exists and exactly what it does and does not do.
+        if not protocol.intent_from_active_controller(
+                payload['node'], self._active_controller,
+                self._controller_ever_received):
             return
         self._last_intent = payload
         # Two 16-point paths are most of an intent message's ~1.4kB, and at
@@ -1259,6 +1270,10 @@ class DashboardNode(Node):
         rebroadcast the tuning state directly -- see the threading
         contract above _setup_tuning().
         """
+        # Set on every call, including a repeat of the same value -- this
+        # is "has a supervisor ever said anything at all", which the early
+        # return below (on an unchanged value) must not skip.
+        self._controller_ever_received = True
         controller = str(message.data or '')
         if controller == self._active_controller:
             return

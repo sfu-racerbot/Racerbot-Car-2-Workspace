@@ -758,6 +758,8 @@ Untick *arrow* in the panel header to hide the overlay without touching the car 
 
 If nothing is publishing, the panel says so and the map is unchanged. This is another purely additive subscription; the dashboard still publishes to no topic.
 
+**During `auto_map_race_node`'s mapping phase, two nodes are publishing `/drive_intent` at once** — `gap_follow_node` driving, and `pure_pursuit_node` truthfully idle (`waiting_for_profile`) since it has no racing line yet. The dashboard shows only the one `/auto_map_race/controller` names as currently driving, so the panel reads as one coherent decision instead of flickering between two independently-true states. Run either driving node alone, without `auto_map_race_node` in the graph, and every message passes through unfiltered exactly as before — there is no second node to disambiguate from.
+
 ---
 
 ## Live parameter tuning
