@@ -130,10 +130,14 @@ auto_map_race_node:
     # --- Racing-line cleanup and acceptance (pure_pursuit/recorded_path.py) ---
     # Must match the car: these decide what "the rack cannot steer this" means.
     profile_max_steering_angle: 0.26
-    profile_wheelbase: 0.324
-    # Shortest wiggle kept before filtering harder. Just over the 1.22m
-    # minimum turning circle 0.26rad implies -- anything tighter in a
-    # recorded line is localisation, not driving.
+    profile_wheelbase: 0.36
+    # Shortest wiggle kept before filtering harder. Just over the 1.35m
+    # minimum turning radius 0.26rad implies on the measured 0.36m
+    # wheelbase -- anything tighter in a recorded line is localisation, not
+    # driving. (It read 1.22m while the wheelbase was believed to be
+    # 0.324m; a longer wheelbase turns WIDER, so the car needs more room
+    # for the same rack angle, not less, and this 1.5m sits closer to the
+    # limit than it used to.)
     profile_min_feature_wavelength: 1.5
     # Fraction of the rack the finished line may need. 1.0 uses all of it;
     # lower reserves steering for cross-track correction but refuses courses
@@ -229,9 +233,10 @@ auto_map_race_node:
     # SAFETY: the corridor the optimizer is allowed to use is the measured
     # track width minus (optimize_car_width / 2 + optimize_safety_margin) on
     # each side. Understate either and the line is planned through space the
-    # car does not fit in. 0.31 is the car's real width; keep the margin at
-    # or above profile_wall_clearance.
-    optimize_car_width: 0.31
+    # car does not fit in. The car measures 0.30 m over the tires; 0.33
+    # matches the padded envelope in gap_follow.yaml / pure_pursuit.yaml.
+    # Keep the margin at or above profile_wall_clearance.
+    optimize_car_width: 0.33
     optimize_safety_margin: 0.15
 
     # --- Handing localization to the particle filter for the race ---

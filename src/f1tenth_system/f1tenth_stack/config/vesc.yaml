@@ -47,8 +47,15 @@ vesc_to_odom_node:
     # publish odom to base link tf
     publish_tf: true
     use_servo_cmd_to_calc_angular_velocity: true
-    # Traxxas 74276-4 published wheelbase: 324 mm
-    wheelbase: .324
+    # Measured on this car, 2026-08-24: 360 mm, front axle to rear axle.
+    # NOT the 324 mm Traxxas publishes for a stock 74276-4 -- this one is
+    # 36 mm longer between the axles, and vesc_to_odom integrates heading
+    # as speed * tan(steering) / wheelbase, so the old figure turned every
+    # commanded steering angle into ~11% more yaw than the car produces.
+    # base_link stays at the rear axle, which is what that model assumes.
+    # See docs/hardware-reference.md; keep in step with gap_follow.yaml,
+    # pure_pursuit.yaml, auto_map_race.yaml and odom_calibration.yaml.
+    wheelbase: 0.36
 
 # No longer needed, all parameters are shared
 # vesc_driver:

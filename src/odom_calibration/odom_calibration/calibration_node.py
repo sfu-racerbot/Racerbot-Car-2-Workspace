@@ -301,7 +301,7 @@ class OdomCalibrationNode(Node):
             'steering_angle_to_servo_gain', -1.2135)
         self.declare_parameter(
             'steering_angle_to_servo_offset', 0.5304)
-        self.declare_parameter('wheelbase', 0.324)
+        self.declare_parameter('wheelbase', 0.36)
 
         self.odom_topic = self.get_parameter('odom_topic').value
         self.vesc_state_topic = self.get_parameter('vesc_state_topic').value
@@ -565,7 +565,7 @@ class OdomCalibrationNode(Node):
                 vehicle = {
                     'model': 'Traxxas Ford Fiesta ST Rally VXL 74276-4',
                     'wheelbase_m': parameters['wheelbase'],
-                    'physical_width_m': 0.281,
+                    'physical_width_m': 0.30,
                     'physical_length_m': 0.535,
                 }
                 self.session = new_session(mode, parameters, vehicle)

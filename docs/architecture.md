@@ -379,8 +379,8 @@ The four frames on this car:
 
 | Frame | Where it is | Notes |
 |---|---|---|
-| `base_link` | Origin of the car, at the rear axle | Matches the Traxxas 74276-4 `wheelbase: 0.324m` in `vesc.yaml`, used by `vesc_to_odom_node` for odometry |
-| `laser` | The Hokuyo's position | Estimated at `+0.33m` forward and `+0.11m` up from `base_link`, fixed via `static_transform_publisher`. **Measure the x offset to finalize it** — it's currently an estimate |
+| `base_link` | Origin of the car, at the rear axle | Pairs with the measured `wheelbase: 0.36m` in `vesc.yaml`, which `vesc_to_odom_node` uses for odometry |
+| `laser` | The Hokuyo's position | **Measured** at `+0.26m` forward and `+0.11m` up from `base_link`, fixed via `static_transform_publisher`. The 0.26m is the 0.36m wheelbase less the 0.10m the sensor sits behind the front axle — see [hardware-reference.md](hardware-reference.md#physical-dimensions-used-in-config) |
 | `odom` | Where the car started | Continuous but **drifting**, published by `vesc_to_odom_node` from wheel-speed and servo-angle integration |
 | `map` | A fixed point in the mapped world | Only exists once `slam_toolbox` or `particle_filter`'s `map_server` is running |
 

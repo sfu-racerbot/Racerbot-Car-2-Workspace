@@ -200,12 +200,16 @@ LAYOUTS = {
     # from -- a size estimate, not a survey. corridor_width=1.5 is the
     # team's on-the-ground measurement of the actual hallway -- narrower
     # than indoor_oval/wide, though indoor_tight (1.4m) is narrower still.
-    # radius is set just past the 1.22m turning-circle floor (see
-    # test_layout_corners_are_inside_the_cars_turning_circle in
-    # test_tracks.py) to mimic the corridor's real right-angle corners as
-    # tightly as this car can actually take them -- second only to
-    # indoor_tight's 1.1m -- so expect wall contact on this one to be
-    # informative about the real hallway, not a bug.
+    # radius mimics the corridor's real right-angle corners as tightly as
+    # this car can take them -- second only to indoor_tight's 1.1m. Note
+    # 1.2m is INSIDE the car's own 1.35m minimum turning radius (0.26 rad
+    # of rack on a measured 0.36m wheelbase): the corner is driveable only
+    # because the 1.5m corridor lets the car swing wide and clip the apex,
+    # which is exactly what
+    # test_every_layout_corner_can_actually_be_driven in test_tracks.py
+    # checks. Expect wall contact on this one to be informative about the
+    # real hallway, not a bug. (This note read "just past the 1.22m
+    # turning-circle floor" while the wheelbase was believed to be 0.324m.)
     'asb_10000': dict(half_x=7.5, half_y=5.5, radius=1.2, corridor_width=1.5),
 }
 

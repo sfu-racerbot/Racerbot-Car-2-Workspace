@@ -365,6 +365,24 @@ def test_hard_stop_overrides_an_active_overtake(node):
     assert node.last_decision_state == 'body_contact'
 
 
+def _range_for_body_clearance(node, clearance):
+    """A straight-ahead LiDAR range leaving `clearance` at the bodywork.
+
+    The emergency tiers compare a raw range against emergency_stop_distance
+    but a footprint-aware clearance against emergency_stop_clearance and
+    emergency_escape_clearance, so a scenario that wants to land in one
+    particular tier has to be written in terms of the clearance, not the
+    range. The conversion between them moved on 2026-08-24 when the car was
+    tape-measured: the LiDAR turned out to sit 0.26 m ahead of the rear axle
+    rather than 0.33 m, which put the modelled nose 0.088 m further out in
+    front of it, and every fixed range here quietly became a test of a
+    different tier.
+    """
+    forward_boundary = (
+        node.wheelbase / 2.0 + node.car_length / 2.0 - node.laser_offset_x)
+    return clearance + forward_boundary
+
+
 def test_forward_cone_obstacle_crawls_out_rather_than_latching(node):
     """An obstacle inside the forward cone with an open track beside it is
     escaped at a crawl, not sat next to forever.
@@ -380,9 +398,16 @@ def test_forward_cone_obstacle_crawls_out_rather_than_latching(node):
     _set_pose(node, -1.5, -1.2, 0.0)
     scan = _clear_scan()
     center = len(scan.ranges) // 2
-    # 0.30m ahead: inside emergency_stop_distance (0.40m), but ~0.18m of
-    # body clearance -- comfortably outside emergency_stop_clearance.
-    scan.ranges[center] = 0.30
+    # 0.15m of body clearance: well outside emergency_stop_clearance and
+    # emergency_escape_clearance, so the escape tier is allowed to act...
+    obstacle = _range_for_body_clearance(node, 0.15)
+    assert 0.15 > node.emergency_escape_clearance
+    # ...while the raw range is still inside emergency_stop_distance, so
+    # there is an emergency to escape from in the first place.
+    assert obstacle < node.emergency_stop_distance, (
+        'the configured footprint no longer leaves a range that is both an '
+        'emergency and escapable; this test proves nothing until it does')
+    scan.ranges[center] = obstacle
     node.scan_callback(scan)
     node.control_loop()
     assert node.last_decision_state == 'emergency_escape'
@@ -402,7 +427,15 @@ def test_forward_cone_hard_stop_still_fires_with_nowhere_to_go(node):
     scan = _clear_scan()
     # A wall right across the avoidance cone: inside the emergency distance
     # ahead, and nothing anywhere near emergency_escape_min_gap to aim at.
-    scan.ranges = [0.30] * len(scan.ranges)
+    # Deliberately at the SAME body clearance as the escapable case above,
+    # so the only thing that differs between the two is whether an opening
+    # exists -- otherwise this could pass merely because the wall was too
+    # close for the escape tier to consider at all, which is a different
+    # reason from the one the docstring claims.
+    wall = _range_for_body_clearance(node, 0.15)
+    assert 0.15 > node.emergency_escape_clearance
+    assert wall < node.emergency_stop_distance
+    scan.ranges = [wall] * len(scan.ranges)
     node.scan_callback(scan)
     node.control_loop()
     assert published[-1].drive.speed == 0.0

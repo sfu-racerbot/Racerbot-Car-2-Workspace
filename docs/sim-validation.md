@@ -444,7 +444,7 @@ So `racerbot_sim` samples the padded car body against the occupancy grid itself 
 
 ## What it does and does not model
 
-**Real:** F1TENTH Gym single-track dynamics with RK4 at 5 ms, multi-car ray-cast LiDAR, 1081 beams over 270° matching the Hokuyo UST-10LX, the 0.33 m LiDAR offset, the padded 0.58 × 0.31 m body, 40 Hz control, and the real ROS graph above the drivers.
+**Real:** F1TENTH Gym single-track dynamics with RK4 at 5 ms, multi-car ray-cast LiDAR, 1081 beams over 270° matching the Hokuyo UST-10LX, the 0.26 m LiDAR offset, the padded 0.58 × 0.33 m body, 40 Hz control, and the real ROS graph above the drivers.
 
 **Not modelled:** tyre grip against a real floor, VESC and servo dynamics, LiDAR reflectivity and multi-echo, WiFi, and CPU contention on the Jetson.
 

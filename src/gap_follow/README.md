@@ -77,7 +77,7 @@ This exists so the car never steers toward a "gap" that's actually behind or bes
 
 ### 3. Check footprint clearance and instantaneous TTC
 
-The collision model is a rectangle around `base_link` (rear axle). The [Traxxas 74276-4 specifications](https://traxxas.com/74276-4-ford-fiesta-st-rally-vxl) are 0.281m wide, 0.535m long, and 0.324m wheelbase; the configured rectangle deliberately remains inflated to 0.31m × 0.58m. `vehicle_boundary_distances()` ray-casts from the estimated LiDAR origin (+0.33m forward, about 0.10m behind the physical nose) to that padded rectangle. Subtracting this per-beam distance from the scan produces clearance from the body rather than from the sensor.
+The collision model is a rectangle around `base_link` (rear axle). This car measures 0.30m over the tires and 0.36m between the axles (tape-measured 2026-08-24, see [hardware-reference.md](../../docs/hardware-reference.md#physical-dimensions-used-in-config)); the configured rectangle is deliberately inflated to 0.33m × 0.58m. `vehicle_boundary_distances()` ray-casts from the measured LiDAR origin (+0.26m forward, 0.10m behind the front axle) to that padded rectangle. Subtracting this per-beam distance from the scan produces clearance from the body rather than from the sensor.
 
 Collision detection has three layers. The all-direction contact floor stops at `emergency_stop_clearance` (0.02m from the body). A separate odometry-independent fallback covers `forward_stop_clearance` (0.25m) within the narrow `forward_stop_fov_deg` cone (60°, or ±30°); close side walls outside that cone do not trigger it. The speed-aware layer then evaluates every approaching beam:
 
@@ -187,16 +187,27 @@ disagree badly in exactly the situation that matters. A gap bearing of 13°
 reads to pure pursuit as a gentle 2.9 m-radius arc, even when the car is
 0.24 m from the wall it is trying to leave.
 
-Worse, that was a *ceiling* rather than a tuning problem. With the LiDAR
-sitting `laser_offset_x` = 0.33 m ahead of the rear axle, the target point
-is always at least that far forward and nearly on-axis, which bounds the
-achievable curvature no matter what lookahead is configured:
+Worse, that was a *ceiling* rather than a tuning problem. The LiDAR sits
+`laser_offset_x` ahead of the rear axle, so the target point is always at
+least that far forward and nearly on-axis, which bounds the achievable
+curvature no matter what lookahead is configured:
 
 | gap bearing | best $\delta$ pure pursuit can *ever* ask for | bearing law ($K$=1) |
 |---|---|---|
 | 10° | 0.086 rad (3.8 m radius) | 0.175 rad (1.8 m) |
 | 13° | 0.111 rad (2.9 m radius) | 0.227 rad (1.4 m) |
 | 20° | 0.171 rad (1.9 m radius) | 0.260 rad (1.2 m) |
+
+> The numbers in that table were computed with the geometry the workspace
+> believed in at the time: a 0.324 m wheelbase and a 0.33 m LiDAR offset.
+> The car was tape-measured on 2026-08-24 as 0.36 m and 0.26 m
+> ([hardware-reference.md](../../docs/hardware-reference.md#physical-dimensions-used-in-config)),
+> so every radius and angle here shifts a little. The comparison the table
+> is making — pure pursuit on a raw gap bearing asks for far less steering
+> than the bearing law does — is between two columns that both scale with
+> the wheelbase, so the conclusion is unchanged. Do not quote the
+> individual figures as current.
+
 
 On the 2026-07-27 run this held every command between 0.064 and 0.118 rad
 while the rack had 0.26 rad available, and the car hugged a wall until its
@@ -374,9 +385,9 @@ apex, only change the car's pace approaching one.
 |---|---|---|
 | `scan_topic` / `drive_topic` / `odom_topic` | `/scan` / `/drive` / `/odom` | Sensor, command, and measured-speed topics |
 | `max_range` / `forward_fov_deg` | `10.0m` / `180°` | Scan clipping and planning window |
-| `car_width` / `car_length` | `0.31` / `0.58` m | Deliberately padded from the Traxxas body (0.281 × 0.535m) |
-| `wheelbase` | `0.324` m | Published Traxxas rear-to-front axle distance; also centers the padded body from rear-axle `base_link` |
-| `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` m | Estimated LiDAR origin relative to `base_link`; measure x to finalize |
+| `car_width` / `car_length` | `0.33` / `0.58` m | Padded: width is the measured 0.30m over the tires plus 14.5mm a side. Length is still padding over an **unmeasured** overall length |
+| `wheelbase` | `0.36` m | Measured rear-to-front axle distance; also centers the padded body from rear-axle `base_link` |
+| `laser_offset_x` / `laser_offset_y` | `0.26` / `0.0` m | Measured LiDAR origin relative to `base_link` (0.10m behind the front axle) |
 | `safety_margin` / `disparity_threshold` | `0.18` / `0.4` m | Edge inflation clearance and range-jump threshold |
 | `min_centerline_gap_width` | `0.10` m | Minimum center corridor remaining after obstacle inflation |
 | `min_gap_distance` / `fallback_min_gap_distance` | `2.0` / `0.8` m | Preferred depth and tight-corner fallback depth |

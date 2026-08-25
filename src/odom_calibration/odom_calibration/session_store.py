@@ -45,7 +45,7 @@ def new_session(mode, current_parameters, vehicle=None):
         'stage': 'preflight',
         'vehicle': copy.deepcopy(vehicle or {
             'model': 'Traxxas Ford Fiesta ST Rally VXL 74276-4',
-            'wheelbase_m': 0.324,
+            'wheelbase_m': 0.36,
         }),
         'current_parameters': copy.deepcopy(current_parameters),
         'trials': [],

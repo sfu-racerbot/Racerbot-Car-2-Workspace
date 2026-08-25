@@ -574,7 +574,7 @@ def curvature_limit(max_steering_angle: float, wheelbase: float) -> float:
 
     The bicycle model the controller already uses inverted: the car cannot
     drive a line tighter than ``tan(delta_max) / L``, whatever the optimizer
-    thinks. On this car that is tan(0.26)/0.324 = 0.82 1/m, a 1.22m radius.
+    thinks. On this car that is tan(0.26)/0.36 = 0.74 1/m, a 1.35m radius.
     """
     if not (math.isfinite(max_steering_angle)
             and 0.0 < max_steering_angle < math.pi / 2.0):

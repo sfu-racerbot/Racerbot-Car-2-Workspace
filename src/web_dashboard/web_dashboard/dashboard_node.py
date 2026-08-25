@@ -473,7 +473,10 @@ class DashboardNode(Node):
         # Send every Nth beam. 1 = every beam (the default; the Hokuyo's
         # 1081 beams at 2 bytes each are already cheap).
         self.declare_parameter('scan_decimation', 1)
-        self.declare_parameter('laser_offset_x', 0.33)
+        # Measured 2026-08-24: the 0.36 m wheelbase less the 0.10 m the LiDAR
+        # sits behind the front axle. Must match the base_link->laser static
+        # transform in f1tenth_stack's bringup_launch.py.
+        self.declare_parameter('laser_offset_x', 0.26)
         self.declare_parameter('laser_offset_y', 0.0)
         # --- Drive intent (docs/drive-intent.md) ---
         # What the running driving node says it is *trying* to do. Purely

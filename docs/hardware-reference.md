@@ -29,7 +29,7 @@ steering_angle_to_servo_gain: -1.2135
 steering_angle_to_servo_offset: 0.5304
 servo_min: 0.15
 servo_max: 0.85
-wheelbase: 0.324  # meters, Traxxas 74276-4 published specification
+wheelbase: 0.36   # meters, MEASURED on this car 2026-08-24
 ```
 The servo formula: `servo_position = -1.2135 × steering_angle + 0.5304`. Steering angle `0.0` → servo position `0.5304` (center). This is what you'll see repeatedly if you inspect `/commands/servo/position` — `0.5304` is neutral, not a bug.
 
@@ -71,7 +71,7 @@ Reading or writing the VESC's app configuration (including that servo-output fla
 | Jetson's wired NIC | `enP8p1s0` |
 | NetworkManager profile | `hokuyo`, static IPv4 `192.168.0.15/24` |
 | Scan rate | ~40Hz, ±180° (`angle_min`/`angle_max`: ±3.14 rad in `sensors.yaml`) |
-| Frame | `laser`, estimated offset from `base_link`: +0.33m forward, +0.11m up, no rotation |
+| Frame | `laser`, measured offset from `base_link`: +0.26m forward, +0.11m up, no rotation |
 
 To bring up this NIC on a fresh boot if the profile isn't auto-connecting:
 ```bash
@@ -107,7 +107,46 @@ watch which `axes[]` index moves as you work each stick/trigger, and which `butt
 
 ## Physical dimensions used in config
 
-- Physical car: Traxxas Ford Fiesta ST Rally VXL 74276-4. [Traxxas publishes](https://traxxas.com/74276-4-ford-fiesta-st-rally-vxl) 0.535m length, 0.281m width, and 0.324m wheelbase.
-- Collision body: deliberately inflated to 0.58m long × 0.31m wide in `gap_follow.yaml`. Relative to the published body, that adds 22.5mm at each end and 14.5mm on each side before the separate `safety_margin` is applied.
-- Wheelbase: 0.324m in `vesc.yaml`, `pure_pursuit.yaml`, and `gap_follow.yaml`. `base_link` remains at the rear axle.
-- LiDAR mount: estimated at +0.33m forward / +0.11m up from `base_link`. Assuming symmetric bumper overhang, the physical nose is about 0.4295m ahead of the rear axle; a sensor about 0.10m inward gives +0.3295m. Measure rear-axle center to LiDAR center and replace the estimate in every linked config and static transform together.
+The chassis is a Traxxas Ford Fiesta ST Rally VXL 74276-4, but **this car is not stock, and the published figures were wrong for it.** Three dimensions were put on a tape measure on **2026-08-24**, and two of them moved enough to change how the car drives.
+
+| What was measured | Value | What the configs said before |
+|---|---|---|
+| Wheelbase — front axle centre to rear axle centre | **0.36 m** | 0.324 m, the Traxxas published figure |
+| Width — outer edge of one tire to outer edge of the other | **0.30 m** | 0.281 m, the Traxxas published *body* width |
+| LiDAR position — how far behind the **front axle** it sits | **0.10 m** | an estimate of 0.10 m behind the **nose**, a different reference point |
+
+`base_link` — the origin every pose, every scan overlay and every collision check is measured from — is the **rear axle**. So the LiDAR's `base_link` offset is `0.36 − 0.10 = `**`0.26 m`** forward, not the 0.33 m the workspace used to assume.
+
+### Where each number lives
+
+Change any of these and you must change all of its row together, or two parts of the stack will be modelling different cars.
+
+| Number | Files |
+|---|---|
+| Wheelbase `0.36` | `vesc.yaml`, `pure_pursuit.yaml`, `gap_follow.yaml`, `auto_map_race.yaml` (`profile_wheelbase`), `odom_calibration.yaml`, `racerbot_sim/sim_bridge.py`, `tools/f1tenth_sim/sim_fidelity/calibration.py` |
+| LiDAR offset `0.26` | the `base_link`→`laser` static transform in `bringup_launch.py`, `no_lidar_bringup_launch.py`, `sick_bringup_launch.py`, `racerbot_sim/launch/sim_bringup_launch.py`, `racerbot_launch/launch/dashboard_test_launch.py`; and `laser_offset_x` in `gap_follow.yaml`, `pure_pursuit.yaml`, `web_dashboard.yaml` |
+| Collision width `0.33` | `gap_follow.yaml`, `pure_pursuit.yaml`, `auto_map_race.yaml` (`optimize_car_width`), both simulators |
+
+### The collision envelope is padded on purpose
+
+`car_width` and `car_length` are **not** the measured car. They are a rectangle deliberately drawn bigger than it, so a clearance of zero means "the padding is gone", not "the paint is touching".
+
+- **Width `0.33 m`** = the measured 0.30 m plus 14.5 mm on each side. That is the same padding the old `0.31 m` gave the old (wrong) 0.281 m body width, carried over to the correct measurement.
+- **Length `0.58 m`** is **unchanged, and this is the loose end.** Nobody has measured this car bumper to bumper.
+  If the overhangs are still the Traxxas-published 0.211 m total, the real car is now about 0.571 m long.
+  That would leave the envelope only ~4.5 mm at each end, instead of the 22.5 mm it was designed for.
+
+**TODO(verify): measure rear-axle centre to the front bumper, and bumper to bumper.**
+
+That distance matters more than it looks. The code models the nose as sitting 0.21 m ahead of the LiDAR, and subtracts that from every forward range before any stop decision is made.
+
+Right now the 0.21 m rests on an assumption of symmetric overhang, not on a measurement.
+
+### What re-measuring invalidated
+
+The wheelbase and LiDAR offset are inputs to things that were recorded *before* they were corrected:
+
+- **Racing lines** recorded under the old 0.33 m LiDAR offset are about 0.07 m out along the car's heading. Re-record rather than re-using them for a race.
+- **`odom` heading** was integrated as `speed × tan(steering) / wheelbase` with a wheelbase 10% too short. Every commanded steering angle therefore produced about 10% more yaw in the estimate than the car actually turned. Re-run [odom calibration](../src/odom_calibration/README.md).
+- **The minimum turning radius grew**, from 1.22 m to **1.35 m** (`tan(0.26) / 0.36`). A longer wheelbase turns *wider* for the same rack angle, so a course the optimizer previously accepted may now be refused — that refusal is correct, and the old acceptance was not.
+- **Saved maps** are still usable; the map itself does not change. What changed is where `base_link` sits relative to the scan that built it.

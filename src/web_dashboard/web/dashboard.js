@@ -205,6 +205,160 @@
   const INTENT_LOG_LIMIT = 20;
 
   // ---------------------------------------------------------------------
+  // The car itself, in meters.
+  //
+  // `base_link` -- the origin of every pose, of /drive_intent, and of the
+  // body-frame view -- is the REAR AXLE. Every x below is therefore
+  // "meters ahead of the rear axle", and the icon is anchored at x = 0,
+  // not at the middle of the car. (It used to be anchored at neither: the
+  // old icon was a pile of multiples of a `size` that tracked the zoom
+  // level, so the drawn car was never any particular size and its origin
+  // sat 42% of the way down a body of no defined length.)
+  //
+  // Measured on this car with a tape, 2026-08-24:
+  //
+  //   wheelbaseM   0.36  rear axle centre to front axle centre
+  //   trackWidthM  0.30  outer edge of tire to outer edge of the other
+  //                      tire -- the widest part of the car
+  //   lidarXM      0.26  = wheelbase - 0.10. The Hokuyo sits 0.10 m behind
+  //                      the FRONT AXLE. The old 0.33 m figure came from
+  //                      assuming 0.10 m behind the physical NOSE, which
+  //                      is a different reference point and 0.07 m out.
+  //
+  // overhangM is the one number nobody has measured on this car: it is
+  // half of (Traxxas 74276-4 published length 0.535 m - published
+  // wheelbase 0.324 m). It only sets how far the drawn outline extends
+  // past the axles. No clearance, TTC or stopping distance anywhere in
+  // this workspace is computed from anything in this object -- those come
+  // from gap_follow.yaml / pure_pursuit.yaml, which carry a deliberately
+  // inflated envelope. This is a picture, and it says so.
+  //
+  // Tire size is likewise approximate (a 1/10-scale rally tire), and only
+  // ever affects how chunky the four wheels look and how far a steered
+  // front tire swings out of the footprint.
+  // ---------------------------------------------------------------------
+  const CAR_MODEL = {
+    wheelbaseM: 0.36,      // measured
+    trackWidthM: 0.30,     // measured, over the tires
+    lidarXM: 0.26,         // measured: 0.10 m behind the front axle
+    overhangM: 0.1055,     // derived, drawing only -- see above
+    tireDiameterM: 0.10,   // approximate, drawing only
+    tireWidthM: 0.04,      // approximate, drawing only
+    lidarRadiusM: 0.025,   // approximate: a UST-10LX is ~50 mm across
+  };
+
+  // Below this the icon stops being to scale and is drawn at a fixed pixel
+  // length instead, because a 0.57 m car at the zoom that fits a whole
+  // 30 m map on screen is under two pixels long and simply vanishes.
+  const CAR_MIN_LENGTH_PX = 24;
+
+  // Steering beyond a right angle is not a steering angle, and tan() blows
+  // up at exactly pi/2. Drawing-only clamp; the commanded number itself is
+  // reported unclamped in the vehicle panel.
+  const CAR_MAX_DRAWN_STEER = Math.PI / 2 - 1e-3;
+
+  // ---------------------------------------------------------------------
+  // Ackermann steering geometry, from the two measured numbers.
+  //
+  // On a real steering rack the inside wheel of a turn traces a tighter
+  // circle than the outside one, so it is turned further. Drawing both
+  // front wheels at the same angle would understate exactly the thing
+  // worth showing: how far the inside tire swings outside the car's
+  // straight-ahead footprint, which is the clearance a corner actually
+  // has to give it.
+  //
+  //   R           = wheelbase / tan(delta)   turn radius at the rear axle,
+  //                                          positive = centre to the left
+  //   delta_inner = atan(wheelbase / (|R| - track/2))
+  //   delta_outer = atan(wheelbase / (|R| + track/2))
+  //
+  // which satisfies the Ackermann condition cot(outer) - cot(inner) =
+  // track / wheelbase exactly -- that identity is what the test checks
+  // against, rather than any number recorded from this function.
+  // ---------------------------------------------------------------------
+  function ackermannWheelAngles(steering,
+                                wheelbase = CAR_MODEL.wheelbaseM,
+                                track = CAR_MODEL.trackWidthM) {
+    if (!Number.isFinite(steering) || steering === 0) return { left: 0, right: 0 };
+    const delta = Math.max(-CAR_MAX_DRAWN_STEER, Math.min(CAR_MAX_DRAWN_STEER, steering));
+    const halfTrack = track / 2;
+    const radius = Math.abs(wheelbase / Math.tan(delta));
+    // A turn radius inside the car's own half-track has no Ackermann
+    // solution -- the inside wheel would have to pivot past a right angle.
+    // Unreachable on this car (the rack limit is 0.26 rad, a 1.35 m
+    // radius), but a bad /drive command must not produce a NaN or a wheel
+    // drawn pointing backwards.
+    if (!(radius > halfTrack)) return { left: delta, right: delta };
+    const sign = delta > 0 ? 1 : -1;
+    const inner = sign * Math.atan(wheelbase / (radius - halfTrack));
+    const outer = sign * Math.atan(wheelbase / (radius + halfTrack));
+    // Turning left (delta > 0) puts the turn centre to the left, so the
+    // LEFT wheel is the inside one.
+    return delta > 0 ? { left: inner, right: outer } : { left: outer, right: inner };
+  }
+
+  // The car's footprint at a given steering angle, in body coordinates
+  // (x forward from the rear axle, y to the LEFT, both meters). Pure --
+  // no canvas, no state -- so it can be checked against the closed forms
+  // above rather than against a screenshot.
+  function carModelGeometry(steering = 0) {
+    const {
+      wheelbaseM, trackWidthM, lidarXM, overhangM, tireDiameterM, tireWidthM,
+    } = CAR_MODEL;
+    const halfTrack = trackWidthM / 2;
+    const angles = ackermannWheelAngles(steering);
+    // Wheel centres sit half a tire inboard of the measured track, so that
+    // each tire's OUTER edge lands exactly on +/- trackWidth/2.
+    const wheelY = halfTrack - tireWidthM / 2;
+    const wheel = (x, y, angle) => ({
+      x, y, angle, length: tireDiameterM, width: tireWidthM,
+    });
+    const wheels = [
+      wheel(wheelbaseM, wheelY, angles.left),
+      wheel(wheelbaseM, -wheelY, angles.right),
+      wheel(0, wheelY, 0),
+      wheel(0, -wheelY, 0),
+    ];
+    // How far the widest part of the car reaches from the centreline once
+    // the front wheels are turned. A rectangle of length L and width W
+    // rotated by d reaches |y| = |yc| + (L/2)|sin d| + (W/2)|cos d|.
+    // Kept per side, because a left turn swings the LEFT tire out further
+    // than the right one and reporting the worse of the two on both sides
+    // would claim clearance the car does not actually need.
+    const reach = (w) => Math.abs(w.y)
+      + (w.length / 2) * Math.abs(Math.sin(w.angle))
+      + (w.width / 2) * Math.abs(Math.cos(w.angle));
+    const worstOn = (side) => wheels
+      .filter((w) => Math.sign(w.y) === side)
+      .reduce((worst, w) => Math.max(worst, reach(w)), 0);
+    const clearanceLeft = worstOn(1);
+    const clearanceRight = worstOn(-1);
+    return {
+      rearAxleX: 0,
+      frontAxleX: wheelbaseM,
+      lidarX: lidarXM,
+      tailX: -overhangM,
+      noseX: wheelbaseM + overhangM,
+      halfTrack,
+      wheels,
+      clearanceLeft,
+      clearanceRight,
+      steeringHalfWidth: Math.max(clearanceLeft, clearanceRight),
+    };
+  }
+
+  if (typeof window !== 'undefined') {
+    window.__CAR_MODEL = CAR_MODEL;
+    window.__ackermannWheelAngles = ackermannWheelAngles;
+    window.__carModelGeometry = carModelGeometry;
+    // drawCarIcon itself, so a test can run the drawing path and check that
+    // no NaN reaches the canvas. A NaN coordinate does not throw -- canvas
+    // silently draws nothing -- so "the car vanished" is a failure mode
+    // that only an assertion on the arguments can catch.
+    window.__drawCarIcon = (...args) => drawCarIcon(...args);
+  }
+
+  // ---------------------------------------------------------------------
   // The HUD palette, in one place.
   //
   // These are the canvas half of the theme and they are deliberately the
@@ -897,6 +1051,35 @@
   }
   if (typeof window !== 'undefined') window.__drawFrames = drawFrames;
 
+  // ---------------------------------------------------------------------
+  // Paint order for the three live overlays, as data rather than as the
+  // order four `if` statements happen to be written in.
+  //
+  // The rule this exists to hold: the SCAN IS PAINTED AFTER THE CAR. The
+  // car icon is a real 0.36 x 0.30 m footprint drawn to scale, and the
+  // LIDAR sits inside that outline (0.26 m ahead of the rear axle), so at
+  // any zoom close enough to be useful the icon covers the beams that
+  // matter most -- the ones reading a wall the car is about to touch. An
+  // obstacle hidden underneath the picture of the car is precisely the
+  // obstacle you need to see. The car being drawn over its own scan was
+  // the bug; the sizes of the icon make it worse, not better, which is
+  // why the order is asserted in test/browser/car_model_test.js.
+  //
+  // The blind-spot wedge stays first: it is a translucent red fill over
+  // everything the LIDAR cannot see, and painting it late would tint the
+  // car and the scan points instead of sitting behind them. Intent stays
+  // under the car so the arrow reads as belonging to the car.
+  // ---------------------------------------------------------------------
+  function overlayDrawOrder(frames) {
+    const steps = [];
+    if (frames.scan !== 'none') steps.push('blindspot');
+    if (frames.intent !== 'none') steps.push('intent');
+    if (frames.car !== 'none') steps.push('car');
+    if (frames.scan !== 'none') steps.push('scan');
+    return steps;
+  }
+  if (typeof window !== 'undefined') window.__overlayDrawOrder = overlayDrawOrder;
+
   function render() {
     resizeCanvasIfNeeded();
     ctx.fillStyle = HUD.void;
@@ -941,24 +1124,21 @@
       drawRacingLine();
     }
 
-    if (frames.scan === 'map') {
-      drawBlindSpotMapRelative();
-      drawScanMapRelative();
-    } else if (frames.scan === 'body') {
-      drawBlindSpotRobotCentric();
-      drawScanRobotCentric();
-    }
-
-    // Intent under the car icon, so the car always reads as the thing the
-    // arrow belongs to.
-    if (frames.intent !== 'none') {
-      drawIntent(frames.intent === 'map');
-    }
-
-    if (frames.car === 'map') {
-      drawCarMapRelative();
-    } else if (frames.car === 'body') {
-      drawCarRobotCentric();
+    for (const step of overlayDrawOrder(frames)) {
+      if (step === 'blindspot') {
+        if (frames.scan === 'map') drawBlindSpotMapRelative();
+        else drawBlindSpotRobotCentric();
+      } else if (step === 'intent') {
+        // Intent under the car icon, so the car always reads as the thing
+        // the arrow belongs to.
+        drawIntent(frames.intent === 'map');
+      } else if (step === 'car') {
+        if (frames.car === 'map') drawCarMapRelative();
+        else drawCarRobotCentric();
+      } else if (step === 'scan') {
+        if (frames.scan === 'map') drawScanMapRelative();
+        else drawScanRobotCentric();
+      }
     }
 
     // Last, over everything: this is the tool the person is actively
@@ -1353,15 +1533,25 @@
     }
   }
 
+  // Ranges arrive in the `laser` frame, not `base_link`, so the mount
+  // offset has to be added here exactly as drawScanMapRelative adds it.
+  // Without it the beams radiate from the rear axle instead of from the
+  // LIDAR 0.26 m ahead of it, and the whole scan sits a quarter of a metre
+  // behind where it belongs relative to the car icon -- invisible while
+  // the icon was a vague blob, obvious now that the icon draws the sensor
+  // in its real place.
   function drawScanRobotCentric() {
-    const { angleMin, angleIncrement, rangeMin, rangeMax, ranges } = state.scan;
+    const {
+      angleMin, angleIncrement, rangeMin, rangeMax,
+      laserOffsetX, laserOffsetY, ranges,
+    } = state.scan;
     for (let i = 0; i < ranges.length; i++) {
       const r = ranges[i];
       if (!Number.isFinite(r) || r < rangeMin || r > rangeMax) continue;
       ctx.fillStyle = lidarColor(r);
       const angle = angleMin + i * angleIncrement;
-      const bx = r * Math.cos(angle);
-      const by = r * Math.sin(angle);
+      const bx = laserOffsetX + r * Math.cos(angle);
+      const by = laserOffsetY + r * Math.sin(angle);
       const [cx, cy] = bodyToCanvas(bx, by);
       ctx.fillRect(cx - 1, cy - 1, 2, 2);
     }
@@ -1399,11 +1589,15 @@
   function drawBlindSpotRobotCentric() {
     const span = blindSpotSpan();
     if (!span) return;
-    const { rangeMax } = state.scan;
-    const [ox, oy] = bodyToCanvas(0, 0);
+    // Apexed at the LIDAR, not at base_link -- same reason as
+    // drawScanRobotCentric above: the wedge is what the sensor cannot see.
+    const { rangeMax, laserOffsetX, laserOffsetY } = state.scan;
+    const toPoint = (a, r) => bodyToCanvas(
+      laserOffsetX + r * Math.cos(a), laserOffsetY + r * Math.sin(a));
+    const [ox, oy] = toPoint(0, 0);
     ctx.fillStyle = 'rgba(255, 69, 96, 0.16)';
-    drawWedge(ox, oy, span.from, span.to, (a) => bodyToCanvas(rangeMax * Math.cos(a), rangeMax * Math.sin(a)));
-    drawBlindSpotLabel(ox, oy, (span.from + span.to) / 2, rangeMax, (a, r) => bodyToCanvas(r * Math.cos(a), r * Math.sin(a)));
+    drawWedge(ox, oy, span.from, span.to, (a) => toPoint(a, rangeMax));
+    drawBlindSpotLabel(ox, oy, (span.from + span.to) / 2, rangeMax, toPoint);
   }
 
   function drawBlindSpotMapRelative() {
@@ -1824,75 +2018,146 @@
     // canvas rotation is clockwise once Y has been flipped -- negating
     // here keeps the icon pointing the same visual direction the car is
     // actually facing.
-    drawCarIcon(cx, cy, -state.pose.yaw);
+    drawCarIcon(cx, cy, -state.pose.yaw, drawnSteeringAngle());
   }
 
   function drawCarRobotCentric() {
-    const [cx, cy] = bodyToCanvas(0, 0); // at canvas center until the user pans
+    // base_link -- the rear axle -- at the canvas centre until the user
+    // pans. The icon's origin is the rear axle too, so this is the same
+    // point in both frames rather than "somewhere in the middle of a car".
+    const [cx, cy] = bodyToCanvas(0, 0);
     // drawCarIcon's un-rotated "front" points along local +X (canvas
     // right, see the comment on drawCarIcon) -- but bodyToCanvas renders
     // forward (bx) as canvas "up", not "right". -PI/2 rotates the icon to
     // actually point up, matching where the scan/blind-spot are drawn;
     // passing 0 here previously left the icon facing sideways while the
     // blind-spot wedge (correctly) rendered behind it.
-    drawCarIcon(cx, cy, -Math.PI / 2);
+    drawCarIcon(cx, cy, -Math.PI / 2, drawnSteeringAngle());
   }
 
-  // A top-down car silhouette, front along local +X before rotation (angle
-  // 0 = facing canvas right) -- a rounded body plus a lighter front stripe
-  // and four wheels so heading is obvious at a glance, unlike a bare
-  // rectangle which looks the same front-to-back.
-  function drawCarIcon(cx, cy, angle) {
-    const size = Math.max(10, view.scale * 0.22);
-    const bodyLen = size * 1.8;
-    const halfWidth = size * 0.6;
-    const rearX = -bodyLen * 0.42;
-    const frontX = bodyLen * 0.58;
-    const r = size * 0.28;
+  // The steering angle the front wheels are drawn at: the last commanded
+  // one, and only while it is fresh. A stale /drive is a command nobody is
+  // sending any more, and leaving the wheels cocked over from it would
+  // show a turn the car is not being asked to make.
+  function drawnSteeringAngle() {
+    if (!state.drive || isStale(state.drive)) return 0;
+    const angle = state.drive.steeringAngle;
+    return Number.isFinite(angle) ? angle : 0;
+  }
+
+  // ---------------------------------------------------------------------
+  // The car, to scale: a 0.36 m wheelbase, 0.30 m over the tires, LIDAR
+  // 0.26 m ahead of the rear axle (see CAR_MODEL). Front along local +X
+  // before rotation, so angle 0 = facing canvas right.
+  //
+  // Local canvas axes, worked out once here because getting it wrong is
+  // silent: both callers translate to base_link and then rotate, and in
+  // both the resulting frame has local +X = body forward and local +Y =
+  // body RIGHT (canvas Y grows downward, body Y grows to the left). So
+  // every body-frame y is negated on the way in, and a body-frame
+  // counterclockwise steer becomes a clockwise canvas rotation.
+  // ---------------------------------------------------------------------
+  function drawCarIcon(cx, cy, angle, steering = 0) {
+    const car = carModelGeometry(steering);
+    const lengthM = car.noseX - car.tailX;
+    // Pixels per meter. Exactly the view scale, so the icon really is the
+    // size of the car against the map -- except when zoomed so far out
+    // that the car would be a couple of pixels, where a floor takes over
+    // and the icon is knowingly bigger than life rather than invisible.
+    const m = Math.max(view.scale, CAR_MIN_LENGTH_PX / lengthM);
+    const X = (x) => x * m;
+    const Y = (y) => -y * m;
 
     ctx.save();
     ctx.translate(cx, cy);
     ctx.rotate(angle);
 
-    // Wheels first, so the body draws on top of their inner edges.
-    const wheelLen = size * 0.5;
-    const wheelThick = size * 0.22;
-    ctx.fillStyle = '#0a1119';
-    for (const ax of [frontX - bodyLen * 0.22, rearX + bodyLen * 0.22]) {
-      for (const side of [-1, 1]) {
-        const wy = side * (halfWidth + wheelThick * 0.35);
-        ctx.fillRect(ax - wheelLen / 2, wy - wheelThick / 2, wheelLen, wheelThick);
-      }
-    }
-
-    // Body: rounded rectangle, nose toward +X.
+    // Body outline. Its width is the MEASURED 0.30 m over the tires --
+    // the true widest part of the car -- so the silhouette on the map is
+    // the footprint, not a narrower styling guess with the tires hanging
+    // out of it.
+    const r = Math.min(X(0.05), X(car.halfTrack) * 0.6);
+    const tail = X(car.tailX);
+    const nose = X(car.noseX);
+    const half = X(car.halfTrack);
     ctx.beginPath();
-    ctx.moveTo(rearX + r, -halfWidth);
-    ctx.lineTo(frontX - r, -halfWidth);
-    ctx.quadraticCurveTo(frontX, -halfWidth, frontX, -halfWidth + r);
-    ctx.lineTo(frontX, halfWidth - r);
-    ctx.quadraticCurveTo(frontX, halfWidth, frontX - r, halfWidth);
-    ctx.lineTo(rearX + r, halfWidth);
-    ctx.quadraticCurveTo(rearX, halfWidth, rearX, halfWidth - r);
-    ctx.lineTo(rearX, -halfWidth + r);
-    ctx.quadraticCurveTo(rearX, -halfWidth, rearX + r, -halfWidth);
+    ctx.moveTo(tail + r, -half);
+    ctx.lineTo(nose - r, -half);
+    ctx.quadraticCurveTo(nose, -half, nose, -half + r);
+    ctx.lineTo(nose, half - r);
+    ctx.quadraticCurveTo(nose, half, nose - r, half);
+    ctx.lineTo(tail + r, half);
+    ctx.quadraticCurveTo(tail, half, tail, half - r);
+    ctx.lineTo(tail, -half + r);
+    ctx.quadraticCurveTo(tail, -half, tail + r, -half);
     ctx.closePath();
     // Cyan, not red: on this palette red means "the car has decided to
     // stop", and a permanently red car icon competes with that. Cyan is
     // the accent that means "this mark is the system talking".
     ctx.fillStyle = HUD.accent;
     ctx.shadowColor = 'rgba(61, 220, 255, 0.85)';
-    ctx.shadowBlur = Math.max(4, size * 0.5);
+    ctx.shadowBlur = Math.max(3, m * 0.08);
     ctx.fill();
     ctx.shadowBlur = 0;
     ctx.strokeStyle = '#eafaff';
-    ctx.lineWidth = Math.max(1, size * 0.06);
+    ctx.lineWidth = Math.max(1, m * 0.006);
     ctx.stroke();
 
-    // Windshield-ish stripe near the front -- the one visual cue that
-    // makes "which end is the front" unambiguous at a glance.
+    // Windshield-ish band near the front -- the one cue that survives at
+    // the zoom where the whole car is 24 px long and reads "which end is
+    // the front" without having to find the LIDAR puck.
     ctx.fillStyle = 'rgba(4, 10, 18, 0.65)';
-    ctx.fillRect(frontX - bodyLen * 0.34, -halfWidth * 0.7, bodyLen * 0.14, halfWidth * 1.4);
+    ctx.fillRect(X(car.noseX - 0.10), -half * 0.7, Math.max(1, X(0.045)), half * 1.4);
+
+    // Wheels last of the body parts, and dark: they are the widest thing
+    // on the car, they sit exactly ON the outline rather than inside it,
+    // and a steered front tire is supposed to be seen poking out past it.
+    ctx.fillStyle = '#0a1119';
+    for (const w of car.wheels) {
+      ctx.save();
+      ctx.translate(X(w.x), Y(w.y));
+      ctx.rotate(-w.angle); // body-frame CCW -> canvas CW, see above
+      ctx.fillRect(-X(w.length) / 2, -X(w.width) / 2,
+                   Math.max(1, X(w.length)), Math.max(1, X(w.width)));
+      ctx.restore();
+    }
+
+    // Where the beams actually come from. Worth its own mark: the LIDAR is
+    // 0.26 m ahead of the rear axle the pose is reported at, so the scan
+    // radiates from a point 72% of the way up the car, not from its
+    // middle and not from the dot the pose puts on the map.
+    const lidarR = Math.max(1.5, X(CAR_MODEL.lidarRadiusM));
+    ctx.beginPath();
+    ctx.arc(X(car.lidarX), 0, lidarR, 0, 2 * Math.PI);
+    ctx.fillStyle = '#04121b';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(234, 250, 255, 0.9)';
+    ctx.lineWidth = Math.max(1, m * 0.004);
+    ctx.stroke();
+
+    // Steering clearance: how far the turned front tire reaches out past
+    // the parked footprint, per side, straight off the measured wheelbase
+    // and track (carModelGeometry). Only drawn while it is actually
+    // wider than the car -- so at rest there is nothing extra on screen,
+    // and mid-corner there is a mark showing the room the front end needs
+    // that the body outline alone does not ask for.
+    const overhangs = [
+      [1, car.clearanceLeft],
+      [-1, car.clearanceRight],
+    ].filter(([, reach]) => reach > car.halfTrack + 0.002);
+    if (overhangs.length) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(61, 220, 255, 0.55)';
+      ctx.lineWidth = Math.max(1, m * 0.004);
+      ctx.setLineDash([Math.max(2, X(0.03)), Math.max(2, X(0.02))]);
+      for (const [side, reach] of overhangs) {
+        ctx.beginPath();
+        ctx.moveTo(X(car.frontAxleX - 0.12), Y(side * reach));
+        ctx.lineTo(X(car.frontAxleX + 0.12), Y(side * reach));
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
 
     ctx.restore();
   }

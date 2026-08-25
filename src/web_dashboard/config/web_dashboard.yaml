@@ -73,8 +73,12 @@ web_dashboard_node:
     scan_decimation: 1
 
     # --- LIDAR mounting offset from base_link, used to place scan points
-    # correctly relative to the car's pose (see docs/hardware-reference.md) ---
-    laser_offset_x: 0.33
+    # correctly relative to the car's pose (see docs/hardware-reference.md).
+    # Measured 2026-08-24: 0.26 m = the 0.36 m wheelbase less the 0.10 m the
+    # LiDAR sits behind the front axle. Must match the base_link->laser
+    # static transform in bringup_launch.py, or the dashboard draws the scan
+    # somewhere the car is not looking. ---
+    laser_offset_x: 0.26
     laser_offset_y: 0.0
 
     # --- Live parameter tuning ---

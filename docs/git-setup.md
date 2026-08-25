@@ -73,9 +73,9 @@ The workspace-specific integration code and documentation outside those two repo
 
 Concretely: its `.git` gitlink and its `.gitmodules` / `.git/config` entries were removed, then the files were kept and `git add`-ed like any other package.
 
-It carries three local fixes that have to live in this repo's history.
+It carries four local fixes that have to live in this repo's history.
 
-> **All three are guaranteed to be silently clobbered by a naive upstream overwrite.** Check every one of them after any sync.
+> **All four are guaranteed to be silently clobbered by a naive upstream overwrite.** Check every one of them after any sync.
 
 ### Fix 1 — the steering axis
 
@@ -117,6 +117,39 @@ ros2 param get /ackermann_to_vesc_node speed_to_erpm_gain # must be +4614.0
 ```
 
 **Working when:** the two values are opposite in sign, exactly as shown. If they match, Fix 3 has been lost.
+
+### Fix 4 — this car's measured geometry, which also fails silently
+
+`src/f1tenth_system/f1tenth_stack/config/vesc.yaml` and
+`src/f1tenth_system/f1tenth_stack/launch/bringup_launch.py`
+
+Two numbers in this package describe *this* car, not a stock one. Both were tape-measured on 2026-08-24 and both replace values that were wrong.
+
+- `vesc.yaml` → `wheelbase: 0.36`, not upstream's (and Traxxas's) `0.324`. `vesc_to_odom_node` integrates heading as `speed × tan(steering) / wheelbase`, so a wheelbase 10% short puts ~10% too much yaw into `/odom`.
+- `bringup_launch.py` → the `base_link`→`laser` static transform is `0.26 0.0 0.11`, not `0.33 0.0 0.11`. The LiDAR sits 0.10 m behind the front axle, which is 0.26 m ahead of the rear-axle `base_link`.
+
+See [hardware-reference.md](hardware-reference.md#physical-dimensions-used-in-config) for the measurements and the full list of files each one has to stay in step with.
+
+> **This one fails as quietly as Fix 3.** Nothing errors. The map just builds slightly wrong, the car's modelled nose moves 0.09 m, and every clearance decision shifts with it.
+
+**Verify after any upstream sync:**
+
+**Terminal 1** — the driver stack, which the two checks read from.
+
+```bash
+ros2 launch f1tenth_stack bringup_launch.py
+```
+
+**Working when:** it settles into a steady stream of logs and stays up. It starts no [node](glossary.md#node) that can move the car on its own. Leave it running.
+
+**Terminal 2** — the checks themselves.
+
+```bash
+ros2 param get /vesc_to_odom_node wheelbase        # must be 0.36
+ros2 run tf2_ros tf2_echo base_link laser          # translation x must be 0.260
+```
+
+**Working when:** the parameter reads `0.36` and the transform's x translation reads `0.260`. Ctrl+C the `tf2_echo` once you've seen one message.
 
 ### Not a fix: the SLAM tuning lives outside this package
 
@@ -254,17 +287,18 @@ colcon build --symlink-install --packages-select <package>
 
 1. **Diff your vendored copy against upstream.** Take a fresh clone or checkout of `f1tenth/f1tenth_system` at whatever branch or commit you want to pull in, and see what actually changed.
 2. **Apply the parts you want by hand** into `src/f1tenth_system/` — copy files over, or use `git diff` / `git apply` between the two trees.
-3. **Before committing, re-check all three local modifications.** Every one of them:
+3. **Before committing, re-check all four local modifications.** Every one of them:
 
    | Check | Should still be |
    |---|---|
    | `f1tenth_stack/config/joy_teleop.yaml` → `drive-steering_angle` under `human_control` | `axis: 3`, **not** upstream's `axis: 2` |
    | `f1tenth_stack/launch/bringup_launch.py` | still does **not** start a `joy_teleop` node, with `teleop_launch.py` still present separately (upstream will have bundled them back together) |
    | `f1tenth_stack/config/vesc.yaml` → `vesc_to_odom_node` | still carries `speed_to_erpm_gain: -4614.0` |
+   | `f1tenth_stack/config/vesc.yaml` → `wheelbase`, and the `base_link`→`laser` transform in all three `*_bringup_launch.py` files | `0.36`, and `0.26 0.0 0.11` — this car's measured geometry, **not** the `0.324` / `0.33` upstream ships |
 
 4. **Commit normally:** `git add src/f1tenth_system && git commit`. There's no submodule pointer to bump — the files themselves are the commit.
 
-> **Do step 3 even when you're confident.** All three fixes are silently reverted by a naive overwrite, and the third one fails silently *and* unsafely.
+> **Do step 3 even when you're confident.** All four fixes are silently reverted by a naive overwrite, and the last two fail silently *and* unsafely.
 
 ---
 

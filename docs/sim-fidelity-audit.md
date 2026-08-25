@@ -7,6 +7,20 @@
 How closely does `tools/f1tenth_sim/` match this physical car, where does it
 diverge, and what would it cost to close the gap?
 
+> **Update, 2026-08-24 — the car was re-measured, and this changes a premise below.**
+>
+> The wheelbase is 0.36 m, not the 0.324 m Traxxas publishes, and the LiDAR sits 0.26 m ahead of `base_link`, not 0.33 m. See [hardware-reference.md](hardware-reference.md#physical-dimensions-used-in-config).
+>
+> **What that does to F10 (the dead collision check):** the first of its two faults no longer holds as written.
+>
+> 0.26 m is *inside* the ±0.29 m collision box. So `side_distances` is no longer identically zero, and the check is no longer provably unreachable.
+>
+> **What it does not do is make gym's flag trustworthy.** Nobody has re-run the probe under the corrected geometry.
+>
+> The check remains a ~2 cm window against a scan clipped at `range_min` 0.05 m, and both harnesses still compute their own collision geometry and take their verdicts from that.
+>
+> The 198.9 m measurement below stands as what was measured, under the geometry of the day.
+
 This audit was done by reading the harness and the pinned F1TENTH Gym dynamics,
 comparing every vehicle parameter against this car's own configs
 (`vesc.yaml`, `sensors.yaml`, `pure_pursuit.yaml`), and **running probes against
@@ -31,6 +45,7 @@ and how to run it. This document is about how much to trust it.
 >   supposed to be measured from, and `range_min` clipping at 0.05 m then makes
 >   the degenerate test unreachable. Measured: 198.9 m driven straight through
 >   the circuit and its barriers, never flagged.
+>   (The +0.33 m was itself wrong — see the 2026-08-24 update below.)
 > - **R3's proposed fix is superseded.** A 5 ms control step shrinks the
 >   steering limit cycle 5× and costs 3.1× in run time.
 >   `SteerActionType.STEERING_SPEED` removes the limit cycle entirely, is more
@@ -59,10 +74,10 @@ Even the heaviest tested configuration runs 3.2× faster than real time in
 
 Worth stating plainly, because the list is longer than you might expect:
 
-- **Wheelbase 0.324 m** matches `vesc.yaml` exactly.
-- **Body 0.31 × 0.58 m** is deliberately padded beyond the real chassis, with
+- **Wheelbase 0.36 m** matches `vesc.yaml` exactly.
+- **Body 0.33 × 0.58 m** is deliberately padded beyond the real chassis, with
   the collision centre at wheelbase/2 — conservative in the right direction.
-- **LiDAR mounting** — ±135° FOV and the +0.33 m forward offset match the real
+- **LiDAR mounting** — ±135° FOV and the +0.26 m forward offset match the real
   `laser` frame.
 - **Control timing** — 40 Hz control with a 5 ms RK4 integration substep matches
   `control_rate_hz: 40.0`.
@@ -276,7 +291,7 @@ in_collision = np.any(ttc <= 0.005)
 
 A geometric test: is any beam within 5 mm of the car's body outline. That is
 reasonable, but it inherits the LiDAR's field of view. **The scan spans ±135°
-from a sensor mounted 0.33 m forward of `base_link`, leaving a 90° wedge behind
+from a sensor mounted 0.26 m forward of `base_link`, leaving a 90° wedge behind
 the car with no beams — contacts there cannot be detected.** In the two-car
 scenario, the opponent being struck from behind would not register as a
 collision on the opponent's flag.

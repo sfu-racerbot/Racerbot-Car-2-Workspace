@@ -65,19 +65,31 @@ gap_follow_node:
     # Never let a long scan pause turn into one unbounded command jump.
     command_slew_max_dt: 0.10
     # --- Rectangular vehicle footprint ---
-    # Traxxas 74276-4 is 0.535 x 0.281 m; retain this intentionally inflated
-    # 0.58 x 0.31 m collision envelope. Its published wheelbase is 0.324 m.
-    # LiDAR x ~= 0.33 m estimates a mount about 0.10 m behind the physical nose.
-    car_width: 0.31
+    # Measured on this car with a tape, 2026-08-24, NOT the Traxxas 74276-4
+    # published figures the earlier values came from:
+    #   wheelbase      0.36 m   front axle to rear axle (Traxxas says 0.324)
+    #   width          0.30 m   outer edge of tire to outer edge of tire --
+    #                           the tires, not the shell, are the widest part
+    #   laser_offset_x 0.26 m   = 0.36 - 0.10; the LiDAR sits 0.10 m behind
+    #                           the FRONT AXLE. The old 0.33 m assumed 0.10 m
+    #                           behind the NOSE, a different reference point.
+    # car_width keeps the same deliberate padding it always had -- 0.31 was
+    # the published 0.281 m body plus 14.5 mm a side, so 0.30 measured plus
+    # the same padding is 0.33. It is an envelope, not a measurement.
+    # car_length is UNCHANGED because nobody has measured this car bumper to
+    # bumper; 0.58 still contains it under the published overhang, but with
+    # ~4.5 mm an end rather than the 22.5 mm it was designed for. Measure
+    # rear-axle-to-nose and revisit.
+    car_width: 0.33
     car_length: 0.58
-    wheelbase: 0.324
-    laser_offset_x: 0.33
+    wheelbase: 0.36
+    laser_offset_x: 0.26
     laser_offset_y: 0.0
     # Padding added to half the car width when inflating obstacle edges
     # (disparity_extend) and when sizing the safety bubble. This is the knob
     # that decides how wide a berth the chosen gap gives the inside of a
     # corner: the extension is car_width/2 + safety_margin, so 0.18 moves the
-    # drivable window 0.335m off every edge instead of 0.255m. Raised because
+    # drivable window 0.345m off every edge instead of 0.265m. Raised because
     # the car was clipping corner apexes and then sitting ~0.08m off the wall.
     # Costs gap width, so raise it further only alongside
     # min_centerline_gap_width / fallback_min_gap_distance.

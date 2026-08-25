@@ -433,7 +433,7 @@ def _linear_fit(points):
 
 def steering_calibration(session: dict):
     params = session.get('current_parameters', {})
-    wheelbase = float(params.get('wheelbase', 0.324))
+    wheelbase = float(params.get('wheelbase', 0.36))
     current_gain = float(params.get('steering_angle_to_servo_gain', -1.2135))
     current_offset = float(params.get('steering_angle_to_servo_offset', 0.5304))
     trials = [

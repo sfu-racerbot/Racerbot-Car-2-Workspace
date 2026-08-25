@@ -14,6 +14,7 @@ import sys
 
 import numpy as np
 import pytest
+import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from racerbot_sim import sim_bridge, tracks  # noqa: E402
@@ -141,10 +142,41 @@ def test_lidar_geometry_matches_the_real_sensor():
     assert math.degrees(increment) == pytest.approx(0.25, abs=0.001)
 
 
-def test_vehicle_geometry_matches_the_car_configs():
-    """These must agree with gap_follow.yaml and pure_pursuit.yaml, or the
-    simulator is validating a different car from the one being flown."""
-    assert sim_bridge.WHEELBASE == 0.324
-    assert sim_bridge.CAR_WIDTH == 0.31
-    assert sim_bridge.CAR_LENGTH == 0.58
-    assert sim_bridge.LIDAR_OFFSET_X == 0.33
+def _car_params(package, node):
+    """The vehicle geometry a real driving node is actually launched with."""
+    path = os.path.join(
+        os.path.dirname(__file__), '..', '..', package, 'config', f'{package}.yaml')
+    with open(path, encoding='utf-8') as handle:
+        return yaml.safe_load(handle)[node]['ros__parameters']
+
+
+@pytest.mark.parametrize('package,node,fields', [
+    ('gap_follow', 'gap_follow_node',
+     ('wheelbase', 'car_width', 'car_length', 'laser_offset_x')),
+    # pure_pursuit.yaml declares laser_offset_x under the same name but in a
+    # different section; car_length/car_width/wheelbase are all there too.
+    ('pure_pursuit', 'pure_pursuit_node',
+     ('wheelbase', 'car_width', 'car_length', 'laser_offset_x')),
+])
+def test_vehicle_geometry_matches_the_car_configs(package, node, fields):
+    """The simulator must fly the car the real code is aimed at.
+
+    Read out of the YAML each node is launched with rather than restated
+    here. The previous version of this test carried its own copy of the
+    four numbers, so "the simulator agrees with the car" held only until
+    someone edited one file and not the other -- which is exactly what
+    re-measuring the car does.
+    """
+    params = _car_params(package, node)
+    sim = {
+        'wheelbase': sim_bridge.WHEELBASE,
+        'car_width': sim_bridge.CAR_WIDTH,
+        'car_length': sim_bridge.CAR_LENGTH,
+        'laser_offset_x': sim_bridge.LIDAR_OFFSET_X,
+    }
+    missing = [f for f in fields if f not in params]
+    assert not missing, f'{package}.yaml no longer declares {missing}'
+    for field in fields:
+        assert sim[field] == params[field], (
+            f'{package}.yaml {field}={params[field]} but the simulator uses '
+            f'{sim[field]}')

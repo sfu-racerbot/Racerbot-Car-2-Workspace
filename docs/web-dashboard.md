@@ -289,9 +289,29 @@ So panning and zooming track their own offset in each: `view.bodyPanX/bodyPanY` 
 
 They deliberately don't share one, since a drag that happened before localization has no meaningful world-frame equivalent to carry over.
 
-**The car icon.** A small top-down car silhouette rather than a bare arrow: rounded cyan body with a faint glow, four wheels, and a dark "windshield" stripe near the nose.
+**The car icon.** A top-down car silhouette rather than a bare arrow, and **drawn to scale**.
 
-The stripe is the one cue that makes heading unambiguous at a glance. A plain rectangle looks the same front-to-back.
+The outline is the car's real footprint: 0.36 m between the axles, 0.30 m across the tires. It is anchored at `base_link` — the rear axle, which is the point every pose refers to.
+
+So the icon is the size of the car against the map. At the zoom where the whole map fits on screen that would be a couple of pixels, so below a floor of about 24 px long it stops shrinking and is knowingly drawn larger than life.
+
+Rounded cyan body with a faint glow, four dark wheels sitting exactly on the outline, and a dark "windshield" stripe near the nose. The stripe is the one cue that makes heading unambiguous at the smallest sizes. A plain rectangle looks the same front-to-back.
+
+**A small ringed dot marks the LIDAR**, 0.26 m ahead of the rear axle. It is worth its own mark because the beams radiate from there, not from the dot the pose puts on the map — about three-quarters of the way up the car.
+
+**The front wheels turn** with the last commanded steering angle.
+
+They use real Ackermann geometry, computed from the two measured numbers. ("Ackermann" is the steering arrangement a car uses: the inside wheel of a turn traces a tighter circle than the outside one, so the rack turns it further.)
+
+When a turned tire reaches outside the parked footprint, a short dashed line appears on that side showing how much room the front end is actually asking for. Nothing is drawn there when the wheels are straight.
+
+If `/drive` goes stale the wheels snap back to straight, rather than leaving the car cocked over from a command nobody is sending.
+
+**LIDAR points are painted on top of the car icon**, not under it.
+
+Because the icon is a real footprint at real scale, it otherwise covers the beams closest to the car — exactly the ones reading a wall it is about to touch.
+
+`test/browser/car_model_test.js` asserts that order for every combination of what has arrived. It is the kind of thing a later refactor reorders without noticing.
 
 A translucent red wedge marks the LIDAR's actual blind spot: the arc it physically never scans. The Hokuyo's ~270° field of view leaves a real ~90° gap behind its mount.
 
@@ -1200,7 +1220,7 @@ All in `src/web_dashboard/config/web_dashboard.yaml`. A few entries mention [TF]
 | `map_keyframe_sec` | `30.0` | Resend the whole grid at least this often, so a browser cannot stay wrong indefinitely |
 | `scan_encoding` | `u16mm` | `u16mm` (uint16 millimetres — half the bytes, difference below one screen pixel) or `f32` |
 | `scan_decimation` | `1` | Send only every Nth beam. `1` = every beam |
-| `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` | Estimated LIDAR mounting offset from `base_link` (matches [hardware-reference.md](hardware-reference.md)), used to place scan points correctly relative to the car's pose |
+| `laser_offset_x` / `laser_offset_y` | `0.26` / `0.0` | Measured LIDAR mounting offset from `base_link` (matches [hardware-reference.md](hardware-reference.md)), used to place scan points correctly relative to the car's pose. **Must match the `base_link`→`laser` static transform in `bringup_launch.py`** — if the two disagree, the dashboard draws the scan somewhere the car is not looking |
 | `enable_tuning` | `true` | Whether [live parameter tuning](#live-parameter-tuning) exists at all. `false` never creates the service clients, and the panel disappears — a strictly read-only dashboard |
 | `tuning_nodes` | `[pure_pursuit_node, gap_follow_node]` | The only nodes this dashboard will probe or write to. An explicit list rather than bus discovery, which is what keeps it inside this workspace's own driving code |
 | `tuning_config_files` | `[pure_pursuit/config/pure_pursuit.yaml, gap_follow/config/gap_follow.yaml]` | Parallel to `tuning_nodes`: `<package>/<path under its share dir>` for the file "save" writes back to. Blank = tunable live but never savable |

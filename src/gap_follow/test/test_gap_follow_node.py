@@ -382,6 +382,24 @@ def _wall_ahead(distance, half_angle_deg=10.0, n=541, span=math.pi):
     return ranges
 
 
+def _range_for_body_clearance(node, clearance):
+    """A straight-ahead LiDAR range that leaves `clearance` at the bumper.
+
+    TTC and the forward reserve are both measured from the padded body, not
+    from the sensor, so a raw range only means something once the forward
+    body boundary is subtracted from it. Computed here from the configured
+    footprint -- rear-axle base_link, rectangle centred halfway along the
+    wheelbase -- rather than written as a fixed range, because the whole
+    conversion moved when the car was re-measured on 2026-08-24: the LiDAR
+    turned out to be 0.26 m ahead of the rear axle rather than 0.33 m, which
+    put the modelled nose 0.088 m further out in front of it. Fixed ranges
+    here quietly became a different test of a different clearance.
+    """
+    forward_boundary = (
+        node.wheelbase / 2.0 + node.car_length / 2.0 - node.laser_offset_x)
+    return clearance + forward_boundary
+
+
 def test_ttc_brakes_at_speed_but_not_at_a_crawl(node):
     """The TTC brake is armed only above ttc_min_brake_speed.
 
@@ -392,18 +410,23 @@ def test_ttc_brakes_at_speed_but_not_at_a_crawl(node):
     stops at 0.15-0.39m/s, several reading `odom 0.00m/s` while braking on
     the car's own commanded speed. Above the gate the brake must still fire.
     """
+    # 0.24m of body clearance at 1.2m/s is a 0.20s TTC, inside the 0.35s
+    # threshold, and the car is above the 0.6m/s gate.
     _ready(node, speed=1.2)
     published = _capture(node)
-    _tick(node, _scan(_wall_ahead(0.45)))
+    _tick(node, _scan(_wall_ahead(_range_for_body_clearance(node, 0.24))))
     assert node.last_decision_state == 'ttc_brake', \
-        'at 1.2m/s a wall 0.45m ahead must still trip the TTC brake'
+        'at 1.2m/s, 0.24m from the bumper must still trip the TTC brake'
     assert published[-1].drive.speed == 0.0
 
-    # Same closing geometry, scaled to a crawl: TTC is still under threshold,
-    # but the car must be left free to creep out rather than latched at zero.
+    # Same closing geometry, scaled to a crawl: 0.16m at 0.55m/s is a 0.29s
+    # TTC, still inside the threshold, so only the speed gate can be what
+    # holds the brake off. The clearance is deliberately above the 0.125m
+    # creep reserve, so the escape creep has room to command a crawl -- this
+    # test is about the TTC gate, not about the reserve.
     _ready(node, speed=0.55)
     published = _capture(node)
-    _tick(node, _scan(_wall_ahead(0.28)))
+    _tick(node, _scan(_wall_ahead(_range_for_body_clearance(node, 0.16))))
     assert node.last_decision_state != 'ttc_brake', \
         'below ttc_min_brake_speed the TTC brake must not be what stops the car'
     assert published[-1].drive.speed > 0.0, \
@@ -419,7 +442,7 @@ def test_the_crawl_case_is_the_gate_and_not_the_geometry(node):
     node.ttc_min_brake_speed = 0.0
     _ready(node, speed=0.55)
     published = _capture(node)
-    _tick(node, _scan(_wall_ahead(0.28)))
+    _tick(node, _scan(_wall_ahead(_range_for_body_clearance(node, 0.16))))
     assert node.last_decision_state == 'ttc_brake'
     assert published[-1].drive.speed == 0.0
 
@@ -646,24 +669,56 @@ def test_adaptive_width_ignores_an_open_side_and_holds_the_static_defaults(node)
     assert corner_speed == pytest.approx(node.corner_speed_wide)
 
 
+ADAPTIVE_FLOOR_MARGIN = 0.12   # a margin a per-course config could set
+
+
+def _disparity_reach_beams(node, margin, wall_range, angle_increment):
+    """Beams disparity_extend inflates each edge by, from its own formula.
+
+    Recomputed rather than restated. The reach is
+    ``ceil(atan2(car_width/2 + margin, near_range) / angle_increment)``,
+    so it moves whenever the car's width does -- and it did, when the car
+    was re-measured on 2026-08-24 and car_width went 0.31 -> 0.33. The
+    previous version of the test below pinned the beam counts as literals
+    and silently stopped straddling the bridge it was built to straddle.
+    """
+    return math.ceil(
+        math.atan2(node.car_width / 2.0 + margin, wall_range) / angle_increment)
+
+
 def test_smaller_effective_margin_recovers_a_gap_a_static_one_would_miss(node):
     """The mechanism the ASB 10000-level course exercised (see
     docs/asb-10000-sim-results.json): at the static 0.18m margin,
     disparity_extend's inflation converging from both sides of a narrow
     opening can fully bridge it, reporting no gap at all. The same opening
     at the adaptive floor (0.12m) leaves enough of it standing to find a
-    preferred gap instead of stopping. These exact widths (a 94-beam
-    opening at 0.01rad spacing, walls at 0.6m) were chosen so the static
-    margin's disparity reach (51 beams each side, fully bridging it) and
-    the adaptive floor's reach (43 beams each side, leaving an 8-beam
-    sliver) land on opposite sides of that bridge -- not a coincidence of
-    this car's real car_width/margin numbers, so this is pinned rather than
-    computed from them."""
+    preferred gap instead of stopping.
+
+    The opening is sized to land between the two reaches: wider than twice
+    the adaptive floor's, so a sliver survives, and narrower than twice the
+    static margin's, so it does not. Both preconditions are asserted, so a
+    car geometry that made the test vacuous would fail it rather than pass
+    it for the wrong reason.
+    """
     n = 600
     angle_increment = 0.01
+    wall_range = 0.6
+    static_reach = _disparity_reach_beams(
+        node, node.safety_margin, wall_range, angle_increment)
+    floor_reach = _disparity_reach_beams(
+        node, ADAPTIVE_FLOOR_MARGIN, wall_range, angle_increment)
+    # 8 beams of surviving sliver: enough to clear min_centerline_gap_width
+    # at this depth, which is what makes the recovered gap a usable one.
+    opening = 2 * floor_reach + 8
+    assert floor_reach < static_reach, \
+        'a smaller margin must inflate less, or this test proves nothing'
+    assert opening < 2 * static_reach, \
+        'the static margin must still fully bridge the opening'
+
     beam_angles = np.zeros(n)
-    window = np.full(n, 0.6)
-    window[150:244] = 2.2
+    window = np.full(n, wall_range)
+    start = (n - opening) // 2
+    window[start:start + opening] = 2.2
     window_valid = np.ones(n, dtype=bool)
 
     node.effective_safety_margin = node.safety_margin
@@ -671,7 +726,7 @@ def test_smaller_effective_margin_recovers_a_gap_a_static_one_would_miss(node):
         window.copy(), window_valid, angle_increment, beam_angles)
     assert gap_start is None, 'the static margin should fully bridge this opening'
 
-    node.effective_safety_margin = 0.12  # a margin a per-course config could set
+    node.effective_safety_margin = ADAPTIVE_FLOOR_MARGIN
     _, _, gap_start, _, used_fallback, _, _ = node._select_gap(
         window.copy(), window_valid, angle_increment, beam_angles)
     assert gap_start is not None, 'a smaller margin should leave the opening standing'

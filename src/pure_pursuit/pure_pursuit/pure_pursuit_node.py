@@ -169,7 +169,8 @@ class PurePursuitNode(Node):
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('drive_topic', '/drive')
         self.declare_parameter('control_rate_hz', 40.0)
-        self.declare_parameter('wheelbase', 0.324)
+        # Measured 2026-08-24; see docs/hardware-reference.md.
+        self.declare_parameter('wheelbase', 0.36)
         self.declare_parameter('min_lookahead', 0.6)
         self.declare_parameter('max_lookahead', 1.5)
         self.declare_parameter('lookahead_speed_gain', 0.15)
@@ -193,7 +194,7 @@ class PurePursuitNode(Node):
         self.declare_parameter('pose_frozen_min_speed', 0.3)
         self.declare_parameter('pose_frozen_min_travel', 0.05)
         # Rectangular collision envelope, mirroring gap_follow's.
-        self.declare_parameter('car_width', 0.31)
+        self.declare_parameter('car_width', 0.33)
         self.declare_parameter('car_length', 0.58)
         self.declare_parameter('emergency_stop_clearance', 0.05)
         self.declare_parameter('body_clearance_fov_deg', 180.0)
@@ -259,7 +260,7 @@ class PurePursuitNode(Node):
         self.declare_parameter('overtake_min_side_clearance', 0.70)
         self.declare_parameter('overtake_lookahead_distance', 4.0)
         self.declare_parameter('overtake_max_blind_sec', 3.0)
-        self.declare_parameter('laser_offset_x', 0.33)
+        self.declare_parameter('laser_offset_x', 0.26)
         self.declare_parameter('laser_offset_y', 0.0)
 
         # --- Opponent detection mode: 'heuristic' (shape-based, no map

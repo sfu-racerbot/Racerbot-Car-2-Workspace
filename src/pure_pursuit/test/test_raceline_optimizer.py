@@ -79,7 +79,11 @@ def test_signed_curvature_is_zero_on_a_straight():
 def test_curvature_limit_matches_the_bicycle_model():
     assert opt.curvature_limit(0.26, 0.324) == pytest.approx(
         math.tan(0.26) / 0.324)
-    assert 1.0 / opt.curvature_limit(0.26, 0.324) == pytest.approx(1.22, abs=0.01)
+    # This car, as configured: 0.26 rad of rack on the 0.36 m wheelbase
+    # measured 2026-08-24. It read 1.22 m while the wheelbase was believed
+    # to be the 0.324 m Traxxas publishes -- a longer wheelbase turns
+    # WIDER, so the car needs MORE room for the same rack angle.
+    assert 1.0 / opt.curvature_limit(0.26, 0.36) == pytest.approx(1.353, abs=0.01)
 
 
 # ============================================================================

@@ -354,7 +354,9 @@ The message names which check failed:
 
 **The two real causes:**
 
-**1. The course has a corner tighter than the car can turn.** `tan(0.26)/0.324` gives a **1.22 m minimum turning radius**. Plot `raceline_raw.csv` (written even on a refusal) over the saved `map.pgm` and look at the tightest corner.
+**1. The course has a corner tighter than the car can turn.** `tan(0.26)/0.36` gives a **1.35 m minimum turning radius**. Plot `raceline_raw.csv` (written even on a refusal) over the saved `map.pgm` and look at the tightest corner.
+
+> This figure was 1.22 m until the car was tape-measured on 2026-08-24 and the wheelbase turned out to be 0.36 m rather than the 0.324 m Traxxas publishes. A longer wheelbase turns *wider*, so a course that the optimizer used to accept may now be refused. The refusal is the correct answer; the old acceptance was not.
 
 If that's the answer, **the course needs opening out.** No amount of filtering fixes geometry.
 

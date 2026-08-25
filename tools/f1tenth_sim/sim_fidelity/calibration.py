@@ -77,16 +77,16 @@ class CarCalibration:
     """Every physical constant the simulator needs for this car."""
 
     # --- Geometry -------------------------------------------------------
-    wheelbase: float = 0.324
+    wheelbase: float = 0.36
     # The padded safety envelope, used for clearance to walls.
-    width: float = 0.31
+    width: float = 0.33
     length: float = 0.58
     # The actual chassis. Contact between two cars has to use this: applying
     # the padded envelope to both bodies counts the safety margin twice and
     # reports a collision while roughly 7 mm of real air remains.
-    body_width: float = 0.281
+    body_width: float = 0.30
     body_length: float = 0.535
-    lidar_offset_x: float = 0.33
+    lidar_offset_x: float = 0.26
 
     # --- Mass properties ------------------------------------------------
     mass: float = 3.74
@@ -206,8 +206,10 @@ class CarCalibration:
 #: Where every field of :class:`CarCalibration` came from.
 PROVENANCE: dict[str, tuple[Provenance, str]] = {
     "wheelbase": (
-        Provenance.DERIVED,
-        "vesc.yaml wheelbase: .324 (Traxxas 74276-4 published figure)",
+        Provenance.MEASURED,
+        "tape-measured on this car 2026-08-24: 0.36 m front axle to rear "
+        "axle, now in vesc.yaml. Traxxas publishes 0.324 for a stock "
+        "74276-4; this car is not one",
     ),
     "width": (
         Provenance.DERIVED,
@@ -218,16 +220,19 @@ PROVENANCE: dict[str, tuple[Provenance, str]] = {
         "pure_pursuit.yaml car_length -- deliberately padded past the real body",
     ),
     "body_width": (
-        Provenance.SPEC,
-        "Traxxas 74276-4 published body width, per pure_pursuit.yaml",
+        Provenance.MEASURED,
+        "tape-measured on this car 2026-08-24: 0.30 m outer edge of tire "
+        "to outer edge of tire, which is wider than the 0.281 m shell "
+        "Traxxas publishes -- the tires are the widest part",
     ),
     "body_length": (
         Provenance.SPEC,
         "Traxxas 74276-4 published body length, per pure_pursuit.yaml",
     ),
     "lidar_offset_x": (
-        Provenance.DERIVED,
-        "pure_pursuit.yaml laser_offset_x (itself recorded as an estimate)",
+        Provenance.MEASURED,
+        "tape-measured on this car 2026-08-24: 0.10 m behind the front "
+        "axle, so 0.36 - 0.10 = 0.26 m ahead of the rear-axle base_link",
     ),
     "mass": (
         Provenance.STOCK,

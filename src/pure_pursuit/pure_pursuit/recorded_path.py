@@ -347,9 +347,10 @@ def prepare(points, *, spacing: float, max_steering_angle: float,
     """Clean a recorded lap into a closed line the rack can actually follow.
 
     `min_feature_wavelength` sets the finest detail considered before
-    filtering harder: 1.5m is a little over the 1.22m minimum turning circle
-    this car's steering limit implies, so anything tighter is not something
-    the car drove -- it is something localisation did.
+    filtering harder: 1.5m is a little over the 1.35m minimum turning radius
+    this car's steering limit implies on its measured 0.36m wheelbase, so
+    anything tighter is not something the car drove -- it is something
+    localisation did.
 
     `clearance_fn(xs, ys) -> metres to the nearest obstacle` and
     `required_clearance` bring the map into the choice, and they are what

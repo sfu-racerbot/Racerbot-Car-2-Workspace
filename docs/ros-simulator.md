@@ -21,7 +21,7 @@ of its own stop. None of that exists in a harness with no ROS in it.
 | `urg_node` (Hokuyo) | `gym_bridge_node` |
 | `vesc_driver` + `ackermann_to_vesc` + `vesc_to_odom` | `gym_bridge_node` |
 | `ackermann_mux` | `ackermann_mux` — the same node, same config |
-| static `base_link->laser` | the same node, same 0.33/0/0.11 offset |
+| static `base_link->laser` | the same node, same 0.26/0/0.11 offset |
 
 Everything above that line is the real thing: the real `ackermann_mux`
 arbitrating `/teleop` over `/drive`, the real `slam_toolbox`, the real

@@ -122,7 +122,8 @@ remain visible in the report.
 
 ### 5. Optional steering
 
-Steering calibration uses the fixed physical wheelbase (`0.324 m`). It does not
+Steering calibration uses the fixed physical wheelbase (`0.36 m`, measured
+2026-08-24). It does not
 misuse wheelbase as a tuning parameter.
 
 1. **Centre:** visually align both front wheels, leave the car stationary, and

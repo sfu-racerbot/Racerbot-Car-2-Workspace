@@ -17,12 +17,16 @@ no test: it costs review time, it occupies the name of the coverage it isn't pro
 This is not hypothetical here. Two documented cases from this repo:
 
 - **A whole simulator's safety verdict was true by construction.** `tools/f1tenth_sim/sim_fidelity/plant.py`
-  records that gym's collision check never fires in this harness's geometry — the LiDAR sits 0.33 m
-  forward of `base_link` while the 0.58 m collision box is centred there spanning only ±0.29 m, so
-  the sensor is outside its own collision body, `side_distances` comes back all zeros, and the test
-  degenerates to "is any beam below 0.005 m" — which `ScanSimulator2D.scan` makes impossible by
+  records that gym's collision check never fired in this harness's geometry — the LiDAR was placed
+  0.33 m forward of `base_link` while the 0.58 m collision box is centred there spanning only ±0.29 m,
+  so the sensor sat outside its own collision body, `side_distances` came back all zeros, and the test
+  degenerated to "is any beam below 0.005 m" — which `ScanSimulator2D.scan` makes impossible by
   clipping every range to `range_min` = 0.05 m. Measured: **a car driven straight into the Spielberg
   barrier travelled 35.5 m through it, reaching 0.058 m from a wall, and was never flagged.**
+  (The car was tape-measured on 2026-08-24 and the LiDAR is 0.26 m forward, inside the box, so that
+  first fault no longer holds as written — and nobody has re-measured whether the flag fires now.
+  The lesson is unchanged and so is the rule: **take the verdict from geometry you compute yourself,
+  never from gym's flag.**)
 - **A control assertion that passed on noise.** `src/pure_pursuit/test/test_opponent_integration.py:241`
   documents an overtake test that asserted on the *sign* of a steering angle. Back-to-back
   `control_loop()` calls are microseconds apart, `max_steering_rate` allowed ~0.0001 rad of change

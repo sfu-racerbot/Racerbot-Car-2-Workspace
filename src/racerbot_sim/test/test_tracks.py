@@ -11,6 +11,7 @@ import os
 
 import numpy as np
 import pytest
+import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from racerbot_sim import tracks  # noqa: E402
@@ -82,12 +83,67 @@ def test_every_named_layout_builds_and_is_big_enough_to_close_a_lap():
             assert _lap_length(line) > 20.0, f'{name} is too short to map'
 
 
-def test_layout_corners_are_inside_the_cars_turning_circle():
-    """tan(0.26)/0.324 is a 1.22m minimum turning radius. A track with a
-    tighter corner than that cannot be raced by this car however good the
-    mapping is, so no layout here may have one."""
+def _min_turning_radius():
+    """This car's tightest circle, from the two configured numbers.
+
+    Read out of gap_follow.yaml rather than written here, because it moved:
+    the wheelbase was believed to be the 0.324 m Traxxas publishes until the
+    car was tape-measured at 0.36 m on 2026-08-24, and a LONGER wheelbase
+    turns WIDER for the same rack angle -- 1.22 m became 1.35 m. A test
+    carrying its own copy of that number would have kept asserting the old,
+    more permissive limit.
+    """
+    path = os.path.join(os.path.dirname(__file__), '..', '..',
+                        'gap_follow', 'config', 'gap_follow.yaml')
+    with open(path, encoding='utf-8') as handle:
+        params = yaml.safe_load(handle)['gap_follow_node']['ros__parameters']
+    # Bicycle model: kappa = tan(delta) / L, and the radius is 1/kappa.
+    return params['wheelbase'] / math.tan(params['max_steering_angle'])
+
+
+def test_every_layout_corner_can_actually_be_driven():
+    """No layout may have a corner this car physically cannot get round.
+
+    The condition is NOT "the centreline radius exceeds the turning radius":
+    the car does not have to drive the centreline. It can enter a corner at
+    the outside wall and clip the inside one, so the widest line available
+    through a corner has radius about
+
+        centreline radius + (corridor width - car width) / 2
+
+    and that is what has to clear the turning circle. asb_10000's 1.20 m and
+    indoor_tight's 1.10 m centrelines are both INSIDE the 1.35 m circle --
+    they are driveable only because the corridor gives the car somewhere to
+    swing out to, and calling them undriveable would be wrong.
+
+    The version of this test before the car was re-measured compared the
+    bare centreline radius against 0.9 x the turning radius. The 0.9 had no
+    stated derivation and happened to sit 2 mm under indoor_tight; with the
+    corrected wheelbase it would have failed two layouts that are in fact
+    perfectly driveable.
+    """
+    turning_radius = _min_turning_radius()
+    assert turning_radius == pytest.approx(1.353, abs=0.01), (
+        'the configured geometry no longer gives this car a 1.35 m circle; '
+        'check gap_follow.yaml wheelbase/max_steering_angle')
+    car_width = _car_width()
+    assert tracks.LAYOUTS, 'no layouts to check'
     for name, spec in tracks.LAYOUTS.items():
-        assert spec['radius'] > 1.22 * 0.9, f'{name} corners are too tight'
+        usable = spec['corridor_width'] - car_width
+        assert usable > 0.0, f'{name} corridor is narrower than the car'
+        widest_line = spec['radius'] + usable / 2.0
+        assert widest_line >= turning_radius, (
+            f'{name}: the widest line through its corners is '
+            f'{widest_line:.2f} m, tighter than the car\'s '
+            f'{turning_radius:.2f} m turning circle')
+
+
+def _car_width():
+    path = os.path.join(os.path.dirname(__file__), '..', '..',
+                        'gap_follow', 'config', 'gap_follow.yaml')
+    with open(path, encoding='utf-8') as handle:
+        params = yaml.safe_load(handle)['gap_follow_node']['ros__parameters']
+    return params['car_width']
 
 
 def test_unknown_layout_is_refused():

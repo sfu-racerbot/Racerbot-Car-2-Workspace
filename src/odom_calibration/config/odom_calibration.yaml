@@ -18,4 +18,5 @@ odom_calibration_node:
     speed_to_erpm_offset: 0.0
     steering_angle_to_servo_gain: -1.2135
     steering_angle_to_servo_offset: 0.5304
-    wheelbase: 0.324
+    # Measured 2026-08-24, front axle to rear axle. Matches vesc.yaml.
+    wheelbase: 0.36

@@ -21,7 +21,9 @@ from pure_pursuit import racing_math, recorded_path  # noqa: E402
 
 
 CAR_STEERING = 0.26
-CAR_WHEELBASE = 0.324
+# Measured on this car 2026-08-24 (docs/hardware-reference.md), not the
+# 0.324 m Traxxas publishes for a stock 74276-4.
+CAR_WHEELBASE = 0.36
 RACK_LIMIT = math.tan(CAR_STEERING) / CAR_WHEELBASE
 
 
@@ -39,8 +41,11 @@ def _jittered(path, sigma, seed=7):
 # --- curvature_limit ------------------------------------------------------
 
 def test_curvature_limit_matches_the_bicycle_model():
-    assert recorded_path.curvature_limit(0.26, 0.324) == pytest.approx(RACK_LIMIT)
-    assert 1.0 / RACK_LIMIT == pytest.approx(1.218, abs=0.01)
+    assert recorded_path.curvature_limit(
+        CAR_STEERING, CAR_WHEELBASE) == pytest.approx(RACK_LIMIT)
+    # 1.353 m, not the 1.218 m this asserted while the wheelbase was
+    # believed to be 0.324 m: a longer wheelbase turns wider.
+    assert 1.0 / RACK_LIMIT == pytest.approx(1.353, abs=0.01)
 
 
 @pytest.mark.parametrize('steering,wheelbase', [

@@ -104,7 +104,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                                '(default: %(default)s).')
 
     vehicle = parser.add_argument_group('vehicle and safety')
-    vehicle.add_argument('--car-width', type=float, default=0.31,
+    vehicle.add_argument('--car-width', type=float, default=0.33,
                          help='Padded car width, m. Matches pure_pursuit.yaml and '
                               'gap_follow.yaml (default: %(default)s).')
     vehicle.add_argument('--safety-margin', type=float, default=0.15,
@@ -112,7 +112,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               'This is the fast-versus-safe dial: the optimizer will use every '
                               'centimeter it is given, so this is what stops it apexing on the '
                               'paint (default: %(default)s).')
-    vehicle.add_argument('--wheelbase', type=float, default=0.324,
+    vehicle.add_argument('--wheelbase', type=float, default=0.36,
                          help='Wheelbase, m (default: %(default)s).')
     vehicle.add_argument('--max-steering-angle', type=float, default=0.26,
                          help='Steering limit, rad. With the wheelbase this sets the tightest '

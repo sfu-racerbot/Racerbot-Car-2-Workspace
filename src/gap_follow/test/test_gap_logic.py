@@ -243,29 +243,43 @@ def test_best_gap_returns_none_when_boxed_in():
 # ============================================================================
 
 
+# The values gap_follow.yaml actually configures, so the numbers below are
+# the distances the running car really computes. wheelbase and
+# laser_offset_x were tape-measured 2026-08-24; car_width is the measured
+# 0.30m over the tires plus 14.5mm a side of deliberate padding.
+CAR_WIDTH = 0.33
+CAR_LENGTH = 0.58
+CAR_WHEELBASE = 0.36
+CAR_LASER_OFFSET_X = 0.26
+
+
 def _body_boundaries(angles):
     return gap_logic.vehicle_boundary_distances(
         np.asarray(angles, dtype=float),
-        car_width=0.31,
-        car_length=0.58,
-        wheelbase=0.324,
-        laser_offset_x=0.33,
+        car_width=CAR_WIDTH,
+        car_length=CAR_LENGTH,
+        wheelbase=CAR_WHEELBASE,
+        laser_offset_x=CAR_LASER_OFFSET_X,
     )
 
 
-def test_vehicle_boundary_matches_padded_traxxas_rectangle():
+def test_vehicle_boundary_matches_the_padded_rectangle():
     boundaries = _body_boundaries([0.0, math.pi / 2.0, math.pi])
-    # base_link is the rear axle. Body center is x=wheelbase/2=0.162m,
-    # so the padded 0.58m rectangle spans x=[-0.128, 0.452].
-    assert boundaries[0] == pytest.approx(0.122)
-    assert boundaries[1] == pytest.approx(0.155)
-    assert boundaries[2] == pytest.approx(0.458)
+    # base_link is the rear axle, and the rectangle is centred halfway along
+    # the wheelbase: centre x = 0.36/2 = 0.18, so the padded 0.58m box spans
+    # x = [0.18 - 0.29, 0.18 + 0.29] = [-0.11, 0.47] and y = +/-0.165.
+    # From the LiDAR at x = 0.26 that is 0.21m to the nose, 0.165m to either
+    # flank, and 0.37m to the tail.
+    assert boundaries[0] == pytest.approx(0.21)
+    assert boundaries[1] == pytest.approx(0.165)
+    assert boundaries[2] == pytest.approx(0.37)
 
 
 def test_vehicle_boundary_rejects_lidar_outside_footprint():
     with pytest.raises(ValueError, match='LiDAR origin'):
         gap_logic.vehicle_boundary_distances(
-            np.array([0.0]), 0.31, 0.58, 0.324, laser_offset_x=0.50)
+            np.array([0.0]), CAR_WIDTH, CAR_LENGTH, CAR_WHEELBASE,
+            laser_offset_x=0.50)
 
 
 def test_minimum_clearance_is_measured_from_body_not_lidar():
@@ -619,7 +633,8 @@ def test_ttc_swept_corridor_follows_the_turn():
         r, valid, ang, 1.0, bnd, swept_half_width=0.255, path_curvature=0.0)
     turning = gap_logic.minimum_ttc(
         r, valid, ang, 1.0, bnd, swept_half_width=0.255,
-        path_curvature=-0.821, laser_offset_x=0.33)
+        path_curvature=-math.tan(0.26) / CAR_WHEELBASE,
+        laser_offset_x=CAR_LASER_OFFSET_X)
     assert straight < math.inf, 'straight ahead, this is on the path'
     assert turning == math.inf, 'turning hard right, the car goes around it'
 
@@ -795,7 +810,7 @@ def test_centering_rejects_a_negative_authority_bound():
 # ============================================================================
 
 def _drive_corridor(width, start_offset, steps=600, speed=1.5, dt=0.025,
-                    wheelbase=0.324, steering_gain=1.0, max_steering=0.26,
+                    wheelbase=CAR_WHEELBASE, steering_gain=1.0, max_steering=0.26,
                     centering=True):
     """Kinematic bicycle down a straight corridor under the real steering law.
 

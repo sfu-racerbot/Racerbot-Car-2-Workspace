@@ -274,7 +274,7 @@ function renderSetup() {
     speed_to_erpm_offset: 0,
     steering_angle_to_servo_gain: -1.2135,
     steering_angle_to_servo_offset: 0.5304,
-    wheelbase: 0.324,
+    wheelbase: 0.36,
   };
   return `<section class="hero-card">
     <div class="eyebrow">Tape measure + human driver</div>
@@ -507,7 +507,7 @@ function renderSteering(session) {
   return `<section class="hero-card">
     <div class="eyebrow">Step 4 · Steering geometry</div>
     <h1>Measure the circle at the rear axle.</h1>
-    <p class="lead">The wizard fits servo value against real steering angle. Wheelbase stays fixed at 0.324 m; tape measurements calibrate gain and centre, not vehicle geometry.</p>
+    <p class="lead">The wizard fits servo value against real steering angle. Wheelbase stays fixed at the measured 0.36 m; tape measurements calibrate gain and centre, not vehicle geometry.</p>
     <ul class="instruction-list">
       <li><strong>Centre:</strong> visually align both front wheels straight, keep the car still, and record 3–5 seconds.</li>
       <li><strong>Circle:</strong> mark the rear-axle centre, hold steering steady, and drive one slow complete circle back to the starting heading.</li>

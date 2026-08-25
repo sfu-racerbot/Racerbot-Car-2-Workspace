@@ -66,12 +66,17 @@ class GapFollowNode(Node):
         self.declare_parameter('max_braking_decel', 3.0)
         self.declare_parameter('max_steering_rate', 1.0)
         self.declare_parameter('command_slew_max_dt', 0.10)
-        # Padded Traxxas 74276-4 footprint (physical: 0.281 x 0.535 m),
-        # combined with its rear-axle base_link and estimated LiDAR transform.
-        self.declare_parameter('car_width', 0.31)
+        # Padded collision envelope around this car's rear-axle base_link.
+        # wheelbase, laser_offset_x and the 0.30 m the car measures over the
+        # tires were tape-measured 2026-08-24; car_width is that 0.30 m plus
+        # 14.5 mm a side, and car_length is still an envelope over an
+        # unmeasured overall length. See docs/hardware-reference.md.
+        # The config file is authoritative -- these defaults only apply if
+        # the node is launched without one.
+        self.declare_parameter('car_width', 0.33)
         self.declare_parameter('car_length', 0.58)
-        self.declare_parameter('wheelbase', 0.324)
-        self.declare_parameter('laser_offset_x', 0.33)
+        self.declare_parameter('wheelbase', 0.36)
+        self.declare_parameter('laser_offset_x', 0.26)
         self.declare_parameter('laser_offset_y', 0.0)
         self.declare_parameter('safety_margin', 0.18)
         # Live corridor-width adaptation: raise corner_speed's ceiling (and,

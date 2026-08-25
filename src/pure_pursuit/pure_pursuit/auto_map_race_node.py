@@ -361,7 +361,7 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('pure_pursuit_node_name', 'pure_pursuit_node')
         # --- Racing-line cleanup (pure_pursuit/recorded_path.py) ---
         self.declare_parameter('profile_max_steering_angle', 0.26)
-        self.declare_parameter('profile_wheelbase', 0.324)
+        self.declare_parameter('profile_wheelbase', 0.36)
         self.declare_parameter('profile_min_feature_wavelength', 1.5)
         self.declare_parameter('profile_curvature_margin', 1.0)
         self.declare_parameter('profile_max_deviation', 0.35)
@@ -387,7 +387,7 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('optimize_max_track_width', 6.0)
         self.declare_parameter('optimize_centerline_passes', 4)
         self.declare_parameter('optimize_centerline_smoothing', 3)
-        self.declare_parameter('optimize_car_width', 0.31)
+        self.declare_parameter('optimize_car_width', 0.33)
         self.declare_parameter('optimize_safety_margin', 0.15)
         # --- Handing localization to the particle filter for the race ---
         self.declare_parameter('localize_after_mapping', True)

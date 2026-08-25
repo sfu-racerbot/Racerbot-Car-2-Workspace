@@ -112,7 +112,13 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='static_baselink_to_laser',
-        arguments=['0.33', '0.0', '0.11', '0.0', '0.0', '0.0', 'base_link', 'laser']
+        # 0.26 m = the measured 0.36 m wheelbase less the 0.10 m the LiDAR
+        # sits behind the FRONT axle (measured 2026-08-24). The previous
+        # 0.33 m came from assuming 0.10 m behind the physical NOSE --
+        # a different reference point, and 0.07 m too far forward.
+        # Keep in step with docs/hardware-reference.md, gap_follow.yaml,
+        # pure_pursuit.yaml, web_dashboard.yaml and racerbot_sim.
+        arguments=['0.26', '0.0', '0.11', '0.0', '0.0', '0.0', 'base_link', 'laser']
     )
 
     # finalize

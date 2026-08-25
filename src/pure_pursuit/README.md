@@ -139,7 +139,7 @@ and threshold. Set the period to `0.0` for transition-only logging.
 | `scan_topic` / `odom_topic` / `drive_topic` | `/scan` / `/odom` / `/drive` | LIDAR / measured speed / output |
 | `control_rate_hz` | `40.0` | Control loop frequency |
 | `decision_log_period_sec` | `1.0` s | Repeat interval for an unchanged terminal decision (`0.0` = transitions only) |
-| `wheelbase` | `0.324` m | Traxxas 74276-4 specification; must match `vesc.yaml` |
+| `wheelbase` | `0.36` m | Measured on this car 2026-08-24; must match `vesc.yaml` |
 | `min_lookahead` / `max_lookahead` / `lookahead_speed_gain` | `0.6` / `1.5` / `0.15` | Adaptive lookahead formula above |
 | `nearest_search_window` | `40` | ±waypoints searched around last tick's nearest point (`0` = search all) |
 | `max_speed` / `min_speed` | `4.0` / `0.5` m/s | Hard safety ceiling/floor, independent of the CSV |
@@ -167,7 +167,7 @@ and threshold. Set the period to `0.0` for transition-only logging.
 | `overtake_lookahead_distance` | `4.0` m | Arc distance ahead the passing offset is applied to, instead of the normal target. Must be ≥ `max_lookahead` — the node refuses to start otherwise |
 | `opponent_detection_mode` | `map` | Subtract map-predicted walls from live scan; falls back to geometric detection until `/map` arrives |
 | `map_topic` / `map_beam_step` / `map_subtraction_margin` | `/map` / `4` / `0.4` m | Map-subtraction input, downsampling, and dynamic residual threshold |
-| `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` m | Estimated LIDAR mounting offset from `base_link`, used to place opponent detections in the map frame |
+| `laser_offset_x` / `laser_offset_y` | `0.26` / `0.0` m | Measured LIDAR mounting offset from `base_link`, used to place opponent detections in the map frame |
 | `max_range` | `10.0` m | Range clip ceiling for every LIDAR-based check above (also fills in `inf` returns) |
 | `enable_deadman` / `joy_topic` / `deadman_button` / `joy_timeout_sec` | `true` / `/joy` / `4` / `0.5` s | **Mandatory** LB deadman button — do not disable |
 

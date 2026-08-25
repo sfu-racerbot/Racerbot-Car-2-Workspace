@@ -213,12 +213,19 @@ chosen automatically based on what data has arrived:
   through the car's pose (plus the LIDAR's mounting offset from
   `base_link`) into the same world frame — so everything is directly,
   correctly comparable.
-- **Robot-centric** (no pose yet, e.g. no `particle_filter` running): the
-  car is drawn at the canvas center (offset by `view.bodyPanX/bodyPanY`
-  once the user drags) always facing "up", and LIDAR points are drawn
-  straight from the scan's own body-frame angles. No map, no pose, no
-  localization needed — this is "what the car is seeing" in the most
-  literal sense, and it's what you get from just `/scan` alone.
+- **Robot-centric** (no pose yet, e.g. no `particle_filter` running):
+  `base_link` is drawn at the canvas center (offset by
+  `view.bodyPanX/bodyPanY` once the user drags) always facing "up", and
+  LIDAR points are drawn from the scan's own angles **plus the LIDAR's
+  mounting offset**, exactly as the map-relative path applies it.
+
+  Without that offset the beams radiate from the rear axle rather than
+  from the sensor 0.26 m ahead of it, putting the whole scan a quarter of
+  a metre behind where it belongs relative to the car.
+
+  No map, no pose, no localization needed — this is "what the car is
+  seeing" in the most literal sense, and it's what you get from just
+  `/scan` alone.
 
 The two modes use different coordinate transforms (`bodyToCanvas` vs
 `worldToCanvas`), each with its own pan/zoom state (`bodyPanX/bodyPanY` vs
@@ -232,12 +239,32 @@ RViz's "2D Pose Estimate"), the scan is deliberately **not drawn at all**
 rather than guessed — plotting LIDAR points without knowing the car's
 position would just be a guess dressed up as data. A banner explains why.
 
-The car is rendered as a small top-down silhouette (`drawCarIcon`) —
-rounded body, four wheels, a lighter "windshield" stripe near the front —
-rather than a bare arrow, so which end is the front is obvious at a
-glance; the un-rotated icon points along local +X (canvas right), which
-is why `drawCarRobotCentric` passes `-Math.PI/2` (bodyToCanvas renders
-forward as canvas "up", not "right"). A translucent wedge
+The car is rendered as a top-down silhouette (`drawCarIcon`) **drawn to
+scale** from `CAR_MODEL`: a 0.36 m wheelbase and 0.30 m over the tires,
+both tape-measured on 2026-08-24.
+
+The icon's origin is `base_link` — the rear axle, where the pose actually
+is. A ringed dot marks the LIDAR 0.26 m forward of that.
+
+The front wheels turn with the last commanded steering angle under real
+Ackermann geometry (`ackermannWheelAngles`), so a turned tire visibly
+reaches outside the parked footprint. A dashed mark appears on that side
+showing the steering clearance the front end needs.
+
+The un-rotated icon points along local +X (canvas right), which is why
+`drawCarRobotCentric` passes `-Math.PI/2` (bodyToCanvas renders forward as
+canvas "up", not "right").
+
+Because that silhouette is a real footprint at real scale, it would cover
+the LIDAR points nearest the car — the ones reading a wall it is about to
+touch. `overlayDrawOrder` therefore paints the scan **after** the car:
+blind spot, intent, car, scan. `test/browser/car_model_test.js` asserts
+that order for every combination of arrived data, alongside the geometry
+itself (the Ackermann split is checked against the identity
+`cot(outer) - cot(inner) = track / wheelbase`, not against any number
+recorded from the code).
+
+A translucent wedge
 (`drawBlindSpotRobotCentric`/`drawBlindSpotMapRelative`) marks the arc the
 LIDAR never physically scans, computed from the scan's own
 `angle_min`/`angle_increment`/count rather than from which beams happen to
@@ -498,7 +525,7 @@ button and cursor hide after `CONTROLS_IDLE_MS` of no input
 | `scan_encoding` | `u16mm` | `u16mm` (uint16 millimetres, half the bytes) or `f32` (the original one float per beam) |
 | `scan_decimation` | `1` | Send only every Nth beam. `1` = every beam |
 | `stats_interval_sec` | `1.0` | How often CPU%/mem%/temp/WiFi/uptime are sampled and broadcast |
-| `laser_offset_x` / `laser_offset_y` | `0.33` / `0.0` | Estimated LIDAR mounting offset from `base_link` (matches [hardware-reference.md](../../docs/hardware-reference.md)) |
+| `laser_offset_x` / `laser_offset_y` | `0.26` / `0.0` | Measured LIDAR mounting offset from `base_link` (matches [hardware-reference.md](../../docs/hardware-reference.md)) |
 | `enable_tuning` | `true` | Whether live tuning exists at all; `false` never creates the service clients |
 | `tuning_nodes` | `[pure_pursuit_node, gap_follow_node]` | The only nodes ever probed or written to |
 | `tuning_config_files` | see YAML | Parallel to `tuning_nodes`: `<package>/<path>` that "save" writes back to |

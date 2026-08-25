@@ -26,7 +26,7 @@ pure_pursuit_node:
 
     # --- Control loop ---
     control_rate_hz: 40.0
-    wheelbase: 0.324         # meters -- Traxxas 74276-4; matches vesc.yaml
+    wheelbase: 0.36          # meters -- MEASURED 2026-08-24; matches vesc.yaml
     # Print every state change immediately, plus a periodic summary of the
     # path/LIDAR/opponent decision and final command. Set 0.0 for transitions only.
     decision_log_period_sec: 1.0
@@ -112,11 +112,13 @@ pure_pursuit_node:
     pose_frozen_min_travel: 0.05
 
     # --- Rectangular collision envelope (matches gap_follow.yaml) ---
-    # Traxxas 74276-4 is 0.535 x 0.281 m; this is the same intentionally
-    # inflated 0.58 x 0.31 m envelope gap_follow uses. Feeds the all-round
-    # body-clearance stop below, which -- unlike safety_fov_deg's forward
-    # cone -- can see a wall the car is *alongside*.
-    car_width: 0.31
+    # This car measures 0.30 m over the tires (2026-08-24), and 0.33 keeps
+    # the same 14.5 mm-a-side padding the old 0.31 gave the 0.281 m figure
+    # Traxxas publishes. car_length is unchanged: nobody has measured this
+    # car bumper to bumper -- see gap_follow.yaml for the full note. Feeds
+    # the all-round body-clearance stop below, which -- unlike
+    # safety_fov_deg's forward cone -- can see a wall the car is *alongside*.
+    car_width: 0.33
     car_length: 0.58
     # All-direction contact floor measured from the body, not the sensor.
     # gap_follow uses 0.02m; 0.05m here because this controller is the one
@@ -202,7 +204,7 @@ pure_pursuit_node:
     # blind for longer than this and the dead-reckoned position is no
     # longer trustworthy, so the pass is abandoned.
     overtake_max_blind_sec: 3.0
-    laser_offset_x: 0.33              # meters -- estimated rear-axle base_link to LiDAR
+    laser_offset_x: 0.26              # meters -- MEASURED rear-axle base_link to LiDAR
     laser_offset_y: 0.0
 
     # --- How opponents are recognized in the scan ---

@@ -56,10 +56,14 @@ def add_sim_python_path(workspace_root=None) -> None:
 
 
 # --- Geometry and timing, shared with tools/f1tenth_sim/run_validation.py ---
-WHEELBASE = 0.324
-CAR_WIDTH = 0.31
+# Must agree with gap_follow.yaml / pure_pursuit.yaml, or this simulator is
+# flying a different car from the one the code is aimed at. Wheelbase and
+# LiDAR offset were measured on the car 2026-08-24; CAR_WIDTH/CAR_LENGTH are
+# the padded collision envelope those configs carry, not raw dimensions.
+WHEELBASE = 0.36
+CAR_WIDTH = 0.33
 CAR_LENGTH = 0.58
-LIDAR_OFFSET_X = 0.33
+LIDAR_OFFSET_X = 0.26
 LIDAR_OFFSET_Z = 0.11
 INTEGRATOR_DT = 0.005
 # The car's Hokuyo UST-10LX: 1081 beams at 0.25 deg over 270 deg. The older

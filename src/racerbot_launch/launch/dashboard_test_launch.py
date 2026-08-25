@@ -43,7 +43,8 @@ def generate_launch_description():
         package='tf2_ros',
         executable='static_transform_publisher',
         name='static_baselink_to_laser',
-        arguments=['0.33', '0.0', '0.11', '0.0', '0.0', '0.0', 'base_link', 'laser'],
+        # Same measured mount as f1tenth_stack's bringup_launch.py.
+        arguments=['0.26', '0.0', '0.11', '0.0', '0.0', '0.0', 'base_link', 'laser'],
     )
 
     realsense_camera_launch = IncludeLaunchDescription(

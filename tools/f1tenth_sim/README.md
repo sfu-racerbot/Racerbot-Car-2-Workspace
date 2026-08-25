@@ -50,20 +50,29 @@ Two independent faults, both of which had to be true:
 1. `check_ttc_jit` compares each beam against `side_distances`, the distance
    from the LiDAR to the car's own outline. That array is built by
    intersecting each ray with the collision rectangle *from the LiDAR's
-   position*, assumed to be inside it. This car's LiDAR is 0.33 m forward of
-   `base_link`, and with `collision_body_center_x = wheelbase/2` against the
-   ST model's CoG-referenced state the 0.58 m collision box ends up centred on
-   `base_link`, spanning ±0.29 m. **0.33 > 0.29: the sensor sits outside its
-   own collision body**, no intersection is found, and the helper returns
-   `0.0` for all 819 beams.
+   position*, assumed to be inside it. This car's LiDAR was believed to be
+   0.33 m forward of `base_link`, and with `collision_body_center_x =
+   wheelbase/2` against the ST model's CoG-referenced state the 0.58 m
+   collision box ends up centred on `base_link`, spanning ±0.29 m.
+   **0.33 > 0.29: the sensor sat outside its own collision body**, no
+   intersection was found, and the helper returned `0.0` for all 819 beams.
+
+   > **Since 2026-08-24 the car has been measured, and the LiDAR is 0.26 m
+   > forward, not 0.33 m** ([hardware-reference.md](../../docs/hardware-reference.md#physical-dimensions-used-in-config)).
+   > 0.26 is *inside* ±0.29, so this fault no longer holds as written.
+   > Nobody has re-run the probe to find out whether gym's flag fires now,
+   > and nothing here depends on the answer: `plant.py` computes its own
+   > collision geometry and the harness takes its verdict from that. Do not
+   > reinstate a "no collision" claim that rests on gym's own flag.
 2. With `side_distances` all zero the test degenerates to "is any beam range
    ≤ 0.005 m", and `ScanSimulator2D.scan()` ends with
    `np.clip(scan, min_range, max_range)` where `min_range` is 0.05 m. No range
    can ever be small enough.
 
 Gym's defaults dodge this by a hair — its 0.275 m LiDAR offset is just inside
-a 0.29 m half-length. Moving the sensor to where this car's actually is
-silently disabled the check.
+a 0.29 m half-length. Putting the sensor where this car's was *believed* to be
+silently disabled the check. The measured 0.26 m is back inside the box, but
+by a similar hair, and nothing here relies on that.
 
 `plant.py` replaces it with real geometry: chassis-vs-map through the map's
 distance transform, and chassis-vs-chassis with the same separating-axis test

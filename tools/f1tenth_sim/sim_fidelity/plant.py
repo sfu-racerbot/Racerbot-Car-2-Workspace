@@ -107,7 +107,7 @@ def env_components(
     calibration: CarCalibration = CALIBRATION,
     *,
     legacy_beams: int = 819,
-    legacy_wheelbase: float = 0.324,
+    legacy_wheelbase: float = 0.36,
 ):
     """Build the gym config pieces this profile needs.
 
@@ -181,19 +181,25 @@ class FidelityPlant:
     work in this harness's geometry. ``check_ttc_jit`` compares each beam
     against ``side_distances``, the distance from the LiDAR to the car's own
     outline -- but that array is computed by intersecting each ray with the
-    collision rectangle *from the LiDAR's position inside it*, and this car's
-    LiDAR sits 0.33 m forward of base_link while the 0.58 m collision box is
-    centred there, spanning only +/-0.29 m. The sensor is outside its own
-    collision body, no intersection is found, and the helper returns 0.0 for
-    every beam. The test then degenerates to "is any beam below 0.005 m",
+    collision rectangle *from the LiDAR's position inside it*. The LiDAR was
+    believed to sit 0.33 m forward of base_link while the 0.58 m collision box
+    is centred there, spanning only +/-0.29 m -- so the sensor was outside its
+    own collision body, no intersection was found, and the helper returned 0.0
+    for every beam. The test then degenerates to "is any beam below 0.005 m",
     which ``ScanSimulator2D.scan`` makes impossible by clipping every range
     to ``range_min`` = 0.05 m.
 
     Measured: a car driven straight into the Spielberg barrier travelled
     35.5 m through it, reaching 0.058 m from a wall, and was never flagged.
-    Every ``"collision": false`` this harness has ever reported was therefore
-    true by construction. ``_wall_contact`` and ``_chassis_contact`` replace
-    it with real geometry against the real chassis.
+    Every ``"collision": false`` this harness had reported was therefore true
+    by construction.
+
+    The car was tape-measured on 2026-08-24 and the LiDAR turned out to be
+    0.26 m forward, which is inside the +/-0.29 m box -- so that first fault
+    no longer holds as written. Nobody has re-measured whether gym's flag
+    fires now, and this class does not need the answer: ``_wall_contact`` and
+    ``_chassis_contact`` compute the collision themselves, against the real
+    chassis, and are what every verdict here comes from.
     """
 
     def __init__(
