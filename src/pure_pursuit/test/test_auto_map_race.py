@@ -1032,6 +1032,175 @@ def test_no_saved_map_means_no_handover_attempt():
         rclpy.shutdown()
 
 
+# ---------------------------------------------------------------------------
+# Publishing which map is consistent with the current pose source
+# (2026-08-25) -- see the parameter comment near frozen_map_topic's
+# declare_parameter in auto_map_race_node.py for why this exists: without
+# it, pure_pursuit_node's opponent detection keeps ray-casting against
+# slam_toolbox's still-live /map after localization has moved to the
+# particle filter (localized against one frozen saved-map snapshot),
+# which can make an already-mapped wall look like an unmapped object.
+# ---------------------------------------------------------------------------
+
+class _Capture:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, msg):
+        self.published.append(msg)
+
+
+def _write_map_file(tmp_path, grid, resolution=0.05, origin=(0.0, 0.0),
+                    free_value=254, occupied_value=0, unknown_value=205):
+    """Write a grid as the map_server yaml+pgm pair, image-row-0-is-top --
+    the convention OccupancyMap.from_yaml expects. Mirrors
+    test_map_despeckle.py's write_map."""
+    from PIL import Image
+    pixels = np.full(grid.shape, unknown_value, dtype=np.uint8)
+    pixels[grid == 0] = free_value       # occupancy_map.FREE
+    pixels[grid == 1] = occupied_value   # occupancy_map.OCCUPIED
+    image_path = tmp_path / 'map.pgm'
+    Image.fromarray(np.flipud(pixels), mode='L').save(str(image_path))
+    yaml_path = tmp_path / 'map.yaml'
+    yaml_path.write_text(
+        f'image: map.pgm\nresolution: {resolution}\n'
+        f'origin: [{origin[0]}, {origin[1]}, 0.0]\n'
+        'negate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n')
+    return yaml_path
+
+
+def test_publish_frozen_map_does_nothing_without_a_run_directory():
+    """Same guard _despeckle_saved_map uses: called too early must not
+    crash rather than fail safe."""
+    node = _supervisor()
+    try:
+        capture = _Capture()
+        node.frozen_map_pub = capture
+        node._publish_frozen_map()
+        assert capture.published == []
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_publish_frozen_map_does_nothing_without_a_saved_file(tmp_path):
+    node = _supervisor()
+    try:
+        node.run_directory = tmp_path   # directory exists, map.yaml does not
+        capture = _Capture()
+        node.frozen_map_pub = capture
+        node._publish_frozen_map()
+        assert capture.published == []
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_publish_frozen_map_sends_the_saved_files_exact_content(tmp_path):
+    node = _supervisor()
+    try:
+        grid = np.zeros((20, 20), dtype=np.int8)
+        grid[10, 10] = 1   # occupancy_map.OCCUPIED
+        _write_map_file(tmp_path, grid, resolution=0.05, origin=(-1.0, -1.0))
+        node.run_directory = tmp_path
+        capture = _Capture()
+        node.frozen_map_pub = capture
+
+        node._publish_frozen_map()
+
+        assert len(capture.published) == 1
+        msg = capture.published[0]
+        assert msg.info.width == 20
+        assert msg.info.height == 20
+        assert msg.info.resolution == pytest.approx(0.05)
+        assert msg.info.origin.position.x == pytest.approx(-1.0)
+        assert msg.info.origin.position.y == pytest.approx(-1.0)
+        data = np.array(msg.data, dtype=np.int16).reshape(20, 20)
+        assert data[10, 10] == 100, 'the occupied cell must read as occupied'
+        assert data[0, 0] == 0, 'a free cell must read as free, not unknown'
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_map_save_callback_publishes_the_frozen_map_after_a_successful_save(tmp_path):
+    """Integration proof, not just the standalone method: a real
+    occupancy-map save completing must actually trigger the publish."""
+    node = _supervisor()
+    try:
+        grid = np.zeros((20, 20), dtype=np.int8)
+        grid[5, 5] = 1
+        _write_map_file(tmp_path, grid)
+        node.run_directory = tmp_path
+        capture = _Capture()
+        node.frozen_map_pub = capture
+
+        class _Ok:
+            def result(self):
+                class _Response:
+                    result = 0
+                return _Response()
+
+        node._map_save_callback(_Ok(), 'occupancy map')
+        assert len(capture.published) == 1
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_publish_localization_source_sends_exactly_the_given_source():
+    node = _supervisor()
+    try:
+        capture = _Capture()
+        node.localization_source_pub = capture
+        node._publish_localization_source('particle_filter')
+        assert len(capture.published) == 1
+        assert capture.published[0].data == 'particle_filter'
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_pf_promotion_publishes_particle_filter_as_the_localization_source():
+    node = _supervisor()
+    try:
+        capture = _Capture()
+        node.localization_source_pub = capture
+        node.pf_process = _RunningProcess()
+        node.pf_started_at = node._now_sec()
+        for _ in range(node.pf_settle_poses):
+            node._pf_pose_callback(_pf_pose())
+        node._update_pf_handover(node._now_sec(), (0.0, 0.0, 0.0))
+        assert node.pf_active
+        assert capture.published, 'promotion must publish the new source'
+        assert capture.published[-1].data == 'particle_filter'
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_pf_demotion_publishes_slam_as_the_localization_source_again():
+    node = _supervisor()
+    try:
+        node.pf_process = _RunningProcess()
+        node.pf_started_at = node._now_sec()
+        for _ in range(node.pf_settle_poses):
+            node._pf_pose_callback(_pf_pose())
+        node._update_pf_handover(node._now_sec(), (0.0, 0.0, 0.0))
+        assert node.pf_active
+
+        capture = _Capture()
+        node.localization_source_pub = capture
+        stale = node.pf_pose_time + node.pf_pose_timeout_sec + 0.1
+        node._update_pf_handover(stale, (0.0, 0.0, 0.0))
+        assert not node.pf_active
+        assert capture.published, 'demotion must publish the reverted source'
+        assert capture.published[-1].data == 'slam'
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
 def test_a_slower_optimized_line_is_refused():
     """The justification for optimizing is lap time, so lap time decides.
 

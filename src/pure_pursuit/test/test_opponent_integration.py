@@ -857,12 +857,23 @@ def test_overtake_aborts_after_too_long_blind(node):
 
 @pytest.fixture
 def map_mode_node(profiled_csv):
-    """Same as `node`, but with opponent_detection_mode:=map."""
+    """Same as `node`, but with opponent_detection_mode:=map.
+
+    opponent_detection_settle_sec:=0 disables the post-activation settle
+    window (2026-08-25): every test using this fixture calls map_callback
+    and asserts on detection within milliseconds of construction, well
+    inside the real 6.0s default, and this fixture is not what the
+    settle window itself is tested through -- see
+    test_map_ray_caster_is_suppressed_immediately_after_the_profile_
+    activates and its companion below, which construct their own node
+    with the real default specifically to exercise it.
+    """
     rclpy.init(args=['--ros-args',
                      '-p', f'waypoints_file:={profiled_csv}',
                      '-p', 'enable_deadman:=false',
                      '-p', 'drive_topic:=/test_only/drive',
-                     '-p', 'opponent_detection_mode:=map'])
+                     '-p', 'opponent_detection_mode:=map',
+                     '-p', 'opponent_detection_settle_sec:=0.0'])
     n = PurePursuitNode()
     yield n
     n.destroy_node()
@@ -955,6 +966,212 @@ def test_map_subtraction_detects_an_unmapped_car_directly(map_mode_node):
     # Indices must come back in *full-scan* space (downsampling mapped back).
     assert center - 12 <= start_idx <= center
     assert center <= end_idx <= center + 12
+
+
+# ============================================================================
+# Frozen-map ray-casting once localization hands off to the particle
+# filter (2026-08-25) -- see the parameter comment near
+# frozen_map_topic's declare_parameter for the full mechanism.
+# ============================================================================
+
+def _synthetic_map_with_blob(cx, cy, size_px=400, resolution=0.05, origin=-10.0,
+                             blob_radius_px=3):
+    """Same base arena as _synthetic_map, plus a small occupied blob
+    centered on world (cx, cy) -- for proving ray-casting distinguishes an
+    already-mapped wall feature from a genuinely unmapped (dynamic) one."""
+    from nav_msgs.msg import OccupancyGrid
+    grid = np.zeros((size_px, size_px), dtype=np.int8)
+    grid[:2, :] = 100
+    grid[-2:, :] = 100
+    grid[:, :2] = 100
+    grid[:, -2:] = 100
+    col = int((cx - origin) / resolution)
+    row = int((cy - origin) / resolution)
+    grid[row - blob_radius_px:row + blob_radius_px,
+        col - blob_radius_px:col + blob_radius_px] = 100
+    msg = OccupancyGrid()
+    msg.header.frame_id = 'map'
+    msg.info.resolution = resolution
+    msg.info.width = size_px
+    msg.info.height = size_px
+    msg.info.origin.position.x = origin
+    msg.info.origin.position.y = origin
+    msg.info.origin.orientation.w = 1.0
+    msg.data = grid.flatten().tolist()
+    return msg
+
+
+def _localization_source(source: str):
+    from std_msgs.msg import String
+    msg = String()
+    msg.data = source
+    return msg
+
+
+def test_map_ray_caster_defaults_to_the_live_map(map_mode_node):
+    """No auto_map_race_node in the graph (or an older one, before this
+    existed): localization_source never arrives, so behavior must be
+    exactly today's -- always the live map."""
+    node = map_mode_node
+    assert node.localization_source == 'slam'
+    node.map_callback(_synthetic_map())
+    assert node.map_ray_caster is node._live_map_ray_caster
+    assert node._frozen_map_ray_caster is None
+
+
+def test_frozen_map_alone_does_not_switch_anything(map_mode_node):
+    """The frozen map arriving is not itself the trigger -- only
+    localization_source actually saying 'particle_filter' switches
+    ray-casting away from the live map. Otherwise a frozen map published
+    early (map saved, particle filter not yet converged, racing still on
+    live slam_toolbox) would prematurely stop tracking the live map."""
+    pytest.importorskip('range_libc')
+    node = map_mode_node
+    node.map_callback(_synthetic_map())
+    node.frozen_map_callback(_synthetic_map_with_blob(0.5, -1.2))
+    assert node.map_ray_caster is node._live_map_ray_caster
+
+
+def test_localization_source_switches_ray_casting_to_the_frozen_map(map_mode_node):
+    pytest.importorskip('range_libc')
+    node = map_mode_node
+    node.map_callback(_synthetic_map())
+    node.frozen_map_callback(_synthetic_map_with_blob(0.5, -1.2))
+    node.localization_source_callback(_localization_source('particle_filter'))
+    assert node.map_ray_caster is node._frozen_map_ray_caster
+
+
+def test_particle_filter_source_falls_back_to_live_map_until_frozen_map_arrives(map_mode_node):
+    """A transient ordering this isn't expected to hit in practice (the
+    frozen map is latched and published well before the particle filter
+    can possibly have converged) but must still fail safe rather than
+    leave opponent detection with no map at all."""
+    pytest.importorskip('range_libc')
+    node = map_mode_node
+    node.map_callback(_synthetic_map())
+    node.localization_source_callback(_localization_source('particle_filter'))
+    assert node.map_ray_caster is node._live_map_ray_caster
+
+
+def test_localization_source_reverts_ray_casting_when_slam_resumes(map_mode_node):
+    """The particle filter's demotion path (auto_map_race_node's
+    _update_pf_handover) is documented as one-way but still re-publishes
+    'slam' -- this must be honored, not sticky on 'particle_filter'."""
+    pytest.importorskip('range_libc')
+    node = map_mode_node
+    node.map_callback(_synthetic_map())
+    node.frozen_map_callback(_synthetic_map_with_blob(0.5, -1.2))
+    node.localization_source_callback(_localization_source('particle_filter'))
+    assert node.map_ray_caster is node._frozen_map_ray_caster
+    node.localization_source_callback(_localization_source('slam'))
+    assert node.map_ray_caster is node._live_map_ray_caster
+
+
+def test_frozen_map_prevents_a_stale_live_map_from_looking_like_an_opponent(map_mode_node):
+    """The exact bug report this whole mechanism exists to fix (found
+    2026-08-25 via racerbot_sim's solo scenario, zero real opponents):
+    once localization is on the particle filter, ray-casting must use the
+    SAME map it is localized against, not whatever slam_toolbox is still
+    live-publishing -- which, by racing time, may have moved on from what
+    the particle filter (and the racing line) actually describe. A live
+    map missing a wall the frozen one has would otherwise make that real,
+    already-mapped wall look like an unmapped (dynamic) object."""
+    pytest.importorskip('range_libc')
+    node = map_mode_node
+    _set_pose(node, -1.5, -1.2, 0.0)
+    scan, _center = _car_ahead_scan(car_range=2.0)  # a close return dead ahead
+    ranges = np.clip(np.nan_to_num(np.array(scan.ranges), nan=0.0, posinf=node.max_range),
+                     0.0, node.max_range)
+
+    # Live map: plain arena, no wall at the scan's close return -- exactly
+    # what would misread that return as an unmapped object if it were used.
+    node.map_callback(_synthetic_map())
+    # Frozen map: has a real wall exactly where the scan reports one --
+    # this is what the particle filter is actually localized against.
+    node.frozen_map_callback(_synthetic_map_with_blob(0.5, -1.2))
+    node.localization_source_callback(_localization_source('particle_filter'))
+
+    detection = node._detect_opponent(
+        scan, ranges, node.car_x + node.laser_offset_x, node.car_y)
+    assert detection is None, (
+        'a wall the frozen map already knows about must not look like an opponent')
+
+
+def test_the_live_map_alone_would_have_misread_that_same_wall(map_mode_node):
+    """Companion proof for the test above: confirms the scenario really
+    does trigger a false detection when ray-casting is left on the live
+    map, i.e. this is not a scenario that happens to never fire either
+    way -- the frozen-map switch above is doing real work."""
+    pytest.importorskip('range_libc')
+    node = map_mode_node
+    _set_pose(node, -1.5, -1.2, 0.0)
+    scan, _center = _car_ahead_scan(car_range=2.0)
+    ranges = np.clip(np.nan_to_num(np.array(scan.ranges), nan=0.0, posinf=node.max_range),
+                     0.0, node.max_range)
+
+    node.map_callback(_synthetic_map())  # live map only, no frozen map, no handover
+
+    detection = node._detect_opponent(
+        scan, ranges, node.car_x + node.laser_offset_x, node.car_y)
+    assert detection is not None, (
+        'this scenario must actually trigger the bug on the live map alone, '
+        'or the test above is not proving anything')
+
+
+def _map_mode_node_with_settle(profiled_csv):
+    """Same construction as map_mode_node, but WITHOUT overriding
+    opponent_detection_settle_sec -- the real default (6.0) is what the
+    two tests below exist to exercise."""
+    rclpy.init(args=['--ros-args',
+                     '-p', f'waypoints_file:={profiled_csv}',
+                     '-p', 'enable_deadman:=false',
+                     '-p', 'drive_topic:=/test_only/drive',
+                     '-p', 'opponent_detection_mode:=map'])
+    from pure_pursuit.pure_pursuit_node import PurePursuitNode
+    return PurePursuitNode()
+
+
+def test_map_ray_caster_is_suppressed_immediately_after_the_profile_activates(profiled_csv):
+    """A second, narrower bug found the same session (2026-08-25) on the
+    same racerbot_sim run, entirely separate from the frozen/live map
+    switch above: even fully on the live map, with no particle-filter
+    handover in play at all, slam_toolbox's own map_update_interval
+    (5.0s) means /map can still be stale relative to the pose right after
+    the racing handoff -- exactly when the just-closed mapping lap's
+    loop-closure correction is heaviest. That combination produced a
+    false opponent detection and a wall hit seconds into racing. See the
+    map_ray_caster property's own docstring."""
+    pytest.importorskip('range_libc')
+    node = _map_mode_node_with_settle(profiled_csv)
+    try:
+        assert node.opponent_detection_settle_sec > 0.0, (
+            'this test needs the real default, not an overridden 0 -- '
+            'otherwise it is not testing anything')
+        node.map_callback(_synthetic_map())
+        assert node._live_map_ray_caster is not None, (
+            'the live caster itself must still build normally -- only '
+            'the property that exposes it is suppressed')
+        assert node.map_ray_caster is None, (
+            'map subtraction must stay off until the settle window passes')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_map_ray_caster_resumes_once_the_settle_window_passes(profiled_csv):
+    pytest.importorskip('range_libc')
+    node = _map_mode_node_with_settle(profiled_csv)
+    try:
+        node.map_callback(_synthetic_map())
+        assert node.map_ray_caster is None
+
+        # Simulate the settle window having passed, without a real sleep.
+        node._profile_active_since = node._profile_active_since - Duration(
+            seconds=node.opponent_detection_settle_sec + 1.0)
+        assert node.map_ray_caster is node._live_map_ray_caster
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 def test_opponent_progress_rate_wraps_cleanly_at_start_finish():

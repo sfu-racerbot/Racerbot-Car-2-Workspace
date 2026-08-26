@@ -303,6 +303,39 @@ class PurePursuitNode(Node):
         self.declare_parameter('map_topic', '/map')
         self.declare_parameter('map_beam_step', 4)
         self.declare_parameter('map_subtraction_margin', 0.4)
+        # --- Which map ray-casting compares the live scan against
+        # (2026-08-25) ---
+        # auto_map_race_node deliberately leaves slam_toolbox running for
+        # the whole race as a fallback (see its _update_pf_handover), so
+        # map_topic above keeps evolving after the racing line and the
+        # particle filter's own localization were both frozen against a
+        # single saved-map snapshot at handover time. A live map that has
+        # moved on from that snapshot -- most likely right at the seam,
+        # where loop-closure correction is heaviest -- makes an
+        # already-mapped wall look like an unmapped (dynamic) object:
+        # verified on racerbot_sim, solo scenario (no real opponents),
+        # where this parked the car at the mapping-to-racing handoff on
+        # two different seeds. These two topics let this node track which
+        # map is geometrically consistent with the *current* pose source:
+        # localization_source_topic names it ('slam' or 'particle_filter',
+        # latched, auto_map_race_node publishes on every change) and
+        # frozen_map_topic carries the exact saved-map snapshot the
+        # particle filter localizes against (latched, published once,
+        # right after that file's on-disk despeckling finishes so this is
+        # never stale relative to what the particle filter actually
+        # loaded). Neither publishing is functionally identical to today:
+        # this always falls back to map_topic, live, exactly as before.
+        self.declare_parameter('localization_source_topic', '/auto_map_race/localization_source')
+        self.declare_parameter('frozen_map_topic', '/auto_map_race/frozen_map')
+        # 2026-08-25, found the same racerbot_sim run as the two above:
+        # even before any particle-filter handover is in play, /map can be
+        # stale by up to slam_toolbox's own map_update_interval (5.0s,
+        # f1tenth_online_async.yaml) relative to the pose, right when the
+        # just-closed mapping lap's loop-closure correction is heaviest.
+        # Map subtraction is suppressed for this long after the racing
+        # profile activates, giving at least one full interval a chance to
+        # land first. See the map_ray_caster property's own docstring.
+        self.declare_parameter('opponent_detection_settle_sec', 6.0)
 
         waypoints_file = str(self.get_parameter('waypoints_file').value)
         self.wait_for_waypoints = bool(self.get_parameter('wait_for_waypoints').value)
@@ -413,6 +446,11 @@ class PurePursuitNode(Node):
         self.map_topic = str(self.get_parameter('map_topic').value)
         self.map_beam_step = max(1, int(self.get_parameter('map_beam_step').value))
         self.map_subtraction_margin = float(self.get_parameter('map_subtraction_margin').value)
+        self.localization_source_topic = str(
+            self.get_parameter('localization_source_topic').value)
+        self.frozen_map_topic = str(self.get_parameter('frozen_map_topic').value)
+        self.opponent_detection_settle_sec = float(
+            self.get_parameter('opponent_detection_settle_sec').value)
         if self.opponent_detection_mode not in ('heuristic', 'map'):
             raise RuntimeError(
                 f"pure_pursuit_node: opponent_detection_mode must be 'heuristic' or 'map', "
@@ -485,6 +523,14 @@ class PurePursuitNode(Node):
         self.cumulative_arc_length = np.empty(0, dtype=np.float64)
         self.total_track_length = 0.0
         self.profile_ready = False
+        # Set for real by _activate_profile, the instant the racing line
+        # this node is about to drive becomes active -- see
+        # opponent_detection_settle_sec's declare_parameter comment. Must
+        # be initialized here, before _activate_profile can possibly run
+        # below, not alongside the map-subtraction state further down --
+        # that runs too late and would clobber the real timestamp back to
+        # None on every activation at construction time.
+        self._profile_active_since = None
         if waypoints_file:
             self._activate_profile(waypoints_file)
         elif not self.wait_for_waypoints:
@@ -556,7 +602,19 @@ class PurePursuitNode(Node):
         # Map-subtraction detection state: stays None until a map arrives
         # (map_callback). Until then 'map' mode falls back to the
         # heuristic detector rather than racing blind.
-        self.map_ray_caster = None
+        #
+        # map_ray_caster (the @property below) is the one every detection
+        # call site reads; it picks between the two below based on
+        # whichever is currently consistent with the active pose source,
+        # freshly on every read -- see the property's own docstring for
+        # why that has to be live rather than cached on each topic
+        # arrival. Defaulting localization_source to 'slam' means a node
+        # with no auto_map_race_node in the graph (or an older one,
+        # before this existed) behaves exactly as before: always the
+        # live map.
+        self._live_map_ray_caster = None
+        self._frozen_map_ray_caster = None
+        self.localization_source = 'slam'
 
         # Live tuning: publish the catalogue of parameters this node will
         # accept changes to *while driving*, so the web dashboard can build
@@ -613,6 +671,16 @@ class PurePursuitNode(Node):
                                  durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
             self.map_sub = self.create_subscription(
                 OccupancyGrid, self.map_topic, self.map_callback, map_qos)
+            # Both latched the same way: a late-starting pure_pursuit_node
+            # (or one started well after the mapping-to-racing handover)
+            # must still learn the current pose source and get the frozen
+            # map, not just whatever arrives from here on.
+            self.localization_source_sub = self.create_subscription(
+                String, self.localization_source_topic,
+                self.localization_source_callback, map_qos)
+            self.frozen_map_sub = self.create_subscription(
+                OccupancyGrid, self.frozen_map_topic,
+                self.frozen_map_callback, map_qos)
 
         control_period_sec = 1.0 / self.control_rate_hz
         self.control_timer = self.create_timer(control_period_sec, self.control_loop)
@@ -657,6 +725,9 @@ class PurePursuitNode(Node):
                 self.opponent_velocity_smoothing, self.opponent_lost_timeout_sec)
             self.overtake_active = False
         self.profile_ready = True
+        # See opponent_detection_settle_sec's declare_parameter comment and
+        # the map_ray_caster property.
+        self._profile_active_since = self.get_clock().now()
 
     def _log_profile_ready(self, path: str):
         self.get_logger().info(
@@ -817,7 +888,7 @@ class PurePursuitNode(Node):
         # machine where it isn't built.
         try:
             from pure_pursuit.map_subtraction import MapRayCaster
-            self.map_ray_caster = MapRayCaster(msg, self.max_range)
+            self._live_map_ray_caster = MapRayCaster(msg, self.max_range)
         except Exception as exc:
             self.get_logger().error(
                 f"Could not build the map ray caster ({exc}) -- opponent detection "
@@ -826,6 +897,64 @@ class PurePursuitNode(Node):
         self.get_logger().info(
             f"Map received ({msg.info.width}x{msg.info.height} @ "
             f"{msg.info.resolution:.3f}m/px) -- map-subtraction opponent detection active.")
+
+    def frozen_map_callback(self, msg: OccupancyGrid):
+        """The exact saved-map snapshot the particle filter localizes
+        against, published once by auto_map_race_node right after that
+        file's on-disk despeckling finishes. See the parameter comment
+        above frozen_map_topic's declaration for why this exists."""
+        try:
+            from pure_pursuit.map_subtraction import MapRayCaster
+            self._frozen_map_ray_caster = MapRayCaster(msg, self.max_range)
+        except Exception as exc:
+            self.get_logger().error(
+                f"Could not build the frozen-map ray caster ({exc}) -- opponent "
+                f"detection stays on the live map even once localization moves "
+                f"to the particle filter.")
+            return
+        self.get_logger().info(
+            f"Frozen map received ({msg.info.width}x{msg.info.height} @ "
+            f"{msg.info.resolution:.3f}m/px) for opponent detection once "
+            "localization hands off to the particle filter.")
+
+    def localization_source_callback(self, msg: String):
+        self.localization_source = msg.data
+
+    @property
+    def map_ray_caster(self):
+        """Whichever map is currently safe to ray-cast against, for every
+        detection call site (_detect_opponent, _dynamic_closest_in_cone,
+        _static_closest_in_cone) to read -- None means "map subtraction is
+        not available right now", which every one of those already
+        handles by falling back to the heuristic detector or a
+        conservative default.
+
+        A property, not a value cached on each topic arrival, because one
+        of the two things it depends on is a clock: opponent_detection_
+        settle_sec (2026-08-25) needs to expire on the next control tick
+        with no topic having to arrive to trigger the recheck. Found on
+        racerbot_sim's solo scenario (zero real opponents): even fully
+        on the live map with no particle-filter handover involved,
+        slam_toolbox's own map_update_interval is 5.0s
+        (f1tenth_online_async.yaml) -- so /map can be freshly stale by up
+        to that long relative to the pose right after the racing handoff,
+        which is also when SLAM's loop-closure correction from the
+        mapping lap that just closed is heaviest. That combination
+        produced a false "opponent" detection and a wall hit seconds into
+        racing, before the particle filter had even converged (so the
+        frozen/live map selection below was not yet in play at all).
+        Suppressing map subtraction until at least one full
+        map_update_interval has had a chance to land closes that window
+        without needing to know exactly when SLAM considers itself
+        settled.
+        """
+        if (self._profile_active_since is not None
+                and self._seconds_since(self._profile_active_since)
+                < self.opponent_detection_settle_sec):
+            return None
+        if self.localization_source == 'particle_filter' and self._frozen_map_ray_caster is not None:
+            return self._frozen_map_ray_caster
+        return self._live_map_ray_caster
 
     def joy_callback(self, msg: Joy):
         self.last_joy_time = self.get_clock().now()

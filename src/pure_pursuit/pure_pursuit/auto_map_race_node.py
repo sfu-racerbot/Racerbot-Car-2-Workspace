@@ -316,6 +316,17 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('drive_topic', '/drive')
         self.declare_parameter('pose_topic', '/slam_pose')
         self.declare_parameter('controller_topic', '/auto_map_race/controller')
+        # 2026-08-25: tells pure_pursuit_node which map is geometrically
+        # consistent with the pose it is currently steering on -- see the
+        # comment above pure_pursuit.yaml's matching parameters for why
+        # this exists (in short: slam_toolbox is deliberately never
+        # stopped, so its live /map keeps evolving past the single
+        # snapshot the particle filter and the racing line are frozen
+        # against, and ray-casting opponent detection against the wrong
+        # one of those two makes an already-mapped wall look dynamic).
+        self.declare_parameter(
+            'localization_source_topic', '/auto_map_race/localization_source')
+        self.declare_parameter('frozen_map_topic', '/auto_map_race/frozen_map')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('odom_frame', 'odom')
@@ -574,6 +585,21 @@ class AutoMapRaceNode(Node):
                        reliability=QoSReliabilityPolicy.RELIABLE,
                        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
         self._published_controller = None
+        # Both latched, same reasoning as controller_pub: a pure_pursuit_node
+        # that starts (or restarts) after the handover has already happened
+        # must still learn the current pose source and get the frozen map,
+        # not just whatever changes from here on.
+        self.localization_source_pub = self.create_publisher(
+            String, str(value('localization_source_topic')),
+            QoSProfile(depth=1,
+                       reliability=QoSReliabilityPolicy.RELIABLE,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
+        self.frozen_map_pub = self.create_publisher(
+            OccupancyGrid, str(value('frozen_map_topic')),
+            QoSProfile(depth=1,
+                       reliability=QoSReliabilityPolicy.RELIABLE,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
+        self._publish_localization_source('slam')
         self.create_subscription(
             AckermannDriveStamped, self.mapping_drive_topic,
             self._mapping_drive_callback, 10)
@@ -972,6 +998,7 @@ class AutoMapRaceNode(Node):
             self._seed_particle_filter(pose)
             if self.pf_pose_count >= self.pf_settle_poses and self._pf_pose_fresh(now_sec):
                 self.pf_active = True
+                self._publish_localization_source('particle_filter')
                 self.get_logger().info(
                     f'Localization handed to the particle filter after '
                     f'{self.pf_pose_count} poses. Pure pursuit now steers on '
@@ -995,6 +1022,15 @@ class AutoMapRaceNode(Node):
                 'slam_toolbox for the rest of the run.')
             self.pf_active = False
             self.pf_gave_up = True
+            self._publish_localization_source('slam')
+
+    def _publish_localization_source(self, source: str):
+        """Tell pure_pursuit_node which map is currently consistent with
+        the pose it is steering on -- see the parameter comment near this
+        topic's declare_parameter for the full reasoning."""
+        message = String()
+        message.data = source
+        self.localization_source_pub.publish(message)
 
     def _stop_particle_filter(self):
         if self.pf_process is None:
@@ -1711,6 +1747,54 @@ class AutoMapRaceNode(Node):
                 f'{map_yaml} -- small, and with clear observed space all '
                 'around, so the LiDAR saw straight through them.')
 
+    def _publish_frozen_map(self):
+        """Publish the exact, despeckled, on-disk map snapshot the
+        particle filter is about to localize against, so pure_pursuit_node
+        can ray-cast opponent detection against the same map once
+        localization hands off to it. See the parameter comment near
+        frozen_map_topic's declare_parameter for the full reasoning.
+
+        Called once, right after _despeckle_saved_map -- so this is never
+        stale relative to what the particle filter's own map_server
+        actually loads. inflate_cells=0: the live /map this substitutes
+        for is not inflated either, and inflating only this one would be
+        a new, avoidable difference between the two.
+        """
+        if not hasattr(self, 'run_directory'):
+            return
+        map_yaml = self.run_directory / 'map.yaml'
+        if not map_yaml.is_file():
+            return
+        try:
+            occ_map = occupancy_map.OccupancyMap.from_yaml(str(map_yaml), inflate_cells=0)
+        except Exception as exc:  # noqa: BLE001 - never lose the race over a diagnostic publish
+            self.get_logger().warn(
+                f'Could not load {map_yaml} to publish the frozen map for '
+                f'opponent detection ({type(exc).__name__}: {exc}). Opponent '
+                'detection stays on the live map even once localization moves '
+                'to the particle filter.')
+            return
+        msg = OccupancyGrid()
+        msg.header.frame_id = self.map_frame
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.info.resolution = occ_map.resolution
+        msg.info.width = occ_map.width
+        msg.info.height = occ_map.height
+        msg.info.origin.position.x = occ_map.origin_x
+        msg.info.origin.position.y = occ_map.origin_y
+        msg.info.origin.orientation.w = 1.0
+        # OccupancyMap's grid is FREE=0/OCCUPIED=1/UNKNOWN=-1 with row 0 at
+        # the smallest world Y -- already OccupancyGrid's own convention,
+        # see OccupancyMap.from_yaml's row-flip.
+        grid = occ_map.grid
+        data = np.where(grid == occupancy_map.OCCUPIED, 100,
+                        np.where(grid == occupancy_map.UNKNOWN, -1, 0))
+        msg.data = data.astype(np.int8).flatten().tolist()
+        self.frozen_map_pub.publish(msg)
+        self.get_logger().info(
+            f'Published the frozen map ({occ_map.width}x{occ_map.height} @ '
+            f'{occ_map.resolution:.3f}m/px) for opponent detection.')
+
     def _map_save_callback(self, future, artifact: str):
         # Count the save as settled however it ended: a failed save is still
         # a save that is no longer blocking slam_toolbox's executor, which
@@ -1726,6 +1810,7 @@ class AutoMapRaceNode(Node):
             if artifact == 'occupancy map':
                 self.map_saved_ok = True
                 self._despeckle_saved_map()
+                self._publish_frozen_map()
             return
 
         self.get_logger().error(

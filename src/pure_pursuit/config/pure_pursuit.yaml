@@ -260,6 +260,29 @@ pure_pursuit_node:
     map_topic: /map
     map_beam_step: 4              # ray-cast every Nth beam -- plenty for a car-sized object, keeps the per-tick cost tiny
     map_subtraction_margin: 0.4   # meters -- measured must be this much shorter than the map predicts to count as dynamic
+    # 2026-08-25: auto_map_race_node deliberately leaves slam_toolbox
+    # running for the whole race (its own documented fallback if the
+    # particle filter goes quiet), so map_topic above keeps evolving after
+    # the particle filter's localization -- and the racing line -- were
+    # both frozen against one saved-map snapshot at handover. Ray-casting
+    # against the still-live map at that point compares two different
+    # maps: verified on racerbot_sim (solo scenario, zero real opponents)
+    # to make an already-mapped wall look like an unmapped object, right
+    # at the seam where loop-closure correction is heaviest, parking the
+    # car at the racing handoff. These track which map matches the
+    # *current* pose source; with no auto_map_race_node in the graph (or
+    # an older one, before this existed), neither ever publishes and
+    # behavior is exactly today's: always the live map.
+    localization_source_topic: /auto_map_race/localization_source
+    frozen_map_topic: /auto_map_race/frozen_map
+    # 2026-08-25, found on the same racerbot_sim run: even fully on the
+    # live map with no particle-filter handover involved yet, /map can be
+    # stale by up to slam_toolbox's own map_update_interval (5.0s,
+    # f1tenth_online_async.yaml) relative to the pose, right when the
+    # just-closed mapping lap's loop-closure correction is heaviest. Map
+    # subtraction is suppressed for this long after the racing profile
+    # activates, giving at least one full interval a chance to land first.
+    opponent_detection_settle_sec: 6.0
 
     # --- Deadman button (workspace policy -- see docs/architecture.md) ---
     # Mandatory workspace-wide safety policy: the car must not move under

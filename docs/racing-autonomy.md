@@ -854,6 +854,10 @@ Among everything that passes every check, the **closest** one wins — the one m
 
 The geometric fallback is a heuristic, not certainty. Map mode removes the most common wall false positives, but it is only as accurate as the map and pose alignment underneath it — see [Limitations](#limitations-and-how-to-go-further).
 
+> **The map ray-casting compares against can silently stop matching the pose it's compared from (2026-08-25).** `auto_map_race_node` deliberately never stops `slam_toolbox` -- it is the documented fallback if the particle filter goes quiet mid-race -- so its live `/map` keeps evolving after the particle filter's localization (and the racing line) were both frozen against one saved-map snapshot at handover. Ray-casting against the still-live map at that point compares two different maps: verified on `racerbot_sim`'s solo scenario (zero real opponents) to make an already-mapped wall look like an unmapped object, worst right at the seam where loop-closure correction is heaviest, parking the car at the racing handoff on two different seeds.
+>
+> Fixed by tracking which map matches the *current* pose source rather than always using the live one: `auto_map_race_node` publishes `localization_source_topic` (`/auto_map_race/localization_source`, latched, "slam" or "particle_filter") on every handover/demotion, and `frozen_map_topic` (`/auto_map_race/frozen_map`, latched) once, right after the saved map's on-disk despeckling finishes -- the exact snapshot the particle filter's own `map_server` loads. `pure_pursuit_node` selects between that and the live `/map` accordingly (`_select_map_ray_caster`). With no `auto_map_race_node` in the graph (or an older one, before this existed), neither topic is ever published and behavior is exactly what it was before: always the live map.
+
 ### 2. "Am I catching them?" — tracking progress along the track, not raw position
 
 **In plain terms:** instead of asking "where is the other car in x/y space" — and then having to guess where the track goes from there to predict anything — this asks "how far around the *track* are they."
@@ -1050,6 +1054,7 @@ All of these live in `src/pure_pursuit/config/pure_pursuit.yaml` — see that fi
 | `overtake_lookahead_distance` | `4.0` | Meters of arc ahead the offset above is applied to, instead of the normal target. Must be >= `max_lookahead` — the node refuses to start otherwise |
 | `opponent_detection_mode` | `map` | Map subtraction by default; `heuristic` is the no-map fallback |
 | `map_topic` / `map_beam_step` / `map_subtraction_margin` | `/map` / `4` / `0.4` | Occupancy map, ray-cast downsampling, and residual margin |
+| `localization_source_topic` / `frozen_map_topic` | `/auto_map_race/localization_source` / `/auto_map_race/frozen_map` | Which map ray-casting compares against once localization hands off to the particle filter -- see the callout above [§1](#1-is-that-a-car--map-subtraction-then-geometric-filtering). Published by `auto_map_race_node`; harmless with no supervisor in the graph |
 | `laser_offset_x` / `laser_offset_y` | `0.26` / `0.0` | Measured LIDAR mounting offset from `base_link`, used to place detections in the map frame |
 | `enable_deadman` | `true` | **Mandatory workspace policy** — LB deadman button, checked first. Leave `true`; see [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car) |
 | `joy_topic` | `/joy` | Deadman button input |
