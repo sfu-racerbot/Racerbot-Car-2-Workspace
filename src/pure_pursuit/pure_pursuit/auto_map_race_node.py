@@ -347,10 +347,12 @@ class AutoMapRaceNode(Node):
         # Closed with heading comfortably inside closure_heading_deg's
         # gate, not just barely under it.
         self.declare_parameter('mapping_lap_max_heading_margin_fraction', 0.5)
-        # The closed lap did not need lap_points() to trim any samples --
-        # i.e. it closed within one revolution cleanly, not two
-        # overlapping ones.
-        self.declare_parameter('mapping_lap_require_no_trim', True)
+        # Closed within this many revolutions of turning, not two
+        # overlapping ones. NOT 1.0 -- see auto_map_race.yaml's comment on
+        # this same parameter for the empirical reason (2026-08-25,
+        # racerbot_sim): real closure detection consistently fires a
+        # little past exactly one revolution even on good laps.
+        self.declare_parameter('mapping_lap_max_revolutions', 1.5)
         # A sanity floor only. It used to be the main closure gate at 20.0m,
         # which is longer than this car's ~15m room -- so the gate could not
         # open until the car had been round twice, and every lap it has ever
@@ -451,7 +453,7 @@ class AutoMapRaceNode(Node):
             value('mapping_lap_require_unwidened_closure'))
         self.mapping_lap_max_heading_margin_fraction = float(
             value('mapping_lap_max_heading_margin_fraction'))
-        self.mapping_lap_require_no_trim = bool(value('mapping_lap_require_no_trim'))
+        self.mapping_lap_max_revolutions = float(value('mapping_lap_max_revolutions'))
         self.transition_stop_sec = float(value('transition_stop_sec'))
         self.map_save_timeout_sec = float(value('map_save_timeout_sec'))
         self.map_save_retries = max(0, int(value('map_save_retries')))
@@ -1473,12 +1475,11 @@ class AutoMapRaceNode(Node):
                 f'{math.degrees(heading_limit_rad):.1f}deg '
                 f'({self.mapping_lap_max_heading_margin_fraction:.0%} of the '
                 f'{math.degrees(self.recorder.closure_heading_rad):.0f}deg gate)')
-        if self.mapping_lap_require_no_trim:
-            trimmed = len(self.recorder.points) - len(self.recorder.lap_points())
-            if trimmed:
-                failed.append(
-                    f'{trimmed} sample(s) trimmed back to the final revolution '
-                    '(closed over more than one revolution, not one cleanly)')
+        if self.recorder.revolutions > self.mapping_lap_max_revolutions:
+            failed.append(
+                f'revolutions={self.recorder.revolutions:.2f} > '
+                f'{self.mapping_lap_max_revolutions:.2f} (closed over roughly '
+                'two overlapping laps, not one)')
         return not failed, failed
 
     def _write_profile(self) -> str:

@@ -78,7 +78,9 @@ ros2 launch racerbot_launch auto_map_race_launch.py
 
 > **Expect this to take minutes, not seconds.** The hallway loop this car maps is 126 m round and takes about 136 seconds a lap, and `mapping_laps` defaults to 2. The progress line leads with how far round the car is (`~34% round, ~83m to go`) precisely so a long run is distinguishable from a stuck one. If that percentage is climbing, keep holding LB.
 >
-> **The car may record a third lap on its own (2026-08-25).** The lap recorded after the discovery lap is only accepted if it passes a quality check (reanchor count, closure margin, heading margin, no multi-revolution trim — see `_lap_quality_ok`); a marginal one triggers one more automatic attempt, up to `max_mapping_laps` (default 3). This is normal, not stuck — the log names which check the lap fell short on. The discovery lap itself is never raced, whatever happens after it.
+> **The car may record a third lap on its own (2026-08-25).** The lap recorded after the discovery lap is only accepted if it passes a quality check (reanchor count, closure margin, heading margin, revolutions — see `_lap_quality_ok`); a marginal one triggers one more automatic attempt, up to `max_mapping_laps` (default 3). This is normal, not stuck — the log names which check the lap fell short on. The discovery lap itself is never raced, whatever happens after it.
+>
+> The revolutions check is `mapping_lap_max_revolutions` (default **1.5**), not the exact-one-revolution ("no trim at all") version first shipped the same day: verified against `racerbot_sim` that a zero-tolerance version rejects essentially every lap, including a genuinely good one, because real closure detection consistently fires a little past exactly one revolution (1.03-1.06 measured, sim and real) — see the parameter's own comment in `auto_map_race.yaml`.
 
 `auto_map_race_node` is a safety-gated command selector and a state machine. In order, it:
 

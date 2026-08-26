@@ -50,9 +50,23 @@ auto_map_race_node:
     # Closed with heading comfortably inside closure_heading_deg's gate,
     # not just barely under it.
     mapping_lap_max_heading_margin_fraction: 0.5
-    # The closed lap did not need lap_points() to trim any samples -- i.e.
-    # it closed within one revolution cleanly, not two overlapping ones.
-    mapping_lap_require_no_trim: true
+    # Closed within this many revolutions of turning, not two overlapping
+    # ones. NOT 1.0: real closure detection on this car's laps -- both
+    # good and bad -- consistently fires a little past exactly one
+    # revolution (1.03-1.06 measured across multiple mapping runs, sim and
+    # real), because the proximity gate requires getting *close to* the
+    # start point again, which the car's actual driven path does slightly
+    # after completing 360 degrees of turning, not exactly at it. A
+    # zero-tolerance "no trim at all" version of this check was verified
+    # (2026-08-25, racerbot_sim solo scenario) to reject essentially every
+    # lap unconditionally -- including a lap that produced a perfectly
+    # good raceline -- wasting the one extra retry this feature grants and
+    # landing on a worse lap by chance. 1.5 sits comfortably above the
+    # normal range and above closure_widen_after_revolutions (1.25, where
+    # the gate itself starts loosening -- already covered independently by
+    # mapping_lap_require_unwidened_closure above), while staying well
+    # under a genuine double-wrap (~2.0).
+    mapping_lap_max_revolutions: 1.5
     waypoint_spacing: 0.15
     # A sanity floor, not the closure gate. It WAS the gate, at 20.0m, which
     # is longer than the ~15m loop this car is driven on -- so closure could

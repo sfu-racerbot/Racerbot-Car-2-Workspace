@@ -646,7 +646,7 @@ class _LapQualityStub:
                 max_mapping_laps=3, mapping_lap_max_reanchors=20,
                 mapping_lap_require_unwidened_closure=True,
                 mapping_lap_max_heading_margin_fraction=0.5,
-                mapping_lap_require_no_trim=True):
+                mapping_lap_max_revolutions=1.5):
         self.recorder = recorder
         self.completed_mapping_laps = completed_mapping_laps
         self.mapping_laps = mapping_laps
@@ -654,7 +654,7 @@ class _LapQualityStub:
         self.mapping_lap_max_reanchors = mapping_lap_max_reanchors
         self.mapping_lap_require_unwidened_closure = mapping_lap_require_unwidened_closure
         self.mapping_lap_max_heading_margin_fraction = mapping_lap_max_heading_margin_fraction
-        self.mapping_lap_require_no_trim = mapping_lap_require_no_trim
+        self.mapping_lap_max_revolutions = mapping_lap_max_revolutions
         self.measured_lap_distance = 0.0
         self.measured_lap_duration_sec = 0.0
         self.state = 'mapping'
@@ -691,11 +691,13 @@ def _quality_recorder(**overrides):
     recorder.heading_error = overrides.get('heading_error', math.radians(5.0))
     recorder.points = overrides.get(
         'points', [(float(i), 0.0) for i in range(10)])
-    # Left empty by default: lap_points()'s own guard (len(point_turn) !=
-    # len(points)) then returns points unchanged, i.e. no trim -- see
-    # LapRecorder.lap_points. Only the 'trimmed' case below populates this
-    # to actually exercise a trim.
-    recorder.point_turn = overrides.get('point_turn', [])
+    # Real closure detection -- both good and bad laps, sim and real --
+    # consistently fires a little past exactly one revolution (1.03-1.06
+    # measured), not at or under it: see the mapping_lap_max_revolutions
+    # comment in auto_map_race.yaml. 1.05 revolutions is that realistic
+    # default, so a "passes every check" recorder here actually resembles
+    # a normal lap rather than an artificially perfect one.
+    recorder.turn = overrides.get('turn', 2.0 * math.pi * 1.05)
     return recorder
 
 
@@ -704,13 +706,11 @@ FAILING_QUALITY_CASES = [
     ('too_many_reanchors', {'reanchor_count': 25}, 'reanchor_count'),
     ('widened_closure', {'closest_approach': 2.0}, 'closed only after'),
     ('heading_margin', {'heading_error': math.radians(20.0)}, 'heading_error'),
-    ('trimmed', {
-        'points': [(float(i), 0.0) for i in range(10)],
-        # total turn 9.0 rad > 2*pi: lap_points() trims back to the final
-        # revolution, dropping the first two samples -- see the docstring
-        # of LapRecorder.lap_points for why.
-        'point_turn': [float(i) for i in range(10)],
-    }, 'trimmed'),
+    # 1.8 revolutions: comfortably over mapping_lap_max_revolutions'
+    # default (1.5) and over closure_widen_after_revolutions (1.25),
+    # representing a genuine near-double-wrap rather than the normal
+    # ~1.05-revolution closure every other case in this table is built on.
+    ('excess_revolutions', {'turn': 2.0 * math.pi * 1.8}, 'revolutions'),
 ]
 
 
@@ -783,8 +783,7 @@ def test_a_marginal_lap_is_accepted_anyway_at_the_ceiling():
         reanchor_count=999,
         closest_approach=999.0,
         heading_error=math.radians(179.0),
-        points=[(float(i), 0.0) for i in range(10)],
-        point_turn=[float(i) for i in range(10)],
+        turn=2.0 * math.pi * 1.8,
     )
     stub = _LapQualityStub(recorder, completed_mapping_laps=2, max_mapping_laps=3)
     AutoMapRaceNode._mapping_lap_completed(stub)
