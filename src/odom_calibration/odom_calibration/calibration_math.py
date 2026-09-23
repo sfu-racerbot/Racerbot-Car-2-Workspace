@@ -253,9 +253,34 @@ def _robust_positive_candidates(candidates):
     return inliers, rejected, result, relative_spread
 
 
+def parameter_values_from_response(names, response):
+    """Decode a ROS GetParameters response without depending on rclpy."""
+    if len(response.values) != len(names):
+        raise ValueError('live parameter response has the wrong number of values')
+    result = {}
+    for name, value in zip(names, response.values):
+        if value.type == 2:  # rcl_interfaces/ParameterType.PARAMETER_INTEGER
+            number = float(value.integer_value)
+        elif value.type == 3:  # PARAMETER_DOUBLE
+            number = float(value.double_value)
+        else:
+            raise ValueError(f'{name} must be a numeric parameter')
+        if not math.isfinite(number):
+            raise ValueError(f'{name} must be finite')
+        if name == 'speed_to_erpm_gain' and number == 0.0:
+            raise ValueError('speed_to_erpm_gain must be nonzero')
+        if name == 'wheelbase' and number <= 0.0:
+            raise ValueError('wheelbase must be positive')
+        result[name] = number
+    return result
+
+
 def movement_calibration(session: dict):
     params = session.get('current_parameters', {})
     current_gain = float(params.get('speed_to_erpm_gain', 4614.0))
+    if not math.isfinite(current_gain) or current_gain == 0.0:
+        raise ValueError('speed_to_erpm_gain must be finite and nonzero')
+    gain_sign = math.copysign(1.0, current_gain)
     current_offset = float(params.get('speed_to_erpm_offset', 0.0))
     trials = [
         trial for trial in session.get('trials', [])
@@ -349,21 +374,27 @@ def movement_calibration(session: dict):
                 )
         if not _finite(candidate):
             pass
-        elif candidate <= 0.0:
+        elif candidate * gain_sign <= 0.0:
             record['warnings'].append(
-                'Candidate gain is negative; direction/sign wiring must be checked.'
+                'Candidate gain is zero or has the wrong sign for the configured '
+                'gain (a negative candidate requires a negative baseline); '
+                'direction/sign wiring must be checked.'
             )
         else:
             record['usable'] = True
         candidate_records.append(record)
 
     candidate_values = [
-        record['candidate_gain']
+        record['candidate_gain'] * gain_sign
         for record in candidate_records
         if record['usable']
     ]
     inliers, rejected, suggested_gain, relative_spread = \
         _robust_positive_candidates(candidate_values)
+    inliers = [value * gain_sign for value in inliers]
+    rejected = [value * gain_sign for value in rejected]
+    if suggested_gain is not None:
+        suggested_gain *= gain_sign
     for record in candidate_records:
         if record.get('candidate_gain') in rejected:
             record['usable'] = False
@@ -371,7 +402,7 @@ def movement_calibration(session: dict):
 
     if suggested_gain is None:
         confidence = 'insufficient'
-        warnings.append('No positive, direction-consistent movement trial is usable.')
+        warnings.append('No gain-sign-consistent movement trial is usable.')
     elif len(inliers) >= 3 and relative_spread <= 0.03:
         confidence = 'high'
     elif len(inliers) >= 2 and relative_spread <= 0.07:
@@ -594,7 +625,9 @@ def build_report(session: dict):
         'steering': steering,
         'parameter_suggestions': suggestions,
         'safety_note': (
-            'Review suggestions before editing YAML. Re-test wheels off the '
+            'Speed gain and offset suggestions apply to vesc_to_odom_node only; '
+            'do not copy a negative odometry gain into the shared motor-command '
+            'configuration. Review suggestions before editing YAML. Re-test wheels off the '
             'ground, then at low speed while holding LB.'
         ),
     }

@@ -91,8 +91,10 @@ a misleading offset suggestion.
 6. Confirm forward or reverse and enter the positive tape-measured magnitude.
 
 Use at least three trials, ideally two forward and one reverse. The report keeps
-all readings signed. A negative gain candidate is excluded and reported as a
-direction/sign fault; it is never silently converted with `abs()`.
+all readings signed. A candidate whose sign disagrees with the configured odometry gain is
+excluded as a direction/sign fault; it is never silently converted with
+`abs()`. This car uses a **negative** gain in `vesc_to_odom_node` to cancel
+the driver's raw-ERPM negation; the motor-command gain remains positive.
 
 The local VESC odometry code uses:
 
@@ -116,7 +118,8 @@ candidate_gain =
     current_gain * integrated_odom_distance / signed_tape_distance
 ```
 
-Multiple positive candidates are combined with a median/MAD estimator.
+Multiple sign-consistent candidates are combined with a median/MAD estimator
+on their magnitudes, then restored to the configured gain sign.
 Statistical outliers, non-finite samples, timestamp gaps, and sign disagreements
 remain visible in the report.
 
@@ -169,8 +172,9 @@ configuration.
 
 ## Applying a suggestion
 
-Only apply a report marked `ready` after reviewing every warning. Update the
-shared conversion values in
+Only apply a report marked `ready` after reviewing every warning. Apply speed gain/offset suggestions to the **`vesc_to_odom_node` override**
+only. Do not copy its negative gain into the shared motor-command parameters.
+Steering suggestions apply to the shared steering conversion values in
 `src/f1tenth_system/f1tenth_stack/config/vesc.yaml`, rebuild/restart the stack,
 then:
 

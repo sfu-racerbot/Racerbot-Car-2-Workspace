@@ -238,3 +238,83 @@ def test_markdown_never_writes_none_as_parameter_value():
         calibration_math.build_report(session))
     assert '# speed_to_erpm_gain: insufficient data' in markdown
     assert 'speed_to_erpm_gain: None' not in markdown
+
+
+@pytest.mark.parametrize('gain', [-5000.0, 5000.0])
+@pytest.mark.parametrize('fallback', [False, True])
+def test_signed_odometry_gain_forward_reverse(gain, fallback):
+    # Oracle: raw integral = gain * signed distance + offset * duration.
+    # vesc.yaml documents this car's negative odometry gain.
+    offset, duration = 17.0, 4.0
+    params = _parameters()
+    params['speed_to_erpm_gain'] = math.copysign(4614.0, gain)
+    trials = [_stationary_trial(offset)]
+    for index, distance in enumerate([4.0, -3.0, 5.0]):
+        trials.append(_movement_trial(
+            str(index), 'forward' if distance > 0 else 'reverse', abs(distance),
+            None if fallback else gain * distance + offset * duration,
+            raw_duration=duration,
+            odom_distance=gain * distance / params['speed_to_erpm_gain']))
+    result = calibration_math.movement_calibration(
+        {'current_parameters': params, 'trials': trials})
+    assert result['suggested_speed_to_erpm_gain'] == pytest.approx(gain, abs=1e-8)
+    assert result['suggested_speed_to_erpm_offset'] == pytest.approx(offset, abs=1e-8)
+    assert result['usable_trial_count'] == 3
+    assert result['status'] == 'high'
+
+
+@pytest.mark.parametrize('baseline', [-4614.0, 4614.0])
+def test_opposite_gain_sign_still_rejected(baseline):
+    params = _parameters()
+    params['speed_to_erpm_gain'] = baseline
+    result = calibration_math.movement_calibration({
+        'current_parameters': params,
+        'trials': [_stationary_trial(0.0), _movement_trial(
+            'wrong', 'forward', 4.0, -baseline * 4.0)],
+    })
+    assert result['usable_trial_count'] == 0
+    assert result['suggested_speed_to_erpm_gain'] is None
+
+
+@pytest.mark.parametrize('gain', [0.0, float('nan'), float('inf')])
+def test_invalid_baseline_gain_rejected(gain):
+    with pytest.raises(ValueError, match='finite and nonzero'):
+        calibration_math.movement_calibration({
+            'current_parameters': {'speed_to_erpm_gain': gain}})
+
+
+def test_parameter_response_preserves_signed_gain():
+    # ROS GetParameters returns .values, not an iterable of Parameters.
+    from types import SimpleNamespace
+    response = SimpleNamespace(values=[
+        SimpleNamespace(type=3, double_value=-4614.0),
+        SimpleNamespace(type=2, integer_value=0),
+        SimpleNamespace(type=3, double_value=0.36),
+    ])
+    values = calibration_math.parameter_values_from_response(
+        ['speed_to_erpm_gain', 'speed_to_erpm_offset', 'wheelbase'], response)
+    assert values == {'speed_to_erpm_gain': -4614.0,
+                      'speed_to_erpm_offset': 0.0, 'wheelbase': 0.36}
+
+
+@pytest.mark.parametrize('name,kind,number,message', [
+    ('speed_to_erpm_gain', 3, 0.0, 'nonzero'),
+    ('speed_to_erpm_gain', 3, float('nan'), 'finite'),
+    ('speed_to_erpm_gain', 3, float('inf'), 'finite'),
+    ('speed_to_erpm_gain', 0, 0.0, 'numeric'),
+    ('wheelbase', 3, 0.0, 'positive'),
+    ('wheelbase', 3, -0.36, 'positive'),
+])
+def test_parameter_response_rejects_invalid(name, kind, number, message):
+    from types import SimpleNamespace
+    response = SimpleNamespace(values=[
+        SimpleNamespace(type=kind, double_value=number)])
+    with pytest.raises(ValueError, match=message):
+        calibration_math.parameter_values_from_response([name], response)
+
+
+def test_parameter_response_rejects_truncated_values():
+    from types import SimpleNamespace
+    with pytest.raises(ValueError, match='number of values'):
+        calibration_math.parameter_values_from_response(
+            ['speed_to_erpm_gain'], SimpleNamespace(values=[]))

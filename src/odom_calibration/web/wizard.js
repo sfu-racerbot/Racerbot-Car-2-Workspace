@@ -246,8 +246,8 @@ function renderTelemetry() {
 
 function parameterInputs(parameters) {
   const fields = [
-    ["speed_to_erpm_gain", "Speed → ERPM gain", "1"],
-    ["speed_to_erpm_offset", "Speed → ERPM offset", "0.1"],
+    ["speed_to_erpm_gain", "Odometry ERPM gain (signed)", "1"],
+    ["speed_to_erpm_offset", "Odometry ERPM offset", "0.1"],
     ["steering_angle_to_servo_gain", "Steering → servo gain", "0.0001"],
     ["steering_angle_to_servo_offset", "Steering → servo offset", "0.0001"],
     ["wheelbase", "Wheelbase (m)", "0.001"],
@@ -270,7 +270,7 @@ function currentParameterValues() {
 
 function renderSetup() {
   const live = app.snapshot?.live_parameters || {
-    speed_to_erpm_gain: 4614,
+    speed_to_erpm_gain: -4614,
     speed_to_erpm_offset: 0,
     steering_angle_to_servo_gain: -1.2135,
     steering_angle_to_servo_offset: 0.5304,

@@ -14,7 +14,7 @@ odom_calibration_node:
     max_samples_per_topic: 30000
     report_directory: "~/.ros/odom_calibration"
     # Used until live values can be read from vesc_to_odom_node.
-    speed_to_erpm_gain: 4614.0
+    speed_to_erpm_gain: -4614.0
     speed_to_erpm_offset: 0.0
     steering_angle_to_servo_gain: -1.2135
     steering_angle_to_servo_offset: 0.5304

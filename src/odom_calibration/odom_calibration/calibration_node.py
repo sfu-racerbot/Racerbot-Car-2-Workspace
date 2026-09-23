@@ -295,7 +295,7 @@ class OdomCalibrationNode(Node):
         self.declare_parameter('max_samples_per_topic', 30000)
         self.declare_parameter(
             'report_directory', '~/.ros/odom_calibration')
-        self.declare_parameter('speed_to_erpm_gain', 4614.0)
+        self.declare_parameter('speed_to_erpm_gain', -4614.0)
         self.declare_parameter('speed_to_erpm_offset', 0.0)
         self.declare_parameter(
             'steering_angle_to_servo_gain', -1.2135)
@@ -324,8 +324,9 @@ class OdomCalibrationNode(Node):
             name: float(self.get_parameter(name).value)
             for name in PARAMETER_NAMES
         }
-        if self.default_parameters['speed_to_erpm_gain'] <= 0.0:
-            raise ValueError('speed_to_erpm_gain must be positive')
+        default_gain = self.default_parameters['speed_to_erpm_gain']
+        if not math.isfinite(default_gain) or default_gain == 0.0:
+            raise ValueError('speed_to_erpm_gain must be finite and nonzero')
         if self.default_parameters['wheelbase'] <= 0.0:
             raise ValueError('wheelbase must be positive')
 
@@ -501,13 +502,8 @@ class OdomCalibrationNode(Node):
     def _live_parameters_done(self, future):
         self._parameter_request_inflight = False
         try:
-            parameters = future.result()
-            values = {
-                name: float(parameter.value)
-                for name, parameter in zip(PARAMETER_NAMES, parameters)
-            }
-            if not all(math.isfinite(value) for value in values.values()):
-                raise ValueError('live parameter response contains non-finite values')
+            values = calibration_math.parameter_values_from_response(
+                PARAMETER_NAMES, future.result())
         except Exception as exc:
             self.live_parameter_status = f'query failed: {exc}'
             return
@@ -529,8 +525,8 @@ class OdomCalibrationNode(Node):
                     if not _finite(value):
                         raise WizardError(f'{name} must be a finite number.')
                     merged[name] = float(value)
-        if merged['speed_to_erpm_gain'] <= 0.0:
-            raise WizardError('speed_to_erpm_gain must be positive.')
+        if merged['speed_to_erpm_gain'] == 0.0:
+            raise WizardError('speed_to_erpm_gain must be finite and nonzero.')
         if merged['wheelbase'] <= 0.0:
             raise WizardError('wheelbase must be positive.')
         return merged
