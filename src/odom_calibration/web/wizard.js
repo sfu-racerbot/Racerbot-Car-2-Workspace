@@ -421,7 +421,10 @@ function trialMeasurement(trial) {
     if (finite(trial.measured_diameter_m)) return `axle ${trial.measured_diameter_m.toFixed(3)} m`;
   }
   if (trial.kind === "steering_drift" && finite(trial.measured_forward_m)) {
-    return `${trial.measured_forward_m.toFixed(2)} m forward`;
+    const lateral = trial.measured_lateral_m;
+    const side = !finite(lateral) || lateral === 0 ? "on the line"
+      : lateral > 0 ? `${lateral.toFixed(2)} m left` : `${(-lateral).toFixed(2)} m right`;
+    return `${trial.measured_forward_m.toFixed(2)} m along, ${side}`;
   }
   return "No tape measure";
 }
