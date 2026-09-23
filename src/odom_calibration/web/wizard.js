@@ -340,7 +340,7 @@ function renderSetup() {
   };
   const mode = selectedMode();
   return `<section>
-    ${pageHead("Setup", "Calibration")}
+    <h1>Calibration</h1>${sectorRule()}
     <p class="lead">Pick what to calibrate, check the current values, and start. You drive the car with the remote; this page only records.</p>
     <div class="choice-list">
       <button class="slot" type="button" aria-pressed="${app.wheelSelected}" onclick="toggleSetup('wheel')">
@@ -732,7 +732,7 @@ function renderSteering(session) {
   const fit = linearFit(points);
   const ready = full.steering_left >= 1 && full.steering_right >= 1;
   return `<section>
-    ${pageHead("Steering calibration", "Steering")}
+    ${pageHead("Steering calibration", "Steering tests")}
     <p class="lead">Three kinds of test: a straight run finds true centre, and circles to each side find how far the wheels really turn.</p>
     <div class="segmented" role="group" aria-label="Steering test">
       ${STEERING_TESTS.map(([kind, label]) =>
@@ -849,6 +849,16 @@ function movementForm() {
     </div>`;
 }
 
+function reviewEyebrow(kind) {
+  if (kind === "movement") return "Wheel calibration, distance run";
+  if (kind === "stationary") return "Wheel calibration, stationary baseline";
+  if (kind === "steering_drift") return "Steering calibration, straight-line drift";
+  if (kind === "steering_left") return "Steering calibration, left circle";
+  if (kind === "steering_right") return "Steering calibration, right circle";
+  if (kind === "steering_center") return "Steering calibration, centred";
+  return "Check this run";
+}
+
 function renderReview(session) {
   const pending = session.pending_capture;
   const summary = pending.summary || {};
@@ -857,7 +867,7 @@ function renderReview(session) {
   else if (pending.kind === "steering_drift") form = driftForm();
   else if (pending.kind === "steering_left" || pending.kind === "steering_right") form = circleForm();
   return `<section>
-    ${pageHead("Check this run", "Check this run")}
+    ${pageHead(reviewEyebrow(pending.kind), "Check this run")}
     ${summaryDefs(summary)}
     ${warningsBlock(summary.warnings)}
     ${form}
