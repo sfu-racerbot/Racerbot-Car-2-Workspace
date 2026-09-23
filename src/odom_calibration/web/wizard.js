@@ -282,8 +282,8 @@ function renderTelemetry() {
       const age = finite(item.age_sec) ? `${item.age_sec.toFixed(2)} s old` : "no data";
       const required = name === "odom" ? "required" : "optional";
       return `<li><span class="topic-square ${escapeHtml(item.status)}"></span>
-        <span class="topic-name">${escapeHtml(item.label || name)}</span>
-        <span class="topic-detail">${escapeHtml(rate)}, ${escapeHtml(age)}, ${required}</span></li>`;
+        <span class="topic-text"><span class="topic-name">${escapeHtml(item.label || name)}</span>
+        <span class="topic-detail"><span class="mono">${escapeHtml(rate)}</span>, <span class="mono">${escapeHtml(age)}</span>, ${required}</span></span></li>`;
     }).join("");
   }
 }
@@ -367,8 +367,8 @@ function topicRow(name, item, required) {
   const rate = finite(item?.rate_hz) ? `${item.rate_hz.toFixed(1)} Hz` : "no rate";
   const age = finite(item?.age_sec) ? `${item.age_sec.toFixed(2)} s old` : "no data";
   return `<li><span class="topic-square ${escapeHtml(item?.status || "missing")}"></span>
-    <span class="topic-name">${escapeHtml(item?.label || name)}</span>
-    <span class="topic-detail">${escapeHtml(rate)}, ${escapeHtml(age)}, ${required ? "required" : "optional"}</span></li>`;
+    <span class="topic-text"><span class="topic-name">${escapeHtml(item?.label || name)}</span>
+    <span class="topic-detail"><span class="mono">${escapeHtml(rate)}</span>, <span class="mono">${escapeHtml(age)}</span>, ${required ? "required" : "optional"}</span></span></li>`;
 }
 
 function renderPreflight() {
