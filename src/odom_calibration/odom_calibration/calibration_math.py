@@ -102,6 +102,35 @@ def integrate_samples(samples, field: str, max_gap_sec: float = 0.5):
     }
 
 
+class RunningIntegral:
+    """Incremental twin of ``integrate_samples`` for live progress readouts.
+
+    Accepts samples in arrival order and applies the same rules: non-finite
+    values and non-increasing timestamps are ignored, and a gap longer than
+    ``max_gap_sec`` is not integrated.
+    """
+
+    def __init__(self, max_gap_sec: float = 0.5):
+        if not _finite(max_gap_sec) or max_gap_sec <= 0.0:
+            raise ValueError('max_gap_sec must be finite and positive')
+        self.max_gap_sec = float(max_gap_sec)
+        self.total = 0.0
+        self._last = None
+
+    def add(self, t, value):
+        if not _finite(t) or not _finite(value):
+            return
+        t, value = float(t), float(value)
+        if self._last is not None:
+            last_t, last_value = self._last
+            dt = t - last_t
+            if dt <= 0.0:
+                return
+            if dt <= self.max_gap_sec:
+                self.total += 0.5 * (last_value + value) * dt
+        self._last = (t, value)
+
+
 def _series_stats(samples, field: str):
     values = [
         float(sample[field])
