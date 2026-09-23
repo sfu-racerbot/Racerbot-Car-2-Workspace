@@ -226,6 +226,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .topbar .button-ghost { color: #fff; }
 .button-danger { background: var(--bad); color: #fff; }
 .button-small { padding: .5rem 1.1rem; min-height: 44px; font-size: .85rem; }
+.button[hidden] { display: none; }
 .button-row { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; margin-top: 1.5rem; }
 
 /* Painted-corner choice boxes */
