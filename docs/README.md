@@ -43,7 +43,7 @@ After that, follow whichever branch below matches what you're doing.
 | [operations.md](operations.md) | Step-by-step procedures: driving, mapping, localizing, running autonomy, racing, shutting down. For anyone actually using the car. |
 | [sim-validation.md](sim-validation.md) | Test your driving code against simulated physics without the car, and watch it on the dashboard from your laptop. For anyone who changed driving code and wants to know if it works. |
 | [run-diagnostics.md](run-diagnostics.md) | Recording a run so it can be diagnosed afterwards, plus the AI-agent prompt template. For anyone debugging a run that went wrong. |
-| [odom-calibration.md](odom-calibration.md) | A browser wizard for tape-measure calibration of VESC speed odometry. For anyone whose distances read wrong. |
+| [odom-calibration.md](odom-calibration.md) | A browser wizard for tape-measure calibration of wheel odometry and steering. For anyone whose distances read wrong or whose car pulls to one side. |
 | [git-setup.md](git-setup.md) | Which `src/` packages are real submodules vs. vendored code, and how to update them safely. Read before pulling upstream changes into `f1tenth_system`. |
 
 ## Write code
