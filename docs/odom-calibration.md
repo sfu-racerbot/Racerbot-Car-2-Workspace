@@ -22,7 +22,7 @@ see [glossary.md](glossary.md)). Two conversions stand between the raw
 readings and reality: the wheel-speed gain and offset, and the
 steering-angle-to-servo line.
 
-Both conversions drift from the physical car over time. The wizard drives
+Both conversions drift from the physical car over time. The wizard compares
 measured ground truth — a tape on the floor — against what the car counted,
 and suggests corrected values.
 
@@ -37,8 +37,7 @@ whichever you pick is in the
 ## Start it
 
 Start the car's normal bringup in **terminal 1** (see
-[operations.md](operations.md)). Then, in **terminal 2**, after the normal car
-bringup:
+[operations.md](operations.md)). Then, in **terminal 2**:
 
 ```bash
 cd ~/racerbot-ws
@@ -47,7 +46,7 @@ ros2 launch odom_calibration odom_calibration_launch.py
 ```
 
 It worked when terminal 2 prints the `http://<car-ip>:8090/` address and
-confirms the node is read-only.
+confirms the node (a running ROS program) is read-only.
 
 Open `http://<car-ip>:8090/`. The wizard never publishes a ROS command; the
 operator drives with the physical remote and LB (the deadman button: the car

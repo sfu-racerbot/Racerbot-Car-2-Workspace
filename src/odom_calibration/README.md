@@ -4,16 +4,16 @@
 > **Read first:** [docs/odom-calibration.md](../../docs/odom-calibration.md) for the calibration procedure itself.
 > **What's in it:** how the wizard is put together and what it writes.
 
-`odom_calibration` is a guided browser wizard for calibrating the RacerBot
-VESC (the motor controller board; see [glossary.md](../../docs/glossary.md))
-odometry (the car's estimate of how far it has travelled and turned; see
-[glossary.md](../../docs/glossary.md)) and, optionally, the steering
-conversion.
+`odom_calibration` is a guided browser wizard for the RacerBot race car.
+It calibrates the VESC (the motor controller board; see
+[glossary.md](../../docs/glossary.md)) odometry (the car's estimate of how
+far it has travelled and turned; see [glossary.md](../../docs/glossary.md))
+and, optionally, the steering conversion.
 
 A human drives the car with the physical remote and measures ground truth
 with a tape measure.
 
-The wizard only subscribes to ROS topics (named message streams; see
+The wizard only reads ROS topics (each topic is a named message stream; see
 [glossary.md](../../docs/glossary.md)): it creates no publishers and cannot
 command the car.
 
@@ -91,13 +91,17 @@ At setup the operator ticks one or both boxes: **Wheel calibration** and
 - **Both** (mode `movement_steering`): movement tests followed by the steering tests.
 
 The stages follow the mode (`MODE_STAGES` in `session_store.py` and
-`web/wizard.js`): `movement` runs preflight, stationary, movement, report;
-`steering` runs preflight, steering, report; `movement_steering` runs all five.
+`web/wizard.js`).
+
+`movement` runs preflight, stationary, movement, report. `steering` runs
+preflight, steering, report. `movement_steering` runs all five.
 
 Verify the current parameter values shown on the setup screen. The five
 editable values are `speed_to_erpm_gain`, `speed_to_erpm_offset`,
 `steering_angle_to_servo_gain`, `steering_angle_to_servo_offset`, and
-`wheelbase`. The servo clamp `servo_min` (`0.15`) and `servo_max` (`0.85`)
+`wheelbase`.
+
+The servo clamp `servo_min` (`0.15`) and `servo_max` (`0.85`)
 come from this node's own configuration in
 `config/odom_calibration.yaml` and must match `servo_min`/`servo_max` in
 `vesc.yaml`. The report compares its suggestions against this baseline.
@@ -108,7 +112,7 @@ Start normal vehicle bringup, turn on the remote, keep the controls neutral, and
 leave the car stationary. The Web UI reports message rate, age, invalid values,
 and timestamp regressions for every topic.
 
-`vesc_to_odom` does not publish `/odom` until it has received at least one servo
+`vesc_to_odom` does not send `/odom` until it has received at least one servo
 command. If raw VESC data is healthy but odometry says "missing," briefly hold
 LB with throttle and steering neutral so the normal teleop (hand-driving with
 the gamepad) path sends a neutral command.
@@ -187,17 +191,21 @@ misuse wheelbase as a tuning parameter.
 A stationary capture with the wheels visually centred (`steering_center`,
 kept for old sessions) cannot find the true centre. With the stick neutral
 the servo command is computed *from* the configured offset, so the capture
-just reads that offset back. Readings within `0.002` of the configured
+just reads that offset back.
+
+Readings within `0.002` of the configured
 offset get a warning ("only reads the current setting back") that points at
 the drift test instead.
 
 The drift test measures the true centre from how the car actually drives.
 Tape a straight line at least 6 m long. Put the rear-axle centre on the line
-with the car pointing along it. Hold LB and drive slowly about 5 m forward
-without touching the steering stick. Then measure the forward distance `s`
+with the car pointing along it.
+
+Hold LB and drive slowly about 5 m forward without touching the steering
+stick. Then measure the forward distance `s`
 along the line and the sideways offset `d` at the end (left positive).
 
-For a constant-curvature path, the radius is:
+For a path that bends at a steady rate, the radius is:
 
 ```text
 R = (s^2 + d^2) / (2d)
@@ -208,7 +216,8 @@ Line the car up carefully before a drift run. Even 1 degree of heading
 misalignment is about 9 cm of sideways error over 5 m, which looks exactly
 like a steering offset that is not really there.
 
-<details><summary>Where the drift formula comes from (safe to skip)</summary>
+<details>
+<summary>Where the drift formula comes from (safe to skip)</summary>
 
 A circle that starts tangent to the lane line and passes through the end
 point `(s, d)` has radius `R = (s^2 + d^2) / (2d)`. The kinematic bicycle
@@ -229,11 +238,14 @@ tires** method takes two diameters and the wizard uses their midpoint, so
 
 The tire-midpoint method needs no track-width constant. The axle centre sits
 exactly midway between the two rear tires, so averaging the two tire radii
-gives the centre directly. The difference is the rear track, which the
-report shows as a free consistency check: circles whose implied track
+gives the centre directly.
+
+The difference is the rear track, which the report shows as a free
+consistency check: circles whose implied track
 widths disagree by more than 3 cm produce a re-measure warning.
 
-<details><summary>Why the midpoint needs no constant (safe to skip)</summary>
+<details>
+<summary>Why the midpoint needs no constant (safe to skip)</summary>
 
 If the inner tire traces radius `r` and the outer traces `r + track`, the
 centre traces `r + track / 2`, which is exactly the mean of the two radii.
@@ -249,8 +261,10 @@ left circle and one full-lock right circle are accepted.
 Full lock measures the real tightest turn because of the servo clamp. The
 servo command the wizard records is the value after `vesc_driver` applies
 the `servo_min`/`servo_max` clamp, so pushing the stick past the clamp
-cannot turn the wheels any further. The report's per-side table lists each
-side's full-lock radius and angle plus an "On servo limit" column (within
+cannot turn the wheels any further.
+
+The report's per-side table lists each side's full-lock radius and angle
+plus an "On servo limit" column (within
 `0.002` of a limit counts as on it).
 
 The report also fits per-side gains from the centre/drift points plus each
@@ -261,8 +275,9 @@ the linkage and trim for a physical cause.
 
 The "Servo limits allow up to … deg left and … deg right" line runs the
 `servo_min`/`servo_max` limits through the suggested line. It is the
-steering the car can actually reach with those values. Compare it against
-`max_steering_angle` in the driving nodes' configs (for example
+steering the car can actually reach with those values.
+
+Compare it against `max_steering_angle` in the driving nodes' configs (for example
 `src/gap_follow/config/gap_follow.yaml` and
 `src/pure_pursuit/config/pure_pursuit.yaml`, both `0.26`). Do not raise a
 driving node's `max_steering_angle` past what the car reaches: the planner
@@ -312,4 +327,5 @@ then:
 Tape measurement cannot detect every source of odometry error. Tire slip,
 surface changes, tire wear, battery state, drivetrain backlash, and steering
 flex can all change results. The report quantifies repeatability but does not
-turn wheel odometry into absolute localization.
+turn wheel odometry into absolute localization (a map-based position
+estimate; see [glossary.md](../../docs/glossary.md)).
