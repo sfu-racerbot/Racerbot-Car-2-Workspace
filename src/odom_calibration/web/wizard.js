@@ -837,16 +837,16 @@ function circleForm() {
     </div>
     <div id="circle-axle-field" class="field">
       <label class="field-label" for="circle-diameter">Diameter (m)</label>
-      <input id="circle-diameter" class="input" type="number" min="0.1" step="0.01">
+      <input id="circle-diameter" class="input" type="number" min="0.1" step="0.01" placeholder="e.g. 3.20">
     </div>
-    <div id="circle-tire-fields" hidden>
+    <div id="circle-tire-fields" class="field-row" hidden>
       <div class="field">
         <label class="field-label" for="circle-inner">Inner tire circle diameter (m)</label>
-        <input id="circle-inner" class="input" type="number" min="0.1" step="0.01">
+        <input id="circle-inner" class="input" type="number" min="0.1" step="0.01" placeholder="e.g. 2.90">
       </div>
       <div class="field">
         <label class="field-label" for="circle-outer">Outer tire circle diameter (m)</label>
-        <input id="circle-outer" class="input" type="number" min="0.1" step="0.01">
+        <input id="circle-outer" class="input" type="number" min="0.1" step="0.01" placeholder="e.g. 3.20">
       </div>
     </div>
     <div class="check-row">
