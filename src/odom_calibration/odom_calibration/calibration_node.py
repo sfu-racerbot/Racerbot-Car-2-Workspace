@@ -275,6 +275,14 @@ class DownloadHandler(tornado.web.RequestHandler):
         self.finish(content)
 
 
+class NoCacheStaticFileHandler(tornado.web.StaticFileHandler):
+    """Static wizard files, revalidated on every load so an updated UI is
+    never mixed with a cached older script or stylesheet."""
+
+    def set_extra_headers(self, path):
+        self.set_header('Cache-Control', 'no-cache')
+
+
 class OdomCalibrationNode(Node):
     """Collect telemetry, own wizard state, and never publish to ROS."""
 
@@ -845,7 +853,7 @@ def main(args=None):
         (r'/ws', WizardWebSocket, {'node': node}),
         (
             r'/(.*)',
-            tornado.web.StaticFileHandler,
+            NoCacheStaticFileHandler,
             {'path': web_directory, 'default_filename': 'index.html'},
         ),
     ])
