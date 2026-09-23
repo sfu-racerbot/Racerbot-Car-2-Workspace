@@ -17,7 +17,7 @@ import uuid
 
 
 SCHEMA_VERSION = 1
-VALID_MODES = ('movement', 'movement_steering')
+VALID_MODES = ('movement', 'movement_steering', 'steering')
 VALID_STAGES = (
     'setup',
     'preflight',
@@ -26,6 +26,31 @@ VALID_STAGES = (
     'steering',
     'report',
 )
+MODE_STAGES = {
+    'movement': ('preflight', 'stationary', 'movement', 'report'),
+    'movement_steering': (
+        'preflight', 'stationary', 'movement', 'steering', 'report'),
+    'steering': ('preflight', 'steering', 'report'),
+}
+CAPTURE_KINDS = (
+    'stationary',
+    'movement',
+    'steering_center',
+    'steering_drift',
+    'steering_left',
+    'steering_right',
+)
+
+
+def stage_allowed(mode, stage):
+    return stage in MODE_STAGES.get(mode, ())
+
+
+def capture_allowed(mode, kind):
+    if kind not in CAPTURE_KINDS:
+        return False
+    stage = 'steering' if kind.startswith('steering_') else kind
+    return stage_allowed(mode, stage)
 
 
 def utc_now():
