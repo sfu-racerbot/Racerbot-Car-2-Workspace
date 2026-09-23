@@ -21,6 +21,13 @@ setup(
             'web/index.html',
             'web/wizard.js',
             'web/style.css',
+            'web/icon.png',
+        ]),
+        ('share/' + package_name + '/web/fonts', [
+            'web/fonts/saira-condensed-700.woff2',
+            'web/fonts/saira-condensed-800.woff2',
+            'web/fonts/public-sans.woff2',
+            'web/fonts/ibm-plex-mono-500.woff2',
         ]),
     ],
     install_requires=['setuptools'],
