@@ -412,6 +412,7 @@ input[type="checkbox"], input[type="radio"] { width: 1.1rem; height: 1.1rem; acc
 .diagram { max-width: 100%; height: auto; display: block; }
 .diagram text { font-family: var(--font-body); }
 .diagram .tick { font-family: var(--font-mono); }
+.fit-chart { width: 100%; height: auto; max-height: 320px; }
 
 /* Code */
 .code-block {

@@ -565,29 +565,28 @@ function servoLimits() {
   return null;
 }
 
-function linearTicks(min, max, count) {
-  if (!(min < max)) return [min];
-  const ticks = [];
-  for (let i = 0; i < count; i++) ticks.push(min + (max - min) * i / (count - 1));
-  return ticks;
+function roundDegStep(span) {
+  return span / 4 <= 5 ? 5 : 10;
 }
 
 function renderFitChart(points, line, limits) {
   if (!points.length) return "";
-  const W = 380, H = 250, L = 48, R = 12, T = 12, B = 36;
+  const W = 480, H = 270, L = 52, R = 14, T = 14, B = 44;
   const xs = points.map(p => p.x * 180 / Math.PI);
   const ys = points.map(p => p.y);
-  let x0 = Math.min(...xs), x1 = Math.max(...xs);
-  let y0 = Math.min(...ys), y1 = Math.max(...ys);
-  if (limits) { y0 = Math.min(y0, ...limits); y1 = Math.max(y1, ...limits); }
-  if (line) {
-    const ends = [x0 * Math.PI / 180, x1 * Math.PI / 180]
-      .map(a => line.slope * a + line.intercept);
-    y0 = Math.min(y0, ...ends); y1 = Math.max(y1, ...ends);
+  const xStep = roundDegStep(Math.max(...xs) - Math.min(...xs));
+  let x0 = Math.floor(Math.min(...xs) / xStep) * xStep;
+  let x1 = Math.ceil(Math.max(...xs) / xStep) * xStep;
+  if (x1 <= x0) { x0 -= xStep; x1 += xStep; }
+  let y0, y1;
+  if (limits) {
+    y0 = Math.max(0, Math.min(limits[0], limits[1], ...ys) - 0.05);
+    y1 = Math.min(1, Math.max(limits[0], limits[1], ...ys) + 0.05);
+  } else {
+    y0 = Math.min(...ys) - 0.1;
+    y1 = Math.max(...ys) + 0.1;
   }
-  const xPad = Math.max((x1 - x0) * 0.15, 1);
-  const yPad = Math.max((y1 - y0) * 0.15, 0.005);
-  x0 -= xPad; x1 += xPad; y0 -= yPad; y1 += yPad;
+  if (!(y1 > y0)) { y0 -= 0.1; y1 += 0.1; }
   const X = v => L + (v - x0) / (x1 - x0) * (W - L - R);
   const Y = v => T + (1 - (v - y0) / (y1 - y0)) * (H - T - B);
 
@@ -595,20 +594,20 @@ function renderFitChart(points, line, limits) {
     const cx = X(p.x * 180 / Math.PI).toFixed(1);
     const cy = Y(p.y).toFixed(1);
     if (p.kind === "steering_left") {
-      return `<circle cx="${cx}" cy="${cy}" r="4" style="fill:var(--blue)"/>`;
+      return `<circle cx="${cx}" cy="${cy}" r="5" style="fill:var(--blue)"/>`;
     }
     if (p.kind === "steering_right") {
       const px = X(p.x * 180 / Math.PI);
       const py = Y(p.y);
-      return `<polygon points="${px.toFixed(1)},${(py - 5).toFixed(1)} ${(px - 4.5).toFixed(1)},${(py + 3.5).toFixed(1)} ${(px + 4.5).toFixed(1)},${(py + 3.5).toFixed(1)}" style="fill:var(--blue)"/>`;
+      return `<polygon points="${px.toFixed(1)},${(py - 6).toFixed(1)} ${(px - 5.5).toFixed(1)},${(py + 4).toFixed(1)} ${(px + 5.5).toFixed(1)},${(py + 4).toFixed(1)}" style="fill:var(--blue)"/>`;
     }
     if (p.kind === "steering_center") {
-      return `<rect x="${(cx - 4).toFixed(1)}" y="${(cy - 4).toFixed(1)}" width="8" height="8" style="fill:var(--paper);stroke:var(--navy)"/>`;
+      return `<rect x="${(cx - 4.5).toFixed(1)}" y="${(cy - 4.5).toFixed(1)}" width="9" height="9" style="fill:var(--paper);stroke:var(--navy);stroke-width:1.5"/>`;
     }
-    return `<rect x="${(cx - 4).toFixed(1)}" y="${(cy - 4).toFixed(1)}" width="8" height="8" style="fill:var(--navy)"/>`;
+    return `<rect x="${(cx - 4.5).toFixed(1)}" y="${(cy - 4.5).toFixed(1)}" width="9" height="9" style="fill:var(--navy)"/>`;
   };
 
-  let inner = `<line x1="${L}" y1="${Y(0) > T && Y(0) < H - B ? Y(0) : H - B}" x2="${W - R}" y2="${Y(0) > T && Y(0) < H - B ? Y(0) : H - B}" style="stroke:var(--line-2)"/>`;
+  let inner = "";
   if (line) {
     inner += `<line x1="${X(x0).toFixed(1)}" y1="${Y(line.slope * x0 * Math.PI / 180 + line.intercept).toFixed(1)}"
       x2="${X(x1).toFixed(1)}" y2="${Y(line.slope * x1 * Math.PI / 180 + line.intercept).toFixed(1)}"
@@ -618,21 +617,32 @@ function renderFitChart(points, line, limits) {
     for (const limit of limits) {
       if (limit < y0 || limit > y1) continue;
       inner += `<line x1="${L}" y1="${Y(limit).toFixed(1)}" x2="${W - R}" y2="${Y(limit).toFixed(1)}"
-        style="stroke:var(--bad);stroke-dasharray:5 4"/><text x="${W - R}" y="${(Y(limit) - 4).toFixed(1)}"
-        text-anchor="end" font-size="10" style="fill:var(--muted)">servo limit</text>`;
+        style="stroke:var(--bad);stroke-dasharray:5 4"/><text x="${W - R}" y="${(Y(limit) - 5).toFixed(1)}"
+        text-anchor="end" font-size="11" style="fill:var(--muted)">servo limit</text>`;
     }
   }
   inner += points.map(pointShape).join("");
-  const xTicks = linearTicks(x0, x1, 4).map(t =>
-    `<text x="${X(t).toFixed(1)}" y="${H - B + 16}" text-anchor="middle" font-size="10" class="tick" style="fill:var(--muted)">${t.toFixed(1)}</text>`).join("");
-  const yTicks = linearTicks(y0, y1, 4).map(t =>
-    `<text x="${L - 6}" y="${(Y(t) + 3).toFixed(1)}" text-anchor="end" font-size="10" class="tick" style="fill:var(--muted)">${t.toFixed(3)}</text>`).join("");
-  return `<figure class="figure"><svg class="diagram" viewBox="0 0 ${W} ${H}" role="img"
+  const xTicks = [];
+  for (let t = x0; t <= x1 + 1e-9; t += xStep) {
+    xTicks.push(`<text x="${X(t).toFixed(1)}" y="${H - B + 18}" text-anchor="middle" font-size="11" class="tick" style="fill:var(--muted)">${t.toFixed(0)}</text>`);
+  }
+  const yTicks = [];
+  for (let t = Math.ceil(y0 / 0.1) * 0.1; t <= y1 + 1e-9; t += 0.1) {
+    const v = Math.round(t * 10) / 10;
+    yTicks.push(`<text x="${L - 7}" y="${(Y(v) + 4).toFixed(1)}" text-anchor="end" font-size="11" class="tick" style="fill:var(--muted)">${v.toFixed(1)}</text>`);
+  }
+  const legends = [];
+  if (points.some(p => p.kind === "steering_drift")) legends.push("Filled square: straight-line drift");
+  if (points.some(p => p.kind === "steering_left")) legends.push("Circle: left circle");
+  if (points.some(p => p.kind === "steering_right")) legends.push("Triangle: right circle");
+  if (points.some(p => p.kind === "steering_center")) legends.push("Hollow square: centred (old sessions only)");
+  const midY = T + (H - T - B) / 2;
+  return `<figure class="figure"><svg class="diagram fit-chart" viewBox="0 0 ${W} ${H}" role="img"
       aria-label="Servo value against steering angle">
-    <text x="${L}" y="${H - 6}" font-size="11" style="fill:var(--muted)">Steering angle (deg)</text>
-    <text x="10" y="${T + 6}" font-size="11" style="fill:var(--muted)">Servo</text>
-    ${xTicks}${yTicks}${inner}</svg>
-    <figcaption>Each point is one test. The line is the suggested setting.</figcaption></figure>`;
+    <text x="${L}" y="${H - 8}" font-size="12" style="fill:var(--muted)">Steering angle (deg)</text>
+    <text transform="rotate(-90 14 ${midY.toFixed(1)})" x="14" y="${midY.toFixed(1)}" text-anchor="middle" font-size="12" style="fill:var(--muted)">Servo</text>
+    ${xTicks.join("")}${yTicks.join("")}${inner}</svg>
+    <figcaption>Each point is one test. The line is the suggested setting.${legends.length ? ` ${legends.join(", ")}.` : ""}</figcaption></figure>`;
 }
 
 function sdPathD(angle, wheelbase) {
