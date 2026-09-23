@@ -261,7 +261,8 @@ function renderTelemetry() {
   const speedText = finite(telemetry.odom_speed) ? `${signed(telemetry.odom_speed, 2)} m/s` : "--";
   const servoText = finite(telemetry.servo) ? telemetry.servo.toFixed(4) : "--";
   const angle = impliedSteeringAngle();
-  const steerText = angle === null ? "--" : `${deg(Math.abs(angle))} deg ${angle >= 0 ? "left" : "right"}`;
+  const steerText = angle === null ? "--"
+    : `${(Math.abs(angle) * 180 / Math.PI).toFixed(1)}° ${angle >= 0 ? "left" : "right"}`;
   const erpmText = finite(telemetry.raw_forward_erpm) ? signed(telemetry.raw_forward_erpm, 0) : "--";
 
   const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
