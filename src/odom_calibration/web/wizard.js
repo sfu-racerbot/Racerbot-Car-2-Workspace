@@ -817,10 +817,10 @@ function driftForm() {
     </div>
     <div class="field">
       <label class="field-label" for="drift-side-mag">Sideways offset at the end (m)</label>
-      <input id="drift-side-mag" class="input" type="number" min="0" step="0.01" value="0">
+      <input id="drift-side-mag" class="input" type="number" min="0" step="0.01">
     </div>
     <div class="radio-row" role="radiogroup" aria-label="Side of the line">
-      <label><input type="radio" name="drift-side" value="left" checked> Left of the line</label>
+      <label><input type="radio" name="drift-side" value="left"> Left of the line</label>
       <label><input type="radio" name="drift-side" value="right"> Right of the line</label>
     </div>
     <div class="check-row">
@@ -1132,11 +1132,28 @@ window.acceptPending = async function acceptPending() {
     } else if (pending.kind === "steering_drift") {
       const forward = Number(document.getElementById("drift-forward").value);
       const onLine = document.getElementById("drift-online")?.checked === true;
-      const magnitude = Math.abs(Number(document.getElementById("drift-side-mag").value));
-      const side = document.querySelector('input[name="drift-side"]:checked')?.value;
       extra.measured_forward_m = forward;
-      if (onLine) extra.measured_lateral_m = 0;
-      else extra.measured_lateral_m = side === "right" ? -magnitude : magnitude;
+      if (onLine) {
+        extra.measured_lateral_m = 0;
+      } else {
+        const rawOffset = document.getElementById("drift-side-mag")?.value ?? "";
+        const offset = Number(rawOffset);
+        if (rawOffset.trim() === "" || !Number.isFinite(offset)) {
+          toast("Enter the sideways offset, or tick Ended exactly on the line.", "error");
+          return;
+        }
+        const magnitude = Math.abs(offset);
+        if (magnitude === 0) {
+          extra.measured_lateral_m = 0;
+        } else {
+          const side = document.querySelector('input[name="drift-side"]:checked')?.value;
+          if (side !== "left" && side !== "right") {
+            toast("Choose left or right of the line.", "error");
+            return;
+          }
+          extra.measured_lateral_m = side === "right" ? -magnitude : magnitude;
+        }
+      }
     } else if (pending.kind === "steering_left" || pending.kind === "steering_right") {
       const method = document.querySelector('input[name="circle-method"]:checked')?.value || "axle_centre";
       extra.measurement_method = method;
