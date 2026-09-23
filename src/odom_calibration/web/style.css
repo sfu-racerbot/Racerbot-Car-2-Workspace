@@ -361,6 +361,9 @@ input[type="checkbox"], input[type="radio"] { width: 1.1rem; height: 1.1rem; acc
 .data-table th { font-weight: 600; }
 .data-table .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
+/* Accepted runs: table on desktop, stacked cards on phone */
+.run-cards { display: none; }
+
 /* Status plate */
 .status-plate {
   display: inline-block;
@@ -494,4 +497,22 @@ input[type="checkbox"], input[type="radio"] { width: 1.1rem; height: 1.1rem; acc
   .wizard-view > section { max-width: 100%; }
   .recording-timer { font-size: 3rem; }
   .data-table { display: block; overflow-x: auto; }
+  .runs-table { display: none; }
+  .run-cards {
+    display: grid;
+    gap: 1rem;
+    list-style: none;
+    margin: 1.25rem 0;
+    padding: 0;
+  }
+  .run-card {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .4rem .6rem;
+    padding: .8rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .run-card .run-measure { flex-basis: 100%; }
+  .run-card .run-meta { flex-basis: 100%; color: var(--muted); font-size: .85rem; }
 }

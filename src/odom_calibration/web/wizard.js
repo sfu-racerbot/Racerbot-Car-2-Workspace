@@ -429,7 +429,7 @@ function trialMeasurement(trial) {
 function acceptedRunsTable(session, kinds) {
   const trials = (session.trials || []).filter(t => t.accepted && kinds.includes(t.kind));
   if (!trials.length) return `<p class="small muted">No accepted runs yet.</p>`;
-  return `<table class="data-table">
+  const table = `<div class="runs-table"><table class="data-table">
     <thead><tr><th>#</th><th>Test</th><th>Measurement</th><th>Servo</th><th>Odom</th><th></th></tr></thead>
     <tbody>${trials.map((trial, index) => `<tr>
       <td><span class="race-plate">${index + 1}</span></td>
@@ -440,7 +440,16 @@ function acceptedRunsTable(session, kinds) {
       <td><button class="button button-ghost button-small" type="button"
         onclick="deleteTrial('${escapeHtml(trial.id)}')">Remove</button></td>
     </tr>`).join("")}</tbody>
-  </table>`;
+  </table></div>`;
+  const cards = `<ul class="run-cards">${trials.map((trial, index) => `<li class="run-card">
+      <span class="race-plate">${index + 1}</span>
+      <strong>${escapeHtml(kindLabel(trial.kind))}</strong>
+      <span class="run-measure">${trialMeasurement(trial)}</span>
+      <span class="run-meta">Servo ${fmt(trial.summary?.servo?.median, 4, "--")}, odom ${signed(trial.summary?.odom_distance_m, 3, "--")} m</span>
+      <button class="button button-ghost button-small" type="button"
+        onclick="deleteTrial('${escapeHtml(trial.id)}')">Remove</button>
+    </li>`).join("")}</ul>`;
+  return table + cards;
 }
 
 function plate(label, done, extra = "") {
