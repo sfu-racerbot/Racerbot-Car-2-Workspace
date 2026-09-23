@@ -478,6 +478,12 @@ input[type="checkbox"], input[type="radio"] { width: 1.1rem; height: 1.1rem; acc
     white-space: nowrap;
   }
   .live-strip strong { font-family: var(--font-mono); font-weight: 500; }
+  .live-strip-lb {
+    border: 1px solid currentColor;
+    padding: .1rem .5rem;
+    white-space: nowrap;
+  }
+  .live-strip-lb.held { background: var(--blue); border-color: var(--blue); color: #fff; }
   .app-shell { display: block; }
   .step-rail {
     border-right: 0;

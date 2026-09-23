@@ -266,12 +266,16 @@ function renderTelemetry() {
   const erpmText = finite(telemetry.raw_forward_erpm) ? signed(telemetry.raw_forward_erpm, 0) : "--";
 
   const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+  const stripLb = document.getElementById("live-strip-lb");
+  if (stripLb) {
+    stripLb.textContent = lbHeld ? "LB held" : "LB released";
+    stripLb.classList.toggle("held", lbHeld);
+  }
   set("lb-state", lbText);
   set("live-speed", speedText);
   set("live-servo", servoText);
   set("live-steer", steerText);
   set("live-erpm", erpmText);
-  set("live-strip-lb", lbHeld ? "LB held" : "LB released");
   set("live-strip-speed", finite(telemetry.odom_speed) ? `${signed(telemetry.odom_speed, 2)} m/s` : "--");
   set("live-strip-servo", finite(telemetry.servo) ? telemetry.servo.toFixed(4) : "--");
 
