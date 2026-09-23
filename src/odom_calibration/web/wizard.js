@@ -635,34 +635,28 @@ function renderFitChart(points, line, limits) {
     <figcaption>Each point is one test. The line is the suggested setting.</figcaption></figure>`;
 }
 
+function sdPathD(angle, wheelbase) {
+  const rearX = 160, rearY = 160;
+  if (Math.abs(angle) < 0.002) return `M ${rearX} ${rearY} L ${rearX} 2`;
+  const radius = Math.max(30, Math.min(600, Math.abs(wheelbase / Math.tan(angle)) * 120));
+  const t = Math.min(2.0, 250 / radius);
+  if (angle > 0) {
+    const cx = rearX - radius;
+    return `M ${rearX} ${rearY} A ${radius.toFixed(1)} ${radius.toFixed(1)} 0 0 0 ` +
+      `${(cx + radius * Math.cos(t)).toFixed(1)} ${(rearY - radius * Math.sin(t)).toFixed(1)}`;
+  }
+  const cx = rearX + radius;
+  return `M ${rearX} ${rearY} A ${radius.toFixed(1)} ${radius.toFixed(1)} 0 0 1 ` +
+    `${(cx - radius * Math.cos(t)).toFixed(1)} ${(rearY - radius * Math.sin(t)).toFixed(1)}`;
+}
+
 function renderSteeringDiagram() {
   const params = currentParams();
   const wheelbase = finite(params.wheelbase) && params.wheelbase > 0 ? params.wheelbase : 0.36;
   const raw = impliedSteeringAngle();
   const angle = raw === null ? 0 : Math.max(-0.5, Math.min(0.5, raw));
-  const degNow = angle * 180 / Math.PI;
-  const rot = (-degNow).toFixed(2);
-  const rearX = 160, rearY = 156;
-  let path;
-  if (Math.abs(angle) < 0.002) {
-    path = `<line x1="${rearX}" y1="${rearY}" x2="${rearX}" y2="30" style="stroke:var(--blue);stroke-dasharray:6 5;stroke-width:2"/>`;
-  } else {
-    const radius = Math.max(40, Math.min(400, Math.abs(wheelbase / Math.tan(angle)) * 120));
-    const t = 0.9;
-    let d;
-    if (angle > 0) {
-      const cx = rearX - radius;
-      const ex = cx + radius * Math.cos(t);
-      const ey = rearY - radius * Math.sin(t);
-      d = `M ${rearX} ${rearY} A ${radius.toFixed(1)} ${radius.toFixed(1)} 0 0 0 ${ex.toFixed(1)} ${ey.toFixed(1)}`;
-    } else {
-      const cx = rearX + radius;
-      const ex = cx - radius * Math.cos(t);
-      const ey = rearY - radius * Math.sin(t);
-      d = `M ${rearX} ${rearY} A ${radius.toFixed(1)} ${radius.toFixed(1)} 0 0 1 ${ex.toFixed(1)} ${ey.toFixed(1)}`;
-    }
-    path = `<path id="sd-path" d="${d}" style="stroke:var(--blue);stroke-dasharray:6 5;stroke-width:2;fill:none"/>`;
-  }
+  const rot = (-angle * 180 / Math.PI).toFixed(2);
+  const pathD = sdPathD(angle, wheelbase);
   const capturing = app.snapshot?.session?.active_capture;
   const progress = app.snapshot?.capture_progress;
   let progressLine = "";
@@ -677,16 +671,16 @@ function renderSteeringDiagram() {
     : `Implied steering ${raw >= 0 ? "+" : ""}${(raw * 180 / Math.PI).toFixed(1)} deg ${raw >= 0 ? "left" : "right"} (from current settings)`;
   return `<figure class="figure"><svg id="sd-svg" class="diagram" width="320" height="220" viewBox="0 0 320 220"
       role="img" aria-label="Top-down steering diagram">
-    ${path}
-    <rect x="124" y="36" width="72" height="128" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/>
-    <line x1="112" y1="156" x2="208" y2="156" style="stroke:var(--navy);stroke-width:2"/>
-    <rect x="100" y="142" width="20" height="30" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/>
-    <rect x="200" y="142" width="20" height="30" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/>
-    <line x1="112" y1="64" x2="208" y2="64" style="stroke:var(--navy);stroke-width:2"/>
-    <g id="sd-wheel-fl" transform="rotate(${rot} 112 64)">
-      <rect x="102" y="49" width="20" height="30" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/></g>
-    <g id="sd-wheel-fr" transform="rotate(${rot} 208 64)">
-      <rect x="198" y="49" width="20" height="30" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/></g>
+    <rect x="118" y="28" width="84" height="150" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/>
+    <line x1="106" y1="160" x2="214" y2="160" style="stroke:var(--navy);stroke-width:2"/>
+    <rect x="94" y="144" width="20" height="32" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/>
+    <rect x="206" y="144" width="20" height="32" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/>
+    <line x1="106" y1="58" x2="214" y2="58" style="stroke:var(--navy);stroke-width:2"/>
+    <g id="sd-wheel-fl" transform="rotate(${rot} 106 58)">
+      <rect x="96" y="42" width="20" height="32" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/></g>
+    <g id="sd-wheel-fr" transform="rotate(${rot} 214 58)">
+      <rect x="204" y="42" width="20" height="32" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/></g>
+    <path id="sd-path" d="${pathD}" style="stroke:var(--blue);stroke-dasharray:6 5;stroke-width:2;fill:none"/>
   </svg>
   <figcaption id="implied-readout">${escapeHtml(readout)}</figcaption></figure>${progressLine}`;
 }
@@ -702,11 +696,17 @@ function updateDiagramLive() {
   }
   const angle = raw === null ? 0 : Math.max(-0.5, Math.min(0.5, raw));
   const rot = (-angle * 180 / Math.PI).toFixed(2);
+  const path = document.getElementById("sd-path");
+  if (path) {
+    const params = currentParams();
+    const wheelbase = finite(params.wheelbase) && params.wheelbase > 0 ? params.wheelbase : 0.36;
+    path.setAttribute("d", sdPathD(angle, wheelbase));
+  }
   for (const id of ["sd-wheel-fl", "sd-wheel-fr"]) {
     const wheel = document.getElementById(id);
     if (wheel) {
-      const cx = id === "sd-wheel-fl" ? 112 : 208;
-      wheel.setAttribute("transform", `rotate(${rot} ${cx} 64)`);
+      const cx = id === "sd-wheel-fl" ? 106 : 214;
+      wheel.setAttribute("transform", `rotate(${rot} ${cx} 58)`);
     }
   }
 }
