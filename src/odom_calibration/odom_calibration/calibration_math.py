@@ -922,6 +922,7 @@ def build_report(session: dict):
         'safety_note': ' '.join(notes),
     }
 
+
 def _format_number(value, digits=4):
     if not _finite(value):
         return 'not available'
