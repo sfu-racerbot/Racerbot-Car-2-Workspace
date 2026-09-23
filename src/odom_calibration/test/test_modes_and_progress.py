@@ -118,6 +118,18 @@ def test_running_integral_ignores_non_finite_and_backwards_time():
     assert running.total == pytest.approx(0.2, abs=1e-12)
 
 
+def test_running_integral_ignores_sample_earlier_than_last_accepted():
+    running = calibration_math.RunningIntegral(max_gap_sec=0.5)
+    running.add(0.0, 1.0)
+    running.add(0.2, 1.0)
+    running.add(0.1, 5.0)  # earlier than the last accepted sample (0.2)
+    running.add(0.3, 1.0)
+    # Closed form: only 0.0 -> 0.2 -> 0.3 at value 1.0 counts = 0.3.
+    # Without the guard the late sample adds 0.5*(1+5)*(-0.1) and then
+    # 0.5*(5+1)*0.2, giving 0.5.
+    assert running.total == pytest.approx(0.3, abs=1e-12)
+
+
 def test_running_integral_starts_at_zero():
     assert calibration_math.RunningIntegral().total == 0.0
 
