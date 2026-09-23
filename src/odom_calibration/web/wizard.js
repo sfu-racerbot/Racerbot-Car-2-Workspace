@@ -235,7 +235,6 @@ function renderNav() {
   const full = fullLockCounts(session);
   const stage = session.stage;
   const preflightDone = stage !== "preflight";
-  const wheelDone = counts.stationary >= 1 && counts.movement >= 1;
   const steeringDone = full.steering_left >= 1 && full.steering_right >= 1;
   const reportDone = Boolean(session.report);
   let html = railButton("preflight", "Preflight", "Preflight", stage === "preflight", preflightDone);
@@ -243,7 +242,6 @@ function renderNav() {
     html += railGroup("Wheel calibration",
       railButton("stationary", "Stationary baseline", "1", stage === "stationary", counts.stationary >= 1) +
       railButton("movement", "Distance runs", "2", stage === "movement", counts.movement >= 2));
-    void wheelDone;
   }
   if (hasSteering(session)) {
     html += railGroup("Steering calibration",
