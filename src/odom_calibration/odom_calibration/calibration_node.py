@@ -30,9 +30,12 @@ import tornado.websocket
 
 from odom_calibration import calibration_math
 from odom_calibration.session_store import (
+    CAPTURE_KINDS,
     SessionStore,
     VALID_STAGES,
+    capture_allowed,
     new_session,
+    stage_allowed,
     touch,
 )
 
@@ -43,13 +46,6 @@ PARAMETER_NAMES = (
     'steering_angle_to_servo_gain',
     'steering_angle_to_servo_offset',
     'wheelbase',
-)
-CAPTURE_KINDS = (
-    'stationary',
-    'movement',
-    'steering_center',
-    'steering_left',
-    'steering_right',
 )
 
 
@@ -151,6 +147,7 @@ class CaptureRecorder:
     def __init__(self, kind, max_samples):
         self.kind = kind
         self.max_samples = int(max_samples)
+        self.progress = {'odom_distance_m': calibration_math.RunningIntegral(), 'odom_yaw_rad': calibration_math.RunningIntegral()}
         self.started_monotonic = time.monotonic()
         self.started_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         self.samples = {
@@ -302,6 +299,8 @@ class OdomCalibrationNode(Node):
         self.declare_parameter(
             'steering_angle_to_servo_offset', 0.5304)
         self.declare_parameter('wheelbase', 0.36)
+        self.declare_parameter('servo_min', 0.15)
+        self.declare_parameter('servo_max', 0.85)
 
         self.odom_topic = self.get_parameter('odom_topic').value
         self.vesc_state_topic = self.get_parameter('vesc_state_topic').value
@@ -329,6 +328,14 @@ class OdomCalibrationNode(Node):
             raise ValueError('speed_to_erpm_gain must be finite and nonzero')
         if self.default_parameters['wheelbase'] <= 0.0:
             raise ValueError('wheelbase must be positive')
+        self.servo_min = float(self.get_parameter('servo_min').value)
+        self.servo_max = float(self.get_parameter('servo_max').value)
+        if (
+            not math.isfinite(self.servo_min)
+            or not math.isfinite(self.servo_max)
+            or self.servo_min >= self.servo_max
+        ):
+            raise ValueError('servo_min must be below servo_max')
 
         report_directory = self.get_parameter('report_directory').value
         try:
@@ -428,6 +435,8 @@ class OdomCalibrationNode(Node):
                     'y': float(position.y),
                     'yaw': yaw,
                 })
+                self.active_recorder.progress['odom_distance_m'].add(now, speed)
+                self.active_recorder.progress['odom_yaw_rad'].add(now, angular_z)
 
     def vesc_callback(self, msg):
         now = time.monotonic()
@@ -563,8 +572,13 @@ class OdomCalibrationNode(Node):
                     'wheelbase_m': parameters['wheelbase'],
                     'physical_width_m': 0.30,
                     'physical_length_m': 0.535,
+                    'servo_min': self.servo_min,
+                    'servo_max': self.servo_max,
                 }
-                self.session = new_session(mode, parameters, vehicle)
+                try:
+                    self.session = new_session(mode, parameters, vehicle)
+                except ValueError as exc:
+                    raise WizardError(str(exc)) from exc
                 return self._save_and_snapshot()
 
             self._require_session()
@@ -572,12 +586,8 @@ class OdomCalibrationNode(Node):
                 stage = payload.get('stage')
                 if stage not in VALID_STAGES:
                     raise WizardError(f'Unknown wizard stage: {stage!r}.')
-                if (
-                    stage == 'steering'
-                    and self.session.get('mode') != 'movement_steering'
-                ):
-                    raise WizardError(
-                        'This session was created as movement-only.')
+                if not stage_allowed(self.session.get('mode'), stage):
+                    raise WizardError(f'Stage {stage!r} is not part of this session.')
                 self.session['stage'] = stage
                 touch(self.session, 'stage_changed', stage)
                 return self._save_and_snapshot()
@@ -637,11 +647,8 @@ class OdomCalibrationNode(Node):
         kind = payload.get('kind')
         if kind not in CAPTURE_KINDS:
             raise WizardError(f'Unknown capture kind: {kind!r}.')
-        if (
-            kind.startswith('steering_')
-            and self.session.get('mode') != 'movement_steering'
-        ):
-            raise WizardError('Steering capture is disabled for this session.')
+        if not capture_allowed(self.session.get('mode'), kind):
+            raise WizardError('That test is not part of this session.')
         health = self._health_snapshot(time.monotonic())
         if kind != 'stationary' and health['odom']['status'] not in (
                 'good', 'warning'):
@@ -698,12 +705,12 @@ class OdomCalibrationNode(Node):
                 raise WizardError('Confirm forward or reverse direction.')
             trial['measured_distance_m'] = float(distance)
             trial['direction'] = direction
-        elif kind in ('steering_left', 'steering_right'):
-            diameter = payload.get('measured_diameter_m')
-            if not _finite(diameter) or float(diameter) <= 0.0:
-                raise WizardError(
-                    'Tape-measured rear-axle circle diameter must be positive.')
-            trial['measured_diameter_m'] = float(diameter)
+        elif kind in calibration_math.STEERING_KINDS:
+            try:
+                fields = calibration_math.validate_steering_measurement(kind, payload)
+            except ValueError as exc:
+                raise WizardError(str(exc)) from exc
+            trial.update(fields)
         trial['notes'] = str(payload.get('notes', ''))[:2000]
         trial['accepted'] = True
         trial['confirmed_at'] = time.strftime(
@@ -735,6 +742,7 @@ class OdomCalibrationNode(Node):
                 'live_parameters': copy.deepcopy(self.live_parameters),
                 'live_parameter_status': self.live_parameter_status,
                 'capture_duration_sec': active_duration,
+                'capture_progress': None if not self.active_recorder else {'kind': self.active_recorder.kind, 'odom_distance_m': self.active_recorder.progress['odom_distance_m'].total, 'odom_yaw_rad': self.active_recorder.progress['odom_yaw_rad'].total},
                 'read_only': True,
                 'report_directory': str(self.store.directory),
                 'server_time': time.time(),

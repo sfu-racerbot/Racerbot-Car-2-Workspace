@@ -20,3 +20,7 @@ odom_calibration_node:
     steering_angle_to_servo_offset: 0.5304
     # Measured 2026-08-24, front axle to rear axle. Matches vesc.yaml.
     wheelbase: 0.36
+    # Servo clamp applied by vesc_driver. Must match vesc.yaml servo_min /
+    # servo_max; the report uses them to show the steering the car can reach.
+    servo_min: 0.15
+    servo_max: 0.85
