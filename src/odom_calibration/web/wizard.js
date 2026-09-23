@@ -913,7 +913,7 @@ function paramTable(current, suggestions, keys) {
   const rows = keys.filter(name => name in suggestions).map(name => {
     const now = current[name];
     const suggested = suggestions[name];
-    const change = finite(now) && finite(suggested) ? signed(suggested - now, 6) : "Not enough data";
+    const change = finite(now) && finite(suggested) ? signed(suggested - now, 6) : "";
     return `<tr><td class="mono">${escapeHtml(name)}</td>
       <td class="num">${fmt(now, 6)}</td>
       <td class="num">${fmt(suggested, 6)}</td>
