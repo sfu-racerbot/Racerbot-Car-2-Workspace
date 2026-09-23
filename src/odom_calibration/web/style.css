@@ -162,7 +162,6 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 }
 .step-button:hover { color: var(--link-ink); }
 .step-button.active { border-left-color: var(--blue); font-weight: 700; }
-.step-button .done-mark { color: var(--good); font-weight: 700; }
 .rail-note { font-size: .8rem; color: var(--muted); margin-top: 1.5rem; }
 
 .race-plate {
@@ -176,6 +175,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   white-space: nowrap;
 }
 .race-plate.done { border-color: var(--good); color: var(--good); }
+.race-plate:empty { display: inline-block; min-width: 2.2rem; min-height: 1.25rem; }
 
 /* Sector rule under page titles */
 .sector-rule {

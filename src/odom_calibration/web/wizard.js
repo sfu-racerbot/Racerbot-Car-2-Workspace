@@ -206,10 +206,10 @@ function renderConnection() {
   if (text) text.textContent = app.connected ? "Connected" : "Reconnecting…";
 }
 
-function railButton(stage, label, plate, active, done) {
+function railButton(stage, label, plateText, active, done) {
   return `<button class="step-button ${active ? "active" : ""}" type="button" onclick="setStage('${stage}')">
-    <span class="race-plate ${done ? "done" : ""}">${done ? `${escapeHtml(plate)} done` : escapeHtml(plate)}</span>
-    <span>${escapeHtml(label)}${done ? ' <span class="done-mark">Done</span>' : ""}</span>
+    <span class="race-plate ${done ? "done" : ""}">${done ? "done" : escapeHtml(plateText)}</span>
+    <span>${escapeHtml(label)}</span>
   </button>`;
 }
 
@@ -227,7 +227,7 @@ function renderNav() {
   if (!nav) return;
   if (!session) {
     nav.innerHTML = `<button class="step-button active" type="button">
-      <span class="race-plate">Setup</span><span>Setup</span>
+      <span class="race-plate"></span><span>Setup</span>
     </button>`;
     return;
   }
@@ -237,7 +237,7 @@ function renderNav() {
   const preflightDone = stage !== "preflight";
   const steeringDone = full.steering_left >= 1 && full.steering_right >= 1;
   const reportDone = Boolean(session.report);
-  let html = railButton("preflight", "Preflight", "Preflight", stage === "preflight", preflightDone);
+  let html = railButton("preflight", "Preflight", "", stage === "preflight", preflightDone);
   if (hasWheel(session)) {
     html += railGroup("Wheel calibration",
       railButton("stationary", "Stationary baseline", "1", stage === "stationary", counts.stationary >= 1) +
@@ -247,7 +247,7 @@ function renderNav() {
     html += railGroup("Steering calibration",
       railButton("steering", "Steering tests", "1", stage === "steering", steeringDone));
   }
-  html += railButton("report", "Report", "Report", stage === "report", reportDone);
+  html += railButton("report", "Report", "", stage === "report", reportDone);
   nav.innerHTML = html;
 }
 
