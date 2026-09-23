@@ -344,13 +344,15 @@ function renderSetup() {
     <h1>Calibration</h1>${sectorRule()}
     <p class="lead">Pick what to calibrate, check the current values, and start. You drive the car with the remote; this page only records.</p>
     <div class="choice-list">
-      <button class="slot" type="button" aria-pressed="${app.wheelSelected}" onclick="toggleSetup('wheel')">
+      <button class="slot${app.wheelSelected ? " selected" : ""}" type="button" aria-pressed="${app.wheelSelected}" onclick="toggleSetup('wheel')">
         <strong>Wheel calibration</strong>
         <span>Stationary baseline and tape-measured distance runs. Corrects the distance the car thinks it travelled. About 15 minutes.</span>
+        <span class="race-plate">${app.wheelSelected ? "Included" : "Not included"}</span>
       </button>
-      <button class="slot" type="button" aria-pressed="${app.steeringSelected}" onclick="toggleSetup('steering')">
+      <button class="slot${app.steeringSelected ? " selected" : ""}" type="button" aria-pressed="${app.steeringSelected}" onclick="toggleSetup('steering')">
         <strong>Steering calibration</strong>
         <span>A straight-line drift run and left and right circles. Corrects where centre is and how far the wheels turn. About 15 minutes.</span>
+        <span class="race-plate">${app.steeringSelected ? "Included" : "Not included"}</span>
       </button>
     </div>
     <h2>Current values</h2>

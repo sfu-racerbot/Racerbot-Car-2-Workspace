@@ -251,6 +251,9 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .slot::after { bottom: 0; right: 0; border-bottom-width: 2px; border-right-width: 2px; }
 .slot[aria-pressed="true"] { background: var(--wash); }
 .slot[aria-pressed="true"]::before, .slot[aria-pressed="true"]::after { border-color: var(--blue); }
+.slot.selected { border: 2px solid var(--navy); }
+.slot.selected::before, .slot.selected::after { display: none; }
+.slot .race-plate { display: inline-block; margin-top: .6rem; }
 .slot strong {
   display: block;
   font-family: var(--font-display);
@@ -259,6 +262,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   font-size: 1.2rem;
   color: var(--heading);
 }
+.slot:not(.selected) strong { color: var(--muted); }
 .slot span { color: var(--muted); font-size: .9rem; }
 .choice-list { display: grid; gap: 1rem; margin: 1.5rem 0; }
 
