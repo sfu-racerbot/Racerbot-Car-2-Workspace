@@ -147,7 +147,10 @@ class CaptureRecorder:
     def __init__(self, kind, max_samples):
         self.kind = kind
         self.max_samples = int(max_samples)
-        self.progress = {'odom_distance_m': calibration_math.RunningIntegral(), 'odom_yaw_rad': calibration_math.RunningIntegral()}
+        self.progress = {
+            'odom_distance_m': calibration_math.RunningIntegral(),
+            'odom_yaw_rad': calibration_math.RunningIntegral(),
+        }
         self.started_monotonic = time.monotonic()
         self.started_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
         self.samples = {
@@ -735,6 +738,14 @@ class OdomCalibrationNode(Node):
             active_duration = None
             if self.active_recorder:
                 active_duration = now - self.active_recorder.started_monotonic
+                progress = self.active_recorder.progress
+                capture_progress = {
+                    'kind': self.active_recorder.kind,
+                    'odom_distance_m': progress['odom_distance_m'].total,
+                    'odom_yaw_rad': progress['odom_yaw_rad'].total,
+                }
+            else:
+                capture_progress = None
             return {
                 'session': copy.deepcopy(self.session),
                 'telemetry': copy.deepcopy(self.latest),
@@ -742,7 +753,7 @@ class OdomCalibrationNode(Node):
                 'live_parameters': copy.deepcopy(self.live_parameters),
                 'live_parameter_status': self.live_parameter_status,
                 'capture_duration_sec': active_duration,
-                'capture_progress': None if not self.active_recorder else {'kind': self.active_recorder.kind, 'odom_distance_m': self.active_recorder.progress['odom_distance_m'].total, 'odom_yaw_rad': self.active_recorder.progress['odom_yaw_rad'].total},
+                'capture_progress': capture_progress,
                 'read_only': True,
                 'report_directory': str(self.store.directory),
                 'server_time': time.time(),
