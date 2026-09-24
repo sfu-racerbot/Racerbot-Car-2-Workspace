@@ -525,7 +525,9 @@
   let ws = null;
 
   function connect() {
-    ws = new WebSocket(`ws://${location.host}/ws`);
+    // wss under https (e.g. a Cloudflare tunnel) — browsers block ws:// there.
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${scheme}://${location.host}/ws`);
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => setConnected(true);
     ws.onclose = () => {
