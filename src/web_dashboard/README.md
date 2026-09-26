@@ -23,6 +23,14 @@ the car, or relax the deadman. See
 [docs/web-dashboard.md](../../docs/web-dashboard.md#live-parameter-tuning)
 for the user-facing account and `enable_tuning: false` to remove it.
 
+> **`web/` is deprecated -- a frozen fallback.** The dashboard's frontend now
+> lives in **sfu-racerbot/web-dashboards**, served at
+> https://dashboard.sfuracerbot.ca. Make new frontend changes there, not in
+> `web/`. This copy keeps working (`serve_static: true`) until the team
+> confirms the new site covers everything, and its tests stay until that repo
+> has ported them. What this package serves the remote site is described in
+> [docs/web-dashboard.md](../../docs/web-dashboard.md#remote-access-through-dashboardsfuracerbotca).
+
 ## Files
 
 | File | What it is |
@@ -35,7 +43,10 @@ for the user-facing account and `enable_tuning: false` to remove it.
 | [`web_dashboard/tuning.py`](web_dashboard/tuning.py) | Live-tuning support: parsing a node's advertised catalogue, clamping a browser request, and the comment-preserving YAML writer. No ROS/Tornado imports either (see [`test/test_tuning.py`](test/test_tuning.py)). |
 | [`web_dashboard/proccontrol.py`](web_dashboard/proccontrol.py) | Finding driving processes in `/proc`, deciding which may be stopped, and the `SIGINT`→`SIGTERM`→`SIGKILL` escalation. Holds `PROTECTED`, the actuation-path names no config can make killable. No ROS/Tornado imports; tested against a fake `/proc` (see [`test/test_proccontrol.py`](test/test_proccontrol.py)). |
 | [`web_dashboard/mapstore.py`](web_dashboard/mapstore.py) | Finding saved SLAM run directories, deciding which may be deleted, and deleting one. Holds the protected-root rules no config can override, and the `.pgm`/`map.yaml` header readers. No ROS/Tornado imports; tested against a `tmp_path` tree (see [`test/test_mapstore.py`](test/test_mapstore.py)). |
-| [`web_dashboard/dashboard_node.py`](web_dashboard/dashboard_node.py) | The ROS2 node: subscribes to map/scan/pose/command/odom/joy, runs a [Tornado](https://www.tornadoweb.org/) web + WebSocket server, and bridges its two threads. |
+| [`web_dashboard/origins.py`](web_dashboard/origins.py) | Which web pages may open the WebSocket: same-origin, or an exact match in `allowed_origins`. No ROS/Tornado imports (see [`test/test_origins.py`](test/test_origins.py)). |
+| [`web_dashboard/roles.py`](web_dashboard/roles.py) | The remote site's connection roles (`relay`, `control`, none): which browser->car messages are writes, who may send them, what each role receives, and the log-safe user name. No ROS/Tornado imports (see [`test/test_roles.py`](test/test_roles.py)). |
+| [`web_dashboard/server.py`](web_dashboard/server.py) | The Tornado WebSocket handler, the page routes (`serve_static`), and the fan-out loop. Tornado but no `rclpy`, so [`test/test_server.py`](test/test_server.py) runs it on a real socket against a fake node. |
+| [`web_dashboard/dashboard_node.py`](web_dashboard/dashboard_node.py) | The ROS2 node: subscribes to map/scan/pose/command/odom/joy, starts the [Tornado](https://www.tornadoweb.org/) server from `server.py`, and bridges its two threads. |
 | [`web/index.html`](web/index.html), [`web/dashboard.js`](web/dashboard.js), [`web/style.css`](web/style.css) | The main browser dashboard — plain HTML/JS/CSS, no build step. `measure.js` loads *before* `dashboard.js`; `panels.js` loads *after*. |
 | [`web/measure.js`](web/measure.js) | The map measuring tool's arithmetic and every decision it makes: segment lengths, the total, distance formatting, tap-versus-drag, and label placement. No DOM, no canvas, no WebSocket, so it loads under plain node (see [`test/browser/measure_test.js`](test/browser/measure_test.js)). |
 | [`web/panels.js`](web/panels.js) | The window manager: popping a section out of the info panel, dragging, magnetic snapping, 8-way resizing, and the saved layout. Touches no telemetry — it only moves boxes. Its geometry is tested under node (see [`test/browser/panels_test.js`](test/browser/panels_test.js)). |
@@ -104,6 +115,7 @@ payload), laid out to match a JavaScript `TypedArray` byte-for-byte:
 
 | Update | JSON header fields | Binary payload |
 |---|---|---|
+| `hello` | `protocol_version` -- **always the first message on every connection**, and exactly these two keys | *(none)* |
 | `map` | `seq`, `width`, `height`, `resolution`, `origin_x`, `origin_y`, `origin_yaw`, `encoding`, `bytes`, `raw_bytes` | the whole grid — one signed byte per cell, matching `OccupancyGrid.data` exactly (`-1` unknown, `0` free, `100` occupied), usually deflated |
 | `map_patch` | `seq`, `x`, `y`, `w`, `h`, `encoding`, `bytes`, `raw_bytes` | just the `w`×`h` rectangle of cells that changed, in grid coordinates |
 | `scan` | `encoding`, `angle_min`, `angle_increment`, `range_min`, `range_max`, `count`, `laser_offset_x`, `laser_offset_y` | `Uint16Array` of millimetres (`u16mm`, the default) or `Float32Array` of metres (`f32`) |
@@ -114,6 +126,21 @@ payload), laid out to match a JavaScript `TypedArray` byte-for-byte:
 | `stopwatch` | `elapsed_s`, enabled/running flags, LB/freshness flags | *(none)* |
 | `stats` | `cpu_percent`, `mem_percent`, `cpu_temp_c` (nullable), `uptime_s`, `wifi_dbm` (nullable) | *(none)* |
 | `intent` | `intent`: one `/drive_intent` payload, forwarded after validation — see [docs/drive-intent.md](../../docs/drive-intent.md) | *(none)* |
+| `write_refused` | `request`, `action`, `detail` — a write this connection may not send (today: any write on the remote site's read-only `relay` connection). Sent only to that connection | *(none)* |
+
+**The version rule.** `protocol.PROTOCOL_VERSION` (currently `1`) goes in
+`hello`. The remote site (sfu-racerbot/web-dashboards) and this car now
+deploy separately, so **bump it on any incompatible wire change**: a renamed
+or retyped field, a changed binary layout, a removed message type, or a
+browser->car request the car now handles differently. A new message type,
+or a new optional field old clients can ignore, is not incompatible. Bumping
+it makes the site show an "update the car or the site" banner instead of
+misreading frames; `test_protocol.py` pins the value so a bump is always a
+deliberate, reviewed change.
+
+Which of these a connection actually receives depends on its role
+(`X-Racerbot-Role`) -- see [`roles.py`](web_dashboard/roles.py) and
+[docs/web-dashboard.md](../../docs/web-dashboard.md#roles-relay-control-and-neither).
 
 `bytes` always means the exact length of the binary frame that follows, so
 the browser's desync check works unchanged; `raw_bytes` is what it should
@@ -517,6 +544,8 @@ button and cursor hide after `CONTROLS_IDLE_MS` of no input
 | `stopwatch_update_rate_hz` | `4.0` | Shared stopwatch broadcast rate. Low because the browser runs the clock between updates; this only corrects drift and carries LB press/release |
 | `host` | `0.0.0.0` | Listen on every interface, IPv4 **and** IPv6 (see [`netbind.py`](web_dashboard/netbind.py); a real address such as `127.0.0.1` restricts it to that one) — plus the security note in [docs/web-dashboard.md](../../docs/web-dashboard.md#security-note) |
 | `port` | `8080` | Web server port |
+| `allowed_origins` | `["https://dashboard.sfuracerbot.ca"]` | Other sites allowed to open the WebSocket, exact `scheme://host[:port]`. Same-origin is always allowed. Declared by type with no default: an empty `[]` default would be inferred as a byte array by rclpy and reject the YAML's strings |
+| `serve_static` | `true` | `false`: only `/ws`, and a 404 for every page |
 | `scan_broadcast_rate_hz` | `10.0` | Throttle for `/scan` broadcasts (input itself runs ~40Hz) |
 | `telemetry_rate_hz` | `20.0` | Pose/command/speed/intent/stopwatch/stats are collected and sent as ONE frame at this rate instead of one frame each |
 | `map_compression` | `true` | Deflate map keyframes and patches |

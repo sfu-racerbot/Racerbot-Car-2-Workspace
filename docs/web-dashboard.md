@@ -727,6 +727,124 @@ It has to go that far because this class of bug is completely invisible to a tes
 
 ---
 
+## Remote access through dashboard.sfuracerbot.ca
+
+The dashboard's web page is moving off the car. The new frontend lives in its own repo, **sfu-racerbot/web-dashboards**, and is served at **https://dashboard.sfuracerbot.ca** by Cloudflare.
+
+Cloudflare Access sits in front of it, so only a few specific email addresses can sign in. This car only has to answer the site.
+
+> **`src/web_dashboard/web/` is deprecated.** It is kept as a frozen fallback: the old page still works at `http://<car-ip>:8080/` and at dashboard-rb2.sfuracerbot.ca. **New frontend work goes to sfu-racerbot/web-dashboards**, not here. The browser tests for `web/` stay until the new repo has ported them.
+
+### What runs where
+
+```
+ browser ──► dashboard.sfuracerbot.ca (Cloudflare Worker, checks who you are)
+                │
+                ├─ Durable Object: ONE "relay" WebSocket per car ──┐  fans telemetry out
+                ├─ your own "control" WebSocket, for write actions ─┤  to every viewer
+                ├─ Lichtblick ──────────────────────────────────────┤
+                └─ camera ──────────────────────────────────────────┤
+                                                                    ▼
+                      Cloudflare Tunnel (cloudflared, already running on the car)
+                                                                    │
+   rb2-dash-origin.sfuracerbot.ca   ──► 127.0.0.1:8080  dashboard_node   (this doc)
+   rb2-bridge-origin.sfuracerbot.ca ──► 127.0.0.1:8765  foxglove_bridge  (foxglove-bridge.md)
+   rb2-cam-origin.sfuracerbot.ca    ──► 127.0.0.1:9090  usb_cam_stream   (usb-camera-livestream.md)
+```
+
+A **Durable Object** is a small always-on program Cloudflare runs for the site. There is one per car. It holds a single connection to this dashboard and copies what it receives to everyone watching, so ten viewers cost the car what one does.
+
+Each of the three origin hostnames sits behind a Cloudflare Access *service auth* policy that only the site's Worker can pass. That is what makes the headers below trustworthy: nothing but the Worker can reach these hostnames, and the Worker strips those headers from every browser request before setting its own.
+
+### Which web pages may connect: `allowed_origins`
+
+Every browser tells a WebSocket server which web page opened it, in the `Origin` header. The dashboard now accepts a connection only when:
+
+- the page came from the dashboard itself (**same origin**) — every LAN, Tailscale and forwarded-port use, and dashboard-rb2.sfuracerbot.ca; or
+- the page's origin is listed, exactly, in `allowed_origins` — shipped as `["https://dashboard.sfuracerbot.ca"]`; or
+- there is no `Origin` header at all, which means a script or tool rather than a browser.
+
+Anything else gets **HTTP 403** before the connection opens, and the node logs `refused a WebSocket from origin ...`.
+
+"Exactly" means scheme, host and port all match: `http://` is not `https://`, `:8443` is not the default port, and there are no wildcards. An entry with a path or a trailing slash (`https://dashboard.sfuracerbot.ca/`) can never match a real `Origin` header, so the node ignores it and warns at startup.
+
+This is a change. The dashboard used to accept **every** origin, which meant any website open in a browser on the car's WiFi could open a connection to it and reach the write paths. The same-origin rule closes that without changing anything for people who browse to the car directly.
+
+### `hello`, and the protocol version
+
+The first message on every connection, before anything else, is:
+
+```json
+{"type": "hello", "protocol_version": 1}
+```
+
+The site and the car are now deployed separately, so each checks it is talking to a version it understands. **`protocol_version` goes up by one on any incompatible change to the wire format** — see the rule in [src/web_dashboard/README.md](../src/web_dashboard/README.md#the-wire-protocol-protocolpy). When the site sees a number it doesn't expect, it shows a banner telling you to update the car or the site.
+
+### Roles: relay, control, and neither
+
+The site says which kind of connection it is opening with an `X-Racerbot-Role` header:
+
+| Role | Opened by | Receives | May write? |
+|---|---|---|---|
+| `relay` | the Durable Object — one per car, no person behind it | `hello`, then the full telemetry stream exactly as a browser always got it | **No.** Every write is refused with a `write_refused` message saying to use `/control` |
+| `control` | one per signed-in person | `hello`, the tuning snapshot, the process list, the saved-run list, the stopwatch, and replies to **their own** actions. No map, scan or batch frames | Yes, exactly as a direct browser: tuning still needs its own per-connection arm |
+| *(no header)* | a browser on the LAN or Tailscale, or the fallback page | Everything, unchanged | Yes, unchanged |
+
+Any other value (`admin`, `Relay`, an empty string) gets **HTTP 400** and no connection. A site and car that disagree about the contract should fail loudly, not quietly get the wrong permissions.
+
+"Reads" still work on the relay: re-listing processes or saved runs, and `map_control` `clear_view`, which re-sends the current map to that one connection. The Durable Object can use that to resynchronise its copy of the map.
+
+<details>
+<summary><b>Which messages a late joiner has to be given</b> — for whoever works on the site's Durable Object. Skip otherwise.</summary>
+
+The car sends some messages only when a connection opens, or only when something changes. A viewer who joins after that has never seen them, so the Durable Object must keep the latest copy of each and hand it to every new viewer:
+
+| Message | When the car sends it | Keep |
+|---|---|---|
+| `hello` | once, first, per connection | the one it got |
+| `map` (+ binary) | new connection; resize; first sight; every `map_keyframe_sec` (30 s) | the latest keyframe **and every `map_patch` after it**, in `seq` order — or send `{"type":"map_control","action":"clear_view"}` on the relay to get a fresh keyframe |
+| `map_patch` (+ binary) | on change only; nothing at all while the map is unchanged | see `map` |
+| `racing_line` | new connection; when the line changes | latest |
+| `tuning` | new connection; when the tuning picture changes | latest |
+| `processes` | new connection; when the running set changes | latest |
+| `saved_maps` | new connection; when the run list changes | latest |
+| `pose`, `drive`, `speed`, `intent`, `stats` | standalone on a new connection; after that **only inside `batch`**, and only when their topic publishes | latest of each (a parked car, or one without localization, may not send them again for a long time) |
+| `stopwatch` | new connection; then in every `batch` (`stopwatch_update_rate_hz`, 4 Hz) | latest |
+| `scan` (+ binary) | new connection; then about 10 Hz while `/scan` publishes | latest, optionally |
+| `tuning_armed` | new connection (always `false`); replies to an arm | never forward the relay's to viewers — arming belongs to one control connection |
+| `tuning_result`, `tuning_saved`, `process_result`, `map_delete_result`, `slam_reset_result`, `map_cleared`, `write_refused` | replies to one action | don't cache |
+
+</details>
+
+### Who did it: `X-Racerbot-User`
+
+Control, bridge and camera requests carry `X-Racerbot-User: <email>`. The dashboard writes it into the log with every write action — accepted or refused:
+
+```
+dashboard write: process_control stop pid=4242 -- accepted (user alice@sfu.ca, control connection #7, from 127.0.0.1)
+```
+
+A direct LAN or Tailscale browser has no such header and is logged as `unknown (direct)`. The relay is logged as `none (relay)`.
+
+Only trust the name for connections that came through the tunnel (they show `from 127.0.0.1`). A LAN client could send the header itself. That gains it no extra permission, but it could put a false name in the log.
+
+### `serve_static`
+
+`serve_static: true` (the default, and what ships) keeps serving the old page from `web/`. With `serve_static: false` the node answers only the WebSocket, and every page request gets a 404. **Keep it `true` until the team confirms dashboard.sfuracerbot.ca does everything the old page did.**
+
+### Troubleshooting remote access
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| The site's socket gets **403** | The page's origin isn't same-origin and isn't in `allowed_origins` | Check `allowed_origins` in `web_dashboard.yaml` for a typo or trailing slash; the node's startup line lists what it allows |
+| The site's socket gets **400** | An `X-Racerbot-Role` other than `relay`/`control` | The site and car disagree on the contract — check both versions |
+| Version banner on the site | `protocol_version` differs between the car and the site | Update whichever is older: rebuild and restart `web_dashboard` on the car, or redeploy the site |
+| Remote camera shows offline | `usb_cam_stream` isn't running, or the tunnel's `rb2-cam-origin` entry points at the wrong port | `ss -tlnp \| grep 9090` on the car; check the tunnel's public hostname entry |
+| A panel says **"use /control"** | A write was sent on the relay connection | A site bug: writes belong on the user's control connection |
+| The old page stopped loading | `serve_static: false` | Set it back to `true` and restart the dashboard |
+
+---
+
 ## Drive intent: the arrow and the decision panel
 
 Once a driving node is running, the dashboard draws a curved arrow ahead of the car showing where the algorithm **intends** to go, and a sidebar panel explaining **why** it is deciding what it is deciding.
@@ -1199,7 +1317,7 @@ The list of what may be stopped is `killable_nodes`, in the same file. It ships 
 ## Parameter reference
 
 <details>
-<summary><b>Every parameter in <code>web_dashboard.yaml</code></b> — 24 settings with defaults and meanings. A lookup table; read it when you need to change one.</summary>
+<summary><b>Every parameter in <code>web_dashboard.yaml</code></b> — every setting, with defaults and meanings. A lookup table; read it when you need to change one.</summary>
 
 All in `src/web_dashboard/config/web_dashboard.yaml`. A few entries mention [TF](glossary.md#tf--transform--frame), which is ROS2's record of where things sit relative to each other.
 
@@ -1214,6 +1332,8 @@ All in `src/web_dashboard/config/web_dashboard.yaml`. A few entries mention [TF]
 | `stopwatch_update_rate_hz` | `4.0` | Shared stopwatch state broadcast rate. Low because the browser runs the clock between updates |
 | `host` | `0.0.0.0` | Listen on every network interface, IPv4 **and** IPv6 — which is what makes the car reachable at its Tailscale hostname, see [viewing over Tailscale](#viewing-over-tailscale-by-name) and the [security note](#security-note). Set a real address (e.g. `127.0.0.1`) to restrict it to that one |
 | `port` | `8080` | Web server port |
+| `allowed_origins` | `["https://dashboard.sfuracerbot.ca"]` (empty if unset) | Other web sites allowed to open the WebSocket, as exact `scheme://host[:port]`. Pages the dashboard serves itself are always allowed. See [allowed_origins](#which-web-pages-may-connect-allowed_origins) |
+| `serve_static` | `true` | `false` answers only the WebSocket and 404s every page, for when the remote site is the only frontend. See [serve_static](#serve_static) |
 | `scan_broadcast_rate_hz` | `10.0` | `/scan` runs ~40Hz; no browser needs to redraw that often, and this keeps WiFi/CPU load down |
 | `stats_interval_sec` | `1.0` | How often CPU%/mem%/temp/uptime are sampled and broadcast |
 | `telemetry_rate_hz` | `20.0` | Pose/command/speed/intent/stopwatch/stats go out as ONE frame at this rate rather than one frame each — see [what this costs the car](#how-it-works) |
@@ -1247,7 +1367,7 @@ All in `src/web_dashboard/config/web_dashboard.yaml`. A few entries mention [TF]
 
 ## Security note
 
-**This dashboard has no authentication** and accepts WebSocket connections from any origin.
+**This dashboard has no authentication of its own.** Anyone who can reach the port can connect with a script. A *web page*, though, can only open a connection if it was served by the dashboard itself or is listed in [`allowed_origins`](#which-web-pages-may-connect-allowed_origins). That stops some random website open in a browser on the car's WiFi from reaching the car — it does not stop a person on that WiFi. Remote access through dashboard.sfuracerbot.ca *is* authenticated, by Cloudflare Access, before anything reaches the car.
 
 For the telemetry half that's a deliberate, reasonable trade-off for a tool that can only ever *watch*.
 
@@ -1318,13 +1438,17 @@ And, if `usb_cam_stream` is running, the camera feed.
 ```
 src/web_dashboard/
 ├── web_dashboard/
-│   ├── protocol.py          # wire-format conversion, framework-agnostic, unit-tested
+│   ├── protocol.py          # wire-format conversion + PROTOCOL_VERSION, framework-agnostic, unit-tested
+│   ├── origins.py           # which web pages may open the WebSocket, unit-tested
+│   ├── roles.py             # relay / control / direct: what each may send and receive, unit-tested
+│   ├── server.py            # Tornado WebSocket handler + fan-out, no rclpy, tested on a real socket
 │   ├── stopwatch.py         # LB/freshness-gated timer logic, unit-tested
 │   ├── tuning.py            # spec parsing + comment-preserving YAML writer, unit-tested
 │   ├── proccontrol.py       # find/stop driving processes; the protected set, unit-tested
 │   ├── mapstore.py          # find/vet/delete saved runs; the protected roots, unit-tested
-│   └── dashboard_node.py    # ROS2 node + Tornado web/WebSocket server
+│   └── dashboard_node.py    # ROS2 node; starts the server in server.py
 ├── web/
+│   ├── (DEPRECATED, frozen fallback -- new work goes to sfu-racerbot/web-dashboards)
 │   ├── index.html / dashboard.js / measure.js / style.css
 │   └── camera.html / camera.js / camera.css  # recording view
 ├── config/web_dashboard.yaml

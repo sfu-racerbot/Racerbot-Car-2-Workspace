@@ -6,6 +6,73 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-09-26 — Car side of dashboard.sfuracerbot.ca, and foxglove_bridge
+
+The dashboard frontend is moving to sfu-racerbot/web-dashboards, served at
+https://dashboard.sfuracerbot.ca through the Cloudflare Tunnel. This is the
+car's half of that contract. `web_dashboard` still creates **no ROS
+publisher**. Verified: 577 `web_dashboard` tests, 53 bridge-config tests
+and a mutation pass over every new test; a real `dashboard_node` driven
+over real sockets by relay, control and direct clients on an isolated ROS
+domain; `usb_cam_stream` fetched with the tunnel's headers.
+
+**Needs on-car validation** (none of this has been through the real tunnel):
+- [ ] dashboard-rb2.sfuracerbot.ca still connects. It relies on cloudflared
+  passing the public hostname as `Host` (its default), which makes that page
+  same-origin. If it gets a 403, add `https://dashboard-rb2.sfuracerbot.ca`
+  to `allowed_origins`.
+- [ ] The remote site's relay and control sockets connect through
+  `rb2-dash-origin`, get `hello` first, and the relay's writes are refused.
+- [ ] foxglove_bridge: Lichtblick through `rb2-bridge-origin` lists topics,
+  reads/sets a parameter, calls a service, can publish `/initialpose`, and is
+  refused `/drive`.
+- [ ] Camera through `rb2-cam-origin`.
+- [ ] A recorded run's bag contains `/parameter_events` entries for a
+  change made from the dashboard and one made from Lichtblick.
+
+### web_dashboard — who may connect, and as what
+
+- **Behavior change: WebSocket origins are checked.** It used to accept
+  every origin. Now: same-origin (every LAN/Tailscale/port-forward use),
+  an exact match in the new **`allowed_origins`** parameter (ships
+  `["https://dashboard.sfuracerbot.ca"]`), or no `Origin` header (scripts).
+  Anything else is a 403. `origins.py`, tested in `test_origins.py`.
+- **`hello` first on every connection**:
+  `{"type":"hello","protocol_version":1}`. New `protocol.PROTOCOL_VERSION`;
+  bump it on any incompatible wire change (rule in the package README).
+- **Connection roles** from `X-Racerbot-Role`: `relay` (full telemetry,
+  every write refused with a new `write_refused` message; unknown requests
+  count as writes), `control` (write-panel state, stopwatch, and replies to
+  its own actions only; no map/scan/batch), none (unchanged). Any other
+  role value is a 400. Every write is logged with `X-Racerbot-User`, or
+  `unknown (direct)`. `roles.py`, tested in `test_roles.py`.
+- **New `serve_static`** (default `true`): `false` serves only `/ws` and
+  404s every page.
+- **`server.py`**: the Tornado handler and fan-out moved out of
+  `dashboard_node.py`, so `test_server.py` runs them on a real socket
+  without `rclpy`.
+- **`web/` is deprecated**, a frozen fallback. New frontend work goes to
+  sfu-racerbot/web-dashboards. Its tests stay until that repo ports them.
+
+### racerbot_launch — foxglove_bridge
+
+- New `config/foxglove_bridge.yaml` and `launch/foxglove_bridge_launch.py`:
+  `127.0.0.1:8765`; topics, services and parameters (get and set) open;
+  **client publishing limited to `^/initialpose$`**, because a raw `/drive`
+  publish would skip every driving node's LB deadman; raw camera/depth
+  images hidden. Parameter names checked against foxglove_bridge 3.5.0.
+- `exec_depend foxglove_bridge` (apt `ros-jazzy-foxglove-bridge`, **not
+  installed yet**). First test in this package:
+  `test/test_foxglove_bridge_config.py`.
+- `tools/systemd/foxglove-bridge.service` + `foxglove-bridge.sh`, written
+  but **not installed or enabled**. See `docs/foxglove-bridge.md`.
+
+### race_diagnostics
+
+- `/parameter_events` added to `record_run.py`'s default bag topics, so
+  parameter changes from the dashboard, Lichtblick or a terminal land in
+  each run's bag.
+
 ## 2026-08-24 — Measuring on the map, and three ways to clear one
 
 Both features live entirely in `web_dashboard`. The package still creates

@@ -1,0 +1,30 @@
+# foxglove_bridge for Lichtblick through dashboard.sfuracerbot.ca.
+# NOT installed or enabled by anything in this repo -- see
+# docs/foxglove-bridge.md, "Running it at boot", for the commands.
+#
+# Listens on 127.0.0.1:8765 only; the Cloudflare Tunnel
+# (rb2-bridge-origin.sfuracerbot.ca) is the only way in from off the car.
+[Unit]
+Description=foxglove_bridge (Lichtblick access, loopback only)
+Documentation=file:///home/racerbotcar-2/racerbot-ws/docs/foxglove-bridge.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The same user every other ROS node on this car runs as, so Fast DDS's
+# shared-memory transport and discovery work exactly as between terminals.
+User=racerbotcar-2
+Group=racerbotcar-2
+# Optional overrides, e.g. ROS_DOMAIN_ID=... if the stack ever sets one.
+# The leading '-' means "fine if the file does not exist".
+EnvironmentFile=-/etc/default/foxglove-bridge
+ExecStart=/home/racerbotcar-2/racerbot-ws/tools/systemd/foxglove-bridge.sh
+# SIGINT is what Ctrl+C sends; ros2 launch shuts its node down cleanly on it.
+KillSignal=SIGINT
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

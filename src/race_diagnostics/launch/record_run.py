@@ -27,10 +27,17 @@ from launch_ros.actions import Node
 # (~10x everything else combined) but is also the only way to answer "what
 # did the car actually see" after the fact, which is precisely the question
 # that could not be answered about the 2026-07-27 collision.
+#
+# /parameter_events is every parameter change on every node, whoever made
+# it: the web dashboard's live tuning, Lichtblick through foxglove_bridge,
+# or `ros2 param set` in a terminal. Without it a bag can show the car
+# driving differently halfway through a run with no record of why. It is a
+# few small messages per change, so it costs nothing next to /scan.
 DEFAULT_TOPICS = [
     '/scan', '/odom', '/slam_pose', '/drive', '/ackermann_cmd',
     '/teleop', '/tf', '/tf_static', '/map', '/joy',
     '/auto_map/drive', '/auto_race/drive',
+    '/parameter_events',
 ]
 
 
