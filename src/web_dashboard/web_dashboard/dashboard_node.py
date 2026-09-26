@@ -79,6 +79,7 @@ thread-safe, specifically for this purpose) instead of ever calling
 `write_message()` itself.
 """
 
+import contextlib
 import functools
 import glob
 import json
@@ -90,7 +91,9 @@ import time
 
 import psutil
 import rclpy
+from rclpy.exceptions import ParameterUninitializedException
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import (
     QoSProfile,
     QoSDurabilityPolicy,
@@ -110,12 +113,12 @@ import tornado.httpserver
 import tornado.ioloop
 import tornado.netutil
 import tornado.web
-import tornado.websocket
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
 
 from drive_intent import schema as intent_schema
-from web_dashboard import mapstore, netbind, proccontrol, protocol, tuning
+from web_dashboard import mapstore, netbind, origins, proccontrol, protocol, tuning
 from web_dashboard.batching import TelemetryBatcher
+from web_dashboard.server import DashboardWebSocket, make_app, send_to_all
 from web_dashboard.mapstream import MapGeometry, MapStreamer
 from web_dashboard.stopwatch import DeadmanStopwatch
 
@@ -258,173 +261,6 @@ class _TuningTarget:
         self.inflight = None
 
 
-class DashboardWebSocket(tornado.websocket.WebSocketHandler):
-    """One instance per connected browser tab. Pure bookkeeping -- all the
-    actual data comes from DashboardNode via _broadcast()/send_initial_state()."""
-
-    def initialize(self, node: 'DashboardNode'):
-        self.node = node
-        # Live tuning is armed per connection and starts disarmed on every
-        # single page load -- see arm_tuning() below.
-        self.tuning_armed = False
-
-    def check_origin(self, origin):
-        # This dashboard has no login, and accepts any origin. For the
-        # telemetry half that is a reasonable trade-off for a LAN-only
-        # debugging tool: a malicious page could see map/scan/pose but
-        # could never command the car.
-        #
-        # Live tuning does reach the car, so it is not covered by that
-        # reasoning and does not rely on it: it is gated on an explicit
-        # per-connection arm (below), bounded by each driving node's own
-        # in-process clamps, and cannot move a car whose driver is not
-        # holding LB. What it is *not* is protected against someone who
-        # can already reach this port and means harm -- so this still
-        # belongs on a trusted network or Tailscale, never a public one.
-        # Set enable_tuning:false to close the write path entirely. See
-        # docs/web-dashboard.md's security note.
-        return True
-
-    def open(self):
-        self.node.ws_clients.add(self)
-        self.node.send_initial_state(self)
-
-    def on_close(self):
-        self.node.ws_clients.discard(self)
-
-    def arm_tuning(self, armed: bool):
-        """Arm/disarm writes for *this* browser connection.
-
-        Held here, on the connection, rather than on the node: arming is a
-        statement about the person holding this particular device, and it
-        should not outlive their tab. A reload, a dropped WiFi link, or a
-        phone going to sleep all close the socket and take the arm with
-        it, which is the behaviour you want from something that lets a
-        pocket-tap change a moving car's speed limit.
-        """
-        self.tuning_armed = bool(armed) and self.node.enable_tuning
-        self.write_message(json.dumps(
-            protocol.tuning_armed_message(self.tuning_armed)))
-
-    def on_message(self, message):
-        """Browser -> server. Four kinds of input are accepted:
-
-          stopwatch_control  affects nothing outside this process
-          process_control    signals a driving process (never the mux)
-          tuning_control     reaches the driving nodes, behind an arm
-          map_control        clears the browser's map view, resets live
-                             SLAM, or deletes a saved run from disk
-
-        Every one of them ends in a queue hand-off or a local write. None
-        of them touches a ROS handle here -- see the threading contract at
-        the top of this file, and check_origin above for what does and does
-        not protect these."""
-        if not isinstance(message, str):
-            return
-        try:
-            payload = json.loads(message)
-        except json.JSONDecodeError:
-            return
-        if not isinstance(payload, dict):
-            return
-
-        kind = payload.get('type')
-        if kind == 'stopwatch_control':
-            self.node.handle_stopwatch_control(
-                payload.get('action'), payload.get('enabled'))
-            return
-        if kind == 'process_control':
-            # Deliberately *not* behind the tuning arm. Arming exists so a
-            # pocket-tap cannot change how a moving car drives; the worst
-            # a mistaken press does here is stop a driving node, which is
-            # the direction of travel you want a mistake to go in. The UI
-            # still asks for a confirm, and the server still re-vets every
-            # pid against a fresh scan before signalling anything.
-            if not self.node.enable_process_control:
-                self.write_message(json.dumps(protocol.process_result_message(
-                    0, '', False, 'stopping processes is disabled on this '
-                                  'dashboard (enable_process_control is false)')))
-                return
-            action = payload.get('action')
-            if action == 'stop':
-                self.node.request_process_stop(payload.get('pid'))
-            elif action == 'refresh':
-                self.node.request_process_refresh()
-            return
-        if kind == 'map_control':
-            # Three actions, three gates. Nothing here touches a ROS handle
-            # or the filesystem -- every one of these ends in a queue.put()
-            # that the rclpy thread drains, and every decision that matters
-            # is made there against a scan taken at that moment.
-            action = payload.get('action')
-            if action == 'clear_view':
-                # Costs the car nothing and changes nothing on it, so it is
-                # not gated at all -- it is the browser forgetting its own
-                # copy of the map.
-                self.node.send_map_keyframe(self)
-                return
-            if action == 'refresh':
-                self.node.request_map_refresh()
-                return
-            if action == 'delete':
-                if not self.node.enable_map_delete:
-                    self.write_message(json.dumps(
-                        protocol.map_delete_result_message(
-                            payload.get('id'), False,
-                            'deleting saved maps is disabled on this '
-                            'dashboard (enable_map_delete is false)')))
-                    return
-                self.node.request_map_delete(
-                    payload.get('id'), payload.get('confirm'),
-                    payload.get('digest'))
-                return
-            if action == 'reset_slam':
-                if not self.node.enable_slam_reset:
-                    self.write_message(json.dumps(
-                        protocol.slam_reset_result_message(
-                            False, 'resetting SLAM is disabled on this '
-                                   'dashboard (enable_slam_reset is false)')))
-                    return
-                self.node.request_slam_reset()
-                return
-            # An action nobody recognises gets an answer, not silence: a
-            # button that does nothing and says nothing is one people press
-            # again, and again.
-            self.write_message(json.dumps(protocol.map_delete_result_message(
-                payload.get('id'), False,
-                f'unknown map action {str(action)[:40]!r}')))
-            return
-
-        if kind != 'tuning_control':
-            return
-
-        action = payload.get('action')
-        if action == 'arm':
-            self.arm_tuning(payload.get('armed'))
-            return
-        if not self.node.enable_tuning:
-            self.write_message(json.dumps(protocol.tuning_saved_message(
-                False, 'live tuning is disabled on this dashboard '
-                       '(enable_tuning is false)')))
-            return
-        if not self.tuning_armed:
-            # Refused server-side, not merely disabled in the UI: a stale
-            # tab, a replayed message, or a hand-rolled WebSocket client
-            # all land here too.
-            self.write_message(json.dumps(protocol.tuning_result_message(
-                str(payload.get('node', '')), str(payload.get('name', '')),
-                False, reason='tuning is not armed on this connection')))
-            return
-
-        if action == 'set':
-            self.node.request_tuning_set(
-                payload.get('node'), payload.get('name'), payload.get('value'))
-        elif action == 'save':
-            self.node.request_tuning_save()
-        elif action == 'refresh':
-            self.node.broadcast_tuning_state()
-
-
 class DashboardNode(Node):
     """Fan read-only ROS telemetry out to every connected browser tab."""
 
@@ -452,6 +288,20 @@ class DashboardNode(Node):
         self.declare_parameter('stopwatch_update_rate_hz', 10.0)
         self.declare_parameter('host', '0.0.0.0')
         self.declare_parameter('port', 8080)
+        # --- Remote access (docs/web-dashboard.md, "Remote access through
+        # dashboard.sfuracerbot.ca") ---
+        # Web pages on OTHER sites allowed to open the WebSocket, as exact
+        # scheme://host[:port] strings -- no wildcards, no paths. Pages this
+        # node serves itself are always allowed (same-origin), so this is
+        # only for the remote site. See origins.py.
+        #
+        # Declared by TYPE with no default, not with `[]`: rclpy infers an
+        # empty list as a BYTE_ARRAY and then refuses the YAML's list of
+        # strings at startup. Unset reads as uninitialized -> empty below.
+        self.declare_parameter('allowed_origins', Parameter.Type.STRING_ARRAY)
+        # False: answer only /ws, and 404 every page. The frontend now lives
+        # in sfu-racerbot/web-dashboards; web/ here is a frozen fallback.
+        self.declare_parameter('serve_static', True)
         self.declare_parameter('scan_broadcast_rate_hz', 10.0)
         self.declare_parameter('stats_interval_sec', 1.0)
         # --- Wire budget (docs/web-dashboard.md, "cost on the car") ---
@@ -605,6 +455,20 @@ class DashboardNode(Node):
         self.scan_decimation = max(1, int(self.get_parameter('scan_decimation').value))
         self.host = self.get_parameter('host').value
         self.port = int(self.get_parameter('port').value)
+        try:
+            configured_origins = self.get_parameter('allowed_origins').value
+        except ParameterUninitializedException:
+            configured_origins = []  # not in the YAML: same-origin only
+        self.allowed_origins, rejected = origins.parse_allowed_origins(
+            configured_origins)
+        for entry in rejected:
+            # Loud, because the only other symptom is a 403 on the far side
+            # of a tunnel: a trailing slash or a path never matches a real
+            # Origin header.
+            self.get_logger().warn(
+                f"allowed_origins: ignoring {entry!r} -- expected exactly "
+                f"scheme://host[:port], e.g. 'https://dashboard.sfuracerbot.ca'")
+        self.serve_static = bool(self.get_parameter('serve_static').value)
         self.scan_broadcast_rate_hz = float(self.get_parameter('scan_broadcast_rate_hz').value)
         self.stats_interval_sec = float(self.get_parameter('stats_interval_sec').value)
         self.intent_topic = self.get_parameter('intent_topic').value
@@ -696,6 +560,10 @@ class DashboardNode(Node):
         # on assignment.
         self.ws_clients = set()
         self._loop = None  # set once Tornado's IOLoop actually starts, see main()
+        # Which connection(s) the reply being produced right now answers --
+        # see _replying_to(). Thread-local because replies are produced on
+        # the rclpy thread and on the map-delete worker thread.
+        self._reply_local = threading.local()
 
         # /map durability: nav2's map_server and slam_toolbox both publish
         # /map "transient local" (latched), so a subscriber that starts
@@ -762,6 +630,9 @@ class DashboardNode(Node):
             f"live tuning {self._tuning_summary()}. "
             f"process control {self._process_control_summary()}. "
             f"map control {self._map_control_summary()}. "
+            f"allowed origins: same-origin + "
+            f"{', '.join(sorted(self.allowed_origins)) or '(none)'}. "
+            f"{'static pages served' if self.serve_static else 'static pages OFF (WebSocket only)'}. "
             f"Once the web server starts, open http://<this car's IP>:{self.port}/ in a browser."
         )
 
@@ -1106,24 +977,31 @@ class DashboardNode(Node):
         forty.
         """
         batches = {}
+        batch_origins = {}   # node -> every connection that set something on it
+        save_origins = set()
         save_requested = False
         refresh_requested = False
         while True:
             try:
-                action, node_name, name, value = self._tuning_requests.get_nowait()
+                action, node_name, name, value, origin = (
+                    self._tuning_requests.get_nowait())
             except queue.Empty:
                 break
             if action == 'save':
                 save_requested = True
+                save_origins.add(origin)
             elif action == 'refresh':
                 refresh_requested = True
             elif action == 'set':
                 batches.setdefault(node_name, {})[name] = value
+                batch_origins.setdefault(node_name, set()).add(origin)
 
         for node_name, updates in batches.items():
-            self._apply_tuning_batch(node_name, updates)
+            with self._replying_to(batch_origins.get(node_name)):
+                self._apply_tuning_batch(node_name, updates)
         if save_requested:
-            self._save_tuning_to_yaml()
+            with self._replying_to(save_origins):
+                self._save_tuning_to_yaml()
         if refresh_requested and not batches:
             self._broadcast_tuning_state()
 
@@ -1159,8 +1037,8 @@ class DashboardNode(Node):
             return
 
         future = target.set_client.call_async(request)
-        future.add_done_callback(
-            functools.partial(self._on_tuning_set, target, ordered))
+        future.add_done_callback(self._keep_replying_to(
+            functools.partial(self._on_tuning_set, target, ordered)))
 
     def _on_tuning_set(self, target, ordered, future):
         try:
@@ -1314,14 +1192,15 @@ class DashboardNode(Node):
 
     # --- Entry points called from the IOLoop thread (see the contract above) ---
 
-    def request_tuning_set(self, node_name, name, value):
-        self._tuning_requests.put(('set', str(node_name or ''), str(name or ''), value))
+    def request_tuning_set(self, node_name, name, value, origin=None):
+        self._tuning_requests.put(
+            ('set', str(node_name or ''), str(name or ''), value, origin))
 
-    def request_tuning_save(self):
-        self._tuning_requests.put(('save', None, None, None))
+    def request_tuning_save(self, origin=None):
+        self._tuning_requests.put(('save', None, None, None, origin))
 
     def broadcast_tuning_state(self):
-        self._tuning_requests.put(('refresh', None, None, None))
+        self._tuning_requests.put(('refresh', None, None, None, None))
 
     # ------------------------------------------------------------------------
     # Stopping driving processes.
@@ -1340,6 +1219,7 @@ class DashboardNode(Node):
     def _setup_process_control(self):
         self._process_requests = queue.Queue()
         self._process_jobs = {}          # pid -> StopJob
+        self._process_job_origins = {}   # pid -> connections to report to
         self._last_process_json = None
         self._last_process_targets = []
         if not self.enable_process_control:
@@ -1396,24 +1276,31 @@ class DashboardNode(Node):
         """Start queued stops and step the ones already running."""
         while True:
             try:
-                action, pid = self._process_requests.get_nowait()
+                action, pid, origin = self._process_requests.get_nowait()
             except queue.Empty:
                 break
             if action == 'refresh':
                 self._last_process_digest = None
                 self._process_scan_callback()
             elif action == 'stop':
-                self._begin_stop(pid)
+                with self._replying_to({origin}):
+                    self._begin_stop(pid)
+                if pid in self._process_jobs:
+                    # The escalation reports over several seconds; every
+                    # step answers whoever started it.
+                    self._process_job_origins.setdefault(pid, {origin})
 
         if not self._process_jobs:
             return
         now = time.monotonic()
         for job in list(self._process_jobs.values()):
             if job.advance(now):
-                self._broadcast(protocol.process_result_message(
-                    job.pid, job.name, job.ok, job.detail, job.sent, job.done))
+                with self._replying_to(self._process_job_origins.get(job.pid)):
+                    self._broadcast(protocol.process_result_message(
+                        job.pid, job.name, job.ok, job.detail, job.sent, job.done))
             if job.done:
                 self._process_jobs.pop(job.pid, None)
+                self._process_job_origins.pop(job.pid, None)
                 # Re-scan promptly so the panel reflects reality rather
                 # than waiting out the next scan interval.
                 self._last_process_digest = None
@@ -1466,16 +1353,16 @@ class DashboardNode(Node):
 
     # --- Entry points called from the IOLoop thread ---
 
-    def request_process_stop(self, pid):
+    def request_process_stop(self, pid, origin=None):
         try:
             pid = int(pid)
         except (TypeError, ValueError):
             return
         if pid > 1:
-            self._process_requests.put(('stop', pid))
+            self._process_requests.put(('stop', pid, origin))
 
     def request_process_refresh(self):
-        self._process_requests.put(('refresh', None))
+        self._process_requests.put(('refresh', None, None))
 
     # ------------------------------------------------------------------------
     # Saved maps, and the three ways of clearing one
@@ -1503,6 +1390,7 @@ class DashboardNode(Node):
         self._last_map_digest = None
         self._map_delete_busy = False
         self._slam_reset_deadline = None
+        self._slam_reset_origins = None
         self._slam_reset_client = None
 
         if self.enable_slam_reset and SlamReset is not None:
@@ -1583,16 +1471,21 @@ class DashboardNode(Node):
         """Start queued map actions, and time out a stalled SLAM reset."""
         while True:
             try:
-                action, payload = self._map_requests.get_nowait()
+                action, payload, origin = self._map_requests.get_nowait()
             except queue.Empty:
                 break
             if action == 'refresh':
                 self._last_map_digest = None
                 self._map_scan_callback()
             elif action == 'delete':
-                self._begin_delete(*payload)
+                with self._replying_to({origin}):
+                    self._begin_delete(*payload)
             elif action == 'reset_slam':
-                self._begin_slam_reset()
+                was_running = self._slam_reset_deadline is not None
+                with self._replying_to({origin}):
+                    self._begin_slam_reset()
+                if not was_running and self._slam_reset_deadline is not None:
+                    self._slam_reset_origins = {origin}
 
         # slam_toolbox handles a reset on its own executor, so a wedged one
         # answers nothing at all. Saying so beats a spinner that never
@@ -1600,11 +1493,12 @@ class DashboardNode(Node):
         if (self._slam_reset_deadline is not None
                 and time.monotonic() > self._slam_reset_deadline):
             self._slam_reset_deadline = None
-            self._broadcast(protocol.slam_reset_result_message(
-                False,
-                f'no answer from {self.slam_reset_service} in '
-                f'{self.slam_reset_timeout_sec:.0f}s -- slam_toolbox may '
-                f'still be busy, so do not assume nothing happened'))
+            with self._replying_to(self._slam_reset_origins):
+                self._broadcast(protocol.slam_reset_result_message(
+                    False,
+                    f'no answer from {self.slam_reset_service} in '
+                    f'{self.slam_reset_timeout_sec:.0f}s -- slam_toolbox may '
+                    f'still be busy, so do not assume nothing happened'))
 
     # --- Deleting a saved run --------------------------------------------
 
@@ -1664,8 +1558,8 @@ class DashboardNode(Node):
         # the scan and the pose to every browser, and removing a 38MB run
         # (300MB+ across a sim root) would freeze all of it. _broadcast is
         # thread-safe by construction -- it hands to the IOLoop.
-        threading.Thread(target=self._delete_worker, args=(run,),
-                         daemon=True).start()
+        threading.Thread(target=self._keep_replying_to(self._delete_worker),
+                         args=(run,), daemon=True).start()
 
     def _delete_worker(self, run):
         try:
@@ -1680,7 +1574,7 @@ class DashboardNode(Node):
             run.run_id, ok, detail, freed))
         # Re-list promptly rather than waiting out the scan interval, so
         # the row disappears when the person is still looking at it.
-        self._map_requests.put(('refresh', None))
+        self._map_requests.put(('refresh', None, None))
 
     # --- Resetting live SLAM ---------------------------------------------
 
@@ -1721,7 +1615,7 @@ class DashboardNode(Node):
                                      + self.slam_reset_timeout_sec)
         self.get_logger().warn('resetting live SLAM at a browser request')
         future = self._slam_reset_client.call_async(request)
-        future.add_done_callback(self._slam_reset_done)
+        future.add_done_callback(self._keep_replying_to(self._slam_reset_done))
         self._broadcast(protocol.slam_reset_result_message(
             False,
             'resetting SLAM -- the pose may freeze for a few seconds while '
@@ -1751,17 +1645,17 @@ class DashboardNode(Node):
     # --- Entry points called from the IOLoop thread ---
 
     def request_map_refresh(self):
-        self._map_requests.put(('refresh', None))
+        self._map_requests.put(('refresh', None, None))
 
-    def request_map_delete(self, run_id, typed_name, digest):
+    def request_map_delete(self, run_id, typed_name, digest, origin=None):
         self._map_requests.put(('delete', (
             '' if run_id is None else str(run_id),
             '' if typed_name is None else str(typed_name),
             None if digest is None else str(digest),
-        )))
+        ), origin))
 
-    def request_slam_reset(self):
-        self._map_requests.put(('reset_slam', None))
+    def request_slam_reset(self, origin=None):
+        self._map_requests.put(('reset_slam', None, origin))
 
     def send_map_keyframe(self, client):
         """Re-send the map this node currently holds to ONE browser tab.
@@ -1776,12 +1670,9 @@ class DashboardNode(Node):
         /map at all.
         """
         frame = self._map_streamer.current_keyframe()
-        client.write_message(json.dumps(
-            protocol.map_cleared_message(frame is not None)))
+        client.send(protocol.map_cleared_message(frame is not None))
         if frame is not None:
-            header, payload = frame
-            client.write_message(json.dumps(header))
-            client.write_message(payload, binary=True)
+            client.send(*frame)
 
     # ------------------------------------------------------------------------
     # Bridging ROS callbacks (rclpy thread) -> the Tornado IOLoop thread.
@@ -1832,6 +1723,36 @@ class DashboardNode(Node):
         """
         return bool(self.ws_clients)
 
+    @contextlib.contextmanager
+    def _replying_to(self, origin_ids):
+        """Tag every _broadcast() inside this block as the answer to a
+        request from these connections (DashboardWebSocket.conn_id).
+
+        Direct and relay connections receive every broadcast regardless,
+        exactly as before. A control connection receives a reply only when
+        it is tagged with its own id -- "replies to that user's actions"
+        (roles.frames_for). A tag that is lost therefore fails quiet on the
+        control socket, never loud on someone else's.
+        """
+        previous = getattr(self._reply_local, 'origins', None)
+        self._reply_local.origins = frozenset(
+            o for o in (origin_ids or ()) if o is not None)
+        try:
+            yield
+        finally:
+            self._reply_local.origins = previous
+
+    def _keep_replying_to(self, func):
+        """Wrap a callback so it replies to whoever the current block
+        replies to -- for future done-callbacks and worker threads, which
+        run after the with-block has exited."""
+        origin_ids = getattr(self._reply_local, 'origins', None)
+
+        def wrapped(*args, **kwargs):
+            with self._replying_to(origin_ids):
+                return func(*args, **kwargs)
+        return wrapped
+
     def _broadcast(self, header: dict, binary_payload: bytes = None):
         if self._loop is None:
             return  # web server hasn't started listening yet -- nothing to send to
@@ -1840,97 +1761,75 @@ class DashboardNode(Node):
             # The per-callback checks are what actually save the work --
             # by the time we get here the payload has already been built.
             return
-        self._loop.add_callback(functools.partial(self._send_to_all, header, binary_payload))
+        origin_ids = getattr(self._reply_local, 'origins', None) or frozenset()
+        self._loop.add_callback(functools.partial(
+            self._send_to_all, header, binary_payload, origin_ids))
 
-    def _send_to_all(self, header: dict, binary_payload):
+    def _send_to_all(self, header: dict, binary_payload, origin_ids=frozenset()):
         """Runs on the IOLoop thread (via add_callback) -- only safe place
-        to touch WebSocket connections."""
-        text = json.dumps(header)
-        dead = []
-        for client in list(self.ws_clients):
-            try:
-                client.write_message(text)
-                if binary_payload is not None:
-                    client.write_message(binary_payload, binary=True)
-            except Exception:  # noqa: BLE001
-                # Any failure, not just WebSocketClosedError. A header that
-                # went out without the binary that explains it leaves that
-                # browser's "what does the next binary mean" slot pointing
-                # at the wrong thing, and it decodes the *next* payload as
-                # the wrong type from then on -- a scan read as occupancy
-                # cells paints the map as garbage. Dropping the client makes
-                # it reconnect and resynchronise, which is the only honest
-                # recovery from a half-sent pair.
-                dead.append(client)
-        for client in dead:
-            self.ws_clients.discard(client)
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass
+        to touch WebSocket connections. See server.send_to_all."""
+        send_to_all(self.ws_clients, header, binary_payload, origin_ids)
 
-    def send_initial_state(self, client: DashboardWebSocket):
+    def send_initial_state(self, client: 'DashboardWebSocket'):
         """Runs on the IOLoop thread (called from WebSocketHandler.open) --
         catches a freshly connected browser tab up on whatever this node
         already knows, instead of leaving it blank until the next update."""
         # The map as it stands *now*, carrying the sequence number the
         # next patch will follow on from -- so this tab is immediately in
         # step with every other one. See MapStreamer.current_keyframe().
+        # Every write goes through client.send(), so a control connection
+        # gets only what roles.frames_for() lets through: no map, scan,
+        # pose or stats, but the stopwatch and the write panels' state.
+        # (hello has already gone out -- DashboardWebSocket.open.)
         map_frame = self._map_streamer.current_keyframe()
         if map_frame is not None:
-            header, payload = map_frame
-            client.write_message(json.dumps(header))
-            client.write_message(payload, binary=True)
+            client.send(*map_frame)
         if self._last_scan_msg is not None:
-            client.write_message(json.dumps(protocol.scan_header(
-                self._last_scan_msg, self.laser_offset_x, self.laser_offset_y,
-                self.scan_encoding, self.scan_decimation)))
-            client.write_message(protocol.scan_payload(
-                self._last_scan_msg, self.scan_encoding, self.scan_decimation),
-                binary=True)
+            client.send(
+                protocol.scan_header(
+                    self._last_scan_msg, self.laser_offset_x, self.laser_offset_y,
+                    self.scan_encoding, self.scan_decimation),
+                protocol.scan_payload(
+                    self._last_scan_msg, self.scan_encoding, self.scan_decimation))
         if self._last_pose is not None:
-            client.write_message(json.dumps(protocol.pose_message(*self._last_pose)))
+            client.send(protocol.pose_message(*self._last_pose))
         if self._last_drive is not None:
-            client.write_message(json.dumps(protocol.drive_message(*self._last_drive)))
+            client.send(protocol.drive_message(*self._last_drive))
         if self._last_speed is not None:
-            client.write_message(json.dumps(protocol.speed_message(self._last_speed)))
+            client.send(protocol.speed_message(self._last_speed))
         if self._last_intent is not None:
-            client.write_message(json.dumps(protocol.intent_message(
-                protocol.thin_intent_payload(self._last_intent))))
+            client.send(protocol.intent_message(
+                protocol.thin_intent_payload(self._last_intent)))
         if self._last_racing_line is not None:
-            client.write_message(json.dumps(
-                protocol.racing_line_message(self._last_racing_line)))
+            client.send(protocol.racing_line_message(self._last_racing_line))
         if self._last_stats is not None:
-            client.write_message(json.dumps(protocol.stats_message(*self._last_stats)))
-        client.write_message(json.dumps(self._stopwatch_message()))
+            client.send(protocol.stats_message(*self._last_stats))
+        client.send(self._stopwatch_message())
         # Tuning state is sent as the last snapshot the rclpy thread
         # published (a plain string -- see the threading contract), and
         # always alongside an explicit "disarmed", so a reconnecting tab
         # can never come back still armed from before.
         if self._last_tuning_json is not None:
-            client.write_message(self._last_tuning_json)
-        client.write_message(json.dumps(protocol.tuning_armed_message(False)))
+            client.send(json.loads(self._last_tuning_json))
+        client.send(protocol.tuning_armed_message(False))
         # Same treatment for the process list: the last snapshot the rclpy
         # thread published, as a plain string.
         if self._last_process_json is not None:
-            client.write_message(self._last_process_json)
+            client.send(json.loads(self._last_process_json))
         # Same treatment again for the saved-map list.
         if self._last_map_list_json is not None:
-            client.write_message(self._last_map_list_json)
+            client.send(json.loads(self._last_map_list_json))
 
     # ------------------------------------------------------------------------
     # Web server
     # ------------------------------------------------------------------------
 
     def make_app(self) -> tornado.web.Application:
-        static_dir = os.path.join(get_package_share_directory('web_dashboard'), 'web')
-        return tornado.web.Application([
-            (r'/ws', DashboardWebSocket, {'node': self}),
-            # Catch-all *after* /ws -- Tornado matches routes in order, so
-            # /ws must be registered first or StaticFileHandler's '.*'
-            # would swallow the WebSocket upgrade request too.
-            (r'/(.*)', tornado.web.StaticFileHandler, {'path': static_dir, 'default_filename': 'index.html'}),
-        ])
+        static_dir = None
+        if self.serve_static:
+            static_dir = os.path.join(
+                get_package_share_directory('web_dashboard'), 'web')
+        return make_app(self, static_dir)
 
 
 def main(args=None):

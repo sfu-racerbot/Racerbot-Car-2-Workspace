@@ -61,6 +61,17 @@ try:
 except ImportError:  # pragma: no cover - present in any ROS2 env; degrade anyway
     _np = None
 
+#: Version of everything on this wire: header fields, binary layouts, the
+#: message types and the browser->car requests. Sent as the first message
+#: on every connection (hello_message). The remote site
+#: (sfu-racerbot/web-dashboards) and this car now deploy separately, so
+#: BUMP THIS ON ANY INCOMPATIBLE WIRE CHANGE -- a renamed or retyped
+#: field, a changed binary layout, a removed message type, or a request the
+#: car now handles differently. Adding a new message type or a new
+#: optional field that old clients can ignore is not incompatible.
+PROTOCOL_VERSION = 1
+
+
 #: Scan payload encodings. 'f32' is the original one float per beam.
 #: 'u16mm' is half the size for no visible difference: the browser paints
 #: each return as a 2x2 pixel dot, so millimetre quantisation is far below
@@ -570,5 +581,33 @@ def map_cleared_message(has_map: bool) -> dict:
     return {
         'type': 'map_cleared',
         'has_map': bool(has_map),
+        'stamp': time.time(),
+    }
+
+
+def hello_message() -> dict:
+    """The first message on every connection, before anything else.
+
+    Exactly these two keys: the remote site's Durable Object and control
+    socket compare `protocol_version` against their own and show a
+    "update the car or the site" banner on a mismatch. JSON only, no
+    binary follows.
+    """
+    return {'type': 'hello', 'protocol_version': PROTOCOL_VERSION}
+
+
+def write_refused_message(request_type, action, reason: str) -> dict:
+    """A browser->car write this connection is not allowed to send.
+
+    Sent only to the connection that sent it -- today, a write arriving
+    on the remote site's read-only relay connection. Its own type rather
+    than a borrowed `process_result`/`tuning_result`, so it can never be
+    mistaken for the outcome of an action that actually ran.
+    """
+    return {
+        'type': 'write_refused',
+        'request': str(request_type)[:40],
+        'action': str(action)[:40],
+        'detail': str(reason),
         'stamp': time.time(),
     }

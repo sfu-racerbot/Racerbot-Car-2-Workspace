@@ -183,3 +183,40 @@ def test_a_scan_payload_is_not_the_length_of_a_map_payload():
     grid = _fake_occupancy_grid(width=334, height=239)
     assert protocol.scan_header(scan)['bytes'] != protocol.map_header(grid)['bytes']
     assert len(protocol.scan_ranges(scan)) != len(protocol.map_cells(grid))
+
+
+# --------------------------------------------------------------------------
+# hello and the protocol version (docs/web-dashboard.md, "Remote access
+# through dashboard.sfuracerbot.ca": the first message on every connection
+# is {"type":"hello","protocol_version":<int>}, JSON, no binary)
+# --------------------------------------------------------------------------
+
+def test_hello_is_exactly_the_contract_message():
+    import json
+    hello = protocol.hello_message()
+    assert hello == {'type': 'hello', 'protocol_version': protocol.PROTOCOL_VERSION}
+    # Survives the wire as-is: the site parses it with JSON.parse.
+    assert json.loads(json.dumps(hello)) == hello
+
+
+def test_protocol_version_is_a_positive_int_not_a_bool():
+    """The site compares it numerically; True == 1 in Python but is
+    `true` on the wire."""
+    assert type(protocol.PROTOCOL_VERSION) is int
+    assert protocol.PROTOCOL_VERSION >= 1
+
+
+def test_the_first_published_version_is_one():
+    """Pinned against the version the remote site was built for. When
+    this fails you changed PROTOCOL_VERSION: that is correct only for an
+    incompatible wire change, and the site must be updated to match --
+    see the rule in src/web_dashboard/README.md's wire-protocol table."""
+    assert protocol.PROTOCOL_VERSION == 1
+
+
+def test_write_refused_names_the_request_and_is_capped():
+    message = protocol.write_refused_message('x' * 100, None, 'because')
+    assert message['type'] == 'write_refused'
+    assert message['request'] == 'x' * 40
+    assert message['action'] == 'None'
+    assert message['detail'] == 'because'
