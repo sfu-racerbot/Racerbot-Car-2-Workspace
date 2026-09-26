@@ -11,7 +11,7 @@ for changes the team made.
 The dashboard frontend is moving to sfu-racerbot/web-dashboards, served at
 https://dashboard.sfuracerbot.ca through the Cloudflare Tunnel. This is the
 car's half of that contract. `web_dashboard` still creates **no ROS
-publisher**. Verified: 577 `web_dashboard` tests, 53 bridge-config tests
+publisher**. Verified: 603 `web_dashboard` tests, 53 bridge-config tests
 and a mutation pass over every new test; a real `dashboard_node` driven
 over real sockets by relay, control and direct clients on an isolated ROS
 domain; `usb_cam_stream` fetched with the tunnel's headers.
