@@ -300,8 +300,10 @@ ros2 launch racerbot_launch auto_map_race_launch.py diagnostics:=false
 # Bag the run as well -- big, because /scan dominates the size.
 ros2 launch racerbot_launch auto_map_race_launch.py record_bag:=true
 
-# Use one mapping/recording lap instead of the cleaner two-lap default
-ros2 launch racerbot_launch auto_map_race_launch.py mapping_laps:=1
+# mapping_laps:=1 does NOT shorten the run today: the discovery lap is always
+# discarded and the second lap is always the first one evaluated, so this
+# argument currently only changes the progress messages. The number of
+# automatic retries is max_mapping_laps (default 3) in auto_map_race.yaml.
 
 # Hardware stack is already running in another terminal
 ros2 launch racerbot_launch auto_map_race_launch.py include_bringup:=false
@@ -428,12 +430,12 @@ This turns the path you drove into a path *plus a target speed at every point* �
 ros2 run pure_pursuit generate_velocity_profile \
     --input src/pure_pursuit/waypoints/my_track_raw.csv \
     --output src/pure_pursuit/waypoints/my_track_profiled.csv \
-    --v-max 4.0 --a-lat-max 2.5 --a-accel-max 3.0 --a-brake-max 8.0
+    --v-max 4.0 --a-lat-max 2.5 --a-accel-max 3.0 --a-brake-max 3.0
 ```
 
 **Working when:** it prints the resulting speed range and an estimated lap time.
 
-Those numbers are the simulator-validated defaults. Start lower on untested physical surfaces — see [racing-autonomy.md](racing-autonomy.md#choosing-a_lat_max--a_accel_max--a_brake_max--v_max) for how to raise them safely.
+Those numbers are the tools' defaults (`--a-brake-max` was 8.0 until it put the car into a wall in simulation; see `profile_max_brake` in `auto_map_race.yaml`). Start lower on untested physical surfaces — see [racing-autonomy.md](racing-autonomy.md#choosing-a_lat_max--a_accel_max--a_brake_max--v_max) for how to raise them safely.
 
 A small synthetic example track is checked in at `src/pure_pursuit/waypoints/example_stadium_raw.csv`.
 

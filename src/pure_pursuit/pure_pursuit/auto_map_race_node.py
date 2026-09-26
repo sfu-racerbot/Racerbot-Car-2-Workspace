@@ -397,7 +397,10 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('profile_min_speed', 0.5)
         self.declare_parameter('profile_max_lateral_accel', 2.5)
         self.declare_parameter('profile_max_accel', 3.0)
-        self.declare_parameter('profile_max_brake', 8.0)
+        # Matches auto_map_race.yaml: 8.0 carried the car into the wall on
+        # its first simulated race (see the comment there). A bare launch
+        # must not inherit the value that was retired for doing that.
+        self.declare_parameter('profile_max_brake', 3.0)
         self.declare_parameter('profile_smoothing_passes', 5)
         self.declare_parameter('pure_pursuit_node_name', 'pure_pursuit_node')
         # --- Racing-line cleanup (pure_pursuit/recorded_path.py) ---
@@ -1653,10 +1656,12 @@ class AutoMapRaceNode(Node):
         Gates the handover: while a save is in flight slam_toolbox is not
         updating map->odom, so nothing downstream should be driving on the
         pose derived from it. On timeout this reports settled anyway and
-        says so -- the racing line is already safely on disk, and
-        pure_pursuit's own frozen-pose watchdog is the backstop if SLAM is
-        genuinely wedged -- but it never reports settled while a save is
-        known to still be running.
+        says so, *even though a save may still be in flight* -- a service
+        call that never answers is indistinguishable from one still
+        running. The racing line is already safely on disk, and
+        pure_pursuit's frozen-pose watchdog (armed above
+        pose_frozen_min_speed) is the backstop if SLAM is genuinely wedged.
+        Before the timeout it never reports settled with a save outstanding.
         """
         if self.map_saves_completed >= self.map_saves_expected:
             return True

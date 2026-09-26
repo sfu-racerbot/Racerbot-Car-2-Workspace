@@ -26,11 +26,11 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 from pathlib import Path
+
+import harness_procs
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -65,13 +65,13 @@ CLEANUP_PATTERNS = (
 
 
 def stop_everything():
-    """Leave no node behind: the next scenario shares the ROS graph."""
-    for pattern in CLEANUP_PATTERNS:
-        subprocess.run(['pkill', '-f', pattern], capture_output=True)
-    time.sleep(1.0)
-    for pattern in CLEANUP_PATTERNS:
-        subprocess.run(['pkill', '-9', '-f', pattern], capture_output=True)
-    time.sleep(1.0)
+    """Refuse to start beside anything matching CLEANUP_PATTERNS.
+
+    Never kills: those patterns match the real car's installed stack as well
+    as a stale simulator. Each launch below cleans up its own process group;
+    see harness_procs.
+    """
+    harness_procs.refuse_if_strays(CLEANUP_PATTERNS)
 
 
 class Run:
@@ -99,18 +99,9 @@ class Run:
             return ''
 
     def stop(self):
-        if self.process is not None and self.process.poll() is None:
-            try:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
-                self.process.wait(timeout=15)
-            except (subprocess.TimeoutExpired, ProcessLookupError, PermissionError):
-                try:
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+        harness_procs.stop_group(self.process)
         if self.handle is not None:
             self.handle.close()
-        stop_everything()
 
 
 def sim_status() -> dict:

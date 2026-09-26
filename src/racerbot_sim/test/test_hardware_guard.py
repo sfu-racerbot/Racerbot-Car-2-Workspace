@@ -84,9 +84,43 @@ def test_output_resumes_once_the_drivers_are_gone():
     assert any('resumed' in message for message in node.get_logger().infos)
 
 
-def test_a_graph_query_failure_never_takes_the_node_down():
-    class _Broken(_Node):
-        def get_node_names_and_namespaces(self):
-            raise RuntimeError('rmw is having a moment')
+class _Broken(_Node):
+    def get_node_names_and_namespaces(self):
+        raise RuntimeError('rmw is having a moment')
 
-    assert hardware_guard.conflicting_hardware_nodes(_Broken()) == []
+
+def test_a_graph_query_failure_never_takes_the_node_down():
+    """The query failing must not raise out of the guard -- and must not be
+    reported as "no conflicts" either (that was the fail-open bug)."""
+    assert hardware_guard.conflicting_hardware_nodes(_Broken()) is None
+
+
+def test_an_unreadable_graph_blocks_the_simulator():
+    """Fail closed: when the guard cannot tell whether real drivers are on
+    the graph, forged LB and synthetic sensors must stay off."""
+    node = _Broken()
+    interlock = hardware_guard.HardwareInterlock(node, 'the synthetic LB deadman')
+    assert not interlock.safe()
+    assert interlock.blocked
+    assert 'Cannot read the ROS graph' in node.get_logger().errors[0]
+
+
+def test_a_failed_query_does_not_clear_a_hardware_block():
+    """A latched block from real drivers must survive a later query failure;
+    only a successful query showing a clear graph releases it."""
+    node = _Node(['vesc_driver_node'])
+    interlock = hardware_guard.HardwareInterlock(node, 'simulated /scan')
+    assert not interlock.safe()
+
+    def _fail():
+        raise RuntimeError('rmw is having a moment')
+
+    node.get_node_names_and_namespaces = _fail
+    assert not interlock.safe()
+    assert interlock.blocked
+    assert node.get_logger().infos == []
+
+    del node.get_node_names_and_namespaces  # back to the class method
+    node.names.clear()
+    assert interlock.safe()
+    assert not interlock.blocked

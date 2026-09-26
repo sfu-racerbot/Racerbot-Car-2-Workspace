@@ -312,11 +312,15 @@ def sanitize_allowlist(names, logger=None):
     return kept
 
 
-def _read_cmdline(proc_root, pid):
+def _read_cmdline(proc_root, pid, strict=False):
     try:
         with open(os.path.join(proc_root, str(pid), 'cmdline'), 'rb') as handle:
             raw = handle.read()
+    except (FileNotFoundError, ProcessLookupError):
+        return []                  # exited between listdir and now
     except (OSError, ValueError):
+        if strict:
+            raise
         return []
     if not raw:
         # Kernel threads have an empty cmdline. They are never ours.
@@ -356,6 +360,26 @@ def _read_state(proc_root, pid):
     return None
 
 
+def read_start_time(proc_root, pid):
+    """Kernel start time of a pid (clock ticks since boot), or None.
+
+    Field 22 of /proc/<pid>/stat. A pid number is reused once its process
+    exits; (pid, start time) is not, which makes it the identity a stop
+    escalation has to pin. The comm field (2) may itself contain spaces and
+    parentheses, so fields are counted from the *last* ')'.
+    """
+    try:
+        with open(os.path.join(proc_root, str(pid), 'stat'), 'rb') as handle:
+            raw = handle.read()
+    except OSError:
+        return None
+    try:
+        fields = raw[raw.rindex(b')') + 2:].split()
+        return int(fields[19])     # field 22; fields[0] is field 3
+    except (ValueError, IndexError):
+        return None
+
+
 def is_zombie(pid, proc_root='/proc'):
     return _read_state(proc_root, pid) == 'Z'
 
@@ -377,13 +401,20 @@ def ancestors(proc_root, pid, limit=64):
     return seen
 
 
-def scan(proc_root='/proc', allowlist=DEFAULT_KILLABLE, self_pid=None, uid=None):
+def scan(proc_root='/proc', allowlist=DEFAULT_KILLABLE, self_pid=None, uid=None,
+         strict=False):
     """Every driving process on this machine, with a verdict for each.
 
     Returns a list of Target. Entries the browser may stop have
     `protected=False`; entries it may not are still returned, with the
     reason, because "pure_pursuit is running and you may not kill it from
     here" is more useful to a person than an empty list.
+
+    `strict=True` is for callers asking "is it safe to proceed because
+    nothing is running?" (the SLAM reset gate, the map-delete in-use
+    check). There an unreadable process table must not read as an empty
+    one, so listing /proc or reading a cmdline raises instead of being
+    skipped. A process that exits mid-scan is still skipped: it is gone.
     """
     self_pid = os.getpid() if self_pid is None else self_pid
     uid = os.getuid() if uid is None else uid
@@ -394,13 +425,15 @@ def scan(proc_root='/proc', allowlist=DEFAULT_KILLABLE, self_pid=None, uid=None)
     try:
         entries = os.listdir(proc_root)
     except OSError:
+        if strict:
+            raise
         return targets
 
     for entry in sorted(entries, key=lambda e: int(e) if e.isdigit() else 0):
         if not entry.isdigit():
             continue
         pid = int(entry)
-        argv = _read_cmdline(proc_root, pid)
+        argv = _read_cmdline(proc_root, pid, strict)
         if not argv:
             continue
         kind, name = classify(argv)
@@ -430,6 +463,44 @@ def scan(proc_root='/proc', allowlist=DEFAULT_KILLABLE, self_pid=None, uid=None)
             continue
         targets.append(Target(pid, name, kind, cmdline, False, ''))
     return targets
+
+
+def running_controllers(targets, controllers=DRIVING_CONTROLLERS):
+    """The targets that are driving controllers, protected or not.
+
+    For "is anything driving?" gates. `protected` only means this dashboard
+    may not *stop* that process (another user's, or one in the dashboard's
+    own ancestry); it is still a controller steering from the live pose.
+    Filtered by name because scan() also returns the actuation path
+    (ackermann_mux, the VESC chain) whatever the allowlist, and those are
+    always running.
+    """
+    return [t for t in targets if t.name in controllers]
+
+
+def slam_reset_refusal(scan_fn=None):
+    """Why a SLAM reset must be refused right now, or '' if it may go ahead.
+
+    Fails closed: if the process table cannot be read, that is a refusal,
+    never "nothing is running". `scan_fn` defaults to a strict scan of the
+    driving controllers and exists so the decision can be tested without
+    a process tree.
+    """
+    if scan_fn is None:
+        def scan_fn():
+            return scan(allowlist=DRIVING_CONTROLLERS, strict=True)
+    try:
+        targets = scan_fn()
+    except Exception as exc:  # noqa: BLE001 - any failure is a refusal
+        return f'could not check what is running: {exc}'
+    driving = running_controllers(targets)
+    if not driving:
+        return ''
+    named = ', '.join(f'{t.name} (pid {t.pid})' for t in driving)
+    return (f'refused -- {named} is running. Resetting SLAM under a '
+            f'live controller freezes the pose it steers from rather '
+            f'than stopping it, which is worse than leaving the map '
+            f'alone. Stop it first.')
 
 
 def find(targets, pid):
@@ -483,6 +554,12 @@ class StopJob:
         self.pid = int(pid)
         self.name = name
         self.proc_root = proc_root
+        # Pinned now, immediately after the caller's fresh scan vetted this
+        # pid. The escalation spans several grace periods; if the vetted
+        # process exits and the number is recycled in between, a later
+        # SIGTERM/SIGKILL must not land on whatever now owns it. None when
+        # it cannot be read (the pid is already gone, or a test /proc).
+        self.start_time = read_start_time(proc_root, self.pid)
         self.grace_sec = float(grace_sec)
         self.stage = -1              # index into STAGES; -1 = nothing sent
         self.next_action_at = now    # monotonic deadline for the next step
@@ -499,7 +576,7 @@ class StopJob:
         """
         if self.done:
             return False
-        if not alive(self.pid, sender, self.proc_root):
+        if not self._same_process() or not alive(self.pid, sender, self.proc_root):
             self.done, self.ok = True, True
             self.detail = 'stopped' if self.sent else 'was already gone'
             return True
@@ -536,6 +613,12 @@ class StopJob:
         self.detail = f'sent {label}'
         self.next_action_at = now + self.grace_sec
         return True
+
+    def _same_process(self):
+        """False once the pid no longer names the process that was vetted."""
+        if self.start_time is None:
+            return True
+        return read_start_time(self.proc_root, self.pid) == self.start_time
 
     def as_dict(self):
         return {

@@ -106,6 +106,16 @@ CONTENT_DIRS = (
     ('bag', 'rosbag'),
 )
 
+#: What `ros2 bag record` writes into its output directory: the index, and
+#: storage files for either backend (sqlite3 with its journal files while
+#: recording, or mcap), optionally zstd-compressed. A `bag/` holding
+#: anything else -- a subdirectory, a symlink, someone's notes -- is not
+#: rosbag output and makes the run unrecognised, because `bag/` is the one
+#: thing delete_run() removes recursively.
+_BAG_FILE_RE = re.compile(
+    r'(metadata\.yaml|[A-Za-z0-9][A-Za-z0-9._-]*'
+    r'\.(mcap|db3|db3-shm|db3-wal)(\.zstd)?)')
+
 #: Run directories that something in this workspace reads as a *test oracle*.
 #: Deleting one does not break the build -- the test skips -- and that is
 #: exactly why it is worth saying out loud: a real test quietly becoming a
@@ -532,7 +542,11 @@ def _describe(path, run):
             run.unknown.append(entry)
         elif os.path.isdir(full):
             if entry in known_dir_names:
-                run.known_dirs.append(entry)
+                strays = _stray_bag_entries(full) if entry == 'bag' else []
+                if strays:
+                    run.unknown.extend(f'{entry}/{name}' for name in strays)
+                else:
+                    run.known_dirs.append(entry)
             else:
                 run.unknown.append(entry)
         elif os.path.isfile(full):
@@ -577,6 +591,21 @@ def _describe(path, run):
     size = read_pgm_size(os.path.join(path, image))
     if size:
         run.width, run.height = size
+
+
+def _stray_bag_entries(bag_path):
+    """Names inside a bag/ directory that are not rosbag output."""
+    try:
+        entries = sorted(os.listdir(bag_path))
+    except OSError as exc:
+        return [f'(unreadable: {exc.strerror or exc})']
+    strays = []
+    for name in entries:
+        full = os.path.join(bag_path, name)
+        if (os.path.islink(full) or not os.path.isfile(full)
+                or _BAG_FILE_RE.fullmatch(name) is None):
+            strays.append(name)
+    return strays
 
 
 def scan(roots):
@@ -642,6 +671,32 @@ def in_use_by(targets, run_path):
     return hits
 
 
+def in_use_refusal(run, scan_fn=None):
+    """Why this run must not be deleted because something is reading it,
+    or '' if nothing is.
+
+    Fails closed: a process table that cannot be read is a refusal, not
+    "nothing is using it". `scan_fn` defaults to proccontrol's strict scan
+    of MAP_CONSUMERS; it is a parameter so this stays testable without a
+    process tree (and so this module keeps not importing proccontrol at
+    import time).
+    """
+    if scan_fn is None:
+        from web_dashboard import proccontrol
+
+        def scan_fn():
+            return proccontrol.scan(allowlist=MAP_CONSUMERS, strict=True)
+    try:
+        targets = scan_fn()
+    except Exception as exc:  # noqa: BLE001 - any failure is a refusal
+        return f'refused -- could not check what is using this run: {exc}'
+    users = in_use_by(targets, run.path)
+    if not users:
+        return ''
+    named = ', '.join(f'{t.name} (pid {t.pid})' for t in users)
+    return f'refused -- {named} is using this run right now'
+
+
 # ---------------------------------------------------------------------------
 # Deleting
 # ---------------------------------------------------------------------------
@@ -691,7 +746,8 @@ def deletable(path, roots):
                    'manages (see map_roots)')
 
 
-def resolve_delete(runs, run_id, typed_name, roots, digest=None):
+def resolve_delete(runs, run_id, typed_name, roots, digest=None,
+                   require_digest=False):
     """Vet a delete request. Returns (SavedRun, '') or (None, reason).
 
     Every check is made here, on the server, against `runs` from a scan taken
@@ -710,10 +766,18 @@ def resolve_delete(runs, run_id, typed_name, roots, digest=None):
         return None, (f'"{run_id}" is not a plain directory name -- a path, a '
                       f'parent reference or a hidden entry is never accepted')
 
-    run = find(runs, run_id)
-    if run is None:
+    matches = [r for r in runs if r.run_id == run_id]
+    if not matches:
         return None, (f'no saved map called "{run_id}" is there now -- the '
                       f'list has just been re-read')
+    # The request names a run by its directory name alone, and two roots
+    # can each hold one called the same thing. Picking one would be a
+    # guess at which the person meant; refuse instead.
+    if len(matches) > 1:
+        where = ', '.join(sorted(r.root for r in matches))
+        return None, (f'"{run_id}" exists under more than one map root '
+                      f'({where}) -- rename one or delete it from a terminal')
+    run = matches[0]
 
     if not typed:
         return None, (f'type the map name ({run.run_id}) to confirm the delete')
@@ -733,7 +797,12 @@ def resolve_delete(runs, run_id, typed_name, roots, digest=None):
         return None, f'"{run.run_id}" {refusal}'
 
     # A digest is optional so a caller that has no snapshot (a test, a
-    # future CLI) still works, but the browser always sends one.
+    # future CLI) still works. The WebSocket entry point passes
+    # require_digest=True: the browser always sends one, so a message
+    # without one comes from a client that never saw this run listed.
+    if digest is None and require_digest:
+        return None, ('no listing fingerprint was sent with this delete -- '
+                      'refresh the page and delete from the list')
     if digest is not None and str(digest) != run.digest:
         return None, ('this run changed since your page listed it -- '
                       'refresh and look again before deleting')
@@ -741,7 +810,7 @@ def resolve_delete(runs, run_id, typed_name, roots, digest=None):
     return run, ''
 
 
-def delete_run(run, roots):
+def delete_run(run, roots, expected_digest=None):
     """Remove one run directory. Returns (ok, detail, bytes_freed).
 
     Deliberately NOT shutil.rmtree on the directory. Every entry is
@@ -775,6 +844,13 @@ def delete_run(run, roots):
     refusal = fresh.deletable_reason
     if refusal:
         return False, f'refused -- it {refusal}', 0
+    # The digest vetted at request time, re-checked against the directory
+    # as it is now: the request was approved on one thread and this runs
+    # later on another, and a file that grew in between (map_saver still
+    # writing) is exactly what the digest exists to catch.
+    if expected_digest is not None and fresh.digest != expected_digest:
+        return False, ('refused -- the run changed after the delete was '
+                       'approved; refresh and look again'), 0
 
     freed = directory_size(path)
 

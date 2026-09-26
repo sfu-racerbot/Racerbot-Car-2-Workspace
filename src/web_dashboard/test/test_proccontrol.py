@@ -475,3 +475,120 @@ def test_a_disabled_dashboard_still_sends_an_explicit_empty_state():
     message = protocol.process_state_message([], False)
     assert message['enabled'] is False
     assert message['targets'] == []
+
+
+# ---------------------------------------------------------------------------
+# Audit 2026-09-25: H13 (pid reuse mid-escalation), H14 (SLAM-reset gate
+# failing open and ignoring protected controllers)
+# ---------------------------------------------------------------------------
+
+def _write_stat(root, pid, start_time, comm='pure_pursuit'):
+    # Field 3 is the state, 4..21 filler, 22 the start time. comm carries a
+    # ') ' inside it, as a real one may.
+    filler = ' '.join(['0'] * 18)
+    (root / str(pid) / 'stat').write_text(
+        f'{pid} ({comm}) x) S {filler} {start_time} 0 0\n')
+
+
+def test_read_start_time_counts_fields_from_the_last_paren(tmp_path):
+    root = tmp_path / 'proc'
+    make_proc(tmp_path, {100: PP_NODE})
+    filler = ' '.join(str(n) for n in range(3, 22))   # fields 3..21
+    (root / '100' / 'stat').write_text(f'100 (a) b) {filler} 987654 23 24\n')
+    assert proccontrol.read_start_time(str(root), 100) == 987654
+
+
+def test_read_start_time_of_a_missing_pid_is_none(tmp_path):
+    make_proc(tmp_path, {})
+    assert proccontrol.read_start_time(str(tmp_path / 'proc'), 100) is None
+
+
+def test_stop_job_never_signals_a_recycled_pid(tmp_path):
+    """The vetted process exits during the grace period and the kernel
+    hands its pid to something else. The next escalation stage must not
+    land on the newcomer: same number, different start time."""
+    root = make_proc(tmp_path, {100: PP_NODE})
+    _write_stat(tmp_path / 'proc', 100, start_time=5000)
+    sent = []
+
+    def send(pid, signum):
+        if signum:
+            sent.append(signum)
+
+    job = proccontrol.StopJob(100, 'pure_pursuit_node', grace_sec=1.0,
+                              now=0.0, proc_root=root)
+    job.advance(0.0, send)                        # SIGINT to the real one
+    assert sent == [signal.SIGINT]
+
+    _write_stat(tmp_path / 'proc', 100, start_time=9999)   # recycled
+    job.advance(1.5, send)
+    job.advance(3.0, send)
+    assert sent == [signal.SIGINT], 'SIGTERM/SIGKILL must not reach the newcomer'
+    assert job.done is True
+    assert job.ok is True
+    assert job.detail == 'stopped'
+
+
+def test_stop_job_keeps_escalating_on_the_same_process(tmp_path):
+    """The permissive half: identical start time is the same process, and
+    the pin must not stop a genuine escalation."""
+    root = make_proc(tmp_path, {100: PP_NODE})
+    _write_stat(tmp_path / 'proc', 100, start_time=5000)
+    sent = []
+    job = proccontrol.StopJob(100, 'stuck_node', grace_sec=1.0, now=0.0,
+                              proc_root=root)
+    for now in (0.0, 1.5, 3.0):
+        job.advance(now, lambda pid, sig: sent.append(sig) if sig else None)
+    assert sent == [signal.SIGINT, signal.SIGTERM, signal.SIGKILL]
+
+
+def test_strict_scan_raises_when_proc_cannot_be_listed(tmp_path):
+    missing = str(tmp_path / 'no_such_proc')
+    assert proccontrol.scan(missing, self_pid=999, uid=os.getuid()) == []
+    with pytest.raises(FileNotFoundError):
+        proccontrol.scan(missing, self_pid=999, uid=os.getuid(), strict=True)
+
+
+@pytest.mark.skipif(os.geteuid() == 0,
+                    reason='root reads a mode-000 file anyway; the '
+                           'permission case cannot be built as root')
+def test_strict_scan_raises_on_an_unreadable_cmdline(tmp_path):
+    root = make_proc(tmp_path, {100: PP_NODE})
+    cmdline = tmp_path / 'proc' / '100' / 'cmdline'
+    cmdline.chmod(0)
+    try:
+        assert proccontrol.scan(root, self_pid=999, uid=os.getuid()) == []
+        with pytest.raises(PermissionError):
+            proccontrol.scan(root, self_pid=999, uid=os.getuid(), strict=True)
+    finally:
+        cmdline.chmod(0o644)
+
+
+def test_slam_reset_is_refused_when_processes_cannot_be_read():
+    def broken():
+        raise PermissionError('/proc is hidepid')
+
+    reason = proccontrol.slam_reset_refusal(broken)
+    assert 'could not check what is running' in reason
+
+
+def test_slam_reset_is_refused_for_a_protected_controller(tmp_path):
+    """pure_pursuit owned by another user is protected from *stopping*, but
+    it is still steering from the pose a reset would freeze."""
+    root = make_proc(tmp_path, {100: PP_NODE})
+    targets = proccontrol.scan(root, allowlist=proccontrol.DRIVING_CONTROLLERS,
+                               self_pid=999, uid=os.getuid() + 1)
+    assert targets[0].protected  # sanity: other-user, so protected
+    reason = proccontrol.slam_reset_refusal(lambda: targets)
+    assert reason.startswith('refused')
+    assert 'pure_pursuit_node (pid 100)' in reason
+
+
+def test_slam_reset_is_not_blocked_by_the_always_running_mux(tmp_path):
+    """scan() returns the actuation path whatever the allowlist; the mux is
+    always up and must not make the reset permanently unavailable."""
+    root = make_proc(tmp_path, {101: MUX_NODE})
+    targets = proccontrol.scan(root, allowlist=proccontrol.DRIVING_CONTROLLERS,
+                               self_pid=999, uid=os.getuid())
+    assert len(targets) == 1 and targets[0].protected  # sanity: mux listed
+    assert proccontrol.slam_reset_refusal(lambda: targets) == ''

@@ -283,7 +283,7 @@ def test_recovery_never_depends_on_cycling_the_deadman(node):
         'the node must resume on its own once the scan clears'
 
 
-def _wall_ahead(distance, n=541, elsewhere=8.0):
+def _wall_across_forward_cone(distance, n=541, elsewhere=8.0):
     """A wall `distance` away across the forward +/-30deg cone only."""
     ranges = [elsewhere] * n
     for i in range(180, 361):          # -30deg .. +30deg on a 541/pi scan
@@ -303,7 +303,7 @@ def test_a_blocked_forward_cone_crawls_out_instead_of_latching(node):
     _ready(node, speed=0.1)
     published = _capture(node)
     for _ in range(5):
-        _tick(node, _scan(_wall_ahead(0.35)))
+        _tick(node, _scan(_wall_across_forward_cone(0.35)))
 
     last = published[-1]
     assert last.drive.speed > 0.0, \
@@ -322,7 +322,7 @@ def test_the_crawl_never_exceeds_its_stopping_distance(node):
     speeds = []
     for distance in (0.35, 0.28, 0.24, 0.20):
         for _ in range(3):
-            _tick(node, _scan(_wall_ahead(distance)))
+            _tick(node, _scan(_wall_across_forward_cone(distance)))
         speeds.append(published[-1].drive.speed)
 
     assert speeds == sorted(speeds, reverse=True), \
@@ -1047,6 +1047,43 @@ def test_cornering_anticipation_near_depth_must_exceed_zero():
     rclpy.init(args=['--ros-args', '-p', 'anticipation_near_depth:=0.0'])
     try:
         with pytest.raises(ValueError, match='anticipation_near_depth'):
+            GapFollowNode()
+    finally:
+        rclpy.shutdown()
+
+
+# ============================================================================
+# Crash path -- an exception mid-tick must still leave a stop behind
+# ============================================================================
+
+def test_an_exception_mid_tick_publishes_a_stop_then_propagates(node):
+    """Nothing downstream zeroes the motor when this node goes quiet, so a
+    crash must publish 0 speed on its way out -- after a moving command,
+    not instead of one."""
+    published = _capture(node)
+    _ready(node, speed=1.0)
+    node.scan_callback(_scan())
+    assert published[-1].drive.speed > 0.0, 'precondition: the car was driving'
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError('injected fault')
+
+    node._check_odom_direction = _boom
+    with pytest.raises(RuntimeError, match='injected fault'):
+        node.scan_callback(_scan())
+    assert published[-1].drive.speed == 0.0
+    assert published[-1].drive.steering_angle == 0.0
+
+
+def test_side_window_is_validated_when_only_adaptive_width_uses_it():
+    """_side_wall_distances runs under adaptive width alone; a bad window
+    must be refused at startup, not raise inside every scan callback."""
+    rclpy.init(args=['--ros-args',
+                     '-p', 'enable_centering:=false',
+                     '-p', 'enable_adaptive_width:=true',
+                     '-p', 'centering_side_fov_deg:=0.0'])
+    try:
+        with pytest.raises(ValueError, match='centering_side_fov_deg'):
             GapFollowNode()
     finally:
         rclpy.shutdown()

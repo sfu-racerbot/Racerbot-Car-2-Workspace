@@ -241,3 +241,62 @@ def test_the_topic_subscription_never_encodes_on_the_ros_thread(node):
     assert node.tiers[FULL].jpeg is None
     node.encode_pending()
     assert node.tiers[FULL].jpeg is not None
+
+
+# --------------------------------------------------------------------------
+# Audit M14/M15 (2026-09-25): one bad frame must not end streaming, and a
+# device that opens but never reads must not spin the CPU
+# --------------------------------------------------------------------------
+
+def test_a_frame_the_encoder_chokes_on_costs_one_frame_not_the_stream(node):
+    """A 1-D array (garbage from a passthrough path) made frame.shape[1]
+    raise IndexError on the encode thread, which ended the thread -- the node
+    stayed up and viewers sat on the last frame forever."""
+    node.tiers[PREVIEW].viewers = 1
+    node._submit(np.zeros(100, dtype=np.uint8), None)
+    assert node.encode_pending_safely() is False
+    assert node.tiers[PREVIEW].jpeg is None
+
+    node._submit(_frame(), None)
+    assert node.encode_pending_safely() is True
+    assert node.tiers[PREVIEW].jpeg is not None, 'the next good frame must still stream'
+
+
+def test_the_bad_frame_really_would_raise_unguarded(node):
+    """Sanity for the test above: the guard is what absorbs it."""
+    node.tiers[PREVIEW].viewers = 1
+    node._submit(np.zeros(100, dtype=np.uint8), None)
+    with pytest.raises(IndexError):
+        node.encode_pending()
+
+
+def test_a_device_that_opens_but_never_reads_does_not_spin(node, monkeypatch):
+    """open -> read fails -> release -> open ... used to have no pause at all.
+    Over 0.3 s a 0.5 s backoff allows at most one reopen; a hot loop manages
+    thousands."""
+    import threading
+
+    opens = []
+
+    class _DeadCapture:
+        def read(self):
+            return False, None
+
+        def release(self):
+            pass
+
+    def fake_open():
+        opens.append(1)
+        node._cap = _DeadCapture()
+        return True
+
+    monkeypatch.setattr(node, '_open_capture', fake_open)
+    worker = threading.Thread(target=node.capture_loop, daemon=True)
+    worker.start()
+    try:
+        worker.join(timeout=0.3)
+    finally:
+        node._stop_event.set()
+        worker.join(timeout=2.0)
+    assert not worker.is_alive()
+    assert 1 <= len(opens) <= 2, f'{len(opens)} reopens in 0.3 s'

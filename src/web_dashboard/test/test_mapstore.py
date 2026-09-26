@@ -1037,3 +1037,141 @@ def test_a_cited_run_is_still_deletable(tmp_path):
     run, reason = mapstore.resolve_delete(
         runs, '20260727-200103', '20260727-200103', roots)
     assert run is not None, reason
+
+
+# ---------------------------------------------------------------------------
+# Audit 2026-09-25: H15 (same name under two roots), H16 (digest optional at
+# the WebSocket boundary), H17 (no re-check in the worker; bag/ removed by
+# name alone), H14's twin (in-use check failing open)
+# ---------------------------------------------------------------------------
+
+def test_the_websocket_path_refuses_a_delete_with_no_digest(tmp_path):
+    """A8: the refusal half. The browser always sends the fingerprint of the
+    listing it showed; a message without one never saw this run."""
+    path = _make_run(tmp_path, 'run')
+    roots = [os.path.realpath(str(tmp_path))]
+    runs = mapstore.scan(roots)
+    run, reason = mapstore.resolve_delete(
+        runs, 'run', 'run', roots, digest=None, require_digest=True)
+    assert run is None
+    assert 'fingerprint' in reason
+    assert os.path.exists(os.path.join(path, 'map.yaml'))
+
+
+def test_require_digest_still_accepts_the_matching_one(tmp_path):
+    _make_run(tmp_path, 'run')
+    roots = [os.path.realpath(str(tmp_path))]
+    runs = mapstore.scan(roots)
+    run, reason = mapstore.resolve_delete(
+        runs, 'run', 'run', roots, digest=runs[0].digest, require_digest=True)
+    assert reason == ''
+    assert run is not None
+
+
+def test_the_same_run_name_under_two_roots_is_refused_not_guessed(tmp_path):
+    """The request names a run by directory name alone; picking the first
+    match would delete a run the person may not have meant, even with the
+    first one's digest attached. Both must survive."""
+    first, second = tmp_path / 'auto', tmp_path / 'sim'
+    first.mkdir()
+    second.mkdir()
+    a = _make_run(first, '20260901-120000')
+    b = _make_run(second, '20260901-120000')
+    roots = [os.path.realpath(str(first)), os.path.realpath(str(second))]
+    runs = mapstore.scan(roots)
+    run, reason = mapstore.resolve_delete(
+        runs, '20260901-120000', '20260901-120000', roots,
+        digest=runs[0].digest, require_digest=True)
+    assert run is None
+    assert 'more than one map root' in reason
+    assert os.path.isdir(a) and os.path.isdir(b)
+
+
+def test_delete_run_re_checks_the_digest_it_was_approved_with(tmp_path):
+    """Approval and removal are on different threads. A map that grew in
+    between is the stale-listing case again, one hop later."""
+    path = _make_run(tmp_path, 'run')
+    roots = [os.path.realpath(str(tmp_path))]
+    run, = mapstore.scan(roots)
+    approved = run.digest
+    with open(os.path.join(path, 'map.pgm'), 'ab') as handle:
+        handle.write(b'x' * 100)
+    ok, detail, freed = mapstore.delete_run(run, roots, expected_digest=approved)
+    assert ok is False
+    assert 'changed after the delete was approved' in detail
+    assert freed == 0
+    assert os.path.exists(os.path.join(path, 'map.pgm'))
+
+
+def test_delete_run_with_an_unchanged_digest_deletes(tmp_path):
+    path = _make_run(tmp_path, 'run')
+    roots = [os.path.realpath(str(tmp_path))]
+    run, = mapstore.scan(roots)
+    ok, detail, _ = mapstore.delete_run(run, roots, expected_digest=run.digest)
+    assert ok is True, detail
+    assert not os.path.exists(path)
+
+
+@pytest.mark.parametrize('stray', ['notes.txt', 'bag_0.mcap.bak', 'nested/'])
+def test_a_bag_dir_holding_anything_but_rosbag_output_is_not_deletable(
+        tmp_path, stray):
+    """bag/ is the one directory delete_run removes recursively, so it has
+    to actually be `ros2 bag record` output, not merely be called bag."""
+    path = _make_run(tmp_path, 'run')
+    bag = os.path.join(path, 'bag')
+    os.makedirs(bag)
+    open(os.path.join(bag, 'metadata.yaml'), 'w').close()
+    open(os.path.join(bag, 'bag_0.mcap'), 'w').close()
+    if stray.endswith('/'):
+        os.makedirs(os.path.join(bag, stray))
+    else:
+        open(os.path.join(bag, stray), 'w').close()
+    roots = [os.path.realpath(str(tmp_path))]
+    run, = mapstore.scan(roots)
+    assert f'bag/{stray.rstrip("/")}' in run.unknown
+    ok, detail, _ = mapstore.delete_run(run, roots)
+    assert ok is False
+    assert os.path.exists(os.path.join(bag, stray.rstrip('/')))
+    assert os.path.exists(os.path.join(path, 'map.yaml'))
+
+
+@pytest.mark.parametrize('name', [
+    'metadata.yaml', 'bag_0.mcap', 'bag_0.db3', 'bag_0.db3-shm',
+    'bag_0.db3-wal', 'bag_0.mcap.zstd'])
+def test_every_rosbag_output_file_is_recognised(tmp_path, name):
+    path = _make_run(tmp_path, 'run')
+    os.makedirs(os.path.join(path, 'bag'))
+    open(os.path.join(path, 'bag', name), 'w').close()
+    run, = mapstore.scan([str(tmp_path)])
+    assert run.unknown == []
+    assert 'bag' in run.known_dirs
+
+
+def test_the_in_use_check_fails_closed_when_processes_cannot_be_read(tmp_path):
+    """Before: an exception from the process scan became `targets = []`,
+    i.e. "nothing is using it", and the delete went ahead."""
+    path = _make_run(tmp_path, 'run')
+    run, = mapstore.scan([str(tmp_path)])
+
+    def broken():
+        raise PermissionError('/proc is hidepid')
+
+    reason = mapstore.in_use_refusal(run, broken)
+    assert reason.startswith('refused')
+    assert 'hidepid' in reason
+
+
+def test_the_in_use_check_names_the_process_using_the_run(tmp_path):
+    path = _make_run(tmp_path, 'run')
+    run, = mapstore.scan([str(tmp_path)])
+    user = _Target(4242, 'map_server',
+                   f'map_server --ros-args -p yaml_filename:={path}/map.yaml')
+    reason = mapstore.in_use_refusal(run, lambda: [user])
+    assert 'map_server (pid 4242)' in reason
+
+
+def test_the_in_use_check_passes_when_nothing_mentions_the_run(tmp_path):
+    _make_run(tmp_path, 'run')
+    run, = mapstore.scan([str(tmp_path)])
+    other = _Target(4242, 'map_server', 'map_server -p yaml_filename:=/elsewhere')
+    assert mapstore.in_use_refusal(run, lambda: [other]) == ''

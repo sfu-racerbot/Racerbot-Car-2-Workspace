@@ -30,12 +30,17 @@ HARDWARE_NODE_NAMES = (
 )
 
 
-def conflicting_hardware_nodes(node) -> list:
-    """Names from HARDWARE_NODE_NAMES currently visible on the ROS graph."""
+def conflicting_hardware_nodes(node):
+    """Names from HARDWARE_NODE_NAMES currently visible on the ROS graph.
+
+    Returns None when the graph cannot be read at all. That is *not* the
+    same answer as an empty list: "I could not look" must never be taken
+    as "there is no car here" -- the interlock treats None as blocked.
+    """
     try:
         live = {name for name, _namespace in node.get_node_names_and_namespaces()}
     except Exception:  # noqa: BLE001 - a graph query must never take a node down
-        return []
+        return None
     return sorted(live.intersection(HARDWARE_NODE_NAMES))
 
 
@@ -53,6 +58,19 @@ class HardwareInterlock:
 
     def safe(self) -> bool:
         conflicts = conflicting_hardware_nodes(self._node)
+        if conflicts is None:
+            # Fail closed: an unreadable graph keeps (or starts) the block.
+            # Only a successful query showing no drivers may clear it.
+            if not self._blocked:
+                self._blocked = True
+                self._node.get_logger().error(
+                    f'Cannot read the ROS graph, so cannot rule out real hardware. '
+                    f'{self._purpose} is suppressed until a graph query succeeds.')
+            else:
+                self._node.get_logger().error(
+                    'still suppressed: the ROS graph query is failing.',
+                    throttle_duration_sec=5.0)
+            return False
         if conflicts:
             if not self._blocked:
                 self._blocked = True

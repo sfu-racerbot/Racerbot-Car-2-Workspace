@@ -535,12 +535,31 @@ def load_profiled_csv(path: str):
                 f"(expected a header with 3 columns, 'x,y,speed'). "
                 f"Run generate_velocity_profile on it first."
             )
-        for row in reader:
+        for line_no, row in enumerate(reader, start=2):
             if not row:
                 continue
+            if len(row) < 3:
+                raise ValueError(
+                    f"'{path}' line {line_no}: expected 3 columns (x, y, speed), "
+                    f"got {len(row)}")
             rows.append((float(row[0]), float(row[1])))
             speeds.append(float(row[2]))
-    return np.array(rows, dtype=np.float64), np.array(speeds, dtype=np.float64)
+    xy = np.array(rows, dtype=np.float64).reshape(-1, 2)
+    speed = np.array(speeds, dtype=np.float64)
+    # float() happily parses 'nan', 'inf' and '-1'. A NaN or inf point
+    # poisons nearest-waypoint search; a NaN speed survives np.clip all the
+    # way to /drive or raises mid-control-step; a negative speed is a
+    # reverse command nothing upstream ever meant. Refuse the file instead.
+    bad = ~np.isfinite(xy).all(axis=1) | ~np.isfinite(speed)
+    if np.any(bad):
+        raise ValueError(
+            f"'{path}' has a non-finite value on data row "
+            f"{int(np.argmax(bad)) + 1}")
+    if np.any(speed < 0.0):
+        raise ValueError(
+            f"'{path}' has a negative speed on data row "
+            f"{int(np.argmax(speed < 0.0)) + 1}; profiled speeds must be >= 0")
+    return xy, speed
 
 
 def save_profiled_csv(path: str, xy: np.ndarray, speed: np.ndarray) -> None:

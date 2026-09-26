@@ -82,12 +82,10 @@ def generate_launch_description():
         name='joy',
         parameters=[LaunchConfiguration('joy_config')]
     )
-    joy_teleop_node = Node(
-        package='joy_teleop',
-        executable='joy_teleop',
-        name='joy_teleop',
-        parameters=[LaunchConfiguration('joy_config')]
-    )
+    # joy_teleop is deliberately NOT started here, same as bringup_launch.py:
+    # its default profile publishes /teleop continuously, and /teleop
+    # (priority 100) then masks every /drive (priority 10) command. Run
+    # teleop_launch.py on top for manual driving.
     ackermann_to_vesc_node = Node(
         package='vesc_ackermann',
         executable='ackermann_to_vesc_node',
@@ -140,7 +138,6 @@ def generate_launch_description():
 
     # finalize
     ld.add_action(joy_node)
-    ld.add_action(joy_teleop_node)
     ld.add_action(ackermann_to_vesc_node)
     ld.add_action(vesc_to_odom_node)
     ld.add_action(vesc_driver_node)

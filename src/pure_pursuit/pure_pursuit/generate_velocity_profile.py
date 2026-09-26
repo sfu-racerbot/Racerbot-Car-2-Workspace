@@ -53,7 +53,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--a-accel-max', type=float, default=3.0,
                          help='Max forward acceleration the drivetrain can produce, m/s^2 '
                               '(default: %(default)s).')
-    parser.add_argument('--a-brake-max', type=float, default=8.0,
+    # 3.0, not 8.0: see profile_max_brake in config/auto_map_race.yaml --
+    # 8.0 planned braking the car could not do and it hit the wall.
+    parser.add_argument('--a-brake-max', type=float, default=3.0,
                          help='Max braking deceleration, m/s^2 (default: %(default)s).')
     parser.add_argument('--smoothing-passes', type=int, default=5,
                          help='Forward+backward smoothing iterations. A closed loop has no single '

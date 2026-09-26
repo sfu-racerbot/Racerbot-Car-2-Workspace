@@ -37,6 +37,7 @@ from racerbot_sim.hardware_guard import HardwareInterlock
 from racerbot_sim.sim_bridge import (
     LIDAR_BEAMS, LIDAR_HALF_FOV, LIDAR_OFFSET_X, LIDAR_OFFSET_Z,
     LIDAR_RANGE_MAX, LIDAR_RANGE_MIN, OpponentPlan, SimBridge, SimConfig,
+    sanitize_command,
 )
 
 
@@ -126,6 +127,7 @@ class GymBridgeNode(Node):
         self.last_command_time = None
         self.contact_steps = 0
         self.car_contact_steps = 0
+        self.nonfinite_commands = 0
         self.ever_contacted = False
         self.distance_travelled = 0.0
         self._previous_xy = None
@@ -155,8 +157,16 @@ class GymBridgeNode(Node):
     # -- ROS plumbing ------------------------------------------------------
 
     def _drive_callback(self, msg: AckermannDriveStamped):
-        self.commanded_speed = float(msg.drive.speed)
-        self.commanded_steering = float(msg.drive.steering_angle)
+        steering, speed, ok = sanitize_command(
+            msg.drive.steering_angle, msg.drive.speed)
+        if not ok:
+            self.nonfinite_commands += 1
+            self.get_logger().error(
+                f'non-finite drive command (steering={msg.drive.steering_angle}, '
+                f'speed={msg.drive.speed}) -- stopping the simulated car',
+                throttle_duration_sec=2.0)
+        self.commanded_speed = speed
+        self.commanded_steering = steering
         self.last_command_time = self.get_clock().now()
 
     def _command_is_fresh(self) -> bool:
@@ -292,6 +302,7 @@ class GymBridgeNode(Node):
                 for i in range(1, self.bridge.num_agents)),
             'car_contact_now': bool(self.bridge.car_contact()),
             'car_contact_steps': self.car_contact_steps,
+            'nonfinite_commands': self.nonfinite_commands,
         })
         self.status_pub.publish(message)
 

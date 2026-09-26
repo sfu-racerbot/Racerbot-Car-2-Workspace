@@ -24,7 +24,19 @@ publishes an imaginary `/scan` and `/odom`.
 
 Both refuse to publish while any of `vesc_driver_node`,
 `ackermann_to_vesc_node`, `vesc_to_odom_node`, `urg_node` or `joy` is on
-the ROS graph, and re-check continuously. **Do not defeat that check.**
+the ROS graph, and re-check before every publish. If the graph query itself
+fails they also refuse, and stay refused until a query succeeds. **Do not
+defeat that check.**
+
+Know what that check is *not*: it matches those five exact node names, so a
+renamed or namespaced driver, or one DDS hasn't discovered yet, reads as
+"no hardware". It is a tripwire, not an isolation boundary. On a machine
+that can also run the real car, the actual isolation is a separate ROS
+domain for the simulator, set in every simulator terminal:
+
+```bash
+export ROS_DOMAIN_ID=42   # anything other than the car's domain (default 0)
+```
 
 ## Layout
 

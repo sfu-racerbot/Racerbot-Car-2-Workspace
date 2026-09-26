@@ -779,14 +779,15 @@ That last call cannot succeed unless the directory really is empty. "Something e
 
 Putting one of those in `map_roots` does not enable it.
 
-### Six bounds on the delete path
+### Bounds on the delete path
 
 1. `is_plain_component` is a **whitelist** (`[A-Za-z0-9][A-Za-z0-9._-]*`, 255 chars). One rule rejects separators, both dot entries, a leading dot, `~`, NUL and anything non-ASCII.
-2. The run must be present in a scan taken **now**, not in whatever the browser last saw.
+2. The run must be present in a scan taken **now**, not in whatever the browser last saw — and exactly once. The same run name under two roots is refused rather than guessed at.
 3. `realpath` must still be inside a sanitized root, and the entry must not itself be a symlink — defeating a link swapped in between the scan and the press.
 4. The typed confirmation must equal the run's name **exactly**: no trim, no case fold.
-5. The published `digest` (name, size and mtime of every entry) must still match. This is what catches a stale tab — one that listed a run before `map_saver` finished would otherwise delete a map it never showed anyone. The typed name cannot see that, because the name did not change.
-6. Nothing running may have the directory in its command line (`in_use_by`, over a fresh `proccontrol.scan`), which is what stops you causing the `particle_filter` hang above.
+5. The published `digest` (name, size and mtime of every entry) must be sent and must still match. This is what catches a stale tab — one that listed a run before `map_saver` finished would otherwise delete a map it never showed anyone. The typed name cannot see that, because the name did not change. The WebSocket path refuses a delete with no digest at all, and the worker thread re-checks it immediately before removing anything.
+6. Nothing running may have the directory in its command line (`in_use_by`, over a fresh strict `proccontrol.scan`), which is what stops you causing the `particle_filter` hang above. If the process table cannot be read, the delete is refused — "could not look" is never "nothing is using it".
+7. `bag/`, the one directory removed recursively, must contain only `ros2 bag record` output (`metadata.yaml`, `*.mcap`, `*.db3` and its journal files, optionally `.zstd`). Anything else in it makes the run unrecognised.
 
 **Be honest about what the typed name is for.** Any client that can read the listing can echo the name back, so it guards against a mis-tap, not against someone hostile who can already reach the port. What actually bounds this is the root list and `enable_map_delete`.
 
@@ -806,7 +807,7 @@ One `call_async` to `/slam_toolbox/reset`, with `add_done_callback` — never `s
 
 Service readiness is checked with `service_is_ready()`, not `wait_for_service()`, for the same reason the tuning clients do: blocking that thread freezes telemetry for every browser.
 
-**Refused while any `proccontrol.DRIVING_CONTROLLERS` process is running.** That set is not a config knob. The reasoning is already written into `killable_nodes`'s comment — `slam_toolbox` is deliberately not stoppable because a controller with a frozen pose is more dangerous than one with no pose. A reset under a live controller is the same hazard with a different trigger.
+**Refused while any `proccontrol.DRIVING_CONTROLLERS` process is running.** That set is not a config knob. The reasoning is already written into `killable_nodes`'s comment — `slam_toolbox` is deliberately not stoppable because a controller with a frozen pose is more dangerous than one with no pose. A reset under a live controller is the same hazard with a different trigger. Every running controller counts, including one owned by another user or one this dashboard is not allowed to stop — "may not stop it" is not "it is not driving". And if the process table cannot be read, the reset is refused.
 
 **`pause_new_measurements` is hard-coded `False`**, and deliberately not exposed.
 

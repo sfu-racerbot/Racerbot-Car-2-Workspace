@@ -408,7 +408,11 @@ class GapFollowNode(Node):
                 and 0.0 < self.max_steering_angle < math.pi / 2.0):
             raise ValueError(
                 'max_steering_angle must be finite and in (0, pi/2) radians')
-        if self.enable_centering:
+        # _side_wall_distances (which reads the centering side-window
+        # parameters) runs whenever either feature is on, so validate for
+        # both -- otherwise a bad window with centering off but adaptive
+        # width on raises inside every scan callback instead of at startup.
+        if self.enable_centering or self.enable_adaptive_width:
             self._validate_centering_parameters()
         if self.enable_adaptive_width:
             self._validate_adaptive_width_parameters()
@@ -635,6 +639,32 @@ class GapFollowNode(Node):
         return True, None, None
 
     def scan_callback(self, scan: LaserScan):
+        """Wrapped so that *any* unexpected exception still publishes a stop
+        before propagating -- the same contract as pure_pursuit's
+        control_loop. Nothing in the ROS chain downstream (ackermann_mux,
+        ackermann_to_vesc, the VESC driver) publishes a zero on its own when
+        this node goes quiet, so an exception that simply unwound would leave the last
+        command in force. The node then exits: a crashed controller must not
+        keep running on half-updated state.
+        """
+        try:
+            self._scan_step(scan)
+        except Exception as exc:
+            # Straight to the publisher, 0/0: the usual _stop() path goes
+            # through state (steering_basis, logging, intent) that may be
+            # exactly what just failed. Zero steering is fine on a stopped car.
+            msg = AckermannDriveStamped()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'base_link'
+            msg.drive.steering_angle = 0.0
+            msg.drive.speed = 0.0
+            self.drive_pub.publish(msg)
+            self.get_logger().error(
+                f'unhandled {type(exc).__name__} in scan_callback: {exc}; '
+                'published stop, node will exit')
+            raise
+
+    def _scan_step(self, scan: LaserScan):
         self.last_scan_time = self.get_clock().now()
 
         deadman_ok, stop_state, stop_detail = self._deadman_status()

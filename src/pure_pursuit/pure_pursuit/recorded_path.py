@@ -61,6 +61,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import Optional
 
 import numpy as np
 
@@ -92,6 +93,10 @@ class PreparedPath:
     max_steering_limit_rad: float
     seam_heading_error_rad: float
     max_segment_m: float
+    # Worst (required - measured) over the line's points, with the
+    # requirement set per point (see `prepare`). None for a PreparedPath
+    # built by hand, which then falls back to the scalar comparison.
+    clearance_shortfall_m: Optional[float] = None
 
     @property
     def feasible(self) -> bool:
@@ -112,6 +117,8 @@ class PreparedPath:
         """
         if self.min_wall_clearance_m < 0.0:
             return True
+        if self.clearance_shortfall_m is not None:
+            return self.clearance_shortfall_m <= 0.0
         return self.min_wall_clearance_m >= self.required_wall_clearance_m
 
     @property
@@ -404,11 +411,37 @@ def prepare(points, *, spacing: float, max_steering_angle: float,
     # refusing to believe the lap that just happened -- while the absolute
     # requirement still catches the real failure, which is the *cleanup*
     # moving the line closer to a wall than driving ever took it.
-    driven_clearance = (-1.0 if clearance_fn is None
-                        else float(np.min(clearance_fn(uniform[:, 0], uniform[:, 1]))))
+    #
+    # The cap is *regional*, not global. Capping by the whole lap's minimum
+    # let one bad spot -- a ghost, or a real obstacle the lap clipped --
+    # zero the requirement everywhere, so the cleanup could then cut any
+    # other corner into a wall and still "fit". Each point of a candidate
+    # is instead held to the driven line's worst clearance within
+    # `reach` of it: far enough to cover everywhere the cleanup may have
+    # moved that point from (max_deviation) plus the resampling step, so
+    # the smoothing still gets credit for how close driving went nearby.
     configured_clearance = required_clearance
-    if driven_clearance >= 0.0:
+    if clearance_fn is None:
+        driven_clearance = -1.0
+        driven_field = None
+    else:
+        driven_field = np.asarray(
+            clearance_fn(uniform[:, 0], uniform[:, 1]), dtype=np.float64)
+        driven_clearance = float(np.min(driven_field))
         required_clearance = min(required_clearance, driven_clearance)
+    reach = max_deviation + spacing
+
+    def point_requirements(points):
+        gaps = np.linalg.norm(points[:, None, :] - uniform[None, :, :], axis=2)
+        nearby = np.where(gaps <= reach, driven_field[None, :], np.inf)
+        local = nearby.min(axis=1)
+        # A point further than `reach` from anything driven (only possible
+        # for the first, least-filtered candidate before the deviation
+        # break) gets the value at its nearest driven point.
+        missing = ~np.isfinite(local)
+        if np.any(missing):
+            local[missing] = driven_field[gaps[missing].argmin(axis=1)]
+        return np.minimum(configured_clearance, local)
     loop_length = float(racing_math.compute_segment_lengths(uniform, closed=True).sum())
     highest = max(1, int(loop_length / min_feature_wavelength))
 
@@ -423,11 +456,16 @@ def prepare(points, *, spacing: float, max_steering_angle: float,
         curvature = racing_math.estimate_path_curvature(candidate, closed=True)
         peak = float(curvature.max())
         deviation = _max_deviation(uniform, candidate)
-        clearance = (-1.0 if clearance_fn is None
-                     else float(np.min(clearance_fn(candidate[:, 0], candidate[:, 1]))))
+        if clearance_fn is None:
+            clearance, shortfall = -1.0, None
+        else:
+            measured = np.asarray(
+                clearance_fn(candidate[:, 0], candidate[:, 1]), dtype=np.float64)
+            clearance = float(np.min(measured))
+            shortfall = float(np.max(point_requirements(candidate) - measured))
         if deviation > max_deviation and best is not None:
             break            # filtering harder only moves it further off
-        fits = clearance < 0.0 or clearance >= required_clearance
+        fits = shortfall is None or shortfall <= 0.0
         # Ranked, not first-past-the-post: peak curvature is not monotonic
         # in the cutoff, and clearance moves the opposite way to curvature,
         # so the best answer is not necessarily the first acceptable one.
@@ -437,11 +475,11 @@ def prepare(points, *, spacing: float, max_steering_angle: float,
                  harmonics if peak <= target else -peak)
         if best is None or score > best[0]:
             best = (score, harmonics, candidate, curvature, peak, deviation,
-                    clearance)
+                    clearance, shortfall)
         if fits and peak <= target:
             break            # highest cutoff that fits: keep the detail
 
-    _score, harmonics, line, curvature, peak, deviation, clearance = best
+    _score, harmonics, line, curvature, peak, deviation, clearance, shortfall = best
     segments = racing_math.compute_segment_lengths(line, closed=True)
     length = float(segments.sum())
     over_limit = float(np.mean(curvature > limit))
@@ -467,6 +505,7 @@ def prepare(points, *, spacing: float, max_steering_angle: float,
         max_steering_limit_rad=math.atan(target * wheelbase),
         seam_heading_error_rad=seam_heading_error(line),
         max_segment_m=float(segments.max()),
+        clearance_shortfall_m=shortfall,
     )
 
 

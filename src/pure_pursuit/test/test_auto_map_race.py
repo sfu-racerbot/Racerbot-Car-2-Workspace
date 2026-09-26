@@ -1256,3 +1256,22 @@ def test_over_steering_is_tolerated_only_when_no_worse_than_the_recording():
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+
+def test_bare_node_defaults_never_plan_harder_braking_than_the_shipped_config():
+    """Audit M3 (2026-09-25). A launch without the YAML (a bare `ros2 run`,
+    a per-course copy missing the key) takes the code default. The code
+    said 8.0 m/s^2 -- the value auto_map_race.yaml records as having put
+    the car into a wall on its first simulated race -- while the YAML said
+    3.0. Oracle: the shipped config (cited file), not a golden number."""
+    import yaml
+    config = os.path.join(os.path.dirname(__file__), '..', 'config',
+                          'auto_map_race.yaml')
+    with open(config) as handle:
+        shipped = next(iter(yaml.safe_load(handle).values()))['ros__parameters']
+    node = _supervisor()
+    try:
+        assert node.profile_max_brake <= shipped['profile_max_brake']
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

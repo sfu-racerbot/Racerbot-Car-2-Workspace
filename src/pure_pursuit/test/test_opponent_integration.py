@@ -23,7 +23,7 @@ import numpy as np
 import pytest
 import rclpy
 from geometry_msgs.msg import PoseStamped
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Joy, LaserScan
 from rclpy.duration import Duration
 from rclpy.parameter import Parameter
 
@@ -795,6 +795,68 @@ def test_off_racing_line_recovery_gives_up_past_its_timeout(node):
         'recovery held past its timeout without the error clearing must '
         'give up and hard-stop, not crawl indefinitely')
     assert published[-1].drive.speed == 0.0
+
+
+def _exhaust_off_line_recovery(node):
+    node.scan_callback(_clear_scan())
+    _set_pose(node, -1.5, -2.7, 0.0)
+    node.control_loop()
+    assert node.last_decision_state == 'off_racing_line_recovery'  # sanity
+    node._off_line_recovery_since = node.get_clock().now() - Duration(
+        seconds=node.off_racing_line_recovery_timeout_sec + 0.5)
+    node.control_loop()
+    assert node.last_decision_state == 'off_racing_line'  # sanity: gave up
+
+
+def test_off_racing_line_give_up_latches_instead_of_re_arming(node):
+    """docs/racing-autonomy.md: past the timeout the car is lost and "the
+    stop is unconditional". The give-up used to clear its own window, so
+    the very next tick re-armed a fresh 5 s crawl -- stop, crawl, stop,
+    forever. Every later tick at the same error must stay stopped."""
+    published = _capture_published(node)
+    _exhaust_off_line_recovery(node)
+    for _ in range(20):
+        node.scan_callback(_clear_scan())
+        _set_pose(node, -1.5, -2.7, 0.0)
+        node.control_loop()
+        assert node.last_decision_state == 'off_racing_line'
+        assert published[-1].drive.speed == 0.0
+
+
+def test_off_racing_line_latch_clears_once_back_on_the_line(node):
+    """Repositioning the car (or localization correcting itself) closes the
+    error, which is exactly the condition that ends the latch."""
+    published = _capture_published(node)
+    _exhaust_off_line_recovery(node)
+    node.scan_callback(_clear_scan())
+    _set_pose(node, -1.5, -1.2, 0.0)   # back on the bottom straight
+    node.control_loop()
+    assert published[-1].drive.speed > 0.0
+
+    # And back off the line afterwards gets a fresh, normal recovery.
+    _set_pose(node, -1.5, -2.7, 0.0)
+    node.control_loop()
+    assert node.last_decision_state == 'off_racing_line_recovery'
+
+
+def test_off_racing_line_latch_clears_when_lb_is_released(node):
+    """Releasing LB is the operator's acknowledgement; the next hold may try
+    one more bounded recovery. (enable_deadman flipped on after
+    construction; the fixture already remaps drive_topic.)"""
+    _exhaust_off_line_recovery(node)
+    node.enable_deadman = True
+    joy = Joy()
+    joy.buttons = [0] * (node.deadman_button + 1)
+    node.joy_callback(joy)
+    node.control_loop()
+    assert node.last_decision_state == 'deadman_released'  # sanity
+
+    joy.buttons[node.deadman_button] = 1
+    node.joy_callback(joy)
+    node.scan_callback(_clear_scan())
+    _set_pose(node, -1.5, -2.7, 0.0)
+    node.control_loop()
+    assert node.last_decision_state == 'off_racing_line_recovery'
 
 
 def test_off_racing_line_recovery_has_its_own_ceiling(node):

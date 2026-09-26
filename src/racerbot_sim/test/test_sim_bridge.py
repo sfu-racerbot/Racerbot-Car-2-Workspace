@@ -180,3 +180,18 @@ def test_vehicle_geometry_matches_the_car_configs(package, node, fields):
         assert sim[field] == params[field], (
             f'{package}.yaml {field}={params[field]} but the simulator uses '
             f'{sim[field]}')
+
+
+@pytest.mark.parametrize('steering, speed', [
+    (float('nan'), 1.0), (0.1, float('nan')),
+    (float('inf'), 1.0), (0.1, float('-inf')), ('x', 1.0), (None, 1.0)])
+def test_a_non_finite_command_becomes_a_stop_and_is_flagged(steering, speed):
+    """Audit M10: one NaN handed to Gym makes the ego NaN for the rest of the
+    run. It becomes 0/0 (the car stops) and ok=False so it gets counted."""
+    assert sim_bridge.sanitize_command(steering, speed) == (0.0, 0.0, False)
+
+
+def test_a_finite_command_passes_through_unchanged():
+    """Including the boundary values that are legal: zero and negative."""
+    assert sim_bridge.sanitize_command(-0.26, 0.0) == (-0.26, 0.0, True)
+    assert sim_bridge.sanitize_command(0.2, -1.5) == (0.2, -1.5, True)

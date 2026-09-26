@@ -312,6 +312,43 @@ def test_load_profiled_csv_rejects_raw_file(tmp_path):
         racing_math.load_profiled_csv(path)
 
 
+def _write_rows(path, rows):
+    with open(path, 'w') as f:
+        f.write('x,y,speed\n')
+        for row in rows:
+            f.write(row + '\n')
+
+
+@pytest.mark.parametrize('bad_row, match', [
+    ('nan,0.0,1.0', 'non-finite'),
+    ('0.0,inf,1.0', 'non-finite'),
+    ('0.0,0.0,nan', 'non-finite'),
+    ('0.0,0.0,-inf', 'non-finite'),
+    ('0.0,0.0,-0.5', 'negative speed'),
+    ('0.0,0.0', 'expected 3 columns'),
+])
+def test_load_profiled_csv_refuses_values_that_must_never_reach_drive(
+        tmp_path, bad_row, match):
+    """Audit M1: float() parses 'nan'/'inf'/'-0.5' without complaint, and the
+    node only checked point count and total length -- a NaN speed or a
+    negative one was loaded as a valid profile. Each bad row sits between
+    good ones so the check cannot pass by looking at the ends only."""
+    path = str(tmp_path / 'bad.csv')
+    _write_rows(path, ['0.0,0.0,1.0', '1.0,0.0,1.0', bad_row, '2.0,1.0,1.0'])
+    with pytest.raises(ValueError, match=match):
+        racing_math.load_profiled_csv(path)
+
+
+def test_load_profiled_csv_accepts_a_zero_speed_point(tmp_path):
+    """The boundary: 0 is a legitimate profiled speed (a stop point), only
+    strictly negative is refused."""
+    path = str(tmp_path / 'zero.csv')
+    _write_rows(path, ['0.0,0.0,0.0', '1.0,0.0,1.0', '2.0,1.0,1.5'])
+    xy, speed = racing_math.load_profiled_csv(path)
+    assert speed.tolist() == [0.0, 1.0, 1.5]
+    assert xy.shape == (3, 2)
+
+
 # ============================================================================
 # Opponent detection, tracking, and overtaking
 # ============================================================================

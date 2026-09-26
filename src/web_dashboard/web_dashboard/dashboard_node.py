@@ -1429,7 +1429,10 @@ class DashboardNode(Node):
         driving process. A stale panel, a replayed message, or a
         hand-rolled WebSocket client posting `{"pid": 1}` all land here
         and are refused -- and pid reuse cannot smuggle something else
-        through, because the re-scan reads the *current* cmdline.
+        through at vetting time, because the re-scan reads the *current*
+        cmdline. The escalation then spans several grace periods, so
+        StopJob pins the vetted process's kernel start time and stops the
+        moment the pid names a different process.
         """
         try:
             targets = self._scan_processes()
@@ -1632,8 +1635,11 @@ class DashboardNode(Node):
                 run_id, False, f'could not read the map directories: {exc}'))
             return
 
+        # require_digest: the browser always sends one; a client that omits
+        # it is one that never saw this run listed.
         run, reason = mapstore.resolve_delete(
-            runs, run_id, typed_name, self.map_roots, digest)
+            runs, run_id, typed_name, self.map_roots, digest,
+            require_digest=True)
         if run is None:
             self.get_logger().warn(
                 f'refused a browser request to delete "{run_id}": {reason}')
@@ -1644,16 +1650,10 @@ class DashboardNode(Node):
         # Is anything on this machine reading it right now? Deleting the map
         # a live map_server is serving leaves particle_filter blocked in its
         # constructor waiting on /map_server/map -- a hang, not an error.
-        try:
-            targets = proccontrol.scan(allowlist=mapstore.MAP_CONSUMERS)
-        except Exception:  # noqa: BLE001
-            targets = []
-        users = mapstore.in_use_by(targets, run.path)
-        if users:
-            named = ', '.join(f'{t.name} (pid {t.pid})' for t in users)
+        refusal = mapstore.in_use_refusal(run)
+        if refusal:
             self._broadcast(protocol.map_delete_result_message(
-                run.run_id, False,
-                f'refused -- {named} is using this run right now'))
+                run.run_id, False, refusal))
             return
 
         self.get_logger().warn(
@@ -1669,7 +1669,10 @@ class DashboardNode(Node):
 
     def _delete_worker(self, run):
         try:
-            ok, detail, freed = mapstore.delete_run(run, self.map_roots)
+            # Re-checks the digest vetted above: the run may have changed
+            # between that check and this thread getting to it.
+            ok, detail, freed = mapstore.delete_run(
+                run, self.map_roots, expected_digest=run.digest)
         except Exception as exc:  # noqa: BLE001
             ok, detail, freed = False, f'delete failed: {exc}', 0
         self._map_delete_busy = False
@@ -1700,19 +1703,9 @@ class DashboardNode(Node):
                    f'now -- is slam_toolbox running?')
             return
 
-        try:
-            targets = proccontrol.scan(
-                allowlist=proccontrol.DRIVING_CONTROLLERS)
-        except Exception as exc:  # noqa: BLE001
-            refuse(f'could not check what is running: {exc}')
-            return
-        driving = [t for t in targets if not t.protected]
-        if driving:
-            named = ', '.join(f'{t.name} (pid {t.pid})' for t in driving)
-            refuse(f'refused -- {named} is running. Resetting SLAM under a '
-                   f'live controller freezes the pose it steers from rather '
-                   f'than stopping it, which is worse than leaving the map '
-                   f'alone. Stop it first.')
+        refusal = proccontrol.slam_reset_refusal()
+        if refusal:
+            refuse(refusal)
             return
 
         request = SlamReset.Request()

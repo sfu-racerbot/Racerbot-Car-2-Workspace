@@ -412,3 +412,65 @@ def test_a_map_with_other_cars_in_it_does_not_veto_the_lap_that_happened():
     assert prepared.fits_the_track
     assert prepared.acceptable
     assert 'phantom obstacles' in prepared.describe()
+
+
+def _rounded_box_sdf(xs, ys, half, radius):
+    """Closed-form signed distance to a rounded square centred on the origin."""
+    q = np.stack([np.abs(xs), np.abs(ys)], axis=-1) - (half - radius)
+    outside = np.linalg.norm(np.maximum(q, 0.0), axis=-1)
+    inside = np.minimum(np.maximum(q[..., 0], q[..., 1]), 0.0)
+    return outside + inside - radius
+
+
+def _rounded_box_lap(half, radius, per_corner=40):
+    corners = ((1, 1), (-1, 1), (-1, -1), (1, -1))
+    points = []
+    for k, (sx, sy) in enumerate(corners):
+        cx, cy = sx * (half - radius), sy * (half - radius)
+        for t in np.linspace(0.0, math.pi / 2.0, per_corner, endpoint=False):
+            a = k * math.pi / 2.0 + t
+            points.append((cx + radius * math.cos(a), cy + radius * math.sin(a)))
+    return np.array(points)
+
+
+def test_one_ghost_does_not_waive_clearance_everywhere_else():
+    """Audit C2 (2026-09-25). The driven-line cap used the lap's *global*
+    minimum, so one ghost -- or one real obstacle the lap clipped -- set the
+    requirement to 0 for every point, and the cleanup was then free to cut
+    every corner into the wall.
+
+    Geometry (closed form, no golden numbers): a 4m rounded-square lap with
+    0.6m corners -- tighter than the 1.35m the rack reaches, so the filter
+    wants to cut them inward -- inside a wall 0.30m in from it everywhere
+    (a 1.7m rounded square with 0.3m corners, i.e. the lap offset inward).
+    Required clearance 0.20m. One 0.15m ghost sits mid-straight at (2, 0).
+
+    Oracle: invariant. A ghost may relax the requirement near itself, but
+    the line chosen with it must keep >= 0.20m from the wall at every point
+    more than 1m from the ghost, and must be graded the same as the line
+    chosen on the ghost-free map. Before the fix the ghosted run accepted a
+    line 0.0m from the wall at the corners."""
+    def wall(xs, ys):
+        return np.maximum(0.0, _rounded_box_sdf(
+            np.asarray(xs, float), np.asarray(ys, float), 1.7, 0.3))
+
+    ghost = np.array([2.0, 0.0])
+
+    def ghosted(xs, ys):
+        xs, ys = np.asarray(xs, float), np.asarray(ys, float)
+        near = np.hypot(xs - ghost[0], ys - ghost[1]) < 0.15
+        return np.where(near, 0.0, wall(xs, ys))
+
+    lap = _rounded_box_lap(2.0, 0.6)
+    common = dict(spacing=0.15, max_steering_angle=CAR_STEERING,
+                  wheelbase=CAR_WHEELBASE, required_clearance=0.20)
+    clean = recorded_path.prepare(lap, clearance_fn=wall, **common)
+    with_ghost = recorded_path.prepare(lap, clearance_fn=ghosted, **common)
+
+    assert with_ghost.map_has_ghosts  # sanity: the scenario is what it says
+    far = np.hypot(with_ghost.xy[:, 0] - ghost[0],
+                   with_ghost.xy[:, 1] - ghost[1]) > 1.0
+    assert np.all(wall(with_ghost.xy[far, 0], with_ghost.xy[far, 1]) >= 0.20), \
+        'a ghost on one straight must not license cutting the corners into the wall'
+    assert with_ghost.acceptable == clean.acceptable
+    assert with_ghost.fits_the_track == clean.fits_the_track

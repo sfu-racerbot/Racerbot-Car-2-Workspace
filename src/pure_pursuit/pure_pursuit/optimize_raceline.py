@@ -104,7 +104,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                                '(default: %(default)s).')
 
     vehicle = parser.add_argument_group('vehicle and safety')
-    vehicle.add_argument('--car-width', type=float, default=0.33,
+    vehicle.add_argument('--car-width', type=float, default=0.31,
                          help='Padded car width, m. Matches pure_pursuit.yaml and '
                               'gap_follow.yaml (default: %(default)s).')
     vehicle.add_argument('--safety-margin', type=float, default=0.15,
@@ -127,7 +127,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     speed.add_argument('--v-min', type=float, default=0.5)
     speed.add_argument('--a-lat-max', type=float, default=2.5)
     speed.add_argument('--a-accel-max', type=float, default=3.0)
-    speed.add_argument('--a-brake-max', type=float, default=8.0)
+    speed.add_argument('--a-brake-max', type=float, default=3.0)  # see generate_velocity_profile
     speed.add_argument('--smoothing-passes', type=int, default=5)
     speed.add_argument('--no-friction-ellipse', action='store_true')
     return parser

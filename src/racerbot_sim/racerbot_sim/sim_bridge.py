@@ -428,6 +428,23 @@ class SimBridge:
         return self._obs
 
 
+def sanitize_command(steering, speed):
+    """(steering, speed, ok) with a non-finite command replaced by 0/0.
+
+    Gym integrates whatever it is handed, and one NaN makes the ego's state
+    NaN for the rest of the run -- every later scan, pose and contact check
+    silently meaningless. A controller that emits NaN is a finding, so the
+    caller counts `ok=False` rather than hiding it; the car just stops.
+    """
+    try:
+        steering, speed = float(steering), float(speed)
+    except (TypeError, ValueError):
+        return 0.0, 0.0, False
+    if math.isfinite(steering) and math.isfinite(speed):
+        return steering, speed, True
+    return 0.0, 0.0, False
+
+
 def _rectangles_overlap(first: np.ndarray, second: np.ndarray) -> bool:
     """Separating-axis test for two convex polygons given as corner arrays."""
     for polygon in (first, second):

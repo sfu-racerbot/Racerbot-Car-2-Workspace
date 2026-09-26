@@ -560,6 +560,12 @@ class PurePursuitNode(Node):
         self._pose_reference_xy = None    # last pose that actually travelled
         self._pose_frozen_since = None    # moving-but-not-tracking window start
         self._off_line_recovery_since = None  # off-line recovery attempt window start
+        # Set when a recovery attempt times out. Latches the give-up stop so
+        # the next tick cannot open a fresh window and crawl again: without
+        # it the car cycled stop/crawl/stop every timeout, forever. Cleared
+        # only by the error actually closing (car repositioned, localization
+        # corrected) or by the operator releasing LB.
+        self._off_line_recovery_exhausted = False
         self.prev_nearest_index = None
 
         self.last_scan = None
@@ -1030,6 +1036,9 @@ class PurePursuitNode(Node):
         # regardless of how healthy localization/LIDAR/the racing line are. ---
         deadman_ok, stop_state, stop_detail = self._deadman_status()
         if not deadman_ok:
+            # Releasing LB is the operator acknowledging an exhausted
+            # off-line recovery; the next hold may try once more.
+            self._off_line_recovery_exhausted = False
             self._stop(stop_state, stop_detail)
             return
 
@@ -1148,6 +1157,15 @@ class PurePursuitNode(Node):
                     "after a full-line search",
                 )
                 return
+            if self._off_line_recovery_exhausted:
+                self.prev_nearest_index = None
+                self._stop(
+                    'off_racing_line',
+                    f"cross-track error {cross_track_error:.2f}m: recovery "
+                    "already timed out; holding the stop until the error "
+                    "clears or LB is released",
+                )
+                return
             now = self.get_clock().now()
             if self._off_line_recovery_since is None:
                 self._off_line_recovery_since = now
@@ -1155,6 +1173,7 @@ class PurePursuitNode(Node):
             if recovery_elapsed > self.off_racing_line_recovery_timeout_sec:
                 self.prev_nearest_index = None
                 self._off_line_recovery_since = None
+                self._off_line_recovery_exhausted = True
                 self._stop(
                     'off_racing_line',
                     f"cross-track error {cross_track_error:.2f}m has not "
@@ -1166,6 +1185,7 @@ class PurePursuitNode(Node):
             recovering = True
         else:
             self._off_line_recovery_since = None
+            self._off_line_recovery_exhausted = False
         self.prev_nearest_index = nearest_idx
 
         # --- Steering: adaptive lookahead + pure pursuit geometry -- or,

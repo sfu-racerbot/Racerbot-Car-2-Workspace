@@ -77,7 +77,7 @@ import cv2
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, qos_profile_sensor_data
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 
@@ -235,6 +235,9 @@ class CameraStreamNode(Node):
         self.status_log_period_sec = max(
             0.0, float(self.get_parameter('status_log_period_sec').value))
         self.passthrough_wanted = bool(self.get_parameter('passthrough').value)
+        # Pause after a failed read before reopening the device. Not a ROS
+        # parameter: it is a CPU guard, not a tuning knob.
+        self.reopen_backoff_sec = 0.5
 
         legacy_quality = int(self.get_parameter('jpeg_quality').value)
         preview_quality = int(self.get_parameter('preview_quality').value)
@@ -286,7 +289,12 @@ class CameraStreamNode(Node):
             # a third of a second of pure latency on a 30fps camera, for
             # frames nobody would ever see.
             self.create_subscription(
-                Image, self.image_topic, self._image_callback, qos_profile_sensor_data)
+                Image, self.image_topic, self._image_callback,
+                QoSProfile(
+                    depth=1,
+                    history=qos_profile_sensor_data.history,
+                    reliability=qos_profile_sensor_data.reliability,
+                    durability=qos_profile_sensor_data.durability))
             self.get_logger().info(
                 f"usb_cam_stream_node ready: source topic={self.image_topic}. "
                 f"Once the web server starts, open "
@@ -448,6 +456,11 @@ class CameraStreamNode(Node):
                 )
                 self._cap.release()
                 self._cap = None
+                # A device that opens fine but fails every read would
+                # otherwise spin open/read/release at 100% CPU, churning
+                # the USB bus. Short, because a real unplug-replug should
+                # recover quickly; retry_period_sec covers open failures.
+                self._stop_event.wait(self.reopen_backoff_sec)
                 continue
 
             if self._passthrough_active and _looks_like_jpeg(frame):
@@ -468,7 +481,25 @@ class CameraStreamNode(Node):
             if not self._frame_ready.wait(timeout=0.2):
                 continue
             self._frame_ready.clear()
-            self.encode_pending()
+            self.encode_pending_safely()
+
+    def encode_pending_safely(self):
+        """encode_pending(), but one bad frame costs one frame.
+
+        This runs on a daemon thread; an exception escaping it used to end
+        the thread -- and with it all streaming -- while the node itself
+        kept running and viewers sat on the last good frame. Drop the
+        frame, say why, and carry on with the next.
+        """
+        try:
+            return self.encode_pending()
+        except Exception as exc:  # noqa: BLE001 - never lose the encoder to one frame
+            self._log_stream_status(
+                'encode_failed',
+                f'dropped a frame the encoder could not handle '
+                f'({type(exc).__name__}: {exc})',
+                level='error')
+            return False
 
     def encode_pending(self):
         """Encode the newest waiting frame for every watched tier.
