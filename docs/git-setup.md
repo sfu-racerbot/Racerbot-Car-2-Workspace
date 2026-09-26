@@ -99,20 +99,22 @@ That makes manual driving ([teleop](glossary.md#teleop)) and autonomy independen
 
 `bringup_launch.py` still starts `joy_node`, because every control layer's deadman check needs it. It just doesn't start `joy_teleop` any more.
 
+The two alternate bringups, `no_lidar_bringup_launch.py` and `sick_bringup_launch.py`, got the same split on 2026-09-26 (they had been missed, and still started `joy_teleop`).
+
 **How it fails if reverted:** confusingly. Autonomy silently stops working, because a bundled `joy_teleop` masks `/drive` permanently — see [troubleshooting.md](troubleshooting.md#autonomy-node-publishes-to-drive-car-doesnt-move-no-errors-anywhere).
 
 ### Fix 3 — the odometry sign, which fails silently
 
 `src/f1tenth_system/f1tenth_stack/config/vesc.yaml`
 
-`vesc_to_odom_node` overrides `speed_to_erpm_gain` to **`-4614.0`**, against the `+4614.0` in the shared `/**` block. (The [VESC](glossary.md#vesc) is the motor controller.)
+`vesc_to_odom_node` overrides `speed_to_erpm_gain` to a **negative** value (**`-4447.983786`**, its magnitude recalibrated from `-4614.0` in September 2026), against the `+4614.0` in the shared `/**` block. The sign is the fix; the magnitude is calibration. (The [VESC](glossary.md#vesc) is the motor controller.)
 
 > **This is the dangerous one.** Nothing errors if it's lost. Odometry just reports the wrong sign, and every speed-aware safety layer degrades along with it.
 
 **Verify both nodes after any upstream sync:**
 
 ```bash
-ros2 param get /vesc_to_odom_node speed_to_erpm_gain      # must be -4614.0
+ros2 param get /vesc_to_odom_node speed_to_erpm_gain      # must be NEGATIVE (currently -4447.983786)
 ros2 param get /ackermann_to_vesc_node speed_to_erpm_gain # must be +4614.0
 ```
 
@@ -182,7 +184,7 @@ That negates the eRPM the VESC reports. Upstream assumes a VESC that reports eRP
 
 **This car's VESC doesn't.** It reports eRPM with the same sign as the command. So without the override, `/odom` publishes **negative** `twist.linear.x` while the car drives forward — and integrates the `odom`→`base_link` TF backwards along with it.
 
-The `-4614.0` override cancels that hardcoded negation, for odometry only. [TF](glossary.md#tf--transform--frame) — ROS2's record of where things sit relative to each other — is built from that odometry, which is why a sign error there propagates into everything positional.
+The negative override cancels that hardcoded negation, for odometry only. [TF](glossary.md#tf--transform--frame) — ROS2's record of where things sit relative to each other — is built from that odometry, which is why a sign error there propagates into everything positional.
 
 `ackermann_to_vesc_node` — which sets the actual motor command — **must keep `+4614.0`**. Flip that one and a forward command drives the car backwards.
 
@@ -292,8 +294,8 @@ colcon build --symlink-install --packages-select <package>
    | Check | Should still be |
    |---|---|
    | `f1tenth_stack/config/joy_teleop.yaml` → `drive-steering_angle` under `human_control` | `axis: 3`, **not** upstream's `axis: 2` |
-   | `f1tenth_stack/launch/bringup_launch.py` | still does **not** start a `joy_teleop` node, with `teleop_launch.py` still present separately (upstream will have bundled them back together) |
-   | `f1tenth_stack/config/vesc.yaml` → `vesc_to_odom_node` | still carries `speed_to_erpm_gain: -4614.0` |
+   | `f1tenth_stack/launch/bringup_launch.py`, `no_lidar_bringup_launch.py`, `sick_bringup_launch.py` | still do **not** start a `joy_teleop` node, with `teleop_launch.py` still present separately (upstream will have bundled them back together) |
+   | `f1tenth_stack/config/vesc.yaml` → `vesc_to_odom_node` | still carries a **negative** `speed_to_erpm_gain` (currently `-4447.983786`) |
    | `f1tenth_stack/config/vesc.yaml` → `wheelbase`, and the `base_link`→`laser` transform in all three `*_bringup_launch.py` files | `0.36`, and `0.26 0.0 0.11` — this car's measured geometry, **not** the `0.324` / `0.33` upstream ships |
 
 4. **Commit normally:** `git add src/f1tenth_system && git commit`. There's no submodule pointer to bump — the files themselves are the commit.

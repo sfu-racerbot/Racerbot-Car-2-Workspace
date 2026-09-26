@@ -1,3 +1,40 @@
+# ============================================================================
+# WANT THE CAR FASTER? Edit THIS file, not gap_follow_node.py.
+#
+# gap_follow_launch.py loads this file, and every value here overrides the
+# declare_parameter() default in the .py -- so changing a number in the .py
+# does nothing on the car. Restart the launch after editing (no rebuild
+# needed with --symlink-install).
+#
+# The speed the car actually drives is the LOWEST of several caps, so raise
+# the one that is binding. In rough order of how often each one binds:
+#
+#   corner_speed        cap whenever the car is in the corner fallback gap
+#                       (on the 2026-08-06 run: ~80% of all driving ticks)
+#   corner_speed_wide   the same cap on a corner sensed as wide
+#   max_lateral_accel   curvature cap: v <= sqrt(max_lateral_accel / curvature).
+#                       At this car's tightest corners (~0.82/m) 1.0 gives
+#                       ~1.1 m/s, so above that raising corner_speed alone
+#                       changes nothing in those corners. A grip limit --
+#                       raise in small steps.
+#   max_acceleration    SAFETY-CRITICAL: the braking the car assumes it has
+#                       for the clearance it sees. Raising it lets the car
+#                       drive faster than it can stop. Do not raise to go
+#                       faster.
+#   max_speed           cap on open straights
+#
+# Rule the node checks at startup, or it exits immediately:
+#     corner_speed <= corner_speed_wide <= max_speed
+# Mapping launches that cap max_speed scale the other two for you
+# (gap_follow/speed_overrides.py).
+#
+# The live-tuning panel on the web dashboard can change corner_speed,
+# max_speed and several others while the car runs; copy what works back
+# here, since live changes are lost on restart.
+#
+# Any speed increase: test wheels-off first, then low speed in open space
+# (docs/writing-your-own-node.md#testing-before-its-on-wheels).
+# ============================================================================
 gap_follow_node:
   ros__parameters:
     scan_topic: /scan
@@ -39,9 +76,13 @@ gap_follow_node:
     # only stops being the *tighter* one for a car that can already go
     # this fast in that curvature on this car's own turning-circle math.
     # Not measured on this exact hallway -- validate low-speed first.
-    corner_speed: 1.1
-    max_speed: 2.5
-    min_speed: 0.8
+    #
+    # Raised 2026-09-26 (1.1 -> 1.5, max 2.5 -> 3.5, min 0.8 -> 1.0) to make
+    # the car faster. NOT yet validated on the car. Note max_lateral_accel
+    # below still caps the tightest corners near 1.1 m/s.
+    corner_speed: 1.5
+    max_speed: 3.5
+    min_speed: 1.0
     # Symmetric achievable envelope from the calibrated servo mapping.
     max_steering_angle: 0.26
     # Steering is proportional to the selected gap's bearing, clipped to
@@ -148,7 +189,10 @@ gap_follow_node:
     # (gap_follow/speed_overrides.py); raising either of these without
     # checking that helper is how gap_follow_node came to exit at startup on
     # 2026-08-19, which stalled a whole auto_map_race run.
-    corner_speed_wide: 1.4
+    # 1.9 on 2026-09-26: raised with corner_speed (1.1 -> 1.5) at the same
+    # 1.4/1.1 ratio, because corner_speed <= corner_speed_wide is checked
+    # at startup and 1.5 against the old 1.4 would stop the node.
+    corner_speed_wide: 1.9
     disparity_threshold: 0.4
     # Obstacles are already inflated by half-width + margin on both sides.
     # Requiring another car width here was double-padding tight openings.

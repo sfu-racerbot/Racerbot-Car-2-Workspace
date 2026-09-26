@@ -6,6 +6,17 @@
 
 Reactive "follow-the-gap" autonomy: no map, no localization, no memory of the track — every LIDAR scan is looked at fresh and the car steers into the biggest safe opening it currently sees. This file documents the algorithm and code in detail; for the broader workspace context (safety model, how to run it, how to write your own node) see [docs/architecture.md](../../docs/architecture.md), [docs/operations.md](../../docs/operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node), and [docs/writing-your-own-node.md](../../docs/writing-your-own-node.md).
 
+## Making the car faster
+
+Edit [`config/gap_follow.yaml`](config/gap_follow.yaml), **not** `gap_follow_node.py`. The launch file loads the YAML, and the YAML overrides every default in the code. Changing a number in the `.py` does nothing on the car.
+
+The car drives at the **lowest** of several speed caps, so raise the cap that is binding. The comment block at the top of the YAML lists them in order: usually `corner_speed`, then `max_lateral_accel` in tight corners, then `max_speed` on straights. Two rules:
+
+- Keep `corner_speed <= corner_speed_wide <= max_speed`. If that ordering breaks, the node exits at startup.
+- Don't raise `max_acceleration` to go faster. It is the braking the car *assumes* it has, so raising it makes the car drive faster than it can stop.
+
+Test any increase wheels-off first, then at low speed in open space.
+
 ## Files
 
 | File | What it is |
@@ -35,7 +46,7 @@ All of this happens in `scan_callback`, once per incoming `LaserScan` message (t
 
 ### 0. Deadman button (checked first)
 
-Before touching the scan at all: if LB (button index `deadman_button`, default `4`) isn't currently held on a live `/joy` stream (received within `joy_timeout_sec`, default `0.5s`), publish `0.0 / 0.0` and return immediately. This is a **mandatory, workspace-wide safety policy** — see [docs/architecture.md](../../docs/architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car) — not specific to this algorithm; every other step below only ever runs while LB is held.
+Before touching the scan at all: if LB (button index `deadman_button`, default `4`) isn't currently held on a live `/joy` stream (received within `joy_timeout_sec`, default `0.5s`), publish speed `0.0` (steering held where the rack already is — see below) and return immediately. This is a **mandatory, workspace-wide safety policy** — see [docs/architecture.md](../../docs/architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car) — not specific to this algorithm; every other step below only ever runs while LB is held.
 
 ```python
 def _deadman_engaged(self) -> bool:
@@ -296,9 +307,20 @@ change at the servo or the motor:
 resumed one cannot cash in a large accumulated interval as one big jump.
 
 **Every emergency path bypasses all of the above.** `_stop()` publishes
-`0.0/0.0` directly, with no rate limiting, for the deadman check, footprint
+speed `0.0` directly, with no rate limiting, for the deadman check, footprint
 clearance, forward clearance, TTC brake, empty scan window, and no-safe-gap
-cases. Command shaping only ever applies to a normal drive command.
+cases. It deliberately does **not** centre the steering: it re-publishes the
+current rack angle, because re-centring on every stop defeated escape
+steering in two real runs (the reasoning is in `_stop()`'s comment). A
+stopped car's steering angle cannot move it. Command shaping only ever
+applies to a normal drive command.
+
+If `scan_callback` itself raises, it publishes `0.0` speed / `0.0` steering
+straight to the publisher, logs the exception, and re-raises so the node
+exits — the same contract as `pure_pursuit`'s control loop. Nothing in
+the ROS chain downstream (`ackermann_mux`, `ackermann_to_vesc`, the VESC
+driver) publishes a zero when a driving node goes silent, so the stop has to
+come from the node on its way out.
 
 ## Three additions from a real-hallway report
 
