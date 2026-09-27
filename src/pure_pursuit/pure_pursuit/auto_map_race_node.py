@@ -440,6 +440,11 @@ class AutoMapRaceNode(Node):
         self.declare_parameter('pf_startup_timeout_sec', 45.0)
         self.declare_parameter('pf_pose_timeout_sec', 0.5)
         self.declare_parameter('pf_settle_poses', 20)
+        # particle_filter's particles are LiDAR poses (it ray-casts each scan
+        # from the particle's own pose); SLAM's is base_link, the rear axle.
+        # The handover converts in both directions with this offset.
+        self.declare_parameter('laser_offset_x', 0.26)
+        self.declare_parameter('laser_offset_y', 0.0)
         self.declare_parameter('enable_deadman', True)
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('deadman_button', 4)
@@ -515,6 +520,8 @@ class AutoMapRaceNode(Node):
         self.pf_startup_timeout_sec = float(value('pf_startup_timeout_sec'))
         self.pf_pose_timeout_sec = float(value('pf_pose_timeout_sec'))
         self.pf_settle_poses = int(value('pf_settle_poses'))
+        self.laser_offset_x = float(value('laser_offset_x'))
+        self.laser_offset_y = float(value('laser_offset_y'))
 
         # Particle-filter handover state. `pf_active` is the one that decides
         # which estimate the car actually steers on -- see _lookup_and_publish_pose.
@@ -961,7 +968,9 @@ class AutoMapRaceNode(Node):
         """
         if pose is None:
             return
-        x, y, yaw = pose
+        # SLAM's pose is base_link; the filter's particles are LiDAR poses.
+        x, y, yaw = racing_math.base_link_pose_to_laser(
+            *pose, self.laser_offset_x, self.laser_offset_y)
         msg = PoseWithCovarianceStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self.map_frame
@@ -1053,14 +1062,22 @@ class AutoMapRaceNode(Node):
         # this node has always been the thing publishing `pose_topic`, so
         # the handover is a change of source, not a change of wiring.
         if self.pf_active and self.pf_pose is not None:
+            # The filter's pose is the LiDAR's; pose_topic carries base_link,
+            # the rear axle the racing line was recorded from. Converting
+            # here keeps the handover a change of source only.
+            q = self.pf_pose.pose.orientation
+            x, y, yaw = racing_math.laser_pose_to_base_link(
+                self.pf_pose.pose.position.x, self.pf_pose.pose.position.y,
+                racing_math.quaternion_to_yaw(q.x, q.y, q.z, q.w),
+                self.laser_offset_x, self.laser_offset_y)
             pose = PoseStamped()
             pose.header = self.pf_pose.header
             pose.header.frame_id = self.map_frame
-            pose.pose = self.pf_pose.pose
+            pose.pose.position.x = x
+            pose.pose.position.y = y
+            pose.pose.orientation = self.pf_pose.pose.orientation
             self.pose_pub.publish(pose)
-            q = pose.pose.orientation
-            return (pose.pose.position.x, pose.pose.position.y,
-                    racing_math.quaternion_to_yaw(q.x, q.y, q.z, q.w))
+            return (x, y, yaw)
         try:
             transform = self.tf_buffer.lookup_transform(
                 self.map_frame, self.base_frame, rclpy.time.Time())

@@ -124,7 +124,7 @@ Change any of these and you must change all of its row together, or two parts of
 | Number | Files |
 |---|---|
 | Wheelbase `0.36` | `vesc.yaml`, `pure_pursuit.yaml`, `gap_follow.yaml`, `auto_map_race.yaml` (`profile_wheelbase`), `odom_calibration.yaml`, `racerbot_sim/sim_bridge.py`, `tools/f1tenth_sim/sim_fidelity/calibration.py` |
-| LiDAR offset `0.26` | the `base_link`→`laser` static transform in `bringup_launch.py`, `no_lidar_bringup_launch.py`, `sick_bringup_launch.py`, `racerbot_sim/launch/sim_bringup_launch.py`, `racerbot_launch/launch/dashboard_test_launch.py`; and `laser_offset_x` in `gap_follow.yaml`, `pure_pursuit.yaml`, `web_dashboard.yaml` |
+| LiDAR offset `0.26` | the `base_link`→`laser` static transform in `bringup_launch.py`, `no_lidar_bringup_launch.py`, `sick_bringup_launch.py`, `racerbot_sim/launch/sim_bringup_launch.py`, `racerbot_launch/launch/dashboard_test_launch.py`; and `laser_offset_x` in `gap_follow.yaml`, `pure_pursuit.yaml`, `web_dashboard.yaml`, `auto_map_race.yaml`, `waypoint_recorder.yaml` (the last two, and `pure_pursuit.yaml`/`web_dashboard.yaml` again, also use it to turn the particle filter's LiDAR pose into the rear-axle pose — [localization.md](localization.md#which-point-on-the-car-the-position-means)) |
 | Collision width `0.31` | `gap_follow.yaml`, `pure_pursuit.yaml`, `auto_map_race.yaml` (`optimize_car_width`), both simulators |
 
 ### The collision envelope is padded on purpose

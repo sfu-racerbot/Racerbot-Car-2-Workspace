@@ -819,3 +819,56 @@ def test_detect_dynamic_cluster_returns_the_closest_of_two_and_splits_on_depth()
     start, end, centroid_range, _ = result
     assert (start, end) == (48, 58)
     assert centroid_range == pytest.approx(1.5)
+
+
+# --- LiDAR pose <-> rear-axle (base_link) pose --------------------------------
+# particle_filter ray-casts each particle's scan from the particle's own pose
+# (particle_filter.py sensor_model: queries = proposal_dist), so its
+# /pf/viz/inferred_pose is the LiDAR's pose, not base_link's. The LiDAR is
+# laser_offset_x = 0.26 m ahead of the rear axle (docs/hardware-reference.md).
+# Oracle for every value below: the rigid-body offset, recomputed in closed
+# form -- base = laser - R(yaw) @ offset, yaw unchanged.
+
+def test_laser_pose_to_base_link_heading_east_moves_back_along_x():
+    x, y, yaw = racing_math.laser_pose_to_base_link(5.0, 2.0, 0.0, 0.26, 0.0)
+    assert x == pytest.approx(5.0 - 0.26, abs=1e-12)  # m
+    assert y == pytest.approx(2.0, abs=1e-12)          # m
+    assert yaw == 0.0
+
+
+def test_laser_pose_to_base_link_heading_north_moves_back_along_y():
+    # Catches a cos/sin swap: facing +y, the rear axle is 0.26 m in -y.
+    x, y, yaw = racing_math.laser_pose_to_base_link(5.0, 2.0, math.pi / 2, 0.26, 0.0)
+    assert x == pytest.approx(5.0, abs=1e-12)          # m
+    assert y == pytest.approx(2.0 - 0.26, abs=1e-12)   # m
+    assert yaw == pytest.approx(math.pi / 2, abs=1e-15)
+
+
+def test_laser_pose_to_base_link_general_offset_matches_closed_form():
+    yaw, ox, oy = math.radians(30.0), 0.26, 0.05
+    x, y, out_yaw = racing_math.laser_pose_to_base_link(1.0, -1.0, yaw, ox, oy)
+    assert x == pytest.approx(1.0 - (ox * math.cos(yaw) - oy * math.sin(yaw)), abs=1e-12)
+    assert y == pytest.approx(-1.0 - (ox * math.sin(yaw) + oy * math.cos(yaw)), abs=1e-12)
+    assert out_yaw == yaw
+
+
+def test_base_link_pose_to_laser_is_the_exact_inverse():
+    rng = np.random.default_rng(7)
+    for _ in range(50):
+        x, y = rng.uniform(-20.0, 20.0, size=2)
+        yaw = rng.uniform(-math.pi, math.pi)
+        ox, oy = rng.uniform(-0.5, 0.5, size=2)
+        lx, ly, lyaw = racing_math.base_link_pose_to_laser(x, y, yaw, ox, oy)
+        # The LiDAR really is ahead by the offset, not just "some" inverse.
+        assert math.hypot(lx - x, ly - y) == pytest.approx(math.hypot(ox, oy), abs=1e-12)
+        bx, by, byaw = racing_math.laser_pose_to_base_link(lx, ly, lyaw, ox, oy)
+        assert (bx, by, byaw) == pytest.approx((x, y, yaw), abs=1e-12)
+
+
+def test_base_link_pose_to_laser_heading_north_moves_forward_along_y():
+    x, y, _ = racing_math.base_link_pose_to_laser(0.0, 0.0, math.pi / 2, 0.26, 0.0)
+    assert (x, y) == pytest.approx((0.0, 0.26), abs=1e-12)  # m
+
+
+def test_zero_offset_is_the_identity():
+    assert racing_math.laser_pose_to_base_link(3.0, 4.0, 1.0, 0.0, 0.0) == (3.0, 4.0, 1.0)

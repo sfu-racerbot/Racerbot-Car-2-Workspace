@@ -36,7 +36,7 @@ v    = max(inp.speed, 0.0)
 
 ## Known risks to watch in sim and on the car
 
-- **Pose frame** — 00 hard stop point 1. A 0.26 m error in where "rear axle" is becomes a heading-dependent error in `e_f`.
+- **Pose frame** — 00 hard stop point 1 (resolved 2026-09-27: poses reach the law already converted to the rear axle; do not convert again). A 0.26 m error in where "rear axle" is becomes a heading-dependent error in `e_f`, so a wrong `pose_frame` in a new launch file shows up here first.
 - **Pose jitter at low speed:** 2 cm of jitter gives `k·0.02/(v + v_soft)` rad of steering noise — about 0.035 rad at 0.5 m/s with the starting gains. The node's 1.0 rad/s slew limit caps it at 0.025 rad per tick. Watch the harness's `p95` versus `mean` cross-track for oscillation; the `car` fidelity profile includes pose noise.
 - **Curvature noise:** the feedforward uses per-waypoint Menger curvature, which is noisy on raw recorded lines. That is why 00 smooths curvature (`tracking_curvature_smoothing`). If sim shows feedforward chatter, raise the smoothing — do not delete the term.
 - **Open path end:** the projection clamps to the last segment; the law keeps steering along it. Stopping at the end of an open path is the node's job (profile speed), not the law's.
@@ -71,4 +71,4 @@ Mutation checks required before calling this done (Hard rule 1): negate the late
 2. The table above passes and every listed mutation is caught.
 3. 00's node tests pass with `steering_law = stanley`.
 4. Spec 01's judging run gives **PROMOTE**; results committed. If REJECT: commit the results anyway, write down why, and stop — no on-car steps.
-5. Then 00's rollout order, stopping at hard stop point 1 in particle-filter mode.
+5. Then 00's rollout order, confirming `pose_frame` matches `pose_topic` for the launch in use (00 hard stop point 1).

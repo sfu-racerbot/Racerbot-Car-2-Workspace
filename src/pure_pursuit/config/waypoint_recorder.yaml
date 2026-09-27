@@ -1,6 +1,13 @@
 waypoint_recorder_node:
   ros__parameters:
     pose_topic: /pf/viz/inferred_pose
+    # particle_filter's pose is the LiDAR's, not the rear axle's: it ray-casts
+    # each scan from the particle's own pose. Recorded points are converted to
+    # base_link (the rear axle) with the offset below. Use 'base_link' only
+    # for a topic that already is one, such as /slam_pose.
+    pose_frame: laser
+    laser_offset_x: 0.26              # meters -- MEASURED rear-axle base_link to LiDAR
+    laser_offset_y: 0.0
     # Required -- e.g.:
     #   /home/racerbotcar-2/racerbot-ws/src/pure_pursuit/waypoints/my_track_raw.csv
     output_file: ''

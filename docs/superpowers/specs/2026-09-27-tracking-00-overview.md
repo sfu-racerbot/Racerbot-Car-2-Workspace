@@ -25,7 +25,7 @@ Success = a law may be selected on the car only after it has beaten pure pursuit
 
 ## Hard stop points — stop and report to the user, do not work around
 
-1. **Pose frame (blocks every on-car step, not the sim work).** `pure_pursuit_node.pose_callback` uses the pose as the rear-axle `base_link` pose with no offset. With `pose_topic: /slam_pose` (`auto_map_race`) that is what it is. With `/pf/viz/inferred_pose` it is suspect: `particle_filter.py:247` publishes the transform as `map -> /laser`, which suggests the particle filter's pose is the **LiDAR's**, 0.26 m ahead of the rear axle. Unverified as of 2026-09-27. Stanley measures error at the front axle and is directly sensitive to a 0.26 m frame error; so, less visibly, is today's pure pursuit. Before any on-car test of any new law in particle-filter mode: determine the frame (read `particle_filter.py`'s motion/sensor model, or drive the car with both `/slam_pose` and `/pf/viz/inferred_pose` live and compare), and **report the finding to the user**. Do not "fix" it silently — it changes today's pure-pursuit behaviour too.
+1. **Pose frame — resolved 2026-09-27, keep it resolved.** The particle filter's `/pf/viz/inferred_pose` is the **LiDAR's** pose (its sensor model ray-casts from each particle), 0.26 m ahead of the rear axle. It was used unconverted until 2026-09-27; it is now converted to `base_link` on arrival (`pure_pursuit_node`/`waypoint_recorder_node` `pose_frame`, `auto_map_race_node`'s handover, `web_dashboard`'s `laser_pose_topics`). See `docs/localization.md#which-point-on-the-car-the-position-means`. The laws in these specs receive `car_x/car_y/car_yaw` **after** that conversion and must not convert again. Stanley measures error at the front axle and is directly sensitive to a frame error, so if any on-car result suggests a constant along-track offset, re-check `pose_frame` for the launch in use before tuning anything, and report it.
 2. Any test that fails and seems to need loosening (Hard rule 2 in `CLAUDE.md`).
 3. Spec 04's G0 benchmark failing its budget, or needing a system-wide `pip install`.
 4. A law that fails spec 01's promotion rule. The answer is "it does not ship", not "relax the rule".
@@ -164,7 +164,7 @@ Exactly `CLAUDE.md`'s order, with the law selected via `steering_law:=<law>` on 
 2. Wheels off the ground, full stack, LB held: steering direction sanity — push the car left of the line by hand, the wheels must turn right.
 3. Floor, low speed (`max_speed` ≤ 1.0 via the launch argument), open space, `race_diagnostics` recording. Compare cross-track against a pure-pursuit run on the same line in the same session.
 
-Hard stop point 1 (pose frame) must be resolved before step 2 in particle-filter mode.
+Before step 2, confirm the launch in use pairs `pose_topic` with the right `pose_frame` (hard stop point 1).
 
 ## Docs to update when implementing
 

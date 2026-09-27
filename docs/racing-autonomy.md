@@ -342,6 +342,8 @@ It runs with localization already up (Phase 2) and the car under manual [teleop]
 
 It subscribes to `/pf/viz/inferred_pose` and appends the car's `(x, y)` position to a `.csv` file.
 
+That pose is the LiDAR's, not the rear axle's, so the recorder moves each point back 0.26 m first (`pose_frame: laser` in `waypoint_recorder.yaml`). The line on disk is the rear axle's path, which is what pure pursuit steers along — see [localization.md](localization.md#which-point-on-the-car-the-position-means).
+
 A point goes in every time the car has moved at least `min_spacing_m` (default `0.15 m`) since the last one. That filters out the dense cluster of near-duplicate points you'd otherwise collect while stopped or crawling.
 
 The file is opened once and **flushed to disk after every single point**, not just on shutdown. If the Jetson crashes mid-lap you keep everything recorded up to that moment instead of losing the whole lap.
@@ -1009,6 +1011,7 @@ All of these live in `src/pure_pursuit/config/pure_pursuit.yaml` — see that fi
 | `wait_for_waypoints` | `false` | Start stopped awaiting a runtime profile; only the automatic launch sets this |
 | `closed_loop` | `true` | Whether the racing line wraps around (a normal lap track) |
 | `pose_topic` | `/pf/viz/inferred_pose` | Localization input |
+| `pose_frame` | `laser` | Which point on the car `pose_topic` describes: `laser` for the particle filter (its pose is the LiDAR's, converted to the rear axle on arrival), `base_link` for `/slam_pose`. See [localization.md](localization.md#which-point-on-the-car-the-position-means) |
 | `scan_topic` | `/scan` | LIDAR input for the reactive safety net |
 | `odom_topic` | `/odom` | Measured speed, used only to size the adaptive lookahead |
 | `drive_topic` | `/drive` | Output, arbitrated by `ackermann_mux` like every other autonomy node |

@@ -11,6 +11,7 @@ import rclpy
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from pure_pursuit.auto_map_race_node import (  # noqa: E402
     angle_difference, AutoMapRaceNode, LapRecorder)
+from pure_pursuit import racing_math  # noqa: E402
 import pytest  # noqa: E402
 
 
@@ -1011,10 +1012,75 @@ def test_the_published_pose_follows_whichever_source_is_trusted():
         node.pf_active = True
         pose = node._lookup_and_publish_pose()
         assert pose is not None
-        assert pose[0] == pytest.approx(7.5)
-        assert pose[1] == pytest.approx(-3.25)
-        assert published[-1].pose.position.x == pytest.approx(7.5)
+        # The particle filter's pose is the LiDAR's; what goes to pure
+        # pursuit is the rear axle, 0.26 m behind it (heading +x here).
+        # Before 2026-09-27 this asserted 7.5 -- the unconverted LiDAR x --
+        # which is the bug test_particle_filter_pose_is_republished_as_base_link
+        # below pins down.
+        assert pose[0] == pytest.approx(7.5 - 0.26, abs=1e-9)  # m
+        assert pose[1] == pytest.approx(-3.25, abs=1e-9)       # m
+        assert published[-1].pose.position.x == pytest.approx(7.5 - 0.26, abs=1e-9)
         assert published[-1].header.frame_id == node.map_frame
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def _pf_pose_heading(x, y, yaw):
+    msg = _pf_pose(x, y)
+    msg.pose.orientation.z = math.sin(yaw / 2.0)
+    msg.pose.orientation.w = math.cos(yaw / 2.0)
+    return msg
+
+
+def test_particle_filter_pose_is_republished_as_base_link():
+    """particle_filter ray-casts each scan from the particle's own pose
+    (particle_filter.py sensor_model), so /pf/viz/inferred_pose is the
+    LiDAR's pose. pure_pursuit reads /slam_pose as base_link -- the rear
+    axle -- and the racing line was recorded from SLAM's base_link, so the
+    handover must convert. Oracle: rigid 0.26 m offset along the heading
+    (docs/hardware-reference.md); facing +y the rear axle is 0.26 m in -y,
+    which also catches a cos/sin swap."""
+    node = _supervisor()
+    try:
+        published = []
+
+        class Capture:
+            def publish(self, msg):
+                published.append(msg)
+
+        node.pose_pub = Capture()
+        node._pf_pose_callback(_pf_pose_heading(4.0, 1.0, math.pi / 2))
+        node.pf_active = True
+        x, y, yaw = node._lookup_and_publish_pose()
+        assert (x, y) == pytest.approx((4.0, 1.0 - 0.26), abs=1e-9)  # m
+        assert yaw == pytest.approx(math.pi / 2, abs=1e-9)            # rad
+        msg = published[-1]
+        assert (msg.pose.position.x, msg.pose.position.y) == pytest.approx(
+            (4.0, 1.0 - 0.26), abs=1e-9)
+        q = msg.pose.orientation
+        assert racing_math.quaternion_to_yaw(q.x, q.y, q.z, q.w) == pytest.approx(
+            math.pi / 2, abs=1e-9)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_particle_filter_is_seeded_with_the_lidar_pose_not_base_link():
+    """The seed comes from SLAM's base_link; the filter's particles are LiDAR
+    poses, so the seed must be moved 0.26 m forward along the heading."""
+    node = _supervisor()
+    try:
+        capture = _Capture()
+        node.initialpose_pub = capture
+        node._seed_particle_filter((1.0, 2.0, math.pi / 2))
+        assert len(capture.published) == 1
+        p = capture.published[0].pose.pose
+        assert (p.position.x, p.position.y) == pytest.approx(
+            (1.0, 2.0 + 0.26), abs=1e-9)  # m
+        q = p.orientation
+        assert racing_math.quaternion_to_yaw(q.x, q.y, q.z, q.w) == pytest.approx(
+            math.pi / 2, abs=1e-9)
     finally:
         node.destroy_node()
         rclpy.shutdown()

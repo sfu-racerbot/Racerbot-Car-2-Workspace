@@ -10,6 +10,12 @@ web_dashboard_node:
     pose_topics:
       - /pf/viz/inferred_pose
       - /slam_pose
+    # Which of those carry the LiDAR's pose instead of base_link's (the rear
+    # axle). particle_filter ray-casts each scan from the particle's own pose,
+    # so its estimate is the LiDAR's; it is moved back by laser_offset_x
+    # before the car and scan are drawn. /slam_pose is already base_link.
+    laser_pose_topics:
+      - /pf/viz/inferred_pose
     drive_topic: /ackermann_cmd  # selected command after ackermann_mux
     odom_topic: /odom            # measured longitudinal speed
     joy_topic: /joy              # read-only LB state for the stopwatch

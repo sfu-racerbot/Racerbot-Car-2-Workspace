@@ -295,6 +295,11 @@ class PurePursuitNode(Node):
         self.declare_parameter('overtake_max_blind_sec', 3.0)
         self.declare_parameter('laser_offset_x', 0.26)
         self.declare_parameter('laser_offset_y', 0.0)
+        # Which point on the car pose_topic's pose describes. 'laser' for
+        # particle_filter's /pf/viz/inferred_pose (it ray-casts each scan from
+        # the particle's own pose, so its particles are LiDAR poses);
+        # 'base_link' for /slam_pose. Converted to base_link on arrival.
+        self.declare_parameter('pose_frame', 'laser')
 
         # --- Opponent detection mode: 'heuristic' (shape-based, no map
         # needed) or 'map' (ray-cast map subtraction via range_libc --
@@ -441,8 +446,13 @@ class PurePursuitNode(Node):
         self.overtake_max_blind_sec = float(self.get_parameter('overtake_max_blind_sec').value)
         self.laser_offset_x = float(self.get_parameter('laser_offset_x').value)
         self.laser_offset_y = float(self.get_parameter('laser_offset_y').value)
+        self.pose_frame = str(self.get_parameter('pose_frame').value)
+        if self.pose_frame not in ('laser', 'base_link'):
+            raise RuntimeError(
+                f"pure_pursuit_node: pose_frame must be 'laser' or 'base_link', "
+                f"got '{self.pose_frame}'.")
 
-        self.opponent_detection_mode = str(self.get_parameter('opponent_detection_mode').value)
+        self.opponent_detection_mode =str(self.get_parameter('opponent_detection_mode').value)
         self.map_topic = str(self.get_parameter('map_topic').value)
         self.map_beam_step = max(1, int(self.get_parameter('map_beam_step').value))
         self.map_subtraction_margin = float(self.get_parameter('map_subtraction_margin').value)
@@ -846,10 +856,13 @@ class PurePursuitNode(Node):
     # ------------------------------------------------------------------------
 
     def pose_callback(self, msg: PoseStamped):
-        self.car_x = msg.pose.position.x
-        self.car_y = msg.pose.position.y
         q = msg.pose.orientation
-        self.car_yaw = racing_math.quaternion_to_yaw(q.x, q.y, q.z, q.w)
+        x, y = msg.pose.position.x, msg.pose.position.y
+        yaw = racing_math.quaternion_to_yaw(q.x, q.y, q.z, q.w)
+        if self.pose_frame == 'laser':
+            x, y, yaw = racing_math.laser_pose_to_base_link(
+                x, y, yaw, self.laser_offset_x, self.laser_offset_y)
+        self.car_x, self.car_y, self.car_yaw = x, y, yaw
         self.last_pose_time = self.get_clock().now()
 
         # Freshness must come from when localization *computed* this pose,

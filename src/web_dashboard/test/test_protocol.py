@@ -99,6 +99,51 @@ def test_pose_message_shape():
     assert 'stamp' in msg
 
 
+# particle_filter's /pf/viz/inferred_pose is the LiDAR's pose (it ray-casts
+# each scan from the particle's own pose); /slam_pose is base_link, the rear
+# axle. The dashboard draws the car and the scan from base_link, so a pose off
+# a LiDAR-pose topic is moved 0.26 m back along its heading before display.
+# Oracle: closed-form rigid offset (docs/hardware-reference.md).
+
+def test_display_pose_moves_a_lidar_pose_back_to_the_rear_axle():
+    x, y, yaw = protocol.display_pose(
+        '/pf/viz/inferred_pose', 5.0, 2.0, math.pi / 2,
+        laser_pose_topics=['/pf/viz/inferred_pose'],
+        laser_offset_x=0.26, laser_offset_y=0.0)
+    # Facing +y, the rear axle is 0.26 m in -y (catches a cos/sin swap).
+    assert (x, y) == pytest.approx((5.0, 2.0 - 0.26), abs=1e-12)  # m
+    assert yaw == pytest.approx(math.pi / 2, abs=1e-15)
+
+
+def test_display_pose_general_offset_matches_closed_form():
+    yaw, ox, oy = math.radians(30.0), 0.26, 0.05
+    x, y, _ = protocol.display_pose(
+        '/pf/viz/inferred_pose', 1.0, -1.0, yaw,
+        laser_pose_topics=['/pf/viz/inferred_pose'],
+        laser_offset_x=ox, laser_offset_y=oy)
+    assert x == pytest.approx(1.0 - (ox * math.cos(yaw) - oy * math.sin(yaw)), abs=1e-12)
+    assert y == pytest.approx(-1.0 - (ox * math.sin(yaw) + oy * math.cos(yaw)), abs=1e-12)
+
+
+def test_display_pose_leaves_a_base_link_topic_alone():
+    """/slam_pose is already base_link: during an auto_map_race race both
+    topics are live, and converting this one too would make the car jump
+    0.26 m every time the display switched source."""
+    assert protocol.display_pose(
+        '/slam_pose', 5.0, 2.0, math.pi / 2,
+        laser_pose_topics=['/pf/viz/inferred_pose'],
+        laser_offset_x=0.26, laser_offset_y=0.0) == (5.0, 2.0, math.pi / 2)
+
+
+def test_shipped_dashboard_config_marks_only_the_particle_filter_as_a_lidar_pose():
+    import yaml
+    path = os.path.join(os.path.dirname(__file__), '..', 'config', 'web_dashboard.yaml')
+    with open(path) as f:
+        params = yaml.safe_load(f)['web_dashboard_node']['ros__parameters']
+    assert params['laser_pose_topics'] == ['/pf/viz/inferred_pose']
+    assert '/slam_pose' in params['pose_topics']
+
+
 def test_drive_message_shape():
     msg = protocol.drive_message(speed=3.5, steering_angle=-0.2)
     assert msg['type'] == 'drive'

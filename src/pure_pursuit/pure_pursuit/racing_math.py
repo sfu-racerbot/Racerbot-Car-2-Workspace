@@ -71,6 +71,36 @@ def world_to_body(dx: float, dy: float, yaw: float):
     return x_body, y_body
 
 
+def laser_pose_to_base_link(x: float, y: float, yaw: float,
+                            laser_offset_x: float, laser_offset_y: float):
+    """The rear-axle (base_link) pose of a car whose LiDAR is at (x, y, yaw).
+
+    particle_filter ray-casts each particle's scan from the particle's own
+    pose, so every particle -- and therefore /pf/viz/inferred_pose -- is a
+    pose of the *LiDAR*, not of base_link. The LiDAR sits
+    (laser_offset_x, laser_offset_y) from base_link in the car's own frame
+    (0.26 m forward on this car, docs/hardware-reference.md); both frames
+    share one heading, so only the position moves:
+
+        base = laser - R(yaw) @ offset
+    """
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    return (x - (laser_offset_x * cos_yaw - laser_offset_y * sin_yaw),
+            y - (laser_offset_x * sin_yaw + laser_offset_y * cos_yaw),
+            yaw)
+
+
+def base_link_pose_to_laser(x: float, y: float, yaw: float,
+                            laser_offset_x: float, laser_offset_y: float):
+    """Inverse of laser_pose_to_base_link: where the LiDAR is, given base_link."""
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    return (x + laser_offset_x * cos_yaw - laser_offset_y * sin_yaw,
+            y + laser_offset_x * sin_yaw + laser_offset_y * cos_yaw,
+            yaw)
+
+
 # ============================================================================
 # 2. Pure pursuit steering geometry
 # ============================================================================

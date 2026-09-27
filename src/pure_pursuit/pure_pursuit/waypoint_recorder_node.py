@@ -26,6 +26,8 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 
+from pure_pursuit import racing_math
+
 
 class WaypointRecorderNode(Node):
     """Samples localized (x, y) positions at a minimum spacing and appends
@@ -39,7 +41,19 @@ class WaypointRecorderNode(Node):
         self.declare_parameter('min_spacing_m', 0.15)
         self.declare_parameter('pose_timeout_sec', 1.0)
         self.declare_parameter('status_log_period_sec', 2.0)
+        # Which point on the car pose_topic describes; recorded as base_link
+        # (the rear axle) either way. See pure_pursuit_node's pose_frame.
+        self.declare_parameter('pose_frame', 'laser')
+        self.declare_parameter('laser_offset_x', 0.26)
+        self.declare_parameter('laser_offset_y', 0.0)
 
+        self.pose_frame = str(self.get_parameter('pose_frame').value)
+        if self.pose_frame not in ('laser', 'base_link'):
+            raise RuntimeError(
+                f"waypoint_recorder_node: pose_frame must be 'laser' or 'base_link', "
+                f"got '{self.pose_frame}'.")
+        self.laser_offset_x = float(self.get_parameter('laser_offset_x').value)
+        self.laser_offset_y = float(self.get_parameter('laser_offset_y').value)
         self.pose_topic = self.get_parameter('pose_topic').value
         self.output_file = self.get_parameter('output_file').value
         self.min_spacing_m = float(self.get_parameter('min_spacing_m').value)
@@ -92,6 +106,11 @@ class WaypointRecorderNode(Node):
     def pose_callback(self, msg: PoseStamped):
         x = msg.pose.position.x
         y = msg.pose.position.y
+        if self.pose_frame == 'laser':
+            q = msg.pose.orientation
+            x, y, _ = racing_math.laser_pose_to_base_link(
+                x, y, racing_math.quaternion_to_yaw(q.x, q.y, q.z, q.w),
+                self.laser_offset_x, self.laser_offset_y)
         self.last_pose_xy = (x, y)
         self.last_pose_time = self.get_clock().now()
 

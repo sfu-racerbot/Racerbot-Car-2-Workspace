@@ -18,9 +18,12 @@ def _pose(x, y):
 
 def test_recorder_reports_pose_health_and_progress(tmp_path):
     output_path = tmp_path / 'recorded.csv'
+    # Poses here are rear-axle positions: this test is about status and
+    # spacing. LiDAR-pose conversion is covered in test_pose_frame.py.
     rclpy.init(args=['--ros-args',
                      '-p', f'output_file:={output_path}',
-                     '-p', 'status_log_period_sec:=0.0'])
+                     '-p', 'status_log_period_sec:=0.0',
+                     '-p', 'pose_frame:=base_link'])
     node = WaypointRecorderNode()
     try:
         node._status_callback()

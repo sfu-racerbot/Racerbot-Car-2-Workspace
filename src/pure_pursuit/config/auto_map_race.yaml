@@ -341,6 +341,12 @@ auto_map_race_node:
     # Consecutive poses required before the car will steer on it. At the
     # filter's update rate this is well under a second of standing still.
     pf_settle_poses: 20
+    # The filter's pose is the LiDAR's, not the rear axle's: it ray-casts each
+    # scan from the particle's own pose. The seed sent to it is moved forward
+    # by this offset, and its estimate moved back before it is republished on
+    # pose_topic (which pure_pursuit reads as base_link).
+    laser_offset_x: 0.26              # meters -- MEASURED rear-axle base_link to LiDAR
+    laser_offset_y: 0.0
     # Older than this and the estimate is treated as gone, not late. One
     # lapse demotes it back to slam_toolbox for the rest of the run.
     pf_pose_timeout_sec: 0.5

@@ -1326,6 +1326,7 @@ All in `src/web_dashboard/config/web_dashboard.yaml`. A few entries mention [TF]
 | `map_topic` | `/map` | Subscribed with "transient local" durability to match `map_server`/`slam_toolbox`, so a dashboard started after the map was published still receives it |
 | `scan_topic` | `/scan` | Subscribed with best-effort sensor QoS |
 | `pose_topics` | `[/pf/viz/inferred_pose, /slam_pose]` | Every map-frame pose source this car can run, subscribed at once: `particle_filter`'s localized pose, and the pose `auto_map_race_node` republishes from SLAM's `map`→`base_link` TF. One dashboard process therefore works across all stacks without a relaunch; last message wins |
+| `laser_pose_topics` | `[/pf/viz/inferred_pose]` | Which `pose_topics` carry the LiDAR's pose instead of the rear axle's. The particle filter's estimate is where the LiDAR is, so it is moved back by `laser_offset_x` before the car and scan are drawn. Without this the car was drawn 0.26 m too far forward in particle-filter mode, and during an `auto_map_race` race it would flicker between the two topics — see [localization.md](localization.md#which-point-on-the-car-the-position-means) |
 | `drive_topic` | `/ackermann_cmd` | Selected command after `ackermann_mux`; steering display and command-speed reference only |
 | `odom_topic` | `/odom` | Measured longitudinal speed |
 | `joy_topic` / `deadman_button` / `joy_timeout_sec` | `/joy` / `4` / `0.5` | Read-only LB state and freshness watchdog for the stopwatch |

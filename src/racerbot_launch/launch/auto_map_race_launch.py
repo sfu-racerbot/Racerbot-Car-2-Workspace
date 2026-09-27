@@ -118,6 +118,10 @@ def generate_launch_description():
             'waypoints_file': '',
             'wait_for_waypoints': True,
             'pose_topic': '/slam_pose',
+            # /slam_pose is already the rear axle: auto_map_race_node
+            # publishes SLAM's map->base_link, and converts the particle
+            # filter's LiDAR pose to base_link before republishing it here.
+            'pose_frame': 'base_link',
             'drive_topic': '/auto_race/drive',
             'opponent_detection_mode': 'map',
         }],

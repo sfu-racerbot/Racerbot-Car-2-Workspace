@@ -6,6 +6,59 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-09-27 — Particle-filter pose is the LiDAR's, now converted to the rear axle
+
+**Bug fixed.** `particle_filter` ray-casts each scan from the particle's own
+pose (`particle_filter.py`, `sensor_model`: `queries = proposal_dist`), so
+`/pf/viz/inferred_pose` is the pose of the **LiDAR**, 0.26 m ahead of the
+rear-axle `base_link` everything else assumes. Nothing converted it:
+
+- `pure_pursuit_node` (saved-map racing) believed the car was 0.26 m ahead
+  of itself, and its map ray caster added `laser_offset_x` on top, placing
+  the expected scan 0.52 m forward of the rear axle.
+- `auto_map_race_node` recorded the line from SLAM's real `base_link`, then
+  at handover republished the filter's LiDAR pose on `/slam_pose` as if it
+  were `base_link` (a 0.26 m jump), and seeded the filter with a
+  `base_link` pose as if it were the LiDAR's.
+- `waypoint_recorder_node` recorded the LiDAR's path.
+- `web_dashboard` drew the car and scan 0.26 m forward in PF mode.
+
+Changes:
+- `racing_math`: new `laser_pose_to_base_link` / `base_link_pose_to_laser`.
+- `pure_pursuit_node`, `waypoint_recorder_node`: **new parameter
+  `pose_frame`** (`laser` default, matching the default
+  `/pf/viz/inferred_pose`; or `base_link`); unknown values refuse to start.
+  `waypoint_recorder.yaml` gains `laser_offset_x/y`.
+- `auto_map_race_node`: converts the PF pose before republishing and the
+  seed before sending; **new parameters `laser_offset_x/y`** in
+  `auto_map_race.yaml`.
+- `auto_map_race_launch.py`: sets `pose_frame: base_link` with
+  `pose_topic: /slam_pose`.
+- `web_dashboard`: **new parameter `laser_pose_topics`**
+  (`[/pf/viz/inferred_pose]`).
+- Docs: `localization.md#which-point-on-the-car-the-position-means`, param
+  tables, the `hardware-reference.md` offset row.
+
+Tests: 339 `pure_pursuit` (sourced), 607 `web_dashboard`, 53
+`racerbot_launch`; every new test seen failing against 11 mutations. Two
+existing tests changed, flagged in the commit: the auto_map_race handover
+test asserted the unconverted pose (the bug), and the recorder status test
+now declares its poses as `base_link`.
+
+Old PF-recorded lines trace the LiDAR's path: on a closed loop the same line
+shifted along itself, about 3 cm outside on a 1 m-radius corner
+(0.26² / 2R), so still usable.
+
+**Needs on-car validation:**
+- [ ] `auto_map_race` handover: no forward jump in `/slam_pose` at the
+  switch to `particle_filter` (plot `race_diagnostics`' pose around it).
+- [ ] Saved-map `race_launch.py`: dashboard car and scan overlay line up
+  with the map walls; map-mode opponent detection shows no phantom or
+  missed opponents near walls.
+
+Also: implementation specs for Stanley / LQR / linear MPC steering laws in
+`docs/superpowers/specs/2026-09-27-tracking-*.md` (not implemented).
+
 ## 2026-09-26 — Car side of dashboard.sfuracerbot.ca, and foxglove_bridge
 
 The dashboard frontend is moving to sfu-racerbot/web-dashboards, served at

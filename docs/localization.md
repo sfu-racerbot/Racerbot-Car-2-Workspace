@@ -10,6 +10,7 @@ Every autonomous thing this car does needs one number: **where am I on the map, 
 ## Contents
 
 - [What "localization" actually means here](#what-localization-actually-means-here)
+- [Which point on the car "the position" means](#which-point-on-the-car-the-position-means)
 - [The two halves, and which one is slow](#the-two-halves-and-which-one-is-slow)
 - [What was changed, and why](#what-was-changed-and-why)
 - [Checking whether it helped](#checking-whether-it-helped)
@@ -43,6 +44,39 @@ That split is the important idea, and it is worth a second:
   **SLAM** ([glossary](glossary.md)) is the software that builds the map and locates the car in it at the same time. It matches the current **LiDAR scan** — one sweep of laser distance readings ([glossary](glossary.md)) — against the map it has already built. The difference tells it how far the dead reckoning has drifted.
 
 So the car always has a position. What it does not always have is a *recently corrected* one.
+
+## Which point on the car "the position" means
+
+A position is a single point, and a car is 0.58 m long. So every pose has to say *which* point on the car it is.
+
+In this workspace the answer is always **`base_link`, the centre of the rear axle** ([hardware-reference.md](hardware-reference.md)). The racing line, the pure pursuit steering maths, the collision footprint, and the dashboard's car drawing all assume it.
+
+The particle filter does not give you that point. It gives you **the LiDAR's** position, 0.26 m further forward.
+
+That is because it scores each guess by pretending the laser scan was taken from exactly that guess (`particle_filter.py`, `sensor_model`). A guess that fits the scan is therefore a guess of where the scanner is. `slam_toolbox`'s `map -> base_link`, and so `/slam_pose`, *is* the rear axle.
+
+A **topic** ([glossary](glossary.md#topic)) is a named channel nodes publish messages on. The two that carry a pose:
+
+| Topic | Which point | Who converts it |
+|---|---|---|
+| `/pf/viz/inferred_pose` | the **LiDAR**, 0.26 m ahead of the rear axle | every consumer, with `laser_offset_x` (below) |
+| `/slam_pose` | the rear axle (`base_link`) | nobody — already right |
+
+Each node that reads a pose therefore has to be told which one it is getting:
+
+- `pure_pursuit_node` and `waypoint_recorder_node`: `pose_frame: laser` (the default, matching their default `/pf/viz/inferred_pose`), or `pose_frame: base_link`. `auto_map_race_launch.py` sets `base_link` together with `pose_topic: /slam_pose`.
+- `auto_map_race_node`: converts the filter's pose back to the rear axle before republishing it on `/slam_pose`, and moves its seed forward to the LiDAR before sending it.
+- `web_dashboard`: `laser_pose_topics` lists the topics to convert before drawing.
+
+All of them use `laser_offset_x: 0.26`, the measured LiDAR position.
+
+> **Until 2026-09-27 nothing converted.** Every particle-filter pose was used as though it were the rear axle, so the car believed it was 0.26 m ahead of where it really was.
+>
+> In `auto_map_race` the believed position jumped 0.26 m forward at the handover, because the line had been recorded from SLAM's real rear axle. The map-based opponent detector and the dashboard's scan overlay were also placed 0.26 m too far forward.
+>
+> **Getting `pose_frame` wrong brings this back, silently.** Nothing errors; the car is just somewhere slightly different from where it thinks.
+
+Racing lines recorded before this fix with `waypoint_recorder` in particle-filter mode traced the LiDAR's path, not the rear axle's. On a closed loop that path is the same line shifted along itself, and it sits at most about 1–3 cm to the outside on corners of 1–2 m radius (`0.26² / 2R`), so those lines are still usable.
 
 ## The two halves, and which one is slow
 
@@ -229,6 +263,8 @@ That is a different and easier problem than SLAM's. SLAM builds and localizes at
 It then republishes *the filter's* estimate on the [topic](glossary.md#topic) that [pure pursuit](glossary.md#pure-pursuit) — the race controller — reads.
 
 `pure_pursuit_node` is not reconfigured and does not notice. The supervisor was always the thing publishing that topic, so the handover changes the source, not the wiring.
+
+The filter's estimate is the LiDAR's position, so the supervisor moves it back 0.26 m to the rear axle before republishing it. See [which point on the car the position means](#which-point-on-the-car-the-position-means).
 
 Two things had to be true first, and both are now:
 

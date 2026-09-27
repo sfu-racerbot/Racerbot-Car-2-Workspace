@@ -136,6 +136,7 @@ and threshold. Set the period to `0.0` for transition-only logging.
 | `wait_for_waypoints` | `false` | Keep stopped and accept a validated runtime profile; used only by `auto_map_race_launch.py` |
 | `closed_loop` | `true` | Whether the racing line wraps around |
 | `pose_topic` | `/pf/viz/inferred_pose` | Localization input |
+| `pose_frame` | `laser` | Which point on the car `pose_topic` describes. `laser` (the particle filter's pose is the LiDAR's) is converted to the rear axle with `laser_offset_x/y`; `base_link` (e.g. `/slam_pose`) is used as-is. A wrong pairing puts the car 0.26 m from where it thinks — see [localization.md](../../docs/localization.md#which-point-on-the-car-the-position-means) |
 | `scan_topic` / `odom_topic` / `drive_topic` | `/scan` / `/odom` / `/drive` | LIDAR / measured speed / output |
 | `control_rate_hz` | `40.0` | Control loop frequency |
 | `decision_log_period_sec` | `1.0` s | Repeat interval for an unchanged terminal decision (`0.0` = transitions only) |

@@ -20,6 +20,13 @@ pure_pursuit_node:
 
     # --- Topics ---
     pose_topic: /pf/viz/inferred_pose   # geometry_msgs/PoseStamped, published by particle_filter
+    # Which point on the car pose_topic describes. particle_filter's pose is
+    # the LiDAR's (it ray-casts each scan from the particle's own pose), so
+    # 'laser': converted to the rear-axle base_link on arrival, using
+    # laser_offset_x/y below. auto_map_race_launch.py sets 'base_link'
+    # together with pose_topic:=/slam_pose. Get the pair wrong and the car
+    # believes it is 0.26 m from where it is -- see docs/localization.md.
+    pose_frame: laser
     scan_topic: /scan
     odom_topic: /odom
     drive_topic: /drive

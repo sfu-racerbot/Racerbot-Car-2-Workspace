@@ -100,6 +100,27 @@ def quaternion_to_yaw(x: float, y: float, z: float, w: float) -> float:
     return math.atan2(siny_cosp, cosy_cosp)
 
 
+def display_pose(topic: str, x: float, y: float, yaw: float, *,
+                 laser_pose_topics, laser_offset_x: float,
+                 laser_offset_y: float):
+    """The rear-axle (base_link) pose to draw, from a pose off `topic`.
+
+    particle_filter ray-casts each scan from the particle's own pose, so its
+    /pf/viz/inferred_pose is the LiDAR's pose, not base_link's; /slam_pose
+    already is base_link. Poses from `laser_pose_topics` are moved back by
+    the LiDAR offset along their heading (same heading, rigid offset) --
+    the same conversion as pure_pursuit's racing_math.laser_pose_to_base_link,
+    duplicated rather than imported across packages.
+    """
+    if topic not in laser_pose_topics:
+        return (x, y, yaw)
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    return (x - (laser_offset_x * cos_yaw - laser_offset_y * sin_yaw),
+            y - (laser_offset_x * sin_yaw + laser_offset_y * cos_yaw),
+            yaw)
+
+
 def map_header(msg) -> dict:
     """JSON-serializable metadata for a nav_msgs/OccupancyGrid: everything
     the browser needs to place the map in world coordinates and size its

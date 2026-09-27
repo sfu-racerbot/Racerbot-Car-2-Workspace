@@ -275,11 +275,17 @@ class DashboardNode(Node):
         #   /pf/viz/inferred_pose  particle_filter (race_launch, localization)
         #   /slam_pose             auto_map_race_node, while slam_toolbox maps
         # Subscribing to every candidate means the car shows up on the map
-        # without having to relaunch the dashboard per mode. Only one of
-        # them publishes at a time in practice; if two ever did, last
-        # message wins, which is the right answer for a display anyway.
+        # without having to relaunch the dashboard per mode. Last message
+        # wins. Both are live once auto_map_race hands over to the particle
+        # filter (it republishes the filter's estimate on /slam_pose), which
+        # is only harmless because both are converted to the same point:
         self.declare_parameter(
             'pose_topics', ['/pf/viz/inferred_pose', '/slam_pose'])
+        # Pose topics that carry the LiDAR's pose rather than base_link's.
+        # particle_filter ray-casts each scan from the particle's own pose,
+        # so its estimate is where the LiDAR is; these are moved back by
+        # laser_offset_x/y before display. Everything else is base_link.
+        self.declare_parameter('laser_pose_topics', ['/pf/viz/inferred_pose'])
         self.declare_parameter('drive_topic', '/ackermann_cmd')
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('joy_topic', '/joy')
@@ -476,6 +482,9 @@ class DashboardNode(Node):
             0.0, float(self.get_parameter('intent_warn_period_sec').value))
         self.laser_offset_x = float(self.get_parameter('laser_offset_x').value)
         self.laser_offset_y = float(self.get_parameter('laser_offset_y').value)
+        self.laser_pose_topics = frozenset(
+            str(topic) for topic in self.get_parameter('laser_pose_topics').value
+            if str(topic))
         self.enable_tuning = bool(self.get_parameter('enable_tuning').value)
         self.controller_topic = self.get_parameter('controller_topic').value
         self.racing_line_topic = self.get_parameter('racing_line_topic').value
@@ -691,7 +700,11 @@ class DashboardNode(Node):
     def pose_callback(self, msg: PoseStamped, topic: str = ''):
         q = msg.pose.orientation
         yaw = protocol.quaternion_to_yaw(q.x, q.y, q.z, q.w)
-        self._last_pose = (msg.pose.position.x, msg.pose.position.y, yaw)
+        self._last_pose = protocol.display_pose(
+            topic, msg.pose.position.x, msg.pose.position.y, yaw,
+            laser_pose_topics=self.laser_pose_topics,
+            laser_offset_x=self.laser_offset_x,
+            laser_offset_y=self.laser_offset_y)
         if topic != self._last_pose_topic:
             self._last_pose_topic = topic
             self.get_logger().info(f"Pose display is now following '{topic}'.")
