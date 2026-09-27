@@ -47,7 +47,7 @@ web_dashboard_node:
     # --- Remote access (docs/web-dashboard.md, "Remote access through
     # dashboard.sfuracerbot.ca") ---
     # Other web sites allowed to open the WebSocket. Pages this node serves
-    # itself -- every LAN/Tailscale use, and dashboard-rb2.sfuracerbot.ca --
+    # itself -- every LAN/Tailscale use --
     # are always allowed, so this only needs the remote site. Exact
     # scheme://host[:port]: no wildcards, no paths, no trailing slash (an
     # entry with one is ignored with a warning at startup).

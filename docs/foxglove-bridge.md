@@ -2,7 +2,7 @@
 
 > **Who this is for:** anyone who wants to look at the car's topics, parameters and services from a browser through dashboard.sfuracerbot.ca, or who is about to change what the bridge allows.
 > **Read first:** [concepts.md](concepts.md) for what a [node](glossary.md#node), [topic](glossary.md#topic) and parameter are, and [architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car) for the LB deadman rule.
-> **You'll be able to:** start the bridge, say exactly what a Lichtblick user can and cannot do to the car, and explain why publishing is limited to one topic.
+> **You'll be able to:** start the bridge, say exactly what a Lichtblick user can and cannot do to the car, and explain why nothing can be published through it.
 > **Time:** about 15 minutes.
 
 **foxglove_bridge** is a ready-made ROS2 program that lets a web app see the car's ROS graph over one WebSocket. The web app here is **Lichtblick**, an open-source robotics viewer (a fork of Foxglove Studio). Through the bridge it can plot any topic, draw the map and scan in 3D, read and change parameters, and call services, all from a browser.
@@ -15,7 +15,7 @@ It is installed from apt, not written by us. This page covers how this car runs 
 
 - **The whole graph, no ROS on the viewing machine.** Every topic, every node's parameters and every service, in a browser tab, through dashboard.sfuracerbot.ca.
 - **Loopback only.** It listens on `127.0.0.1:8765`. It cannot be reached on the LAN or Tailscale at all. The only way in from off the car is the Cloudflare Tunnel, which sits behind Cloudflare Access.
-- **One topic can be published, and it is not a driving topic.** `/initialpose`, the "2D Pose Estimate" that seeds localization. `/drive`, `/teleop`, `/ackermann_cmd`, `/joy` and `/commands/*` are refused. A test holds that line.
+- **Nothing can be published through it.** Client publishing is switched off entirely, so `/drive`, `/teleop`, `/ackermann_cmd`, `/joy` and `/commands/*` are out of reach. That was measured, not assumed — see [why](#why-clients-cannot-publish-anything). A test holds that line.
 - **No raw camera frames.** Raw images would cost about 7 MB/s per viewer through the tunnel, so only the compressed versions are offered.
 - **Every change it makes is recorded.** Parameter changes land on `/parameter_events`, which [race_diagnostics](run-diagnostics.md) now bags by default.
 
@@ -95,7 +95,7 @@ Everything is set in `src/racerbot_launch/config/foxglove_bridge.yaml`, which ex
 | A Lichtblick user can… | Scope |
 |---|---|
 | Subscribe to topics | All of them, **except** raw camera and raw depth images (see below) |
-| Publish to topics | **`/initialpose` only** |
+| Publish to topics | **Nothing** — client publishing is off |
 | Read parameters | Every node |
 | **Change** parameters | **Every node** |
 | Call services | **Every service** |
@@ -111,17 +111,24 @@ Through the bridge, someone can change a parameter on `ackermann_mux`, the VESC 
 
 So treat access to Lichtblick as "may reconfigure the running car", and keep the Access list to people you'd trust at the laptop.
 
-### Why client publishing is limited to `/initialpose`
+### Why clients cannot publish anything
 
-**The bridge must never be allowed to publish `/drive`, `/teleop`, `/ackermann_cmd`, `/joy` or `/commands/motor|servo/*`.**
+**The bridge must never be able to publish `/drive`, `/teleop`, `/ackermann_cmd`, `/joy` or `/commands/motor|servo/*`.**
 
 A message published straight onto `/drive` goes to `ackermann_mux`, which forwards it to the motors. It never passes through a driving node. And the driving nodes are where the LB deadman lives: each one checks that someone is holding LB before it publishes. A raw `/drive` from a browser skips all of that.
 
 The result would be a car driven from a web page with no dead-man switch — exactly the state the [workspace policy](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car) exists to make impossible. Publishing `/joy` is the same hazard by a different route: it would forge the LB button itself.
 
-`/initialpose` is safe to allow. It tells [particle_filter](glossary.md#localization) roughly where the car is, the same thing RViz's "2D Pose Estimate" does. It moves nothing.
+**The plan was to allow only `/initialpose`, and it does not work on this bridge version.** foxglove_bridge has a `client_topic_whitelist` setting for exactly this, and the config sets it to `/initialpose` only. On 2026-09-27 it was tested on a copy of the bridge running on its own isolated ROS domain, with nothing connected to the car:
 
-`src/racerbot_launch/test/test_foxglove_bridge_config.py` fails if the rule is widened to any of those topics, or loosened in a way that would let one through (dropping the `^`…`$` anchors, say).
+- With client publishing on, a client published a message to `/drive` and it **arrived** — the whitelist is read, reported back correctly, and then ignored.
+- With client publishing off (the `clientPublish` capability removed), the bridge refused with `Server does not support clientPublish capability`, and nothing arrived.
+
+So publishing is off entirely. The cost is that Lichtblick's "2D Pose Estimate" cannot seed [particle_filter](glossary.md#localization); use RViz on the car's network for that. The whitelist stays in the config as a second layer for a future version that enforces it — **it is not what protects the car today.**
+
+`src/racerbot_launch/test/test_foxglove_bridge_config.py` fails if `clientPublish` is ever added back to `capabilities`.
+
+> **After any foxglove_bridge upgrade, re-run that isolated test before even considering turning client publishing back on.** A config file that says `/initialpose only` is not evidence; a message that failed to arrive is.
 
 ### Why no raw images
 
@@ -153,7 +160,7 @@ A renamed parameter in the YAML is silently ignored, and the bridge falls back t
 | Lichtblick connects but shows no topics | Bridge on a different `ROS_DOMAIN_ID` from the stack | Make both the same; see [Running it at boot](#running-it-at-boot) |
 | Lichtblick can't connect at all | Bridge not running, or the tunnel's `rb2-bridge-origin` hostname points somewhere else | `ss -tlnp \| grep 8765`; check the tunnel's public hostname entry |
 | No camera in Lichtblick | Only raw image topics exist, and they are hidden on purpose | Install `ros-jazzy-image-transport-plugins` (see [Before you start](#before-you-start)) |
-| "Publishing not allowed" on a topic | Working as intended — only `/initialpose` is allowed | See [why](#why-client-publishing-is-limited-to-initialpose) |
+| "Server does not support clientPublish" in Lichtblick | Working as intended — nothing may be published | See [why](#why-clients-cannot-publish-anything); use RViz for a pose estimate |
 
 ## See also
 

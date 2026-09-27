@@ -733,7 +733,7 @@ The dashboard's web page is moving off the car. The new frontend lives in its ow
 
 Cloudflare Access sits in front of it, so only a few specific email addresses can sign in. This car only has to answer the site.
 
-> **`src/web_dashboard/web/` is deprecated.** It is kept as a frozen fallback: the old page still works at `http://<car-ip>:8080/` and at dashboard-rb2.sfuracerbot.ca. **New frontend work goes to sfu-racerbot/web-dashboards**, not here. The browser tests for `web/` stay until the new repo has ported them.
+> **`src/web_dashboard/web/` is deprecated.** It is kept as a frozen fallback: the old page still works at `http://<car-ip>:8080/` on the LAN or Tailscale. (Its old tunnel hostname, dashboard-rb2.sfuracerbot.ca, was retired on 2026-09-27.) **New frontend work goes to sfu-racerbot/web-dashboards**, not here. The browser tests for `web/` stay until the new repo has ported them.
 
 ### What runs where
 
@@ -760,7 +760,7 @@ Each of the three origin hostnames sits behind a Cloudflare Access *service auth
 
 Every browser tells a WebSocket server which web page opened it, in the `Origin` header. The dashboard now accepts a connection only when:
 
-- the page came from the dashboard itself (**same origin**) — every LAN, Tailscale and forwarded-port use, and dashboard-rb2.sfuracerbot.ca; or
+- the page came from the dashboard itself (**same origin**) — every LAN, Tailscale and forwarded-port use; or
 - the page's origin is listed, exactly, in `allowed_origins` — shipped as `["https://dashboard.sfuracerbot.ca"]`; or
 - there is no `Origin` header at all, which means a script or tool rather than a browser.
 

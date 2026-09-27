@@ -74,8 +74,8 @@ class DashboardWebSocket(tornado.websocket.WebSocketHandler):
         await super().get(*args, **kwargs)
 
     def check_origin(self, origin):
-        # Same-origin (every LAN/Tailscale page this node serves itself, and
-        # the dashboard-rb2 tunnel), or an exact match in allowed_origins
+        # Same-origin (every LAN/Tailscale page this node serves itself),
+        # or an exact match in allowed_origins
         # (the remote site). Anything else is a 403 before the upgrade.
         #
         # This used to accept every origin. That let any web page open in a

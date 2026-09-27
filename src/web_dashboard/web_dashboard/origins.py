@@ -12,9 +12,9 @@ The rule now is:
 
   * **Same origin** -- the page was served by this dashboard itself, so
     the Origin's host:port equals the request's own `Host` header. This is
-    every LAN, Tailscale and forwarded-port use, and the old
-    dashboard-rb2.sfuracerbot.ca tunnel (cloudflared passes the public
-    hostname through as `Host`). Unchanged from what worked before.
+    every LAN, Tailscale and forwarded-port use. Unchanged from what
+    worked before. (Behind a tunnel this also holds, because cloudflared
+    passes the public hostname through as `Host`.)
   * **Listed** -- the Origin equals, exactly, one entry of
     `allowed_origins` (scheme + host + port, no wildcards, no paths).
     Shipped with `https://dashboard.sfuracerbot.ca`, the remote site whose

@@ -7,10 +7,11 @@ own terminal, like the web dashboard. It listens on 127.0.0.1:8765 only
 and is reached from off the car through the Cloudflare Tunnel.
 
 It is NOT read-only the way the dashboard is. Clients can set parameters
-and call services on every node, and can publish to /initialpose -- and
-to nothing else, because a raw /drive publish would skip every driving
-node's LB deadman. Read docs/foxglove-bridge.md before changing
-config/foxglove_bridge.yaml.
+and call services on every node. They cannot publish to ANY topic: the
+clientPublish capability is off, because foxglove_bridge 3.5.0 does not
+enforce client_topic_whitelist and a raw /drive publish would skip every
+driving node's LB deadman (measured 2026-09-27). Read
+docs/foxglove-bridge.md before changing config/foxglove_bridge.yaml.
 """
 
 import os
@@ -28,8 +29,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'params_file', default_value=default_params,
-            description='foxglove_bridge parameter file. The default keeps client '
-                        'publishing limited to /initialpose -- see '
+            description='foxglove_bridge parameter file. The default turns client '
+                        'publishing off entirely -- see '
                         'docs/foxglove-bridge.md before pointing this elsewhere.'),
         Node(
             package='foxglove_bridge',

@@ -6,6 +6,41 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-09-27 — foxglove_bridge: client publishing switched off (safety fix)
+
+**foxglove_bridge 3.5.0 does not enforce `client_topic_whitelist`.** The
+2026-09-26 config relied on it to allow only `/initialpose`. Tested on an
+isolated copy of the bridge (ROS domain 79, its own port, this YAML,
+nothing connected to the car):
+
+- with `clientPublish` on, a client advertised `/drive`, published one
+  zero-speed message, and `ros2 topic echo /drive` **received it**;
+- with `clientPublish` removed from `capabilities`, the bridge answered
+  `Server does not support clientPublish capability` and nothing arrived.
+
+A `/drive` published from a browser goes straight to `ackermann_mux` and
+skips every driving node's LB deadman. So:
+
+### racerbot_launch
+
+- `config/foxglove_bridge.yaml`: **`clientPublish` removed from
+  `capabilities`**. Nothing can be published through the bridge.
+  `client_topic_whitelist` stays as a second layer for a future version that
+  enforces it; it is not what protects the car.
+- `test/test_foxglove_bridge_config.py`: the test that asserted
+  `clientPublish` was **on** now asserts it is **off**, citing the
+  measurement above. Seen to fail with `clientPublish` put back.
+- Cost: Lichtblick can no longer send a "2D Pose Estimate"
+  (`/initialpose`). Use RViz on the car's network for that.
+
+### Checked live on the car (bringup + RealSense + dashboard + bridge, no control layer)
+
+- Bridge listening on `127.0.0.1:8765` only; offers 34 topics, all
+  compressed image topics, **no raw `Image`**; 83 services;
+  `getParameters` returns values (391 across the graph); calling
+  `/foxglove_bridge/list_parameters` returned 39 names.
+- dashboard-rb2.sfuracerbot.ca is retired; mentions removed.
+
 ## 2026-09-27 — Particle-filter pose is the LiDAR's, now converted to the rear axle
 
 **Bug fixed.** `particle_filter` ray-casts each scan from the particle's own
@@ -70,15 +105,13 @@ over real sockets by relay, control and direct clients on an isolated ROS
 domain; `usb_cam_stream` fetched with the tunnel's headers.
 
 **Needs on-car validation** (none of this has been through the real tunnel):
-- [ ] dashboard-rb2.sfuracerbot.ca still connects. It relies on cloudflared
-  passing the public hostname as `Host` (its default), which makes that page
-  same-origin. If it gets a 403, add `https://dashboard-rb2.sfuracerbot.ca`
-  to `allowed_origins`.
+- [x] ~~dashboard-rb2.sfuracerbot.ca still connects~~ — retired on
+  2026-09-27 (it was not working), so nothing to check.
 - [ ] The remote site's relay and control sockets connect through
   `rb2-dash-origin`, get `hello` first, and the relay's writes are refused.
 - [ ] foxglove_bridge: Lichtblick through `rb2-bridge-origin` lists topics,
-  reads/sets a parameter, calls a service, can publish `/initialpose`, and is
-  refused `/drive`.
+  reads/sets a parameter and calls a service. (Publishing is now off
+  entirely — see 2026-09-27.)
 - [ ] Camera through `rb2-cam-origin`.
 - [ ] A recorded run's bag contains `/parameter_events` entries for a
   change made from the dashboard and one made from Lichtblick.
@@ -111,8 +144,10 @@ domain; `usb_cam_stream` fetched with the tunnel's headers.
 
 - New `config/foxglove_bridge.yaml` and `launch/foxglove_bridge_launch.py`:
   `127.0.0.1:8765`; topics, services and parameters (get and set) open;
-  **client publishing limited to `^/initialpose$`**, because a raw `/drive`
-  publish would skip every driving node's LB deadman; raw camera/depth
+  **client publishing limited to `^/initialpose$`** (**WRONG — superseded
+  2026-09-27: 3.5.0 does not enforce that whitelist; publishing is now off
+  entirely**), because a raw `/drive` publish would skip every driving
+  node's LB deadman; raw camera/depth
   images hidden. Parameter names checked against foxglove_bridge 3.5.0.
 - `exec_depend foxglove_bridge` (apt `ros-jazzy-foxglove-bridge`, **not
   installed yet**). First test in this package:

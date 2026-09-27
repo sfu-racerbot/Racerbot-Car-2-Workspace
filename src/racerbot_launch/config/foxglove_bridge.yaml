@@ -23,25 +23,33 @@ foxglove_bridge:
     tls: false            # TLS ends at Cloudflare; the hop to here is loopback
 
     # --- What a client may do ---
-    # clientPublish      publish to a topic -- but only those matched by
-    #                    client_topic_whitelist below
     # parameters         read AND set parameters on any node
     # parametersSubscribe  be told when a parameter changes
     # services           call any service
     # connectionGraph    see which node publishes/subscribes what
     # assets             fetch package:// meshes and URDFs (asset_uri_allowlist)
-    capabilities: [clientPublish, parameters, parametersSubscribe, services, connectionGraph, assets]
-
-    # --- Client publishing: /initialpose and NOTHING else ---
-    # /initialpose is the "2D Pose Estimate" that seeds particle_filter.
     #
-    # Everything else is refused, and above all /drive, /teleop,
-    # /ackermann_cmd and /commands/motor|servo/*. A message published
-    # straight onto /drive goes to ackermann_mux without passing through
-    # any driving node -- so it skips the LB deadman every driving node
-    # enforces in its own code (docs/architecture.md). That would be a
-    # remote-control car with no dead-man switch. Never widen this regex
-    # to include a drive or mux input.
+    # clientPublish is DELIBERATELY ABSENT. NEVER ADD IT BACK.
+    #
+    # Measured 2026-09-27 on foxglove_bridge 3.5.0: with clientPublish on,
+    # client_topic_whitelist below is declared, reads back as
+    # ['^/initialpose$'] -- and is NOT ENFORCED. A client advertised
+    # /drive, published a message, and it arrived on /drive. A message
+    # published straight onto /drive goes to ackermann_mux without passing
+    # through any driving node, so it skips the LB deadman every driving
+    # node enforces in its own code (docs/architecture.md): a
+    # remote-control car with no dead-man switch.
+    #
+    # With clientPublish absent, the same test is refused ("Server does not
+    # support clientPublish capability") and nothing reaches /drive. The
+    # price is that Lichtblick cannot publish /initialpose either; set the
+    # pose estimate from RViz on the car's network instead.
+    # See docs/foxglove-bridge.md, "Why clients cannot publish anything".
+    capabilities: [parameters, parametersSubscribe, services, connectionGraph, assets]
+
+    # Kept as a second line of defence for the day a bridge version does
+    # enforce it. On 3.5.0 it does nothing -- the capability above is what
+    # actually stops publishing.
     client_topic_whitelist: ['^/initialpose$']
 
     # --- Topics a client may subscribe to ---

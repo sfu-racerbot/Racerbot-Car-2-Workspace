@@ -3,10 +3,12 @@ config/foxglove_bridge.yaml: what a Lichtblick client can publish and see.
 
 The client-publish check is the safety-relevant half (A8): a client able
 to publish /drive, /teleop, /ackermann_cmd or /commands/* would drive the
-car without any driving node's LB deadman (docs/architecture.md). These
-tests read the real YAML and apply its regexes the way the bridge does --
-a topic is allowed when ANY whitelist entry matches it -- so a widened
-regex fails here, not on the car.
+car without any driving node's LB deadman (docs/architecture.md). On
+foxglove_bridge 3.5.0 only removing the clientPublish capability prevents
+that -- see test_client_publishing_is_switched_off_entirely. The
+whitelist tests below still read the real YAML and apply its regexes the
+way a bridge that enforced them would -- a topic is allowed when ANY entry
+matches it -- so a widened regex fails here too.
 
 The topic names are the real ones: the RealSense names come from
 realsense2_camera 4.x as launched by realsense_camera_launch.py (namespace
@@ -56,14 +58,27 @@ def test_a_client_cannot_publish_anything_but_initialpose(topic):
     assert not _allowed(_params()['client_topic_whitelist'], topic)
 
 
-def test_a_client_can_publish_the_pose_estimate():
+def test_the_backup_whitelist_names_only_the_pose_estimate():
     assert _allowed(_params()['client_topic_whitelist'], '/initialpose')
+    assert _params()['client_topic_whitelist'] == ['^/initialpose$']
 
 
-def test_client_publishing_needs_the_capability_and_nothing_else_publishes():
-    params = _params()
-    assert 'clientPublish' in params['capabilities']
-    assert params['client_topic_whitelist'] == ['^/initialpose$']
+def test_client_publishing_is_switched_off_entirely():
+    """THE test that matters in this file.
+
+    Oracle: a recorded measurement, 2026-09-27, foxglove_bridge 3.5.0 on
+    this car (isolated ROS domain 79, port 18765, this YAML):
+      * with clientPublish in `capabilities`, a client advertised /drive,
+        published one message, and `ros2 topic echo /drive` received it --
+        client_topic_whitelist is declared but NOT enforced;
+      * without clientPublish, the advertisement was refused ("Server does
+        not support clientPublish capability") and nothing arrived.
+    So the capability, not the whitelist, is the only thing between a
+    browser and a deadman-free /drive (docs/foxglove-bridge.md).
+    """
+    capabilities = [str(c) for c in _params()['capabilities']]
+    assert 'clientPublish' not in capabilities
+    assert not any(c.lower() == 'clientpublish' for c in capabilities)
 
 
 # --------------------------------------------------------------------------
