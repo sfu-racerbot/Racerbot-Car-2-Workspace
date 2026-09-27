@@ -28,13 +28,20 @@ CHALLENGE_BODY = '<!DOCTYPE html><html lang="en-US"><head><title>Just a moment..
 # The Cloudflare edge
 # --------------------------------------------------------------------------
 
-def test_a_bot_challenge_is_a_failure_even_though_it_is_a_403():
+def test_a_bot_challenge_is_a_warning_not_ok_and_not_a_failure():
     """The trap: a challenge is also HTTP 403, which looks like Access
-    doing its job. It is not -- the Worker cannot solve it."""
+    doing its job -- so it must not be reported ok.
+
+    It is not a failure either. Recorded 2026-09-27: every hostname showed
+    this checker the challenge, while the site's Worker got HTTP 101 from
+    rb2-dash-origin (its /rb2/check at 22:54:47Z; the dashboard logged
+    relay connection #3). An earlier version of this test asserted FAIL on
+    the assumption that the Worker would be challenged too; that
+    measurement disproved it."""
     status, message, fix = classify_edge(403, CHALLENGE_HEADERS, CHALLENGE_BODY)
-    assert status == FAIL
+    assert status == WARN
     assert 'challenge' in message
-    assert 'Bot Fight Mode' in fix
+    assert '/rb2/check' in fix
 
 
 @pytest.mark.parametrize('headers, body', [
@@ -42,8 +49,11 @@ def test_a_bot_challenge_is_a_failure_even_though_it_is_a_403():
     ({'cf-mitigated': 'Challenge'}, ''),       # case
     ({}, CHALLENGE_BODY),                     # page alone
 ])
-def test_either_sign_of_a_challenge_is_enough(headers, body):
-    assert classify_edge(403, headers, body)[0] == FAIL
+def test_either_sign_of_a_challenge_is_recognised(headers, body):
+    """Recognised as a challenge -- not mistaken for Access (OK)."""
+    status, message, _ = classify_edge(403, headers, body)
+    assert status == WARN
+    assert 'challenge' in message
 
 
 def test_access_refusing_an_unauthenticated_request_is_the_healthy_answer():

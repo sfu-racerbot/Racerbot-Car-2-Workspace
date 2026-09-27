@@ -78,11 +78,14 @@ def classify_edge(status, headers, body_start):
     body = body_start or ''
     location = headers.get('location', '')
     if headers.get('cf-mitigated', '').lower() == 'challenge' or 'Just a moment...' in body:
-        return (FAIL, 'Cloudflare answers with a bot challenge ("Just a moment..."). '
-                      'Browsers pass it; the site\'s Worker cannot, so it never reaches Access or the car',
-                'Cloudflare dashboard > sfuracerbot.ca > Security: turn off Bot Fight Mode / '
-                'lower Security Level, or add a WAF custom rule that SKIPS managed challenges '
-                'for the rb2-*-origin hostnames')
+        # Not a failure. On 2026-09-27 every hostname challenged this
+        # checker, yet the site's Worker got HTTP 101 from rb2-dash-origin
+        # through the same zone: the challenge stops non-browser clients like
+        # this one, not the Worker. It does hide whether Access is in front,
+        # which is why it is a warning rather than ok.
+        return (WARN, 'Cloudflare shows this checker a bot challenge ("Just a moment..."), so it '
+                      'cannot see whether Access is in front. The site\'s Worker is not affected by it',
+                'confirm from the Worker\'s side: https://dashboard.sfuracerbot.ca/rb2/check')
     code = cloudflare_error_code(body)
     if code == 1016 or code == 1001:
         return (FAIL, f'Cloudflare has no DNS/route for this hostname (error {code})',

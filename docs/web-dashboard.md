@@ -845,16 +845,18 @@ ros2 run web_dashboard remote_check
 
 **Working when:** it ends with `Everything this car can check is fine`. Then the fault is on the site's side: open `https://dashboard.sfuracerbot.ca/rb2/check`, which probes the same hops from the Worker with the real service token.
 
-Two things only this checker catches, both found on 2026-09-27:
+Things worth knowing about what it reports, all learned on 2026-09-27:
 
-- **A bot challenge in front of the origin hostnames.** Cloudflare's Bot Fight Mode (or a high Security Level) answers "Just a moment…" with HTTP 403. A browser solves it; the site's Worker cannot, so its requests never reach Access or the car. Because it is also a 403 it looks exactly like Access working — the checker tells them apart by the `cf-mitigated: challenge` header.
-- **A tunnel route with no DNS record.** The route shows in the tunnel's config, but the hostname does not resolve, so nothing can reach it.
+- **A tunnel route with no DNS record** is a real failure. The route shows in the tunnel's config, but the hostname does not resolve, so nothing can reach it.
+- **A bot challenge ("Just a moment…", HTTP 403) is only a warning.** Cloudflare shows it to this checker because it is not a browser. The site's Worker is not challenged — its check got through to the dashboard the same day. The warning exists because a challenge also hides whether Access is protecting the hostname, so confirm that from the Worker's side.
+- **The site's check reports the bridge as a 502 even when it is fine.** foxglove_bridge only speaks WebSocket, and hangs up on a plain web request without answering; cloudflared turns that into a 502. The bridge answers `101` to a WebSocket upgrade that asks for its `foxglove.sdk.v1` subprotocol, and `400 Missing expected sec-websocket-protocol header` to one that doesn't. This checker's step 1 is the one to trust for "is the bridge running".
 
 Since 2026-09-27 the dashboard also logs every connection opening and closing, with its role, user and address, so "did anything from the site arrive at all?" has an answer in its log.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Everything on the car is fine, yet the site never connects | A Cloudflare bot challenge in front of the origin hostnames, or a missing DNS record | `ros2 run web_dashboard remote_check` — it names which, and the fix |
+| Everything on the car is fine, yet the site never connects | A missing DNS record or tunnel route, or the page never opened a viewer connection | `ros2 run web_dashboard remote_check` — it names which, and the fix |
+| The site's `/rb2/check` says the bridge is 502 | Its probe is a plain web request, which foxglove_bridge hangs up on | Not a fault if `remote_check` step 1 shows port 8765 listening |
 | The site's socket gets **403** | The page's origin isn't same-origin and isn't in `allowed_origins` | Check `allowed_origins` in `web_dashboard.yaml` for a typo or trailing slash; the node's startup line lists what it allows |
 | The site's socket gets **400** | An `X-Racerbot-Role` other than `relay`/`control` | The site and car disagree on the contract — check both versions |
 | Version banner on the site | `protocol_version` differs between the car and the site | Update whichever is older: rebuild and restart `web_dashboard` on the car, or redeploy the site |

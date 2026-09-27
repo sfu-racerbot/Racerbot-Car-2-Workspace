@@ -9,18 +9,21 @@ for changes the team made.
 ## 2026-09-27 (later) — Diagnosing the remote site from the car
 
 The site could not connect although every service on the car was healthy.
-Checked from the car: **every sfuracerbot.ca hostname sits behind a
-Cloudflare bot challenge** (`cf-mitigated: challenge`, "Just a moment..."),
-which a browser passes and the site's Worker cannot; and
-**rb2-bridge-origin.sfuracerbot.ca has no DNS record** (NXDOMAIN on
-1.1.1.1) although the tunnel routes it. Neither is fixable from the car.
+Checked from the car: **rb2-bridge-origin.sfuracerbot.ca had no DNS record**
+(NXDOMAIN on 1.1.1.1) although the tunnel routed it. Every hostname also
+shows non-browser clients a Cloudflare bot challenge; this entry first
+blamed that for the failure, which was **wrong** — the site's Worker got
+HTTP 101 from the dashboard through the same zone. The site's check also
+reports the bridge as 502 because it probes it with a plain request, which
+foxglove_bridge hangs up on; a WebSocket upgrade with its subprotocol gets
+101.
 
 ### web_dashboard
 
 - **New `ros2 run web_dashboard remote_check`** (`remote_check.py`): local
   services, a relay handshake as the site makes it, tunnel routes from
   cloudflared's journal, public DNS, how the Cloudflare edge answers
-  (challenge vs Access vs tunnel down vs *unprotected*), and the site
+  (Access vs tunnel down vs *unprotected*; a challenge is a warning), and the site
   connections that reached the dashboard. Read-only; prints a fix per
   failure. Verdicts tested in `test_remote_check.py` (mutation-checked).
 - **The dashboard logs every connection open and close**, all roles, with
