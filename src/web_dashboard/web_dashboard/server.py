@@ -16,6 +16,7 @@ touches a ROS handle. See dashboard_node.py's threading contract.
 
 import itertools
 import json
+import time
 
 import tornado.web
 import tornado.websocket
@@ -98,14 +99,22 @@ class DashboardWebSocket(tornado.websocket.WebSocketHandler):
         # before it interprets anything else.
         self.write_message(json.dumps(protocol.hello_message()))
         self.node.ws_clients.add(self)
-        if self.role is not None:
-            self.node.get_logger().info(
-                f'{self.role} connection #{self.conn_id} opened '
-                f'(user {self.user}, from {self.request.remote_ip})')
+        # Every connection, every role, opened and closed: "nothing from the
+        # site ever arrived" has to be something the log can show.
+        # remote_check.py reads these lines back.
+        self._opened_at = time.monotonic()
+        self.node.get_logger().info(
+            f'{self.role or "direct"} connection #{self.conn_id} opened '
+            f'(user {self.user}, from {self.request.remote_ip}, '
+            f'{len(self.node.ws_clients)} open)')
         self.node.send_initial_state(self)
 
     def on_close(self):
         self.node.ws_clients.discard(self)
+        held = time.monotonic() - getattr(self, '_opened_at', time.monotonic())
+        self.node.get_logger().info(
+            f'{self.role or "direct"} connection #{self.conn_id} closed after '
+            f'{held:.0f}s (code {self.close_code}, {len(self.node.ws_clients)} open)')
 
     def send(self, header, binary_payload=None, is_origin=True):
         """Write one message to this connection, through its role filter.

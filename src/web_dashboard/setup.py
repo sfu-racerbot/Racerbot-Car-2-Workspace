@@ -38,6 +38,7 @@ setup(
     entry_points={
         'console_scripts': [
             'dashboard_node = web_dashboard.dashboard_node:main',
+            'remote_check = web_dashboard.remote_check:main',
         ],
     },
 )

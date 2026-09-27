@@ -6,6 +6,29 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-09-27 (later) — Diagnosing the remote site from the car
+
+The site could not connect although every service on the car was healthy.
+Checked from the car: **every sfuracerbot.ca hostname sits behind a
+Cloudflare bot challenge** (`cf-mitigated: challenge`, "Just a moment..."),
+which a browser passes and the site's Worker cannot; and
+**rb2-bridge-origin.sfuracerbot.ca has no DNS record** (NXDOMAIN on
+1.1.1.1) although the tunnel routes it. Neither is fixable from the car.
+
+### web_dashboard
+
+- **New `ros2 run web_dashboard remote_check`** (`remote_check.py`): local
+  services, a relay handshake as the site makes it, tunnel routes from
+  cloudflared's journal, public DNS, how the Cloudflare edge answers
+  (challenge vs Access vs tunnel down vs *unprotected*), and the site
+  connections that reached the dashboard. Read-only; prints a fix per
+  failure. Verdicts tested in `test_remote_check.py` (mutation-checked).
+- **The dashboard logs every connection open and close**, all roles, with
+  user, address, duration and close code. Before, direct connections were
+  not logged at all.
+- Needs rebuilding: new entry point (`colcon build --packages-select
+  web_dashboard`).
+
 ## 2026-09-27 — foxglove_bridge: client publishing switched off (safety fix)
 
 **foxglove_bridge 3.5.0 does not enforce `client_topic_whitelist`.** The
