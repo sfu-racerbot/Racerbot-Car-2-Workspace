@@ -57,7 +57,7 @@ you can forget.
 ```bash
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 
-# The whole automatic composition, plus the dashboard on :8080
+# The whole automatic composition, plus the dashboard (watch at dashboard.sfuracerbot.ca)
 ros2 launch racerbot_sim sim_auto_map_race_launch.py dashboard:=true
 
 # A tighter course, with two slower cars on it
@@ -189,7 +189,7 @@ tools/racerbot_sim/capture_dashboard.py --output /tmp/dashboard.png
 
 `capture_dashboard.py` connects to the same WebSocket a browser does,
 decodes the same messages `web_dashboard/protocol.py` sends, and draws them
-the way `web/dashboard.js` does -- occupancy grid, LiDAR points, car arrow
+the way the site's `apps/simple/web/dashboard.js` does -- occupancy grid, LiDAR points, car arrow
 -- into a PNG. It only listens, so it is safe against the real car too.
 
 With `--seconds` and `--interval` it is the dashboard's test instrument
@@ -207,7 +207,7 @@ and exits non-zero if any failed. Measured over a full auto-map race:
 It also replays both view-fitting policies over the recorded map sequence,
 so "the map looks glitchy" can be attributed to the view moving, to SLAM
 genuinely smearing, or to two stacks running at once -- see
-[web-dashboard.md](web-dashboard.md#the-map-looks-glitchy).
+[web-dashboard.md](../src/web_dashboards/car/docs/web-dashboard.md#the-map-looks-glitchy).
 
 ## Automated validation
 

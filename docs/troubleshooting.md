@@ -426,7 +426,7 @@ That's what `racerbot_launch/launch/slam_launch.py` does now, mirroring upstream
 
 > **If that `Ctrl+C` didn't actually clear it, don't reach for `pkill`.** A node wedged in a callback can survive `Ctrl+C` and keep publishing to `/drive`, which is what makes the next run misbehave.
 >
-> The dashboard's [processes panel](web-dashboard.md#stopping-a-driving-process) lists what is really still running and ends it, escalating past `SIGINT` on its own. It refuses to touch `joy_node`, `joy_teleop` and the rest of the actuation path, so it cannot cause the cascade described below.
+> The dashboard's [processes panel](../src/web_dashboards/car/docs/web-dashboard.md#stopping-a-driving-process) lists what is really still running and ends it, escalating past `SIGINT` on its own. It refuses to touch `joy_node`, `joy_teleop` and the rest of the actuation path, so it cannot cause the cascade described below.
 
 But if you reach for `pkill -f joy_teleop` out of habit — from before `teleop_launch.py` existed as its own file — know that it's a trap.
 

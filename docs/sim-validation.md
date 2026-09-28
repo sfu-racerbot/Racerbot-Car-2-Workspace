@@ -176,7 +176,7 @@ target=4.91m at -0.0deg, ... command: steering=-0.001rad, speed=2.50m/s
 ```bash
 source /opt/ros/jazzy/setup.bash
 source ~/racerbot-ws/install/setup.bash
-ros2 launch web_dashboard web_dashboard_launch.py
+ros2 launch racerbot_launch dashboard_launch.py
 ```
 
 **Working when:** you see the server announce itself:
@@ -188,7 +188,7 @@ live tuning enabled for pure_pursuit_node, gap_follow_node.
 Serving on port 8080, every interface, IPv4 + IPv6
 ```
 
-**Then open `http://<jetson-ip>:8080/`** in a browser on your laptop or phone. Get `<jetson-ip>` with `hostname -I` on the car, or use its Tailscale name — see [the dashboard's networking section](web-dashboard.md#finding-the-cars-address-and-viewing-through-a-forwarded-port).
+**Then open https://dashboard.sfuracerbot.ca** on your laptop or phone, sign in, and pick **Car 2** — the simulator runs on car 2's own graph, so the site shows it as the car. The car serves no pages itself any more ([web-dashboard.md](web-dashboard.md)).
 
 **If it doesn't:** `Address already in use` means a dashboard is already running — you only ever need one, and it can stay up across simulator restarts. If the page loads but every panel is empty, Terminal 1 isn't publishing.
 
@@ -216,7 +216,7 @@ That last row is worth stating plainly, because it looks like a bug and isn't:
 
 The dashboard's live tuning panel works against the simulator exactly as it does against the car — it calls the standard `set_parameters` service on `pure_pursuit_node` and `gap_follow_node`. The startup log above confirms which nodes it found.
 
-This is the fastest way to test a tuning change: move a slider, watch the sim car's behaviour change on the same screen, and only then save it into the config file. Full detail in [web-dashboard.md](web-dashboard.md#live-parameter-tuning).
+This is the fastest way to test a tuning change: move a slider, watch the sim car's behaviour change on the same screen, and only then save it into the config file. Full detail in [web-dashboard.md](../src/web_dashboards/car/docs/web-dashboard.md#live-parameter-tuning).
 
 ---
 
@@ -227,7 +227,7 @@ Your node goes in Terminal 2, in place of `gap_follow`. Nothing else changes.
 ```bash
 ros2 launch racerbot_sim sim_bringup_launch.py     # terminal 1
 ros2 launch <your_package> <your_node>_launch.py   # terminal 2
-ros2 launch web_dashboard web_dashboard_launch.py  # terminal 3
+ros2 launch racerbot_launch dashboard_launch.py   # terminal 3
 ```
 
 That works because your node talks to the same topics the real car uses. If it subscribes to `/scan` and publishes to `/drive`, it is already simulator-compatible — see [writing-your-own-node.md](writing-your-own-node.md).
@@ -280,7 +280,7 @@ source ~/racerbot-ws/install/setup.bash
 ros2 launch racerbot_sim sim_auto_map_race_launch.py track:=indoor_wide dashboard:=true
 ```
 
-**Working when:** open `http://<jetson-ip>:8080/` and watch the map draw itself as the car drives its mapping laps. In the terminal, these four milestones appear in order over about 90 seconds:
+**Working when:** open Car 2 on https://dashboard.sfuracerbot.ca and watch the map draw itself as the car drives its mapping laps. In the terminal, these four milestones appear in order over about 90 seconds:
 
 ```
 Recorded lap cleaned up: 267 points over 40.0m ... peak curvature 0.744/m of
@@ -327,7 +327,7 @@ This is where the dashboard earns its place, because each phase looks different:
 | **Handover** | The commanded speed and steering readouts start coming from pure pursuit instead. |
 | **Racing** | Map-relative mode: the map is the background and the car is drawn at its localized position, so you can see it relative to the walls. |
 
-"The SLAM map looked really glitchy" is how a mapping run usually gets judged, and it's hard to act on without the picture. [web-dashboard.md](web-dashboard.md#the-map-looks-glitchy) breaks that down into the three things it can actually be.
+"The SLAM map looked really glitchy" is how a mapping run usually gets judged, and it's hard to act on without the picture. [web-dashboard.md](../src/web_dashboards/car/docs/web-dashboard.md#the-map-looks-glitchy) breaks that down into the three things it can actually be.
 
 ### Memory on the Jetson
 

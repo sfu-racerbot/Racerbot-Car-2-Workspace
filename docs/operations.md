@@ -121,7 +121,7 @@ Driving a track while [SLAM](glossary.md#slam) builds a map of it.
 
    > **Where the map ends up matters later.** This command writes into whatever directory you ran it from, so there is no fixed home for maps saved this way.
    >
-   > That is why the [dashboard's map panel](web-dashboard.md#clearing-the-map) does not list them — it only knows the two directories the automatic flow writes to. Delete a hand-saved map from a terminal.
+   > That is why the [dashboard's map panel](../src/web_dashboards/car/docs/web-dashboard.md#clearing-the-map) does not list them — it only knows the two directories the automatic flow writes to. Delete a hand-saved map from a terminal.
 
 ## Building a map autonomously (no steering required)
 
@@ -522,6 +522,4 @@ This is the safety model working as designed. If you follow [Running autonomy](#
 
 **The dashboard's camera panel says "camera offline" even though the camera and stream nodes are definitely running**
 
-You're almost certainly viewing the dashboard through an editor's forwarded port (VS Code, SSH `-L`) at `localhost:8080`, rather than the car's real address.
-
-The dashboard itself works fine over a tunnel, but the camera panel specifically needs a second, unforwarded connection straight to port `9090`. See [web-dashboard.md](web-dashboard.md#finding-the-cars-address-and-viewing-through-a-forwarded-port) for the fix.
+The page reaches the camera through the site and the car's `rb2-cam-origin` tunnel route, so check that hop: `ros2 run web_dashboard remote_check --site https://dashboard.sfuracerbot.ca --car rb2` on the car lists port 9090 and the route. See [web-dashboard.md](web-dashboard.md#if-the-site-cant-reach-the-car).

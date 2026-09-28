@@ -132,7 +132,7 @@ ros2 launch race_diagnostics record_run.py \
   topics:="/odom /slam_pose /drive /ackermann_cmd /tf /tf_static /map /joy /parameter_events"
 ```
 
-**Parameter changes are in the bag too.** `/parameter_events` is recorded by default. Every node announces each change to one of its settings on that topic, so the bag holds every change made during the run: from the [web dashboard's tuning panel](web-dashboard.md#live-parameter-tuning), from Lichtblick through [foxglove_bridge](foxglove-bridge.md), or from `ros2 param set` in a terminal. Without it, a bag can show the car driving differently halfway through a run with no record of why.
+**Parameter changes are in the bag too.** `/parameter_events` is recorded by default. Every node announces each change to one of its settings on that topic, so the bag holds every change made during the run: from the [web dashboard's tuning panel](../src/web_dashboards/car/docs/web-dashboard.md#live-parameter-tuning), from Lichtblick through [foxglove_bridge](foxglove-bridge.md), or from `ros2 param set` in a terminal. Without it, a bag can show the car driving differently halfway through a run with no record of why.
 
 To read them back:
 

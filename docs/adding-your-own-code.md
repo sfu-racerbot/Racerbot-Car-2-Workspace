@@ -53,7 +53,7 @@ It only subscribes, or publishes things that can't move the car — visualizatio
 <details>
 <summary><b>The one genuinely ambiguous case</b> — the dashboard's live tuning panel, and where the category line actually falls. Worth reading before you build anything that writes back to a driving node.</summary>
 
-`web_dashboard` has one narrow write path: its [live tuning panel](web-dashboard.md#live-parameter-tuning) calls the driving nodes' `set_parameters` service.
+`web_dashboard` has one narrow write path: its [live tuning panel](../src/web_dashboards/car/docs/web-dashboard.md#live-parameter-tuning) calls the driving nodes' `set_parameters` service.
 
 That still isn't driving code. It cannot command motion — it can only adjust a node that is *already* driving, within bounds that node enforces on itself, in its own process.
 
@@ -158,7 +158,7 @@ Nothing extra is *mandatory* beyond Step 3. Four things are worth keeping in min
 
 **Network-facing tools need a stated trade-off.** Anything binding a port, like `web_dashboard`'s web server, should default to listening in a way that's safe for a LAN-only debugging tool.
 
-Document that choice explicitly, and never expose it past a trusted network. Follow the reasoning in [web-dashboard.md](web-dashboard.md#security-note).
+Document that choice explicitly, and never expose it past a trusted network. Follow the reasoning in [web-dashboard.md](../src/web_dashboards/car/docs/web-dashboard.md#security-note).
 
 **Say in your docs that it's safe to start and stop freely.** Support code is independent of the driver stack and of the safety procedures in [operations.md](operations.md), specifically because it can't move the car. Write that down, so nobody wastes an afternoon treating your log viewer with driving-code caution it doesn't need.
 
@@ -188,7 +188,7 @@ A few notes on those commands:
 
 **If it's driving code**, launching it is only part of the procedure. Follow [operations.md](operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node): start the bringup, launch your node as the control layer on top in a second terminal, **don't also launch `teleop_launch.py`**, hold LB, and put the wheels off the ground first.
 
-**If it's support code**, just launch it. `ros2 launch web_dashboard web_dashboard_launch.py` is the entire procedure, on top of anything else already running.
+**If it's support code**, just launch it. `ros2 launch racerbot_launch dashboard_launch.py` (the web dashboard, with car 2's settings) is the entire procedure, on top of anything else already running.
 
 ---
 

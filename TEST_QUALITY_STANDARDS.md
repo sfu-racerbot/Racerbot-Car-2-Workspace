@@ -132,7 +132,7 @@ The core failure. Detect with §0. Common shapes:
 - Probes only inputs where the correct answer coincides with the degenerate one (the overtake bug:
   asserting a sign on a value the rate limiter had pinned to ~0).
 
-`src/web_dashboard/test/test_netbind.py` states the principle in its own module docstring: it binds
+`src/web_dashboards/car/ros/web_dashboard/test/test_netbind.py` (moved to the web-dashboards submodule) states the principle in its own module docstring: it binds
 a real socket the way `dashboard_node.py` does, "because the bug being guarded against here
 (IPv4-only listener) is invisible to any test that only checks a return value."
 
@@ -479,7 +479,8 @@ Keep non-trivial math and parsing importable without `rclpy` — that is what ma
 cd ~/racerbot-ws
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 T="src/drive_intent/test src/gap_follow/test src/odom_calibration/test src/pure_pursuit/test
-   src/race_diagnostics/test src/racerbot_sim/test src/usb_cam_stream/test src/web_dashboard/test"
+   src/race_diagnostics/test src/racerbot_sim/test \
+   src/web_dashboards/car/ros/usb_cam_stream/test src/web_dashboards/car/ros/web_dashboard/test"
 
 # A1 - every mock hit must assert on behavior, not on the configured return
 grep -rn "Mock\|MagicMock\|patch(" $T --include='*.py'

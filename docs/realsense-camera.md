@@ -51,35 +51,32 @@ no kernel patching, no `librealsense` source clone needed.
 `race_launch.py` uses for `particle_filter`/`pure_pursuit`), passing this
 car's tuning as launch arguments — color+depth at `424x240x15`, pointcloud
 off — plus a placeholder `base_link`→`camera_link` static transform. It also
-includes `usb_cam_stream`'s `realsense_stream_launch.py`, so ROS images and the
-browser stream start and stop together.
+includes `usb_cam_stream`'s `usb_cam_stream_launch.py` with car 2's
+`config/web_dashboard_rb2.yaml` on top (its `image_topic` points at the
+RealSense), so ROS images and the browser stream start and stop together.
 
 ## Seeing the feed in a browser — the dashboard's camera panel
 
 [web_dashboard](web-dashboard.md)'s bottom-right camera inset auto-connects
-to the MJPEG stream on port `9090` that `realsense_camera_launch.py` now starts.
-Launch the dashboard separately, then click its camera inset for the full-window
-recording view. **Full step-by-step (both launch commands and how to find
-`<car-ip>`) is in
-[web-dashboard.md#with-the-camera-panel-filled-in-too](web-dashboard.md#with-the-camera-panel-filled-in-too)
-— including a real gotcha if you're viewing through an editor's
-port-forwarding (VS Code, SSH `-L`) instead of the car's actual address,
-where the camera panel specifically breaks even though everything is
-running correctly**
-([web-dashboard.md#finding-the-cars-address-and-viewing-through-a-forwarded-port](web-dashboard.md#finding-the-cars-address-and-viewing-through-a-forwarded-port)).
+to the MJPEG stream on port `9090` that `realsense_camera_launch.py` now starts
+(through the site: the page asks https://dashboard.sfuracerbot.ca for it, and
+the site reaches the car's port 9090 through the tunnel). Launch the dashboard
+separately with `ros2 launch racerbot_launch dashboard_launch.py`, then click
+its camera inset for the full-window recording view. **Both launch commands,
+step by step, are in [web-dashboard.md](web-dashboard.md#start-it).**
 
-Under the hood, `realsense_stream_launch.py` runs `usb_cam_stream`'s node
+Under the hood, `realsense_camera_launch.py` runs `usb_cam_stream`'s node
 in its `image_topic` mode — subscribing to
 `/camera/camera/color/image_raw` and re-serving it as MJPEG — rather than
 opening the camera's V4L2 device directly, because `realsense2_camera_node`
 holds that device exclusively (a second `cv2.VideoCapture` on it just
 fails). Full detail:
-[usb-camera-livestream.md](usb-camera-livestream.md#image_topic-mode-streaming-a-ros-image-topic-instead).
+[usb-camera-livestream.md](../src/web_dashboards/car/docs/usb-camera-livestream.md#image_topic-mode-streaming-a-ros-image-topic-instead).
 The stream is also directly viewable at `http://<car-ip>:9090/` without
 the dashboard.
 
 Two things about this mode are worth knowing. It serves the same
-[two tiers](usb-camera-livestream.md#two-streams-not-one) as the webcam
+[two tiers](../src/web_dashboards/car/docs/usb-camera-livestream.md#two-streams-not-one) as the webcam
 mode — a small `/stream` for the dashboard inset and
 `/stream?tier=full` for the recording view — but `passthrough` does
 nothing here: frames arrive from the topic already decoded, so there is no
@@ -123,8 +120,9 @@ rest of the stack.
 
 `realsense_camera_launch.py`'s `static_transform_publisher` currently
 publishes `base_link`→`camera_link` at `0,0,0` — a placeholder, not yet
-measured, same treatment as `laser_offset_x`/`laser_offset_y` in
-[web_dashboard.yaml](../src/web_dashboard/config/web_dashboard.yaml). Update
+measured (the LiDAR's own offset, `laser_offset_x` in
+[web_dashboard_rb2.yaml](../src/racerbot_launch/config/web_dashboard_rb2.yaml),
+was measured on 2026-08-24). Update
 the `--x`/`--y`/`--z` arguments in that launch file once the camera's
 physical mount position relative to `base_link` is measured — see
 [hardware-reference.md](hardware-reference.md).
@@ -152,8 +150,8 @@ config file for a wrapped driver package):
 src/realsense-ros/                                  # git submodule, ros2-master
 src/racerbot_launch/
 ├── launch/realsense_camera_launch.py                # driver + static TF + MJPEG bridge
+├── config/web_dashboard_rb2.yaml                     # usb_cam_stream_node: image_topic = the color feed
 ├── package.xml                                       # exec_depend on realsense2_camera
-src/usb_cam_stream/
-├── launch/realsense_stream_launch.py                # browser MJPEG stream of the color feed (dashboard camera panel)
-└── config/realsense_stream.yaml
+src/web_dashboards/car/ros/usb_cam_stream/            # submodule: the MJPEG stream node (generic)
+└── launch/usb_cam_stream_launch.py                   # car_config:= the rb2 YAML above
 ```

@@ -6,7 +6,7 @@
 
 Shared schema and trajectory prediction for `/drive_intent`: the topic on
 which a driving node says **what it is trying to do, and why**, so the
-[web dashboard](../web_dashboard/README.md) can draw an intent arrow and a
+[web dashboard](../web_dashboards/car/ros/web_dashboard/README.md) can draw an intent arrow and a
 decision panel.
 
 **Workflow, schema reference, safety contract, and the porting guide for

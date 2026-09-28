@@ -441,7 +441,7 @@ Exactly like every other speed parameter on this car: **start conservative, rais
 
 `a_lat_max` / `a_accel_max` / `a_brake_max` / `v_max` shape the *recorded speed profile*. Changing them means regenerating that profile — a rerun of [Phase 4](#phase-4-generate-the-velocity-profile).
 
-`pure_pursuit_node`'s `max_speed`, `max_lateral_accel` and friends are online ceilings applied on top of whatever profile is loaded. Those you can change on a *running* node from the dashboard's [live tuning panel](web-dashboard.md#live-parameter-tuning), which is the fast way to answer "is it the profile or the controller?" between runs.
+`pure_pursuit_node`'s `max_speed`, `max_lateral_accel` and friends are online ceilings applied on top of whatever profile is loaded. Those you can change on a *running* node from the dashboard's [live tuning panel](../src/web_dashboards/car/docs/web-dashboard.md#live-parameter-tuning), which is the fast way to answer "is it the profile or the controller?" between runs.
 
 Lowering `max_speed` there clips the whole profile without re-recording anything.
 

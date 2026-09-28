@@ -60,8 +60,8 @@ After that, follow whichever branch below matches what you're doing.
 |---|---|
 | [racing-autonomy.md](racing-autonomy.md) | The map-based race stack end to end: SLAM, localization, racing line, velocity profile, pure pursuit, overtaking. The biggest doc here; it opens with a plain-language summary. |
 | [localization.md](localization.md) | Where the car's position estimate comes from, why it used to arrive late, what was tuned, and what would improve it next. For anyone whose car is slow to know where it is, or whose map will not close. |
-| [web-dashboard.md](web-dashboard.md) | The browser dashboard: what it shows, how it works, live parameter tuning, measuring distances on the map, and clearing or deleting a map. Safe to run alongside anything. Includes how the car serves the remote site at dashboard.sfuracerbot.ca. |
-| [foxglove-bridge.md](foxglove-bridge.md) | foxglove_bridge for Lichtblick: starting it, what a remote user can see and change, and why the only topic they can publish is `/initialpose`. For anyone opening Lichtblick, or changing what it may do. |
+| [web-dashboard.md](web-dashboard.md) | The browser dashboard on car 2: starting it, opening it at dashboard.sfuracerbot.ca, car 2's settings file, the live-tuning contract with the driving nodes, and reinstalling the bridge's boot service. The full manual moved to the `src/web_dashboards` submodule; this page links it. Safe to run alongside anything. |
+| [foxglove-bridge.md](foxglove-bridge.md) | foxglove_bridge for Lichtblick (moved to the `src/web_dashboards` submodule; this page links it): what a remote user can see and change, and why they can publish to **no topic at all**. For anyone opening Lichtblick, or changing what it may do. |
 | [simulator.md](simulator.md) | The no-ROS simulator that tests controller *math* directly. |
 | [ros-simulator.md](ros-simulator.md) | The same physics behind the real ROS topics, so whole launch files can be validated without the car. Includes the interlock that stops it running beside real hardware. For the step-by-step workflow, see [sim-validation.md](sim-validation.md). |
 | [sim-fidelity-audit.md](sim-fidelity-audit.md) | How closely the simulator matches this physical car, and where it doesn't. Read before trusting a simulator result. |
@@ -80,7 +80,7 @@ After that, follow whichever branch below matches what you're doing.
 | Doc | What's in it, and who it's for |
 |---|---|
 | [realsense-camera.md](realsense-camera.md) | Intel RealSense D435i color/depth over ROS2: install notes, measured performance, and a known IMU limitation on this hardware. |
-| [usb-camera-livestream.md](usb-camera-livestream.md) | Live MJPEG video from a USB webcam, viewable in any browser. |
+| [usb-camera-livestream.md](usb-camera-livestream.md) | Live MJPEG video of car 2's RealSense, for the dashboard's camera inset or any browser (moved to the `src/web_dashboards` submodule; this page links it). |
 | [realsense-lidar-perception-research-report.md](realsense-lidar-perception-research-report.md) | Design/research report on combining camera and LiDAR perception. Background reading — it changes no driving behavior. |
 
 ---

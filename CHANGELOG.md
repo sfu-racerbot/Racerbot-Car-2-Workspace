@@ -6,6 +6,63 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-09-27 (latest) — The dashboard moves to sfu-racerbot/web-dashboards
+
+`web_dashboard` and `usb_cam_stream` moved, with their git history
+(`git subtree split` here, `git subtree add` there), into
+**sfu-racerbot/web-dashboards** under `car/ros/`. That repo now holds the
+site and everything a team needs on its car; this workspace consumes it as
+the git submodule **`src/web_dashboards`** and keeps only car 2's settings.
+Package names, `ros2 run` and `ros2 launch` commands are unchanged.
+
+### Behaviour changes
+
+- **Start the dashboard with `ros2 launch racerbot_launch dashboard_launch.py`.**
+  The package now ships generic defaults, so a bare
+  `ros2 launch web_dashboard web_dashboard_launch.py` allows **no** site
+  (the site shows CAR OFFLINE), tunes and stops nothing, and lists no maps.
+  Car 2's values are in the new **`racerbot_launch/config/web_dashboard_rb2.yaml`**,
+  passed as `car_config:=`: `allowed_origins`, `laser_offset_x: 0.26`,
+  `tuning_nodes`/`tuning_config_files`, `killable_nodes`, `map_roots`, and
+  the RealSense stream's `image_topic`/`passthrough`. Values unchanged from
+  before. `realsense_camera_launch.py`, `dashboard_test_launch.py` and
+  `racerbot_sim`'s `dashboard:=true` use it.
+- **The car serves no pages.** The old frontend (`web/`) and its tests were
+  deleted — the site's `apps/simple` replaced them. `serve_static` defaults
+  to false and is ignored (with a warning) if set; `http://<car-ip>:8080/`
+  answers 404. Open https://dashboard.sfuracerbot.ca.
+- **`drive_intent` is now optional for the dashboard** (it stays in this
+  workspace): without it, nothing subscribes to `/drive_intent` and the
+  node logs `drive intent: OFF` once.
+- **`remote_check` takes `--site https://dashboard.sfuracerbot.ca --car rb2`.**
+- **foxglove_bridge's config, launch and safety test moved into
+  `web_dashboard`** (`ros2 launch web_dashboard foxglove_bridge_launch.py`);
+  client publishing stays **off**. `racerbot_launch/launch/foxglove_bridge_launch.py`
+  is now a **temporary forwarder**, kept with `tools/systemd/` only so the
+  installed `foxglove-bridge` unit survives a reboot; both go once the unit is
+  reinstalled from `src/web_dashboards/car/systemd/` (`docs/web-dashboard.md`).
+- `usb_cam_stream`'s `realsense_stream_launch.py`/`realsense_stream.yaml`
+  are gone (car-2 config, now in the rb2 YAML).
+- `tools/web_dashboard/` moved to the submodule's `car/tools/`.
+
+### Tests
+
+- New `racerbot_launch/test/test_web_dashboard_rb2_config.py`: every rb2 key
+  is a parameter the node declares; `laser_offset_x` equals every bringup's
+  `base_link`→`laser` x; the site origin equals the site's own
+  `PUBLIC_ORIGIN`; no stoppable process or map folder would be silently
+  dropped. Replaces `test_foxglove_bridge_config.py`, which moved with the
+  bridge config.
+- `gap_follow`/`pure_pursuit` `test_*_live_tuning.py`: the dashboard's
+  `tuning.py` is imported from the submodule, and each node's **live**
+  config now round-trips through its YAML writer — this workspace's half of
+  the `live_tunable_spec` contract (the dashboard repo round-trips a snapshot).
+- **Run ROS tests on an isolated domain** (`ROS_DOMAIN_ID=79
+  ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`, now in `CLAUDE.md`):
+  `gap_follow`'s node tests publish to the real `/drive`. Found the hard way
+  while taking baseline counts for this move, with bringup up and the
+  battery detached.
+
 ## 2026-09-27 (later) — Diagnosing the remote site from the car
 
 The site could not connect although every service on the car was healthy.

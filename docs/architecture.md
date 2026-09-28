@@ -237,7 +237,7 @@ Live tuning is the one path from the dashboard back to the car, and it is delibe
 
 It cannot publish a command, cannot start the car, and cannot relax the deadman — `enable_deadman` is refused at runtime by every node that has it. What it changes is *tuning*, on a car that is already being driven by an autonomy node with LB held.
 
-Each driving node enforces its own hard bounds on every such change, in its own process, so the browser is never the authority on what is safe. Full reasoning in [web-dashboard.md](web-dashboard.md#live-parameter-tuning).
+Each driving node enforces its own hard bounds on every such change, in its own process, so the browser is never the authority on what is safe. Full reasoning in [web-dashboard.md](../src/web_dashboards/car/docs/web-dashboard.md#live-parameter-tuning).
 
 ---
 
@@ -293,7 +293,7 @@ Comparing the last three is how you diagnose "why isn't the car doing what my co
 | `slam_toolbox` | apt (`ros-jazzy-slam-toolbox`) | Builds a map during manual or autonomous course discovery; remains online for the automatic race |
 | `gap_follow` | local, `src/gap_follow` | Baseline reactive autonomy (follow-the-gap) — see [writing-your-own-node.md](writing-your-own-node.md), this package *is* the worked example |
 | `pure_pursuit` | local, `src/pure_pursuit` | Race controller, record/profile tools, and automatic map-to-race supervisor — see [racing-autonomy.md](racing-autonomy.md) |
-| `web_dashboard` | local, `src/web_dashboard` | Live browser dashboard of the map/scan/pose over a WebSocket, plus a live tuning panel for the driving nodes' parameters. Publishes to no topic and cannot move the car, so it isn't subject to the deadman policy below — see [web-dashboard.md](web-dashboard.md) |
+| `web_dashboard` | submodule, `src/web_dashboards/car/ros/web_dashboard` ([sfu-racerbot/web-dashboards](https://github.com/sfu-racerbot/web-dashboards)); car 2's settings in `racerbot_launch/config/web_dashboard_rb2.yaml` | The car-side server for the browser dashboard at dashboard.sfuracerbot.ca: map/scan/pose over a WebSocket, plus a live tuning panel for the driving nodes' parameters. Publishes to no topic and cannot move the car, so it isn't subject to the deadman policy below — see [web-dashboard.md](web-dashboard.md). Also ships foxglove_bridge's config, whose client publishing is off ([foxglove-bridge.md](foxglove-bridge.md)) |
 | `racerbot_launch` | local, `src/racerbot_launch` | Top-level SLAM, automatic map-to-race, and saved-map race launches |
 
 ---

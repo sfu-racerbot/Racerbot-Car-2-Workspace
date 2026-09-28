@@ -26,7 +26,7 @@ a wall.
                                   (the gap between them is command shaping)
 ```
 
-- **Workflow and what you'll see:** [web-dashboard.md](web-dashboard.md#drive-intent-the-arrow-and-the-decision-panel)
+- **Workflow and what you'll see:** [web-dashboard.md](../src/web_dashboards/car/docs/web-dashboard.md#drive-intent-the-arrow-and-the-decision-panel)
 - **This doc:** the `/drive_intent` schema, the safety contract for
   publishers, and the porting guide for `racerbot_a` / `racerbot_b`.
 
@@ -287,7 +287,7 @@ Identical in `gap_follow.yaml` and `pure_pursuit.yaml`:
 | `intent_samples` | `16` | |
 | `intent_max_length` | `8.0` | Metres. Truncates the drawn path however fast the plan is. |
 
-Dashboard side, in `web_dashboard.yaml`:
+Dashboard side, in the `web_dashboard` package's own `config/web_dashboard.yaml` (in the `src/web_dashboards` submodule; car 2 leaves both at their defaults). The dashboard works without `drive_intent` installed — the panel is then off, and it says so at startup:
 
 | Parameter | Default | Notes |
 |---|---|---|
@@ -390,11 +390,14 @@ against the Python validator (see [Testing](#testing)).
 # Pure logic -- no ROS, no build, no robot:
 python3 -m pytest src/drive_intent/test/ -v
 
-# Node integration, including the safety rules -- needs the workspace built:
+# Node integration, including the safety rules -- needs the workspace built.
+# These start real driving nodes: run them on an isolated ROS domain, never
+# on the car's own graph (gap_follow's publish to the real /drive):
+export ROS_DOMAIN_ID=79 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 python3 -m pytest src/gap_follow/test/test_gap_follow_intent.py -v
 python3 -m pytest src/pure_pursuit/test/test_pure_pursuit_intent.py -v
-python3 -m pytest src/web_dashboard/test/test_intent_protocol.py -v
+(cd src/web_dashboards/car/ros/web_dashboard && python3 -m pytest test/test_intent_protocol.py test/test_intent_optional.py -v)
 ```
 
 The tests worth knowing about, because they are the ones encoding the
