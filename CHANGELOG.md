@@ -44,6 +44,12 @@ Package names, `ros2 run` and `ros2 launch` commands are unchanged.
 - `usb_cam_stream`'s `realsense_stream_launch.py`/`realsense_stream.yaml`
   are gone (car-2 config, now in the rb2 YAML).
 - `tools/web_dashboard/` moved to the submodule's `car/tools/`.
+- Later the same day, after `foxglove-bridge.service` was reinstalled from
+  the submodule and the site's `/rb2/check` passed every hop: the forwarder
+  `racerbot_launch/launch/foxglove_bridge_launch.py` and `tools/systemd/`
+  were **removed**. `ros2 launch web_dashboard foxglove_bridge_launch.py` is
+  the bridge's launch. `racerbot_launch`'s test now fails if a bridge launch
+  or config reappears in it.
 
 ### Tests
 

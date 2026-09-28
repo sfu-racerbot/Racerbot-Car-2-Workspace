@@ -154,13 +154,13 @@ def test_the_car_2_launches_pass_this_yaml_as_car_config(launch):
     assert "'car_config'" in text
 
 
-def test_the_forwarding_bridge_launch_includes_the_moved_one():
-    """Kept only so the pre-move systemd unit survives a restart (its
-    wrapper runs `ros2 launch racerbot_launch foxglove_bridge_launch.py`).
-    It must start the bridge with web_dashboard's clientPublish-free
-    config, not a copy of its own."""
-    with open(os.path.join(_PKG, 'launch', 'foxglove_bridge_launch.py')) as handle:
-        text = handle.read()
-    assert "get_package_share_directory('web_dashboard')" in text
-    assert "'foxglove_bridge_launch.py'" in text
-    assert not os.path.exists(os.path.join(_PKG, 'config', 'foxglove_bridge.yaml'))
+def test_this_package_has_no_bridge_launch_or_config_of_its_own():
+    """foxglove_bridge's launch and config live in web_dashboard only
+    (ros2 launch web_dashboard foxglove_bridge_launch.py), where
+    test_client_publishing_is_switched_off_entirely holds clientPublish off.
+    A second copy here could drift from that config -- and a bridge with
+    clientPublish on lets a browser publish /drive past every LB deadman.
+    (Until 2026-09-27 a forwarding launch lived here for the old systemd
+    unit; the unit now runs from the submodule.)"""
+    assert not glob.glob(os.path.join(_PKG, 'launch', '*foxglove*'))
+    assert not glob.glob(os.path.join(_PKG, 'config', '*foxglove*'))

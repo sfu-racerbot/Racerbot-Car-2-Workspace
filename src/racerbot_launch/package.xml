@@ -26,11 +26,6 @@
   <!-- slam_launch.py drives slam_toolbox's lifecycle transitions itself. -->
   <exec_depend>lifecycle_msgs</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <!-- foxglove_bridge_launch.py is a TEMPORARY forwarder to web_dashboard's,
-       kept until the foxglove-bridge systemd unit is reinstalled from the
-       submodule (docs/foxglove-bridge.md). Remove both then.
-       apt: ros-jazzy-foxglove-bridge -->
-  <exec_depend>foxglove_bridge</exec_depend>
 
   <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>python3-yaml</test_depend>

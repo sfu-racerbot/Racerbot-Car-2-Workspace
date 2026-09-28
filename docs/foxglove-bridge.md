@@ -19,5 +19,3 @@ So `clientPublish` is off, and `test_client_publishing_is_switched_off_entirely`
 | Boot service | `src/web_dashboards/car/systemd/` (`foxglove-bridge.service`, `foxglove-bridge.sh`, `install.sh`) |
 
 **Car 2 specifics** — the tunnel route (`rb2-bridge-origin.sfuracerbot.ca` → `127.0.0.1:8765`) and reinstalling the boot service from the submodule — are in [web-dashboard.md](web-dashboard.md#the-lichtblick-bridges-boot-service).
-
-Until that reinstall, `ros2 launch racerbot_launch foxglove_bridge_launch.py` and `tools/systemd/foxglove-bridge.{service,sh}` still work: the launch file is a thin forwarder to the new one, kept only so the unit installed before the move survives a reboot.

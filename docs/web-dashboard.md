@@ -80,7 +80,7 @@ This workspace's half is tested in `src/gap_follow/test/test_gap_follow_live_tun
 
 `foxglove-bridge.service` starts foxglove_bridge at boot. Its unit and wrapper now live in the submodule (`src/web_dashboards/car/systemd/`), and the bridge's launch file in `web_dashboard`. **Browsers can publish to no topic through it** — see [foxglove-bridge.md](foxglove-bridge.md).
 
-The unit installed before the move runs `tools/systemd/foxglove-bridge.sh` → `ros2 launch racerbot_launch foxglove_bridge_launch.py`. Both are kept, as a thin forwarder to the new launch, until the unit is reinstalled — **Terminal 1, on the car** (needs sudo):
+It was reinstalled from the submodule on 2026-09-27. To reinstall it again — after moving the workspace, say — **Terminal 1, on the car** (needs sudo):
 
 ```bash
 sudo ~/racerbot-ws/src/web_dashboards/car/systemd/install.sh racerbotcar-2 /home/racerbotcar-2/racerbot-ws
@@ -88,7 +88,7 @@ sudo ~/racerbot-ws/src/web_dashboards/car/systemd/install.sh racerbotcar-2 /home
 
 **Working when:** it prints `active (running)`, `systemctl cat foxglove-bridge` shows `ExecStart=/home/racerbotcar-2/racerbot-ws/src/web_dashboards/car/systemd/foxglove-bridge.sh`, and `journalctl -u foxglove-bridge -n 20` shows `Server listening on port 8765`.
 
-After that, `tools/systemd/` and `racerbot_launch/launch/foxglove_bridge_launch.py` are removed in a follow-up commit.
+(Before the move the unit ran `tools/systemd/foxglove-bridge.sh` → `ros2 launch racerbot_launch foxglove_bridge_launch.py`. Both were removed once the unit was reinstalled; if `systemctl cat foxglove-bridge` still names `tools/systemd`, run the command above.)
 
 ## Tests
 
