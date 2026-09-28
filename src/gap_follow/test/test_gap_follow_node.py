@@ -26,6 +26,18 @@ from sensor_msgs.msg import Joy, LaserScan
 
 from gap_follow import gap_logic
 from gap_follow.gap_follow_node import GapFollowNode
+
+# Every node these tests build publishes its drive commands here, never on
+# the real /drive: with the driver stack up, /drive reaches ackermann_mux
+# and the VESC (it happened on 2026-09-27, battery off). A test that needs
+# the real topic name reads it from the node's own parameter declaration.
+#
+# It goes LAST in every rclpy.init: once any -p precedes --params-file, the
+# YAML's node-keyed values win over every -p (measured on Jazzy, 2026-09-27:
+# see test_test_only_drive_must_come_after_the_params_file), and
+# gap_follow.yaml sets drive_topic: /drive. test_gap_follow_node.py's
+# test_no_test_here_builds_a_node_on_the_real_drive checks every call here.
+TEST_ONLY_DRIVE = ['-p', 'drive_topic:=/test_only/drive']
 from gap_follow.speed_overrides import mapping_speed_overrides
 
 
@@ -44,8 +56,9 @@ def node():
                      '-p', 'fallback_min_gap_distance:=0.8',
                      '-p', 'min_speed:=0.8',
                      '-p', f'max_speed:={MAX_SPEED}',
-                     '-p', f'max_steering_angle:={MAX_STEERING}'])
+                     '-p', f'max_steering_angle:={MAX_STEERING}', *TEST_ONLY_DRIVE])
     n = GapFollowNode()
+    assert n.drive_pub.topic_name == '/test_only/drive'
     yield n
     n.destroy_node()
     rclpy.shutdown()
@@ -721,7 +734,7 @@ def test_centering_refuses_to_start_with_too_much_authority():
     """A bias able to cancel the chosen gap is a second driving policy."""
     rclpy.init(args=['--ros-args',
                      '-p', 'max_steering_angle:=0.26',
-                     '-p', 'centering_max_steering:=0.25'])
+                     '-p', 'centering_max_steering:=0.25', *TEST_ONLY_DRIVE])
     try:
         with pytest.raises(ValueError, match='centering_max_steering'):
             GapFollowNode()
@@ -878,7 +891,7 @@ def test_adaptive_width_refuses_a_floor_above_the_static_margin():
     the margin beyond safety_margin on a sensed-wide corridor."""
     rclpy.init(args=['--ros-args',
                      '-p', 'safety_margin:=0.18',
-                     '-p', 'min_safety_margin:=0.20'])
+                     '-p', 'min_safety_margin:=0.20', *TEST_ONLY_DRIVE])
     try:
         with pytest.raises(ValueError, match='min_safety_margin'):
             GapFollowNode()
@@ -889,7 +902,7 @@ def test_adaptive_width_refuses_a_floor_above_the_static_margin():
 def test_adaptive_width_refuses_a_narrow_reference_that_does_not_fit():
     rclpy.init(args=['--ros-args',
                      '-p', 'adaptive_width_narrow:=2.6',
-                     '-p', 'adaptive_width_reference:=1.4'])
+                     '-p', 'adaptive_width_reference:=1.4', *TEST_ONLY_DRIVE])
     try:
         with pytest.raises(ValueError, match='adaptive_width_narrow'):
             GapFollowNode()
@@ -915,9 +928,11 @@ def test_packaged_config_plus_mapping_overrides_actually_starts():
         overrides = []
         for name, value in speeds.items():
             overrides += ['-p', f'{name}:={value}']
-        rclpy.init(args=['--ros-args', '--params-file', PACKAGED_CONFIG] + overrides)
+        rclpy.init(args=['--ros-args', '--params-file', PACKAGED_CONFIG, *overrides, *TEST_ONLY_DRIVE])
         try:
             node = GapFollowNode()
+            # Last, so it beats the packaged YAML's drive_topic: /drive.
+            assert node.drive_pub.topic_name == '/test_only/drive'
             assert node.corner_speed <= node.corner_speed_wide <= node.max_speed
             assert node.min_speed <= node.max_speed
             node.destroy_node()
@@ -930,7 +945,7 @@ def test_lowering_only_max_speed_is_still_rejected():
     an inconsistent set is a configuration error and the node is still
     expected to refuse it rather than pick an interpretation."""
     rclpy.init(args=['--ros-args', '--params-file', PACKAGED_CONFIG,
-                     '-p', 'max_speed:=1.0'])
+                     '-p', 'max_speed:=1.0', *TEST_ONLY_DRIVE])
     try:
         with pytest.raises(ValueError, match='corner_speed_wide'):
             GapFollowNode()
@@ -941,7 +956,7 @@ def test_lowering_only_max_speed_is_still_rejected():
 def test_adaptive_width_refuses_a_corner_speed_ceiling_below_its_floor():
     rclpy.init(args=['--ros-args',
                      '-p', 'corner_speed:=0.8',
-                     '-p', 'corner_speed_wide:=0.5'])
+                     '-p', 'corner_speed_wide:=0.5', *TEST_ONLY_DRIVE])
     try:
         with pytest.raises(ValueError, match='corner_speed_wide'):
             GapFollowNode()
@@ -1044,7 +1059,7 @@ def test_cornering_anticipation_caps_speed_beyond_ordinary_curvature(node):
 
 
 def test_cornering_anticipation_near_depth_must_exceed_zero():
-    rclpy.init(args=['--ros-args', '-p', 'anticipation_near_depth:=0.0'])
+    rclpy.init(args=['--ros-args', '-p', 'anticipation_near_depth:=0.0', *TEST_ONLY_DRIVE])
     try:
         with pytest.raises(ValueError, match='anticipation_near_depth'):
             GapFollowNode()
@@ -1081,9 +1096,92 @@ def test_side_window_is_validated_when_only_adaptive_width_uses_it():
     rclpy.init(args=['--ros-args',
                      '-p', 'enable_centering:=false',
                      '-p', 'enable_adaptive_width:=true',
-                     '-p', 'centering_side_fov_deg:=0.0'])
+                     '-p', 'centering_side_fov_deg:=0.0', *TEST_ONLY_DRIVE])
     try:
         with pytest.raises(ValueError, match='centering_side_fov_deg'):
             GapFollowNode()
     finally:
         rclpy.shutdown()
+
+
+# --------------------------------------------------------------------------
+# Test isolation: no node built here publishes on the real /drive
+# --------------------------------------------------------------------------
+
+def _rclpy_init_arg_lists():
+    """Every rclpy.init(args=[...]) call in this directory, as (file,
+    line, the list's elements)."""
+    import ast
+    import glob
+    here = os.path.dirname(os.path.abspath(__file__))
+    found = []
+    for path in sorted(glob.glob(os.path.join(here, 'test_*.py'))):
+        with open(path) as f:
+            tree = ast.parse(f.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == 'rclpy.init':
+                args = [k.value for k in node.keywords if k.arg == 'args']
+                elts = args[0].elts if args and isinstance(args[0], ast.List) else None
+                found.append((os.path.basename(path), node.lineno, elts))
+    return found
+
+
+def test_no_test_here_builds_a_node_on_the_real_drive():
+    """Every rclpy.init in this directory ends with *TEST_ONLY_DRIVE, so
+    every GapFollowNode it builds publishes on /test_only/drive. A new
+    test that leaves it out, or puts it anywhere but last, fails here
+    before it can reach ackermann_mux on a car with its stack up."""
+    import ast
+    calls = _rclpy_init_arg_lists()
+    assert len(calls) >= 13, calls              # the ones this was written for
+    bad = [(name, line) for name, line, elts in calls
+           if not elts or ast.unparse(elts[-1]) != '*TEST_ONLY_DRIVE']
+    assert bad == []
+
+
+def test_test_only_drive_really_moves_the_publisher():
+    """The remap itself. Oracle: the parameter's declared default is the
+    real /drive (gap_follow_node.py), and the prefix moves it."""
+    rclpy.init(args=['--ros-args', *TEST_ONLY_DRIVE])
+    try:
+        node = GapFollowNode()
+        assert node.drive_topic == '/test_only/drive'
+        assert node.drive_pub.topic_name == '/test_only/drive'
+        assert node.get_publishers_info_by_topic('/drive') == []
+        node.destroy_node()
+    finally:
+        rclpy.shutdown()
+
+
+@pytest.mark.parametrize('order, expected', [
+    ('after', '/test_only/drive'),
+    ('before', '/drive'),
+])
+def test_test_only_drive_must_come_after_the_params_file(order, expected):
+    """Why TEST_ONLY_DRIVE goes last. Oracle: gap_follow.yaml's own
+    drive_topic: /drive, and rcl's override order as measured on Jazzy on
+    2026-09-27 -- a -p placed before --params-file loses to the file's
+    node-keyed value. If this ever flips, the guard above is still right,
+    only stricter than it needs to be.
+
+    Measured on a bare node under gap_follow_node's name that declares the
+    parameter and creates no publisher of its own -- the 'before' case must not build
+    anything that could publish on the real /drive -- in its own Context,
+    so no rclpy.init here (the guard above covers every rclpy.init)."""
+    from rclpy.context import Context
+    from rclpy.node import Node
+    with open(PACKAGED_CONFIG) as f:
+        assert '    drive_topic: /drive\n' in f.read()
+    file_args = ['--params-file', PACKAGED_CONFIG]
+    args = (['--ros-args', *file_args, *TEST_ONLY_DRIVE] if order == 'after'
+            else ['--ros-args', *TEST_ONLY_DRIVE, *file_args])
+    context = Context()
+    context.init(args)
+    try:
+        node = Node('gap_follow_node', context=context)
+        node.declare_parameter('drive_topic', '/drive')
+        assert node.get_parameter('drive_topic').value == expected
+        assert node.get_publishers_info_by_topic('/drive') == []
+        node.destroy_node()
+    finally:
+        context.shutdown()

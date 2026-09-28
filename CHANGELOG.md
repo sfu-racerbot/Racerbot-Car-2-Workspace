@@ -65,9 +65,19 @@ Package names, `ros2 run` and `ros2 launch` commands are unchanged.
   the `live_tunable_spec` contract (the dashboard repo round-trips a snapshot).
 - **Run ROS tests on an isolated domain** (`ROS_DOMAIN_ID=79
   ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`, now in `CLAUDE.md`):
-  `gap_follow`'s node tests publish to the real `/drive`. Found the hard way
+  `gap_follow`'s node tests published to the real `/drive`. Found the hard way
   while taking baseline counts for this move, with bringup up and the
   battery detached.
+- **`gap_follow`'s node tests no longer publish to the real `/drive`.** Every
+  `rclpy.init` in `src/gap_follow/test/` ends with `TEST_ONLY_DRIVE`
+  (`-p drive_topic:=/test_only/drive`), as `pure_pursuit`'s already did.
+  It must be **last**: measured on Jazzy, once any `-p` precedes
+  `--params-file`, the YAML's node-keyed values beat every `-p`, so a
+  remap placed first left `test_packaged_config_plus_mapping_overrides_actually_starts`
+  on `/drive`. `test_no_test_here_builds_a_node_on_the_real_drive` checks
+  every call (by AST), each fixture asserts its publisher's topic, and
+  `test_test_only_drive_must_come_after_the_params_file` pins the ordering
+  rule. The isolated domain stays: the tests still publish latched topics.
 
 ## 2026-09-27 (later) — Diagnosing the remote site from the car
 

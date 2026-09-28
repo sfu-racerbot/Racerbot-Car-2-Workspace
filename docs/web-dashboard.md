@@ -92,7 +92,7 @@ sudo ~/racerbot-ws/src/web_dashboards/car/systemd/install.sh racerbotcar-2 /home
 
 ## Tests
 
-`web_dashboard` and `usb_cam_stream` are still built and tested by this workspace's colcon, from the submodule. **Run ROS tests on an isolated domain** — node tests start real nodes that join whatever graph they can see, and some of this workspace's (gap_follow's) publish to the real `/drive`:
+`web_dashboard` and `usb_cam_stream` are still built and tested by this workspace's colcon, from the submodule. **Run ROS tests on an isolated domain** — node tests start real driving nodes that join whatever graph they can see. They publish their drive commands on `/test_only/drive`, never the real `/drive`, but still put latched topics such as `/racing_line` on the graph, and the running dashboard shows them:
 
 **Terminal 1, from `~/racerbot-ws`:**
 

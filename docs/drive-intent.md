@@ -392,7 +392,7 @@ python3 -m pytest src/drive_intent/test/ -v
 
 # Node integration, including the safety rules -- needs the workspace built.
 # These start real driving nodes: run them on an isolated ROS domain, never
-# on the car's own graph (gap_follow's publish to the real /drive):
+# on the car's own graph (they publish latched topics the dashboard shows):
 export ROS_DOMAIN_ID=79 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 source /opt/ros/jazzy/setup.bash && source install/setup.bash
 python3 -m pytest src/gap_follow/test/test_gap_follow_intent.py -v

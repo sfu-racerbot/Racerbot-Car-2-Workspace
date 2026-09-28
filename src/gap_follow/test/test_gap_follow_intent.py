@@ -28,6 +28,18 @@ from sensor_msgs.msg import Joy, LaserScan
 from drive_intent import schema
 from gap_follow.gap_follow_node import GapFollowNode
 
+# Every node these tests build publishes its drive commands here, never on
+# the real /drive: with the driver stack up, /drive reaches ackermann_mux
+# and the VESC (it happened on 2026-09-27, battery off). A test that needs
+# the real topic name reads it from the node's own parameter declaration.
+#
+# It goes LAST in every rclpy.init: once any -p precedes --params-file, the
+# YAML's node-keyed values win over every -p (measured on Jazzy, 2026-09-27:
+# see test_test_only_drive_must_come_after_the_params_file), and
+# gap_follow.yaml sets drive_topic: /drive. test_gap_follow_node.py's
+# test_no_test_here_builds_a_node_on_the_real_drive checks every call here.
+TEST_ONLY_DRIVE = ['-p', 'drive_topic:=/test_only/drive']
+
 
 DEADMAN_BUTTON = 4
 
@@ -41,8 +53,9 @@ def node():
                      '-p', 'max_speed:=2.0',
                      # Every scan should produce an intent message, so the
                      # tests below never have to reason about the throttle.
-                     '-p', 'intent_rate_hz:=0.0'])
+                     '-p', 'intent_rate_hz:=0.0', *TEST_ONLY_DRIVE])
     n = GapFollowNode()
+    assert n.drive_pub.topic_name == '/test_only/drive'
     yield n
     n.destroy_node()
     rclpy.shutdown()
@@ -380,8 +393,9 @@ def test_an_expensive_stop_reason_is_computed_at_most_once_per_tick(node):
 # ============================================================================
 
 def test_publish_intent_false_creates_no_publisher_at_all():
-    rclpy.init(args=['--ros-args', '-p', 'publish_intent:=false'])
+    rclpy.init(args=['--ros-args', '-p', 'publish_intent:=false', *TEST_ONLY_DRIVE])
     n = GapFollowNode()
+    assert n.drive_pub.topic_name == '/test_only/drive'
     try:
         assert n.intent_pub is None
         _ready(n)
@@ -393,8 +407,9 @@ def test_publish_intent_false_creates_no_publisher_at_all():
 
 
 def test_the_publish_rate_is_honoured():
-    rclpy.init(args=['--ros-args', '-p', 'intent_rate_hz:=1.0'])
+    rclpy.init(args=['--ros-args', '-p', 'intent_rate_hz:=1.0', *TEST_ONLY_DRIVE])
     n = GapFollowNode()
+    assert n.drive_pub.topic_name == '/test_only/drive'
     try:
         intents = _capture_intent(n)
         _ready(n)
