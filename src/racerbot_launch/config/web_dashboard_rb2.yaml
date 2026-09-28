@@ -1,0 +1,83 @@
+# SFU Racerbot car 2's settings for the web dashboard and its camera stream.
+#
+# The packages themselves live in the src/web_dashboards submodule
+# (sfu-racerbot/web-dashboards, car/ros/) and ship GENERIC defaults: no
+# site allowed, nothing tunable or stoppable, no map folders, LiDAR at
+# base_link. This file is loaded ON TOP of those defaults, so it holds only
+# what car 2 changes. Started with it by:
+#
+#   ros2 launch racerbot_launch dashboard_launch.py          # the dashboard
+#   ros2 launch racerbot_launch realsense_camera_launch.py   # RealSense + camera stream
+#
+# Every key must be one the node actually declares -- a misspelt key here is
+# silently ignored by ROS. test/test_web_dashboard_rb2_config.py checks that,
+# and checks the values below against the files they have to agree with.
+#
+# What each key means: src/web_dashboards/car/docs/web-dashboard.md,
+# "Parameter reference". Car-2 specifics: docs/web-dashboard.md.
+
+web_dashboard_node:
+  ros__parameters:
+    # The site. Exactly scheme://host -- no path, no trailing slash.
+    allowed_origins: ["https://dashboard.sfuracerbot.ca"]
+
+    # Measured 2026-08-24: 0.26 m = the 0.36 m wheelbase less the 0.10 m the
+    # LiDAR sits behind the front axle. Must match the base_link->laser
+    # static transform in f1tenth_stack's *_bringup_launch.py, or the
+    # dashboard draws the scan somewhere the car is not looking
+    # (docs/hardware-reference.md#physical-dimensions-used-in-config).
+    laser_offset_x: 0.26
+
+    # The only nodes the tuning panel will probe or write to, and (parallel)
+    # the file "save" writes each one's tune back to. Both advertise a
+    # live_tunable_spec -- the contract is in
+    # src/web_dashboards/car/docs/web-dashboard.md.
+    tuning_nodes:
+      - pure_pursuit_node
+      - gap_follow_node
+    tuning_config_files:
+      - pure_pursuit/config/pure_pursuit.yaml
+      - gap_follow/config/gap_follow.yaml
+
+    # The only process names the stop panel may end. The actuation path
+    # (ackermann_mux, joy_*, the VESC chain, bringup/teleop launches) is
+    # refused whatever is listed here -- proccontrol.PROTECTED.
+    killable_nodes:
+      # this workspace
+      - pure_pursuit_node
+      - gap_follow_node
+      - auto_map_race_node
+      # racerbot_a / racerbot_b
+      - gap_finder_node
+      - ftg_node
+      - follow_the_gap_node
+      - reactive_node
+      - wall_follow_node
+      - safety_node
+      # racerbot_sim -- a stale one forges LB and fakes a /scan
+      - gym_bridge_node
+      - sim_joy_node
+      # the launches that own the above
+      - pure_pursuit_launch.py
+      - gap_follow_launch.py
+      - auto_map_race_launch.py
+      - sim_launch.py
+
+    # Where this car's tooling writes saved runs: auto_map_race_node's
+    # output_directory, and the simulator's equivalent. The git-tracked demo
+    # maps in src/particle_filter/maps are refused whatever is listed here.
+    map_roots:
+      - ~/.ros/racerbot_auto
+      - ~/.ros/racerbot_sim/auto
+
+    # enable_slam_reset stays at its default (true): its refusal list,
+    # proccontrol.DRIVING_CONTROLLERS, names this car's controllers.
+
+usb_cam_stream_node:
+  ros__parameters:
+    # The RealSense D435i's colour topic, not a V4L2 device:
+    # realsense2_camera_node holds /dev/videoN exclusively
+    # (docs/realsense-camera.md). Needs realsense_camera_launch.py running.
+    image_topic: /camera/camera/color/image_raw
+    # Frames arrive already decoded, so there is no camera JPEG to pass through.
+    passthrough: false

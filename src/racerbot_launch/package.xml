@@ -16,6 +16,9 @@
   <exec_depend>pure_pursuit</exec_depend>
   <exec_depend>race_diagnostics</exec_depend>
   <exec_depend>realsense2_camera</exec_depend>
+  <!-- usb_cam_stream and web_dashboard come from the src/web_dashboards
+       submodule (sfu-racerbot/web-dashboards); this package holds car 2's
+       settings for them, config/web_dashboard_rb2.yaml. -->
   <exec_depend>usb_cam_stream</exec_depend>
   <exec_depend>web_dashboard</exec_depend>
   <exec_depend>urg_node</exec_depend>
@@ -23,7 +26,9 @@
   <!-- slam_launch.py drives slam_toolbox's lifecycle transitions itself. -->
   <exec_depend>lifecycle_msgs</exec_depend>
   <exec_depend>launch_ros</exec_depend>
-  <!-- foxglove_bridge_launch.py: Lichtblick access, docs/foxglove-bridge.md.
+  <!-- foxglove_bridge_launch.py is a TEMPORARY forwarder to web_dashboard's,
+       kept until the foxglove-bridge systemd unit is reinstalled from the
+       submodule (docs/foxglove-bridge.md). Remove both then.
        apt: ros-jazzy-foxglove-bridge -->
   <exec_depend>foxglove_bridge</exec_depend>
 

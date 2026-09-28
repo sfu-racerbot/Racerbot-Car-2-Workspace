@@ -22,3 +22,7 @@
 	path = src/racerbot_b
 	url = https://github.com/sfu-racerbot/racerbot_b.git
 	branch = main
+[submodule "src/web_dashboards"]
+	path = src/web_dashboards
+	url = https://github.com/sfu-racerbot/web-dashboards.git
+	branch = main

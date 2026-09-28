@@ -20,7 +20,9 @@ def generate_launch_description():
     wraps particle_filter's/pure_pursuit's own launch files -- this file
     owns only this car's tuning (as launch arguments) and the
     base_link->camera_link static transform. It also starts the color-topic
-    MJPEG bridge used by browsers and the web dashboard on port 9090.
+    MJPEG stream the web dashboard's camera inset uses, on port 9090:
+    usb_cam_stream (in the src/web_dashboards submodule) with this car's
+    config/web_dashboard_rb2.yaml on top of its generic defaults.
 
     Pointcloud is deliberately off (not needed yet, costs CPU).
     """
@@ -59,8 +61,11 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(
             os.path.join(
                 get_package_share_directory('usb_cam_stream'), 'launch',
-                'realsense_stream_launch.py')
-        )
+                'usb_cam_stream_launch.py')
+        ),
+        launch_arguments={'car_config': os.path.join(
+            get_package_share_directory('racerbot_launch'), 'config',
+            'web_dashboard_rb2.yaml')}.items(),
     )
 
     return LaunchDescription([

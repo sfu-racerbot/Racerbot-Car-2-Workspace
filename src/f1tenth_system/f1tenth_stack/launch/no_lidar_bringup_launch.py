@@ -115,7 +115,7 @@ def generate_launch_description():
         # 0.33 m came from assuming 0.10 m behind the physical NOSE --
         # a different reference point, and 0.07 m too far forward.
         # Keep in step with docs/hardware-reference.md, gap_follow.yaml,
-        # pure_pursuit.yaml, web_dashboard.yaml and racerbot_sim.
+        # pure_pursuit.yaml, racerbot_launch web_dashboard_rb2.yaml and racerbot_sim.
         arguments=['0.26', '0.0', '0.11', '0.0', '0.0', '0.0', 'base_link', 'laser']
     )
 

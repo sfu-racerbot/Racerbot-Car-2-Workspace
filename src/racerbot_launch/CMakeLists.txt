@@ -9,8 +9,8 @@ if(BUILD_TESTING)
   # Config checks that need no ROS at all -- runnable directly too:
   #   python3 -m pytest src/racerbot_launch/test/ -v
   find_package(ament_cmake_pytest REQUIRED)
-  ament_add_pytest_test(test_foxglove_bridge_config
-    test/test_foxglove_bridge_config.py)
+  ament_add_pytest_test(test_web_dashboard_rb2_config
+    test/test_web_dashboard_rb2_config.py)
 endif()
 
 ament_package()

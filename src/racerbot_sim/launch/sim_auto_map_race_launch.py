@@ -9,7 +9,8 @@ runs. The only substitution is the hardware layer underneath.
     ros2 launch racerbot_sim sim_auto_map_race_launch.py \\
         track:=indoor_wide opponents:="12,1.0,0.0;24,0.8,0.0"
 
-Add `dashboard:=true` for the browser view on http://localhost:8080/.
+Add `dashboard:=true` to also start the web dashboard with car 2's settings
+(racerbot_launch dashboard_launch.py); watch it at https://dashboard.sfuracerbot.ca.
 """
 
 import os
@@ -74,8 +75,8 @@ def generate_launch_description():
     )
     dashboard = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
-            get_package_share_directory('web_dashboard'),
-            'launch', 'web_dashboard_launch.py')),
+            get_package_share_directory('racerbot_launch'),
+            'launch', 'dashboard_launch.py')),
         condition=IfCondition(LaunchConfiguration('dashboard')),
     )
 

@@ -23,12 +23,13 @@ def generate_launch_description():
 
     For actual driving/racing, don't use this file -- launch
     bringup_launch.py + a control layer as usual (see docs/operations.md),
-    and web_dashboard_launch.py on its own if you also want the dashboard
+    and dashboard_launch.py on its own if you also want the dashboard
     up alongside them.
 
         ros2 launch racerbot_launch dashboard_test_launch.py
 
-    Then open http://<car-ip>:8080/.
+    Then open https://dashboard.sfuracerbot.ca and pick car 2 -- the car
+    serves no pages itself any more.
     """
     sensors_config = os.path.join(
         get_package_share_directory('f1tenth_stack'), 'config', 'sensors.yaml')
@@ -57,8 +58,8 @@ def generate_launch_description():
     web_dashboard_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
-                get_package_share_directory('web_dashboard'), 'launch',
-                'web_dashboard_launch.py')
+                get_package_share_directory('racerbot_launch'), 'launch',
+                'dashboard_launch.py')
         )
     )
 
