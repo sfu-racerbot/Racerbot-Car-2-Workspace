@@ -269,16 +269,52 @@ def test_spec_json_describes_every_tunable():
         assert entry['kind'] in ('float', 'bool')
 
 
-def test_spec_is_parseable_by_the_dashboard():
-    """The producer and the consumer live in different packages and can
-    only agree through this string."""
-    sys.path.insert(0, os.path.join(PACKAGE_DIR, '..', 'web_dashboard'))
-    from web_dashboard import tuning as dashboard_tuning
+# The dashboard's side of the live_tunable_spec contract lives in another
+# repo now: web_dashboard, in the src/web_dashboards submodule
+# (sfu-racerbot/web-dashboards). The contract is written down in
+# src/web_dashboards/car/docs/web-dashboard.md, "The live_tunable_spec
+# contract"; these two tests are this workspace's half of it, run against
+# the dashboard's real tuning.py.
+DASHBOARD_PACKAGE = os.path.join(
+    PACKAGE_DIR, '..', 'web_dashboards', 'car', 'ros', 'web_dashboard')
 
-    params, error = dashboard_tuning.parse_spec(live_tuning.spec_json(
+
+def _dashboard_tuning():
+    sys.path.insert(0, DASHBOARD_PACKAGE)
+    from web_dashboard import tuning as dashboard_tuning
+    return dashboard_tuning
+
+
+def test_spec_is_parseable_by_the_dashboard():
+    """The producer and the consumer live in different repos and can
+    only agree through this string."""
+    params, error = _dashboard_tuning().parse_spec(live_tuning.spec_json(
         'gap_follow_node', live_tuning.GAP_FOLLOW_TUNABLES))
     assert error is None
-    assert len(params) == len(TUNABLES)
+    assert [p['name'] for p in params] == list(TUNABLES)
+
+
+def test_the_dashboards_save_round_trips_this_nodes_live_config():
+    """"save" rewrites config/gap_follow.yaml, which is mostly comments
+    explaining the numbers. Oracle: invariants -- every comment survives,
+    and no value other than the requested one moves. (The dashboard's own
+    repo checks the same against a snapshot of this file; this checks the
+    file as it is today.)"""
+    path = os.path.join(PACKAGE_DIR, 'config', 'gap_follow.yaml')
+    original = open(path).read()
+    before = yaml.safe_load(original)['gap_follow_node']['ros__parameters']
+    new_speed = round(before['max_speed'] * 0.5, 3)
+    updated, changed, added = _dashboard_tuning().update_yaml_values(
+        original, 'gap_follow_node', {'max_speed': new_speed})
+    assert changed == ['max_speed'] and added == []
+
+    def comments(text):
+        return [line.strip() for line in text.splitlines() if line.strip().startswith('#')]
+
+    assert comments(updated) == comments(original)
+    after = yaml.safe_load(updated)['gap_follow_node']['ros__parameters']
+    assert set(after) == set(before)
+    assert {k: v for k, v in after.items() if before[k] != v} == {'max_speed': new_speed}
 
 
 # ---------------------------------------------------------------------------
