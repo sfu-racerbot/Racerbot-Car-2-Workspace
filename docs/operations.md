@@ -33,6 +33,16 @@ source ~/racerbot-ws/install/setup.bash
 
 **If it doesn't:** if a later `ros2` command says "command not found", or can't find a package you know exists, you missed one of these two lines. There's no way around repeating them; environment settings don't carry between terminals. [Why](concepts.md#why-you-have-to-source-things-and-what-that-means).
 
+### Check the hardware in one command
+
+**Terminal 1** — any sourced terminal; it runs, prints a report and exits:
+
+```bash
+ros2 run racerbot_doctor doctor
+```
+
+**Working when:** the last line reads `0 FAIL`. It's read-only and never moves the car, so it's safe to run any time. Run it again after starting `bringup_launch.py` to also check message rates, VESC faults and battery voltage. Details: [src/racerbot_doctor/README.md](../src/racerbot_doctor/README.md).
+
 ### Safety checklist, every time before powering the drive motor
 
 - [ ] **Wheels off the ground** (car propped up) for the first run of any new code, or after any config change.

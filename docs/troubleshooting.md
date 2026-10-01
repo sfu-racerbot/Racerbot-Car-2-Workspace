@@ -8,6 +8,24 @@ Every entry here is a problem someone actually hit on this car, with the fix and
 
 ---
 
+## Run the doctor first
+
+Before reading anything below, run this.
+
+**Terminal 1** — any sourced terminal:
+
+```bash
+ros2 run racerbot_doctor doctor
+```
+
+**Working when:** the last line reads `0 FAIL`.
+
+**If it doesn't:** each `FAIL` line names the exact broken layer, e.g. "VESC not plugged in" versus "plugged in, but its driver crashed", and has a `fix:` line under it. Start bringup first if you want the ROS side checked too. Full guide: [src/racerbot_doctor/README.md](../src/racerbot_doctor/README.md).
+
+If the doctor is all `PASS` and the car still misbehaves, the problem is above the hardware layer. Find your symptom below.
+
+---
+
 ## Find your symptom
 
 | What you're seeing | Go to |
