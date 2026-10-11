@@ -1,17 +1,17 @@
 # MIT License
-
+#
 # Copyright (c) 2025 Hongrui Zheng
-
+#
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
 # in the Software without restriction, including without limitation the rights
 # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 # copies of the Software, and to permit persons to whom the Software is
 # furnished to do so, subject to the following conditions:
-
+#
 # The above copyright notice and this permission notice shall be included in all
 # copies or substantial portions of the Software.
-
+#
 # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -20,22 +20,22 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from launch import LaunchDescription
-from launch_ros.actions import Node
-from launch.substitutions import Command
-from launch.substitutions import LaunchConfiguration
-from launch.actions import DeclareLaunchArgument
-from launch.actions import IncludeLaunchDescription
-from launch_xml.launch_description_sources import XMLLaunchDescriptionSource
-from ament_index_python.packages import get_package_share_directory
 import os
 
-def generate_launch_description():
-    """The shared foundation layer: hardware drivers + arbitration, no
-    control layer of its own.
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
-    Starts joy_node (raw joystick input -- needed by manual teleop *and*
-    every autonomy node's own LB deadman check), the VESC driver stack,
+
+def generate_launch_description():
+    """
+    Start the shared foundation layer: hardware drivers + arbitration.
+
+    It has no control layer of its own. Starts joy_node (raw joystick
+    input -- needed by manual teleop *and* every autonomy node's own LB
+    deadman check), the VESC driver stack,
     the LiDAR, and ackermann_mux (which arbitrates between whichever
     control layer(s) are publishing to /teleop or /drive). It deliberately
     does NOT start joy_teleop -- that's its own control layer now, see
@@ -113,12 +113,6 @@ def generate_launch_description():
         name='vesc_driver_node',
         parameters=[LaunchConfiguration('vesc_config')]
     )
-    throttle_interpolator_node = Node(
-        package='f1tenth_stack',
-        executable='throttle_interpolator',
-        name='throttle_interpolator',
-        parameters=[LaunchConfiguration('vesc_config')]
-    )
     urg_node = Node(
         package='urg_node',
         executable='urg_node_driver',
@@ -150,7 +144,6 @@ def generate_launch_description():
     ld.add_action(ackermann_to_vesc_node)
     ld.add_action(vesc_to_odom_node)
     ld.add_action(vesc_driver_node)
-    # ld.add_action(throttle_interpolator_node)
     ld.add_action(urg_node)
     ld.add_action(ackermann_mux_node)
     ld.add_action(static_tf_node)

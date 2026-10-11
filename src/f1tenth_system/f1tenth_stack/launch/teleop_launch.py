@@ -8,7 +8,8 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    """The manual-driving control layer: just `joy_teleop`.
+    """
+    Start the manual-driving control layer: just `joy_teleop`.
 
     This is the teleop half of what used to be bundled into
     bringup_launch.py. Run bringup_launch.py first (in its own terminal --

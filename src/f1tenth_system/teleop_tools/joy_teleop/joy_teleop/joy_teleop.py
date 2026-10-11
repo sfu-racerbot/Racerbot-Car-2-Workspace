@@ -85,7 +85,8 @@ class JoyTeleopCommand:
 
         if len(self.buttons) == 0 and len(self.axes) == 0:
             self.buttons = ['default']
-            # raise JoyTeleopException("No buttons or axes configured for command '{}'".format(name))
+            # raise JoyTeleopException(
+            #     "No buttons or axes configured for command '{}'".format(name))
 
         # Used to short-circuit the run command if there aren't enough buttons in the message.
         self.min_button = 0
@@ -118,7 +119,8 @@ class JoyTeleopCommand:
                     self.active |= joy_state.buttons[button] == 1
                 except IndexError:
                     # An index error can occur if this command is configured for multiple buttons
-                    # like (0, 10), but the length of the joystick buttons is only 1.  Ignore these.
+                    # like (0, 10), but the length of the joystick buttons is only 1.
+                    # Ignore these.
                     pass
 
         for axis in self.axes:

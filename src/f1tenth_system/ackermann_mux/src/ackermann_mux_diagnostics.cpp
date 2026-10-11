@@ -34,11 +34,12 @@
  */
 
 #include <ackermann_mux/ackermann_mux_diagnostics.hpp>
+
+#include <memory>
+
 #include <ackermann_mux/ackermann_mux_diagnostics_status.hpp>
 
 #include <diagnostic_updater/diagnostic_updater.hpp>
-
-#include <memory>
 
 namespace ackermann_mux
 {
