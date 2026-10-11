@@ -42,8 +42,19 @@ source install/setup.bash
 
 **Working when:** `colcon` ends with `2 packages finished` and no `Failed`.
 
-**If it doesn't:** `Package 'libxwiimote' not found` means the `apt install`
-line did not finish; run it again.
+**If it doesn't:**
+
+- `Package 'libxwiimote' not found`: the `apt install` line did not finish;
+  run it again.
+- `CMake Error: The source ... does not match the source ... used to generate
+  cache`: an old build of the driver from its previous folder
+  (`src/racerbot_wiimote_driver`) is in the way. Move that old folder out of
+  `src/` if it is still there, delete the stale build, and build again:
+
+  ```bash
+  mv ~/racerbot-ws/src/racerbot_wiimote_driver ~/old_wiimote_clone 2>/dev/null
+  rm -rf ~/racerbot-ws/build/racerbot_wiimote_* ~/racerbot-ws/install/racerbot_wiimote_*
+  ```
 
 Let your account read the Wiimote's input device. Log out and back in
 afterwards; group changes only apply to new logins.
