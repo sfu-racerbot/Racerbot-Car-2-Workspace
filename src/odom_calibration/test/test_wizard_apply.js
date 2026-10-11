@@ -170,6 +170,16 @@ const done = kind => ({id: kind, kind, accepted: true, summary: {servo: {median:
   assert.ok(refused.element("wizard-view").innerHTML.includes("No offset suggested: it would move the offset by 0.140"));
   assert.equal(refused.element("wizard-view").innerHTML.includes("applyCentreOffset()"), false);
 
+  // After the car runs the new offset, the old run's suggestion is history:
+  // the card asks for another run and offers no write.
+  const stale = browser();
+  stale.snapshot({trials: [done("steering_sweep"), done("steering_drift")]}, {centre_offset: {
+    suggested_offset: null, current_offset: 0.5734, drift_angle_rad: null, straight: false,
+    stale: true, blocked: "recorded with offset 0.5904", run_count: 1}});
+  await stale.sandbox.goToStep("steering_drift");
+  assert.ok(stale.element("wizard-view").innerHTML.includes("Record another drive-straight run"));
+  assert.equal(stale.element("wizard-view").innerHTML.includes("applyCentreOffset()"), false);
+
   // After a write, every test page says bringup must restart until it has.
   const waiting = browser();
   waiting.snapshot({trials: [done("steering_sweep")], applied_changes: [{

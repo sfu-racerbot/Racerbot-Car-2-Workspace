@@ -536,8 +536,19 @@ def centre_offset_suggestion(session, drift_angle_fn):
         'drift_angle_rad': None,
         'straight': False,
         'blocked': None,
+        'stale': False,
         'run_count': len(drifts),
     }
+    # A run recorded under an older offset says nothing about the current
+    # one: after writing a new offset, the next step is another run.
+    recorded = parameters.get('steering_angle_to_servo_offset')
+    if _finite(recorded) and _finite(current) and abs(recorded - current) > 1e-9:
+        result['stale'] = True
+        result['blocked'] = (
+            f'the latest drive-straight run was recorded with offset '
+            f'{recorded:.4f}, but the car now uses {current:.4f}; record '
+            'another drive-straight run to check the new offset')
+        return result
     if (stats.get('count') or 0) and stats['count'] < 10 and 'servo_active' in summary:
         result['blocked'] = 'too few servo samples while driving; re-record'
         return result

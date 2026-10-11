@@ -1,0 +1,35 @@
+# joy_teleop profile for the Wiimote, used by wiimote_teleop_launch.py.
+# Same shape as f1tenth_stack's joy_teleop.yaml, read from /wiimote/joy.
+wiimote_teleop:
+  ros__parameters:
+    # Nothing held. The driver zeroes every button unless "2" is held, so
+    # letting go of "2" lands here and commands an active stop.
+    default:
+      type: topic
+      interface_type: ackermann_msgs/msg/AckermannDriveStamped
+      topic_name: teleop
+      axis_mappings:
+        drive-speed:
+          axis: 1
+          scale: 0.0
+          offset: 0.0
+        drive-steering_angle:
+          axis: 0
+          scale: 0.0
+          offset: 0.0
+
+    # "2" held: A drives forward, B reverses, tilt steers.
+    human_control:
+      type: topic
+      interface_type: ackermann_msgs/msg/AckermannDriveStamped
+      topic_name: teleop
+      deadman_buttons: [4]
+      axis_mappings:
+        drive-speed:
+          axis: 1
+          scale: 1.0      # m/s while A is held (-1.0 m/s with B); the F710 tops out at 5.0
+          offset: 0.0
+        drive-steering_angle:
+          axis: 0
+          scale: 0.34     # rad at full tilt, the same as the F710's full stick
+          offset: 0.0

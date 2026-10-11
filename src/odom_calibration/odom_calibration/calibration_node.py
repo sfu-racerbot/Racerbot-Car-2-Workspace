@@ -1081,6 +1081,13 @@ def _spin_node(node):
         rclpy.spin(node)
     except ExternalShutdownException:
         pass
+    finally:
+        # rclpy turns Ctrl+C and SIGTERM into a ROS shutdown, which ends this
+        # spin but not the web loop in the main thread. Without this the page
+        # stayed up, its port taken, with no ROS behind it (found 2026-10-11).
+        loop = node._loop
+        if loop is not None:
+            loop.add_callback(loop.stop)
 
 
 def main(args=None):
@@ -1096,6 +1103,12 @@ def main(args=None):
 
     web_directory = os.path.join(
         get_package_share_directory('odom_calibration'), 'web')
+    # With `colcon build --symlink-install` every installed web file is a
+    # symlink into build/ (and on into src/). Tornado 6.5 refuses to serve a
+    # symlink that leaves the served folder (403), so serve the folder the
+    # files really live in. A plain install resolves to itself.
+    web_directory = os.path.dirname(
+        os.path.realpath(os.path.join(web_directory, 'index.html')))
     application = tornado.web.Application([
         (r'/', tornado.web.RedirectHandler, {'url': '/index.html'}),
         (r'/api/state', StateHandler, {'node': node}),
@@ -1108,7 +1121,18 @@ def main(args=None):
             {'path': web_directory, 'default_filename': 'index.html'},
         ),
     ])
-    application.listen(node.port, address=node.host)
+    try:
+        application.listen(node.port, address=node.host)
+    except OSError as exc:
+        node.get_logger().fatal(
+            f'Cannot open the wizard web page on port {node.port}: {exc}. '
+            'Another calibration wizard is probably still running; stop it '
+            '(Ctrl+C in its terminal, or `pkill -f calibration_node`) and '
+            'try again, or set a different port in odom_calibration.yaml.')
+        node.destroy_node()
+        rclpy.shutdown()
+        spin_thread.join(timeout=2.0)
+        raise SystemExit(1) from exc
     loop = tornado.ioloop.IOLoop.current()
     node._loop = loop
     node.get_logger().info(

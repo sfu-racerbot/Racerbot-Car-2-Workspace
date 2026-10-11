@@ -1099,7 +1099,9 @@ function renderCentreCard(session) {
   const drift = finite(angle)
     ? `${Math.abs(angle * 180 / Math.PI).toFixed(2)}° ${angle >= 0 ? "left" : "right"}` : "not available";
   let body;
-  if (centre.blocked) {
+  if (centre.stale) {
+    body = `<p class="tip">The car now uses offset ${fmt(centre.current_offset, 4)}. Record another drive-straight run to see whether it drives straight.</p>`;
+  } else if (centre.blocked) {
     body = `<p class="warning-banner">No offset suggested: ${escapeHtml(centre.blocked)}.</p>`;
   } else if (centre.straight) {
     body = `<p class="done-banner"><span aria-hidden="true">✓</span> The car drives straight (within 0.14°). The centre offset is done.</p>`;

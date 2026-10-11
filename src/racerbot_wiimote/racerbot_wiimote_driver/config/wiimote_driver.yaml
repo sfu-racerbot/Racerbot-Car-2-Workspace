@@ -1,0 +1,31 @@
+wiimote_driver_node:
+  ros__parameters:
+    # Its own topic, never /joy: autonomy nodes take their LB deadman from
+    # the F710 on /joy, and a Wiimote must not stand in for it.
+    joy_topic: /wiimote/joy
+    raw_mode: false
+    poll_period_ms: 10
+    # Try to (re)connect this often while no Wiimote is connected.
+    reconnect_period_s: 1.0
+    battery_period_s: 5.0
+    # No event for this long = the link stalled: publish "nothing held".
+    input_timeout_s: 0.5
+
+    # Joy layout. "2" sits at index 4, like the F710's LB, so the teleop
+    # profile reads the same way as joy_teleop.yaml.
+    steering_axis_index: 0
+    throttle_axis_index: 1
+    accelerate_button_index: 1
+    brake_button_index: 2
+    deadman_button_index: 4
+
+    # Tilt steering (Wii Wheel). Hold the Wiimote sideways, buttons up; read
+    # /wiimote/accel at centre, full left and full right and put the y values
+    # here. If tilting left turns the wheels right, set invert to true.
+    accelerometer_y_min: -100.0
+    accelerometer_y_center: 0.0
+    accelerometer_y_max: 100.0
+    invert_accelerometer_y: false
+    accelerometer_filter_alpha: 0.2
+    accelerometer_activation_threshold: 0.12
+    accelerometer_release_threshold: 0.08

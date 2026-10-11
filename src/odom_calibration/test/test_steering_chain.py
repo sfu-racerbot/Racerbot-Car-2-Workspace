@@ -417,3 +417,13 @@ def test_a_range_check_from_before_an_offset_change_says_so():
     session['vehicle']['servo_max'] = 0.9
     stale = steering_chain.diagnose_session(session)
     assert stale['stale'] is True and 'servo limits' in stale['summary']
+
+
+def test_a_drift_run_from_before_an_offset_change_suggests_nothing():
+    session, _ = _drift_session(0.5734)
+    session['current_parameters']['steering_angle_to_servo_offset'] = 0.5734
+    result = steering_chain.centre_offset_suggestion(
+        session, calibration_math.drift_steering_angle)
+    assert result['stale'] is True
+    assert result['suggested_offset'] is None
+    assert 'recorded with offset 0.5904, but the car now uses 0.5734' in result['blocked']

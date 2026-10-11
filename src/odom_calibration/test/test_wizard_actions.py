@@ -144,3 +144,10 @@ def test_undone_change_needs_no_restart_notice():
                                     'restored': True}]}
     assert wizard_actions.pending_restart(
         session, {'steering_angle_to_servo_offset': 0.5904}) == []
+
+
+def test_centre_update_refuses_a_run_recorded_under_an_older_offset():
+    session = _drift_session(0.5904, 0.2)
+    session['current_parameters']['steering_angle_to_servo_offset'] = 0.5734
+    with pytest.raises(ValueError, match='record another drive-straight run'):
+        wizard_actions.centre_updates(session, LIMITS)

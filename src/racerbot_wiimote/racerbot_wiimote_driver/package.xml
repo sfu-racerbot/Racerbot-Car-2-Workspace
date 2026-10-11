@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>racerbot_wiimote_driver</name>
+  <version>0.1.0</version>
+  <description>Nintendo Wiimote as a ROS 2 joystick (sensor_msgs/Joy on /wiimote/joy) plus raw button, battery and accelerometer topics, and a Wiimote teleop control layer.</description>
+  <maintainer email="sfuracerbot@gmail.com">racerbotcar-2</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>racerbot_wiimote_msgs</depend>
+  <build_depend>pkg-config</build_depend>
+  <!-- libxwiimote-dev, xwiimote and bluez come from apt (docs/wiimote.md):
+       they have no rosdep keys, and an unknown key fails `rosdep install`
+       for the whole workspace. -->
+
+  <exec_depend>joy_teleop</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

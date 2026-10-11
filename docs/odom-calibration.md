@@ -105,6 +105,15 @@ only picks them up after bringup is restarted; until then every test page
 shows a **Restart bringup** banner. The backups are in
 `~/.ros/odom_calibration/backups/`, outside git.
 
+## How it was tested
+
+`tools/odom_calibration_e2e/run_e2e.py` runs the wizard against the car's
+real VESC conversion nodes, `ackermann_mux` and `joy_teleop`, with only the
+hardware simulated. It checks that the wizard recovers a simulated car's true
+steering and wheel values, names the right cause of uneven steering, and that
+writes, undo and bringup restarts all work. See
+[its README](../tools/odom_calibration_e2e/README.md).
+
 ## Using it on another car
 
 Everything specific to one car is in
@@ -118,3 +127,6 @@ from the running nodes every 2 seconds: speed values from
 `servo_min`/`servo_max` from `vesc_driver_node`. Run the steering range check
 first on a new car: it catches a clamp or linkage problem before you spend
 time on circles.
+
+To start the wizard with another settings file:
+`ros2 launch odom_calibration odom_calibration_launch.py config:=/path/to/file.yaml`.

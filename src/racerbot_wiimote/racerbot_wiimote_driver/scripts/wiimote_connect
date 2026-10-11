@@ -1,0 +1,193 @@
+#!/usr/bin/env bash
+# Pair, trust and connect a Nintendo Wiimote, and keep it connected.
+#
+#   wiimote_connect            check everything, then connect (pair first if new)
+#   wiimote_connect --check    only report what is and isn't ready
+#   wiimote_connect --watch    keep reconnecting known Wiimotes (for systemd)
+#   wiimote_connect --install-service   auto-connect at boot (asks for sudo)
+#
+# Run through ROS:  ros2 run racerbot_wiimote_driver wiimote_connect
+# Full guide: docs/wiimote.md in the racerbot workspace.
+set -u
+
+NAME_PATTERN='Nintendo RVL-'   # RVL-CNT-01 (Wiimote) and RVL-CNT-01-TR (Plus)
+SCAN_SECONDS="${WIIMOTE_SCAN_SECONDS:-20}"
+WATCH_PERIOD="${WIIMOTE_WATCH_PERIOD:-3}"
+SERVICE_PATH=/etc/systemd/system/wiimote-autoconnect.service
+
+ok()   { printf '  [ ok ] %s\n' "$*"; }
+bad()  { printf '  [FAIL] %s\n' "$*"; }
+warn() { printf '  [warn] %s\n' "$*"; }
+say()  { printf '%s\n' "$*"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# MAC addresses of known Nintendo controllers. $1 = "" (all known), or a
+# bluetoothctl filter such as Paired / Trusted / Connected.
+known_wiimotes() {
+  bluetoothctl devices ${1:+"$1"} 2>/dev/null \
+    | awk -v pat="$NAME_PATTERN" '$1 == "Device" && index($0, pat) { print $2 }'
+}
+
+is_connected() {
+  bluetoothctl info "$1" 2>/dev/null | grep -q 'Connected: yes'
+}
+
+check() {
+  local failed=0
+  say "Checking the Wiimote setup on this computer:"
+  if ! have bluetoothctl; then
+    bad "bluetoothctl missing. Fix: sudo apt install bluez"
+    return 1
+  fi
+  if systemctl is-active --quiet bluetooth 2>/dev/null; then
+    ok "Bluetooth service running"
+  else
+    bad "Bluetooth service not running. Fix: sudo systemctl enable --now bluetooth"
+    failed=1
+  fi
+  if bluetoothctl show 2>/dev/null | grep -q 'Powered: yes'; then
+    ok "Bluetooth adapter powered on"
+  elif bluetoothctl show 2>/dev/null | grep -q 'Controller'; then
+    warn "Bluetooth adapter is off; turning it on"
+    bluetoothctl power on >/dev/null 2>&1 || { bad "could not power on the adapter"; failed=1; }
+  else
+    bad "No Bluetooth adapter found (is a USB dongle plugged in? \`rfkill list\` shows blocks)"
+    failed=1
+  fi
+  if [ -d /sys/module/hid_wiimote ] || modprobe -n hid-wiimote >/dev/null 2>&1; then
+    [ -d /sys/module/hid_wiimote ] || sudo -n modprobe hid-wiimote 2>/dev/null
+    if [ -d /sys/module/hid_wiimote ]; then
+      ok "hid-wiimote kernel driver loaded"
+    else
+      warn "hid-wiimote exists but is not loaded. Fix: sudo modprobe hid-wiimote"
+    fi
+  else
+    bad "hid-wiimote kernel driver missing (Jetson kernels leave it out). The" \
+      "Wiimote will connect but keep flashing. Fix: docs/wiimote.md, 'Build the kernel driver'"
+    failed=1
+  fi
+  if have xwiishow || [ -e /usr/include/xwiimote.h ]; then
+    ok "xwiimote installed"
+  else
+    bad "xwiimote missing. Fix: sudo apt install xwiimote libxwiimote-dev"
+    failed=1
+  fi
+  if id -nG "$(id -un)" | tr ' ' '\n' | grep -qx input; then
+    ok "user $(id -un) is in the input group"
+  else
+    warn "user $(id -un) is not in the input group: the driver may get error -13." \
+      "Fix: sudo usermod -aG input $(id -un), then log out and back in"
+  fi
+  local mac
+  for mac in $(known_wiimotes); do
+    local info
+    info=$(bluetoothctl info "$mac" 2>/dev/null)
+    printf '  [info] Wiimote %s: paired=%s trusted=%s connected=%s\n' "$mac" \
+      "$(grep -oP 'Paired: \K\w+' <<<"$info")" \
+      "$(grep -oP 'Trusted: \K\w+' <<<"$info")" \
+      "$(grep -oP 'Connected: \K\w+' <<<"$info")"
+  done
+  return $failed
+}
+
+connect_known() {
+  local mac any=1
+  for mac in $(known_wiimotes Paired); do
+    any=0
+    if is_connected "$mac"; then
+      say "Wiimote $mac is connected."
+      return 0
+    fi
+    bluetoothctl trust "$mac" >/dev/null 2>&1
+    if bluetoothctl connect "$mac" >/dev/null 2>&1 && is_connected "$mac"; then
+      say "Connected to Wiimote $mac."
+      return 0
+    fi
+  done
+  return $((any ? 2 : 1))
+}
+
+pair_new() {
+  say ""
+  say "Pairing a new Wiimote:"
+  say "  1. Open the battery cover and press the small red SYNC button once."
+  say "     (Pressing 1 and 2 together also works, but then it will not"
+  say "     reconnect by itself later.) The four blue LEDs start flashing."
+  say "  2. Searching for ${SCAN_SECONDS} s..."
+  bluetoothctl --timeout "$SCAN_SECONDS" scan on >/dev/null 2>&1
+  local mac
+  mac=$(known_wiimotes | while read -r m; do
+    bluetoothctl info "$m" 2>/dev/null | grep -q 'Paired: yes' || echo "$m"
+  done | head -n1)
+  if [ -z "$mac" ]; then
+    bad "No Wiimote found. Press SYNC again (LEDs must be flashing) and rerun."
+    return 1
+  fi
+  say "  3. Found $mac. Pairing, trusting and connecting..."
+  bluetoothctl pair "$mac" >/dev/null 2>&1 || warn "pair reported an error (often harmless for Wiimotes)"
+  bluetoothctl trust "$mac" >/dev/null 2>&1
+  bluetoothctl connect "$mac" >/dev/null 2>&1
+  if is_connected "$mac"; then
+    ok "Wiimote $mac connected. Player-1 LED should go solid once the driver starts."
+    return 0
+  fi
+  bad "Wiimote $mac paired but did not connect. Press any button on it and run this again."
+  return 1
+}
+
+watch_loop() {
+  say "Keeping known Wiimotes connected (every ${WATCH_PERIOD} s). Ctrl+C to stop."
+  bluetoothctl power on >/dev/null 2>&1
+  while true; do
+    local mac
+    for mac in $(known_wiimotes Trusted); do
+      if ! is_connected "$mac"; then
+        # Succeeds only while the Wiimote is awake (a button was pressed);
+        # a sleeping Wiimote cannot be woken from the car.
+        bluetoothctl connect "$mac" >/dev/null 2>&1 && say "$(date +%T) reconnected $mac"
+      fi
+    done
+    sleep "$WATCH_PERIOD"
+  done
+}
+
+install_service() {
+  local self
+  self=$(readlink -f "$0")
+  say "Installing $SERVICE_PATH (runs: $self --watch)"
+  sudo tee "$SERVICE_PATH" >/dev/null <<EOF
+[Unit]
+Description=Keep paired Nintendo Wiimotes connected
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+ExecStart=$self --watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  sudo systemctl daemon-reload && sudo systemctl enable --now wiimote-autoconnect.service \
+    && ok "wiimote-autoconnect enabled. Check it with: systemctl status wiimote-autoconnect"
+}
+
+case "${1:-}" in
+  --check) check; exit $? ;;
+  --watch) watch_loop ;;
+  --install-service) install_service ;;
+  -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+  "")
+    check || say "Fix the [FAIL] lines above first."
+    say ""
+    connect_known
+    case $? in
+      0) exit 0 ;;
+      1) say "Known Wiimote is asleep: press any button on it, then run this again." \
+           "If it still will not connect, it was paired with 1+2; pair it again with SYNC." ;;
+    esac
+    pair_new ;;
+  *) say "Unknown option $1 (try --help)"; exit 2 ;;
+esac
