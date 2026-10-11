@@ -9,7 +9,8 @@
 
 - A browser wizard at `http://<car-ip>:8090/`. You drive the car with the physical remote. The page only records.
 - **Wheel calibration**: a stationary baseline plus 5–10 m tape-measured distance runs. Three runs are recommended (two forward, one reverse).
-- **Steering calibration**: a straight-line drift run plus full-lock left and right circles. One full-lock circle per side is required before the report.
+- **Steering calibration**: a straight-line drift run plus full-lock left and right half circles. All three are required before the report unlocks.
+- Every test is its own numbered step in the left sidebar. Do them top to bottom. Each step has a setup diagram, and each measuring screen has a lettered diagram (A, B, C) that matches the input boxes.
 - The report suggests new values but writes nothing itself. You copy them into `vesc.yaml` by hand.
 - The wizard creates no ROS publishers. Captures stop by themselves at five minutes.
 - Limits: a tape measure cannot see tire slip, surface changes, tire wear, battery state, or drivetrain backlash.

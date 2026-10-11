@@ -18,5 +18,9 @@ def generate_launch_description():
             name='odom_calibration_node',
             output='screen',
             parameters=[config_path],
+            # The read-only wizard may run under a different Linux account
+            # from bringup. Fast DDS shared memory cannot cross that account
+            # boundary; UDP keeps discovery and telemetry working for both.
+            additional_env={'FASTDDS_BUILTIN_TRANSPORTS': 'UDPv4'},
         ),
     ])

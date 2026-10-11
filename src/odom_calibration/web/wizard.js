@@ -5,9 +5,16 @@ const app = {
   connected: false,
   socket: null,
   reconnectTimer: null,
-  wheelSelected: true,
-  steeringSelected: true,
+  setupMode: "movement_steering",
+  choosingMode: false,
+  setupParameters: null,
+  // The server has one "steering" stage; the page tracks which of its three
+  // tests is open so each one can be its own sidebar step.
   steeringTest: "steering_drift",
+  steeringSession: null,
+  circleMethod: "rear_tires",
+  halfLockNext: false,
+  navHtml: null,
 };
 
 const MODE_STAGES = {
@@ -16,11 +23,76 @@ const MODE_STAGES = {
   steering: ["preflight", "steering", "report"],
 };
 
-const STEERING_TESTS = [
-  ["steering_drift", "Straight-line drift"],
-  ["steering_left", "Left circle"],
-  ["steering_right", "Right circle"],
-];
+const STEERING_STEPS = ["steering_drift", "steering_left", "steering_right"];
+
+// Every step in the sidebar. A step's id equals the capture kind it records.
+const STEPS = {
+  preflight: {stage: "preflight", label: "Check the car"},
+  stationary: {
+    stage: "stationary", kind: "stationary", group: "Wheels", label: "Stand still", need: 1,
+    finds: "The motor's reading when the car is perfectly still. The wizard subtracts it from every distance run.",
+    phases: ["Hands off", "Record", "Wait 5 s", "Stop", "Accept"],
+    steps: [
+      "Put the car on the floor. Release LB and leave both sticks centred.",
+      "Press <strong>Record</strong>.",
+      "Wait 5 seconds. Do not touch the car or the remote.",
+      "Press <strong>Stop</strong>, then <strong>Accept run</strong>. There is nothing to measure.",
+    ],
+    during: "Keep your hands off the car and the remote. Press Stop after 5 seconds.",
+  },
+  movement: {
+    stage: "movement", kind: "movement", group: "Wheels", label: "Distance runs", need: 2, best: 3,
+    finds: "How far the car really travels compared with how far it thinks it went. Fixes a car that counts 4.6 m for a 5 m lane.",
+    phases: ["Mark start", "Record", "Drive", "Stop", "Measure"],
+    steps: [
+      "Lay a straight lane 5 to 10 m long and put a tape mark across the start.",
+      "Park the car so the <strong>middle of the rear axle</strong> (the red dot in the picture, halfway between the rear wheels) is right over the start mark.",
+      "Press <strong>Record</strong> before the car moves.",
+      "Hold LB and drive slowly and smoothly straight down the lane.",
+      "Stop near the end, release LB, then press <strong>Stop</strong>.",
+      "Measure <strong>A</strong>: from the start mark to the middle of the rear axle.",
+    ],
+    tip: "Do three runs: two forward and one in reverse. For the reverse run, start at the far end and drive backwards. You pick Forward or Reverse when you enter the distance.",
+    during: "Hold LB and drive smoothly down the lane. Stop, release LB, then press Stop.",
+  },
+  steering_drift: {
+    stage: "steering", kind: "steering_drift", group: "Steering", label: "Drive straight", need: 1,
+    finds: "The servo value where the car truly drives straight. Fixes a car that pulls to one side with the stick centred.",
+    phases: ["Line up", "Record", "Drive", "Stop", "Measure"],
+    steps: [
+      "Stick a straight tape line at least 6 m long on the floor.",
+      "Put the <strong>middle of the rear axle</strong> (red dot) on the start of the line, with the car pointing exactly along it. Take your time: 1° off adds about 9 cm of error over 5 m.",
+      "Press <strong>Record</strong>.",
+      "Hold LB and drive slowly about 5 m forward. <strong>Do not touch the steering stick.</strong>",
+      "Stop, release LB, then press <strong>Stop</strong>.",
+      "Measure <strong>A</strong>, how far along the line the rear axle got, and <strong>B</strong>, the sideways gap from the line to the rear axle. Note whether the car ended left or right of the line.",
+    ],
+    tip: "Ending a few centimetres to one side is normal. That drift is exactly what this test measures.",
+    during: "Hold LB and drive about 5 m. Hands off the steering stick. Stop, release LB, then press Stop.",
+  },
+  steering_left: circleStep("left"),
+  steering_right: circleStep("right"),
+  report: {stage: "report", label: "Report"},
+};
+
+function circleStep(side) {
+  return {
+    stage: "steering", kind: `steering_${side}`, group: "Steering",
+    label: `${side === "left" ? "Left" : "Right"} circle`, need: 1, side,
+    finds: `How far the wheels really turn at full ${side} lock. This sets how sharp the car turns when a node asks for a ${side} turn.`,
+    phases: ["Mark tires", "Record", "Half circle", "Stop", "Measure"],
+    steps: [
+      `Park in open space with about 4 m × 4 m clear, mostly to the car's ${side}.`,
+      "Put a small tape mark on the floor <strong>right behind the middle of each rear tire</strong>.",
+      "Press <strong>Record</strong>.",
+      `Hold LB, push the steering stick <strong>fully ${side}</strong> and keep it there. Drive slowly until the car has turned half a circle and points back the way it came.`,
+      "Stop, release LB, then press <strong>Stop</strong>.",
+      "Put a second mark behind the middle of each rear tire. Measure across the circle: <strong>A</strong> between the two inner-tire marks and <strong>B</strong> between the two outer-tire marks.",
+    ],
+    tip: `The inner tire is the ${side} rear tire, the one closer to the middle of the circle.`,
+    during: `Hold LB with the stick fully ${side}. Stop once the car points back the way it came (about 0.50 turns below), release LB, then press Stop.`,
+  };
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -118,13 +190,19 @@ function updateSnapshot(snapshot) {
   const previousKey = renderKey(app.snapshot);
   app.snapshot = snapshot;
   app.connected = true;
+  const session = snapshot.session;
+  if (session && session.session_id !== app.steeringSession) {
+    // A restored or new session opens on its first unfinished steering test.
+    app.steeringSession = session.session_id;
+    app.steeringTest = STEERING_STEPS.find(id => !stepDone(session, id)) || STEERING_STEPS[0];
+  }
   renderConnection();
   renderNav();
   renderTelemetry();
   const nextKey = renderKey(snapshot);
   if (
     previousKey !== nextKey ||
-    snapshot.session?.stage === "preflight" ||
+    (snapshot.session?.stage === "preflight" && !app.choosingMode) ||
     !document.getElementById("wizard-view")?.dataset.rendered
   ) {
     renderWizardView();
@@ -188,6 +266,52 @@ function fullLockCounts(session) {
   return counts;
 }
 
+function sessionSteps(session) {
+  const ids = ["preflight"];
+  if (hasWheel(session)) ids.push("stationary", "movement");
+  if (hasSteering(session)) ids.push(...STEERING_STEPS);
+  ids.push("report");
+  return ids;
+}
+
+// Runs that count toward a step: half-lock circles are extras, not the test.
+function stepRunCount(session, id) {
+  if (id === "steering_left" || id === "steering_right") return fullLockCounts(session)[id];
+  return trialCounts(session)[id] || 0;
+}
+
+function stepDone(session, id) {
+  if (id === "preflight") return session.stage !== "preflight" || (session.trials || []).length > 0;
+  if (id === "report") return Boolean(session.report);
+  return stepRunCount(session, id) >= STEPS[id].need;
+}
+
+// Test steps still missing before the report may be generated.
+function remainingSteps(session) {
+  return sessionSteps(session).filter(id => STEPS[id].kind && !stepDone(session, id));
+}
+
+function reportLocked(session) {
+  return remainingSteps(session).length > 0 && !session.report;
+}
+
+function currentStepId(session) {
+  return session.stage === "steering" ? app.steeringTest : session.stage;
+}
+
+function groupPosition(session, id) {
+  const group = STEPS[id].group;
+  if (!group) return null;
+  const members = sessionSteps(session).filter(item => STEPS[item].group === group);
+  return {group, index: members.indexOf(id) + 1, total: members.length};
+}
+
+function nextStepId(session, id) {
+  const ids = sessionSteps(session);
+  const after = ids.slice(ids.indexOf(id) + 1);
+  return after.find(item => !stepDone(session, item)) || "report";
+}
+
 function currentParams() {
   return app.snapshot?.session?.current_parameters || {};
 }
@@ -206,17 +330,37 @@ function renderConnection() {
   if (text) text.textContent = app.connected ? "Connected" : "Reconnecting…";
 }
 
-function railButton(stage, label, plateText, active, done) {
-  return `<button class="step-button ${active ? "active" : ""}" type="button" onclick="setStage('${stage}')">
-    <span class="race-plate ${done ? "done" : ""}">${done ? "done" : escapeHtml(plateText)}</span>
-    <span>${escapeHtml(label)}</span>
-  </button>`;
+const CALIBRATION_MODES = [
+  {value: "steering", label: "Steering calibration", short: "Steering", detail: "3 tests: drive straight, then one left and one right full-lock circle. Fixes a car that pulls to one side or turns too sharply or too gently. About 15 minutes."},
+  {value: "movement", label: "Wheel calibration", short: "Wheels", detail: "2 tests: stand still for 5 seconds, then 2 or 3 measured distance runs. Fixes a car that reports the wrong distance. About 15 minutes."},
+  {value: "movement_steering", label: "Both calibrations", short: "Wheels + steering", detail: "All 5 tests in one session: the wheel tests first, then the steering tests. About 30 minutes."},
+];
+
+function stepStatus(session, id, active, locked) {
+  if (locked) {
+    const left = remainingSteps(session).length;
+    return `Locked · ${left} test${left === 1 ? "" : "s"} left`;
+  }
+  const def = STEPS[id];
+  const runs = def.kind ? stepRunCount(session, id) : 0;
+  const runText = def.best ? `${runs} of ${def.best} runs` : `${runs} run${runs === 1 ? "" : "s"}`;
+  if (stepDone(session, id)) return def.kind ? `Done · ${runText}` : "Done";
+  if (active) return "You are here";
+  if (def.best) return `Required · ${def.need} runs, ${def.best} best`;
+  return def.kind ? "Required" : "";
 }
 
-function railGroup(heading, inner) {
-  return `<div class="rail-group"><h2 class="rail-group-heading">${escapeHtml(heading)}</h2>
-    <div class="rail-rule" aria-hidden="true"><span></span><span></span><span></span></div>
-    ${inner}</div>`;
+function railButton(session, id, number, active, disabled, locked) {
+  const def = STEPS[id];
+  const done = stepDone(session, id);
+  const position = groupPosition(session, id);
+  return `<li><button class="step-button ${active ? "active" : ""} ${done ? "complete" : ""} ${locked ? "locked" : ""}" type="button"
+      data-step="${id}" ${active ? 'aria-current="step"' : ""} ${disabled ? "disabled" : ""} onclick="goToStep('${id}')">
+    <span class="step-number" aria-hidden="true">${done ? "✓" : locked ? "🔒" : number}</span>
+    <span class="step-copy">${position ? `<span class="step-group">${escapeHtml(position.group)} ${position.index} of ${position.total}</span>` : ""}
+      <span class="step-label">${escapeHtml(def.label)}</span>
+      <span class="step-detail">${escapeHtml(stepStatus(session, id, active, locked))}</span></span>
+  </button></li>`;
 }
 
 function renderNav() {
@@ -224,31 +368,36 @@ function renderNav() {
   const button = document.getElementById("new-session-button");
   const session = app.snapshot?.session;
   button.hidden = !session;
+  button.disabled = Boolean(session?.active_capture) || app.choosingMode;
+  button.textContent = "Change calibration";
   if (!nav) return;
-  if (!session) {
-    nav.innerHTML = `<button class="step-button active" type="button">
-      <span class="race-plate"></span><span>Setup</span>
-    </button>`;
+  if (!session || app.choosingMode) {
+    nav.innerHTML = `<div class="rail-heading">Calibration setup</div>
+      <p class="rail-description">Choose steering, wheels, or both. Each test then appears here as its own step, in the order to do them.</p>`;
+    app.navHtml = null;
     return;
   }
-  const counts = trialCounts(session);
-  const full = fullLockCounts(session);
-  const stage = session.stage;
-  const preflightDone = stage !== "preflight";
-  const steeringDone = full.steering_left >= 1 && full.steering_right >= 1;
-  const reportDone = Boolean(session.report);
-  let html = railButton("preflight", "Preflight", "", stage === "preflight", preflightDone);
-  if (hasWheel(session)) {
-    html += railGroup("Wheel calibration",
-      railButton("stationary", "Stationary baseline", "1", stage === "stationary", counts.stationary >= 1) +
-      railButton("movement", "Distance runs", "2", stage === "movement", counts.movement >= 2));
-  }
-  if (hasSteering(session)) {
-    html += railGroup("Steering calibration",
-      railButton("steering", "Steering tests", "1", stage === "steering", steeringDone));
-  }
-  html += railButton("report", "Report", "", stage === "report", reportDone);
+  const busy = Boolean(session.active_capture || session.pending_capture);
+  const current = currentStepId(session);
+  const mode = CALIBRATION_MODES.find(item => item.value === session.mode);
+  const html = `<div class="rail-session"><span class="rail-caption">Selected calibration</span>
+      <strong>${escapeHtml(mode?.short || session.mode)}</strong>
+      <button class="rail-change" type="button" onclick="openCalibrationSetup()" ${session.active_capture ? "disabled" : ""}>Change calibration</button>
+    </div><div class="rail-heading">Do every step, top to bottom</div>
+    <ol class="step-list">${sessionSteps(session).map((id, index) => {
+      const locked = id === "report" && reportLocked(session);
+      return railButton(session, id, index + 1, current === id, busy || locked, locked);
+    }).join("")}</ol>
+    ${session.active_capture ? '<p class="rail-description">Stop recording before changing steps or calibration.</p>'
+      : session.pending_capture ? '<p class="rail-description">Accept or discard this run before changing steps.</p>' : ""}`;
+  // Telemetry arrives many times a second; only rebuild when the steps change,
+  // so the phone's sideways step list keeps its scroll position.
+  if (html === app.navHtml) return;
+  app.navHtml = html;
   nav.innerHTML = html;
+  const list = typeof nav.querySelector === "function" ? nav.querySelector(".step-list") : null;
+  const active = list?.querySelector('[aria-current="step"]')?.parentElement;
+  if (list && active) list.scrollLeft = Math.max(0, active.offsetLeft - list.offsetLeft - 16);
 }
 
 function renderTelemetry() {
@@ -329,14 +478,11 @@ function currentParameterValues() {
 }
 
 function selectedMode() {
-  if (app.wheelSelected && app.steeringSelected) return "movement_steering";
-  if (app.wheelSelected) return "movement";
-  if (app.steeringSelected) return "steering";
-  return null;
+  return app.setupMode;
 }
 
 function renderSetup() {
-  const live = app.snapshot?.live_parameters || {
+  const live = app.setupParameters || app.snapshot?.live_parameters || {
     speed_to_erpm_gain: -4614,
     speed_to_erpm_offset: 0,
     steering_angle_to_servo_gain: -1.2135,
@@ -347,23 +493,20 @@ function renderSetup() {
   return `<section>
     <h1>Calibration</h1>${sectorRule()}
     <p class="lead">Pick what to calibrate, check the current values, and start. You drive the car with the remote; this page only records.</p>
-    <div class="choice-list">
-      <button class="slot${app.wheelSelected ? " selected" : ""}" type="button" aria-pressed="${app.wheelSelected}" onclick="toggleSetup('wheel')">
-        <strong>Wheel calibration</strong>
-        <span>Stationary baseline and tape-measured distance runs. Corrects the distance the car thinks it travelled. About 15 minutes.</span>
-        <span class="race-plate">${app.wheelSelected ? "Included" : "Not included"}</span>
-      </button>
-      <button class="slot${app.steeringSelected ? " selected" : ""}" type="button" aria-pressed="${app.steeringSelected}" onclick="toggleSetup('steering')">
-        <strong>Steering calibration</strong>
-        <span>A straight-line drift run and left and right circles. Corrects where centre is and how far the wheels turn. About 15 minutes.</span>
-        <span class="race-plate">${app.steeringSelected ? "Included" : "Not included"}</span>
-      </button>
-    </div>
+    ${app.snapshot?.session ? '<p class="tip">Starting a new calibration archives your current session. Cancel to keep working on it.</p>' : ""}
+    <fieldset class="mode-picker"><legend>Calibration type</legend>
+      ${CALIBRATION_MODES.map(item => `<label class="mode-option ${mode === item.value ? "selected" : ""}">
+        <input type="radio" name="calibration-mode" value="${item.value}" ${mode === item.value ? "checked" : ""} onchange="selectCalibrationMode(this.value)">
+        <span><strong>${item.label}</strong><span class="mode-detail">${item.detail}</span></span>
+      </label>`).join("")}
+    </fieldset>
+    <p class="tip"><strong>You will need:</strong> a tape measure, a roll of masking tape, about 10 m of smooth open floor, and a spotter.</p>
     <h2>Current values</h2>
     <p class="muted small">Values were ${escapeHtml(app.snapshot?.live_parameter_status || "loaded from defaults")}.</p>
     <div class="form-grid">${parameterInputs(live)}</div>
     <div class="button-row">
       <button class="button" type="button" ${mode ? "" : "disabled"} onclick="createSession()">Start calibration</button>
+      ${app.snapshot?.session ? '<button class="button button-ghost" type="button" onclick="cancelCalibrationSetup()">Cancel</button>' : ""}
       ${mode ? "" : `<span class="small muted">Pick at least one calibration.</span>`}
     </div>
   </section>`;
@@ -377,13 +520,18 @@ function topicRow(name, item, required) {
     <span class="topic-detail"><span class="mono">${escapeHtml(rate)}</span>, <span class="mono">${escapeHtml(age)}</span>, ${required ? "required" : "optional"}</span></span></li>`;
 }
 
-function renderPreflight() {
+function renderPreflight(session) {
   const health = app.snapshot.health || {};
   const odomReady = ["good", "warning"].includes(health?.odom?.status);
-  const next = hasWheel(app.snapshot.session) ? "stationary" : "steering";
+  const next = sessionSteps(session)[1];
   return `<section>
-    ${pageHead("Preflight", "Preflight")}
-    <p class="lead">Start the normal bringup and keep the car still with the remote on.</p>
+    ${pageHead("Preflight", "Check the car")}
+    <p class="lead">Make sure the car is talking to the wizard before you start testing.</p>
+    <ol class="instruction-list">
+      <li>Put the car on level ground with clear space around it.</li>
+      <li>Turn on the remote and start bringup. Leave the sticks centred.</li>
+      <li>Wait for <strong>Odometry</strong> below to turn green. If it stays missing, hold LB for a moment with the sticks centred.</li>
+    </ol>
     <ul class="topic-health">
       ${topicRow("odom", health.odom, true)}
       ${topicRow("vesc", health.vesc, false)}
@@ -391,22 +539,17 @@ function renderPreflight() {
       ${topicRow("drive", health.drive, false)}
       ${topicRow("joy", health.joy, false)}
     </ul>
-    <ol class="instruction-list">
-      <li>Put the car on level ground with clear space around it.</li>
-      <li>Turn on the remote and start bringup. Leave the sticks centred.</li>
-      <li>If odometry shows missing, hold LB for a moment with the sticks centred.</li>
-    </ol>
     <div class="button-row">
-      <button class="button" type="button" ${odomReady ? "" : "disabled"} onclick="setStage('${next}')">Continue</button>
+      <button class="button" type="button" ${odomReady ? "" : "disabled"} onclick="goToStep('${next}')">Start step 2: ${escapeHtml(STEPS[next].label)}</button>
       ${odomReady ? "" : `<span class="small muted">Waiting for odometry</span>`}
     </div>
   </section>`;
 }
 
 function kindLabel(kind) {
-  if (kind === "stationary") return "Stationary";
+  if (kind === "stationary") return "Stand still";
   if (kind === "movement") return "Distance run";
-  if (kind === "steering_drift") return "Drift";
+  if (kind === "steering_drift") return "Drive straight";
   if (kind === "steering_left") return "Left circle";
   if (kind === "steering_right") return "Right circle";
   if (kind === "steering_center") return "Centre";
@@ -418,11 +561,12 @@ function trialMeasurement(trial) {
     return `${escapeHtml(trial.direction || "")} ${trial.measured_distance_m.toFixed(3)} m`;
   }
   if ((trial.kind === "steering_left" || trial.kind === "steering_right")) {
+    const lock = trial.full_lock === false ? ", half lock (extra)" : "";
     if (trial.measurement_method === "rear_tires"
         && finite(trial.measured_inner_diameter_m) && finite(trial.measured_outer_diameter_m)) {
-      return `tires ${trial.measured_inner_diameter_m.toFixed(2)} and ${trial.measured_outer_diameter_m.toFixed(2)} m`;
+      return `tires ${trial.measured_inner_diameter_m.toFixed(2)} and ${trial.measured_outer_diameter_m.toFixed(2)} m${lock}`;
     }
-    if (finite(trial.measured_diameter_m)) return `axle ${trial.measured_diameter_m.toFixed(3)} m`;
+    if (finite(trial.measured_diameter_m)) return `axle ${trial.measured_diameter_m.toFixed(3)} m${lock}`;
   }
   if (trial.kind === "steering_drift" && finite(trial.measured_forward_m)) {
     const lateral = trial.measured_lateral_m;
@@ -459,75 +603,179 @@ function acceptedRunsTable(session, kinds) {
   return table + cards;
 }
 
-function plate(label, done, extra = "") {
-  return `<span class="race-plate ${done ? "done" : ""}">${escapeHtml(label)}${done ? " done" : ` ${extra}`}</span>`;
+// "Set up → Record → Drive → Stop → Measure" with the current action lit.
+function phaseStrip(phases, current) {
+  return `<ol class="phase-strip" aria-label="What you will do">${phases.map((phase, index) => {
+    const state = index < current ? "done" : index === current ? "current" : "";
+    return `<li class="${state}" ${index === current ? 'aria-current="step"' : ""}>
+      <span class="phase-dot" aria-hidden="true">${index < current ? "✓" : index + 1}</span>${escapeHtml(phase)}</li>`;
+  }).join("")}</ol>`;
 }
 
-function renderStationary(session) {
-  const counts = trialCounts(session);
-  return `<section>
-    ${pageHead("Wheel calibration, step 1 of 2", "Stationary baseline")}
-    <p class="lead">Measures the raw motor reading when nothing moves.</p>
-    <ol class="instruction-list">
-      <li>Release LB and leave the sticks centred.</li>
-      <li>Press Record, do not touch the car for 5 seconds, then press Stop.</li>
-    </ol>
-    <div class="button-row">
-      <button class="button" type="button" onclick="startCapture('stationary')">Record</button>
-      ${counts.stationary ? `<button class="button button-ghost" type="button" onclick="setStage('movement')">Continue</button>` : ""}
-    </div>
-  </section>
-  <section>
-    <h2>Accepted runs</h2>
-    ${acceptedRunsTable(session, ["stationary"])}
-  </section>`;
+/* ---------- Diagrams ----------
+ * Top-down drawings in SVG user units. The car is drawn pointing up with its
+ * rear-axle centre (the red dot, the point every measurement uses) at 0,0.
+ */
+
+function carSvg(x, y, rotation, options = {}) {
+  const steer = options.steer || 0;
+  const tire = (cx, cy) => `<rect class="dg-tire" x="${cx - 3}" y="${cy - 7}" width="6" height="14" rx="1.5"/>`;
+  return `<g class="${options.ghost ? "dg-ghost" : ""}" transform="translate(${x} ${y}) rotate(${rotation})">
+    <rect class="dg-body" x="-11" y="-46" width="22" height="54" rx="5"/>
+    <line class="dg-axle-line" x1="-14" y1="0" x2="14" y2="0"/>
+    ${tire(-14, 0)}${tire(14, 0)}
+    <g transform="rotate(${steer} -14 -36)">${tire(-14, -36)}</g>
+    <g transform="rotate(${steer} 14 -36)">${tire(14, -36)}</g>
+    <path class="dg-nose" d="M -6 -32 L 0 -40 L 6 -32"/>
+    <circle class="dg-axle" cx="0" cy="0" r="3.2"/>
+  </g>`;
 }
 
-function renderMovement(session) {
-  const counts = trialCounts(session);
-  const forward = hasSteering(session)
-    ? `<button class="button button-ghost" type="button" onclick="setStage('steering')">Go to steering calibration</button>`
-    : `<button class="button button-ghost" type="button" onclick="setStage('report')">Build report</button>`;
-  return `<section>
-    ${pageHead("Wheel calibration, step 2 of 2", "Distance runs")}
-    <p class="lead">Drive a measured straight line; the wizard compares it with what the car counted.</p>
-    <ol class="instruction-list">
-      <li>Tape out a straight 5 to 10 m lane.</li>
-      <li>Mark the rear-axle centre at the start.</li>
-      <li>Press Record before moving. Hold LB and drive smoothly to the end mark.</li>
-      <li>Stop, release LB, press Stop, then measure.</li>
-    </ol>
-    <p>${plate("Run 1", counts.movement >= 1)} ${plate("Run 2", counts.movement >= 2)} ${plate("Run 3", counts.movement >= 3, "recommended")}</p>
-    <p class="small muted">Two forward and one reverse is best.</p>
-    <div class="button-row">
-      <button class="button" type="button" onclick="startCapture('movement')">Record</button>
-      ${counts.movement >= 1 ? forward : ""}
-    </div>
-  </section>
-  <section>
-    <h2>Accepted runs</h2>
-    ${acceptedRunsTable(session, ["movement"])}
-  </section>`;
+function arrowHead(x, y, ux, uy) {
+  const bx = x - ux * 8;
+  const by = y - uy * 8;
+  return `<polygon class="dg-arrow" points="${x.toFixed(1)},${y.toFixed(1)} ${(bx - uy * 4).toFixed(1)},${(by + ux * 4).toFixed(1)} ${(bx + uy * 4).toFixed(1)},${(by - ux * 4).toFixed(1)}"/>`;
 }
 
-function steeringInstructions(kind) {
-  if (kind === "steering_drift") {
-    return `<ol class="instruction-list">
-      <li>Tape a straight line at least 6 m long.</li>
-      <li>Put the rear-axle centre on the line with the car pointing along it.</li>
-      <li>Press Record. Hold LB and drive slowly about 5 m forward without touching the steering stick.</li>
-      <li>Stop, release LB, press Stop.</li>
-      <li>Measure how far along the line the rear-axle centre is, and how far it ended up to the left or right of the line.</li>
-    </ol>`;
+function badge(x, y, letter) {
+  return `<g class="dg-badge"><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="10"/>
+    <text x="${x.toFixed(1)}" y="${(y + 4).toFixed(1)}" text-anchor="middle">${letter}</text></g>`;
+}
+
+// A measured distance: line with arrowheads at both ends and a letter badge.
+function dimension(x1, y1, x2, y2, letter, badgeAt = 0.5) {
+  const length = Math.hypot(x2 - x1, y2 - y1) || 1;
+  const ux = (x2 - x1) / length;
+  const uy = (y2 - y1) / length;
+  return `<line class="dg-dim" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>
+    ${arrowHead(x2, y2, ux, uy)}${arrowHead(x1, y1, -ux, -uy)}
+    ${badge(x1 + (x2 - x1) * badgeAt, y1 + (y2 - y1) * badgeAt, letter)}`;
+}
+
+function extension(x1, y1, x2, y2) {
+  return `<line class="dg-ext" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
+}
+
+function label(x, y, text, anchor = "start", strong = false) {
+  return `<text class="${strong ? "dg-label-strong" : "dg-label"}" x="${x}" y="${y}" text-anchor="${anchor}">${escapeHtml(text)}</text>`;
+}
+
+function figure(svg, caption, viewBox, aria, extraClass = "") {
+  return `<figure class="figure step-figure ${extraClass}"><svg class="diagram step-diagram" viewBox="${viewBox}" role="img" aria-label="${escapeHtml(aria)}">${svg}</svg>
+    <figcaption>${caption}</figcaption></figure>`;
+}
+
+const AXLE_KEY = `<span class="key-dot" aria-hidden="true"></span> red dot = middle of the rear axle`;
+
+function stationaryDiagram() {
+  const svg = `${carSvg(90, 110, 0)}
+    ${label(90, 140, "car on the floor", "middle")}
+    <circle class="dg-watch" cx="235" cy="78" r="40"/>
+    <rect class="dg-watch-button" x="229" y="30" width="12" height="7"/>
+    <path class="dg-watch-fill" d="M 235 46 A 32 32 0 1 1 234.9 46"/>
+    <text class="dg-big" x="235" y="86" text-anchor="middle">5 s</text>
+    ${label(235, 140, "hands off car and remote", "middle")}`;
+  return figure(svg, "Release LB, leave the sticks centred, and let the car sit completely still for 5 seconds.",
+    "0 0 330 150", "Car standing still for five seconds", "step-figure-small");
+}
+
+function distanceDiagram(measure) {
+  const svg = `<line class="dg-lane" x1="20" y1="45" x2="450" y2="45"/>
+    <line class="dg-lane" x1="20" y1="115" x2="450" y2="115"/>
+    <line class="dg-tape" x1="60" y1="55" x2="60" y2="105"/>
+    ${label(60, 34, "start mark", "middle", true)}
+    ${carSvg(60, 80, 90, {ghost: measure})}
+    <line class="dg-path" x1="110" y1="80" x2="330" y2="80"/>${arrowHead(330, 80, 1, 0)}
+    ${carSvg(380, 80, 90, {ghost: !measure})}
+    ${label(380, 34, "stop anywhere near the end", "middle")}
+    ${extension(60, 105, 60, 140)}${extension(380, 84, 380, 140)}
+    ${dimension(60, 132, 380, 132, "A")}
+    ${label(240, 158, measure ? "A = start mark to the red dot" : "A: 5 to 10 m, drive straight", "middle")}`;
+  return figure(svg, `${measure ? "Measure <strong>A</strong> along the lane, from the start mark to where the red dot stopped." : "Start with the red dot on the start mark. Drive straight down the lane."} ${AXLE_KEY}.`,
+    "0 0 470 170", "Distance run along a taped lane");
+}
+
+function driftDiagram(measure) {
+  const endX = 380;
+  const endY = 46;
+  const svg = `<line class="dg-tape" x1="20" y1="80" x2="465" y2="80"/>
+    <line class="dg-tape" x1="60" y1="62" x2="60" y2="98"/>
+    ${label(160, 102, "tape line", "middle", true)}
+    ${carSvg(60, 80, 90, {ghost: measure})}
+    <path class="dg-path" d="M 60 80 Q ${(60 + endX) / 2} 80 ${endX} ${endY}"/>
+    ${arrowHead(endX, endY, 0.99, -0.12)}
+    ${label(220, 50, "about 5 m, steering stick untouched", "middle")}
+    ${carSvg(endX, endY, 84, {ghost: !measure})}
+    ${measure ? `${extension(60, 98, 60, 140)}${extension(endX, 80, endX, 140)}
+      ${dimension(60, 132, endX, 132, "A")}
+      ${extension(endX, endY, 448, endY)}${dimension(440, 80, 440, endY, "B")}
+      ${label(472, 22, "here B is left of the line", "end")}` : ""}`;
+  return figure(svg, measure
+    ? `<strong>A</strong> = how far along the line the red dot got. <strong>B</strong> = sideways gap from the line to the red dot. ${AXLE_KEY}.`
+    : `Start with the red dot on the line and the car pointing exactly along it. A small drift to one side is expected. ${AXLE_KEY}.`,
+    measure ? "0 0 480 160" : "0 0 480 112", "Straight-line drift test");
+}
+
+function circleDiagram(side, measure, method = "rear_tires") {
+  const s = side === "left" ? 1 : -1;
+  const cx = 220;
+  const cy = 168;
+  const R = 118;
+  const half = 14; // rear tire offset from the axle centre
+  const startX = cx + s * R;
+  const endX = cx - s * R;
+  const sweep = s > 0 ? 0 : 1;
+  const arc = r => `M ${cx + s * r} ${cy} A ${r} ${r} 0 0 ${sweep} ${cx - s * r} ${cy}`;
+  const mark = (x, behind) => `<rect class="dg-mark" x="${x - 5}" y="${behind > 0 ? cy + 9 : cy - 14}" width="10" height="5"/>`;
+  let marks = "";
+  let dims = "";
+  if (method === "rear_tires") {
+    for (const r of [R - half, R + half]) {
+      marks += mark(cx + s * r, 1) + mark(cx - s * r, -1);
+    }
+    if (measure) {
+      dims = `${extension(cx - (R - half), cy - 9, cx - (R - half), cy + 46)}${extension(cx + (R - half), cy + 14, cx + (R - half), cy + 46)}
+        ${extension(cx - (R + half), cy - 9, cx - (R + half), cy + 68)}${extension(cx + (R + half), cy + 14, cx + (R + half), cy + 68)}
+        ${dimension(cx - (R - half), cy + 40, cx + (R - half), cy + 40, "A", 0.3)}
+        ${dimension(cx - (R + half), cy + 62, cx + (R + half), cy + 62, "B", 0.7)}`;
+    }
+  } else {
+    marks = `<path class="dg-xmark" d="M ${startX - 5} ${cy - 5} L ${startX + 5} ${cy + 5} M ${startX + 5} ${cy - 5} L ${startX - 5} ${cy + 5}"/>
+      <path class="dg-xmark" d="M ${endX - 5} ${cy - 5} L ${endX + 5} ${cy + 5} M ${endX + 5} ${cy - 5} L ${endX - 5} ${cy + 5}"/>`;
+    if (measure) {
+      dims = `${extension(cx - R, cy, cx - R, cy + 58)}${extension(cx + R, cy, cx + R, cy + 58)}
+        ${dimension(cx - R, cy + 52, cx + R, cy + 52, "C")}`;
+    }
   }
-  const side = kind === "steering_left" ? "left" : "right";
-  return `<ol class="instruction-list">
-    <li>Mark the ground under the rear-axle centre.</li>
-    <li>Press Record. Hold LB, hold the steering stick fully ${side}, and drive one slow full circle back to your mark.</li>
-    <li>Stop, release LB, press Stop.</li>
-    <li>Measure the circle. Either measure the diameter traced by the rear-axle centre, or measure the inner and outer rear-tire circles; the wizard takes the midpoint.</li>
-  </ol>
-  <p class="tip">A second circle with the stick half over shows whether the steering is linear.</p>`;
+  const svg = `<path class="dg-track" d="${arc(R - half)}"/><path class="dg-track" d="${arc(R + half)}"/>
+    <path class="dg-path" d="${arc(R)}"/>${arrowHead(cx - s * 4, cy - R, -s, 0)}
+    ${label(cx, cy - R - 26, `stick fully ${side}, drive slowly`, "middle")}
+    <path class="dg-centre" d="M ${cx - 5} ${cy} L ${cx + 5} ${cy} M ${cx} ${cy - 5} L ${cx} ${cy + 5}"/>
+    ${label(cx, cy - 10, "circle centre", "middle")}
+    ${carSvg(startX, cy, 0, {ghost: measure, steer: -s * 20})}
+    ${carSvg(endX, cy, 180, {ghost: !measure, steer: -s * 20})}
+    ${marks}
+    ${label(cx + s * (R - 26), cy - 28, "Start", s > 0 ? "end" : "start", true)}
+    ${label(cx - s * (R - 26), cy - 28, "Stop: facing back", s > 0 ? "start" : "end", true)}
+    ${dims}`;
+  let caption;
+  if (method === "rear_tires") {
+    caption = measure
+      ? `Measure straight across the circle between matching marks. <strong>A</strong> = inner (${side}) tire marks. <strong>B</strong> = outer tire marks. Orange = your tape marks.`
+      : `Mark behind both rear tires, drive half a circle at full ${side} lock, then mark behind them again. Orange = your tape marks.`;
+  } else {
+    caption = `Mark the floor under the red dot at the start and after the half circle. <strong>C</strong> = distance between the two marks. ${AXLE_KEY}.`;
+  }
+  return figure(svg, caption, "0 0 440 258", `${side} full-lock half circle`);
+}
+
+function setupDiagram(id) {
+  if (id === "stationary") return stationaryDiagram();
+  if (id === "movement") return distanceDiagram(false);
+  if (id === "steering_drift") return driftDiagram(false);
+  if (id === "steering_left") return circleDiagram("left", false);
+  if (id === "steering_right") return circleDiagram("right", false);
+  return "";
 }
 
 function clientTrialPoints(session, wheelbase) {
@@ -621,9 +869,9 @@ function renderFitChart(points, line, limits) {
       return `<polygon points="${px.toFixed(1)},${(py - 6).toFixed(1)} ${(px - 5.5).toFixed(1)},${(py + 4).toFixed(1)} ${(px + 5.5).toFixed(1)},${(py + 4).toFixed(1)}" style="fill:var(--blue)"/>`;
     }
     if (p.kind === "steering_center") {
-      return `<rect x="${(cx - 4.5).toFixed(1)}" y="${(cy - 4.5).toFixed(1)}" width="9" height="9" style="fill:var(--paper);stroke:var(--navy);stroke-width:1.5"/>`;
+      return `<rect x="${(cx - 4.5).toFixed(1)}" y="${(cy - 4.5).toFixed(1)}" width="9" height="9" style="fill:var(--paper);stroke:var(--ink);stroke-width:1.5"/>`;
     }
-    return `<rect x="${(cx - 4.5).toFixed(1)}" y="${(cy - 4.5).toFixed(1)}" width="9" height="9" style="fill:var(--navy)"/>`;
+    return `<rect x="${(cx - 4.5).toFixed(1)}" y="${(cy - 4.5).toFixed(1)}" width="9" height="9" style="fill:var(--ink)"/>`;
   };
 
   let inner = "";
@@ -651,7 +899,7 @@ function renderFitChart(points, line, limits) {
     yTicks.push(`<text x="${L - 7}" y="${(Y(v) + 4).toFixed(1)}" text-anchor="end" font-size="11" class="tick" style="fill:var(--muted)">${v.toFixed(1)}</text>`);
   }
   const legends = [];
-  if (points.some(p => p.kind === "steering_drift")) legends.push("Filled square: straight-line drift");
+  if (points.some(p => p.kind === "steering_drift")) legends.push("Filled square: drive straight");
   if (points.some(p => p.kind === "steering_left")) legends.push("Circle: left circle");
   if (points.some(p => p.kind === "steering_right")) legends.push("Triangle: right circle");
   if (points.some(p => p.kind === "steering_center")) legends.push("Hollow square: centred (old sessions only)");
@@ -679,6 +927,12 @@ function sdPathD(angle, wheelbase) {
     `${(cx - radius * Math.cos(t)).toFixed(1)} ${(rearY - radius * Math.sin(t)).toFixed(1)}`;
 }
 
+function impliedReadout(raw) {
+  return raw === null
+    ? "Live wheel angle not available (check the current settings)"
+    : `Live: the stick is asking for ${(Math.abs(raw) * 180 / Math.PI).toFixed(1)}° ${raw >= 0 ? "left" : "right"} (using the current, uncalibrated settings)`;
+}
+
 function renderSteeringDiagram() {
   const params = currentParams();
   const wheelbase = finite(params.wheelbase) && params.wheelbase > 0 ? params.wheelbase : 0.36;
@@ -695,34 +949,27 @@ function renderSteeringDiagram() {
     const dist = finite(progress.odom_distance_m) ? `${progress.odom_distance_m.toFixed(2)} m` : "";
     progressLine = `<p id="capture-progress-line" class="small muted"><span id="capture-turns">${escapeHtml(turns)}</span>${turns && dist ? ", " : ""}<span id="capture-dist-live">${escapeHtml(dist)}</span></p>`;
   }
-  const readout = raw === null
-    ? "Implied steering not available (check the current settings)"
-    : `Implied steering ${raw >= 0 ? "+" : ""}${(raw * 180 / Math.PI).toFixed(1)} deg ${raw >= 0 ? "left" : "right"} (from current settings)`;
-  return `<figure class="figure"><svg id="sd-svg" class="diagram" width="320" height="220" viewBox="0 0 320 220"
-      role="img" aria-label="Top-down steering diagram">
-    <rect x="118" y="28" width="84" height="150" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/>
-    <line x1="106" y1="160" x2="214" y2="160" style="stroke:var(--navy);stroke-width:2"/>
-    <rect x="94" y="144" width="20" height="32" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/>
-    <rect x="206" y="144" width="20" height="32" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/>
-    <line x1="106" y1="58" x2="214" y2="58" style="stroke:var(--navy);stroke-width:2"/>
+  return `<figure class="figure live-figure"><svg id="sd-svg" class="diagram" width="320" height="220" viewBox="0 0 320 220"
+      role="img" aria-label="Live top-down steering diagram">
+    <rect class="dg-body" x="118" y="28" width="84" height="150"/>
+    <line class="dg-axle-line" x1="106" y1="160" x2="214" y2="160"/>
+    <rect class="dg-tire" x="94" y="144" width="20" height="32"/>
+    <rect class="dg-tire" x="206" y="144" width="20" height="32"/>
+    <line class="dg-axle-line" x1="106" y1="58" x2="214" y2="58"/>
     <g id="sd-wheel-fl" transform="rotate(${rot} 106 58)">
-      <rect x="96" y="42" width="20" height="32" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/></g>
+      <rect class="dg-tire" x="96" y="42" width="20" height="32"/></g>
     <g id="sd-wheel-fr" transform="rotate(${rot} 214 58)">
-      <rect x="204" y="42" width="20" height="32" style="fill:var(--paper);stroke:var(--navy);stroke-width:2"/></g>
-    <path id="sd-path" d="${pathD}" style="stroke:var(--blue);stroke-dasharray:6 5;stroke-width:2;fill:none"/>
+      <rect class="dg-tire" x="204" y="42" width="20" height="32"/></g>
+    <path id="sd-path" class="dg-path" d="${pathD}"/>
   </svg>
-  <figcaption id="implied-readout">${escapeHtml(readout)}</figcaption></figure>${progressLine}`;
+  <figcaption id="implied-readout">${escapeHtml(impliedReadout(raw))}</figcaption></figure>${progressLine}`;
 }
 
 function updateDiagramLive() {
   if (!document.getElementById("sd-svg")) return;
   const raw = impliedSteeringAngle();
   const readout = document.getElementById("implied-readout");
-  if (readout) {
-    readout.textContent = raw === null
-      ? "Implied steering not available (check the current settings)"
-      : `Implied steering ${raw >= 0 ? "+" : ""}${(raw * 180 / Math.PI).toFixed(1)} deg ${raw >= 0 ? "left" : "right"} (from current settings)`;
-  }
+  if (readout) readout.textContent = impliedReadout(raw);
   const angle = raw === null ? 0 : Math.max(-0.5, Math.min(0.5, raw));
   const rot = (-angle * 180 / Math.PI).toFixed(2);
   const path = document.getElementById("sd-path");
@@ -740,57 +987,74 @@ function updateDiagramLive() {
   }
 }
 
-function renderSteering(session) {
-  const counts = trialCounts(session);
-  const full = fullLockCounts(session);
-  const test = STEERING_TESTS.some(([kind]) => kind === app.steeringTest)
-    ? app.steeringTest : "steering_drift";
-  const testName = STEERING_TESTS.find(([kind]) => kind === test)[1];
-  const wheelbase = currentParams().wheelbase;
-  const points = clientTrialPoints(session, wheelbase);
-  const fit = linearFit(points);
-  const ready = full.steering_left >= 1 && full.steering_right >= 1;
+function stepEyebrow(session, id) {
+  const position = groupPosition(session, id);
+  return position ? `${position.group} calibration · test ${position.index} of ${position.total}` : "";
+}
+
+// One page layout shared by every test step.
+function renderTestStep(session, id) {
+  const def = STEPS[id];
+  const done = stepDone(session, id);
+  const runs = stepRunCount(session, id);
+  const next = nextStepId(session, id);
+  const isCircle = id === "steering_left" || id === "steering_right";
+  const nextLabel = next === "report"
+    ? (reportLocked(session) ? "" : "Next: build the report")
+    : `Next: ${STEPS[next].label}`;
+  let status = "";
+  if (done) {
+    status = `<p class="done-banner"><span aria-hidden="true">✓</span> This test is done (${runs} run${runs === 1 ? "" : "s"} accepted).${
+      def.best && runs < def.best ? ` One more run is recommended: ${runs} of ${def.best}.` : ""}</p>`;
+  } else if (runs > 0) {
+    status = `<p class="tip">${runs} of ${def.need} runs accepted. Record ${def.need - runs} more.</p>`;
+  }
+  const record = `<button class="button ${done ? "button-ghost" : ""}" type="button" onclick="startCapture('${def.kind}')">${done ? "Record another run" : "Record"}</button>`;
+  const forward = done && nextLabel
+    ? `<button class="button" type="button" onclick="goToStep('${next}')">${escapeHtml(nextLabel)}</button>` : "";
+  const points = def.stage === "steering" ? clientTrialPoints(session, currentParams().wheelbase) : [];
   return `<section>
-    ${pageHead("Steering calibration", "Steering tests")}
-    <p class="lead">Three kinds of test: a straight run finds true centre, and circles to each side find how far the wheels really turn.</p>
-    <div class="segmented" role="group" aria-label="Steering test">
-      ${STEERING_TESTS.map(([kind, label]) =>
-        `<button type="button" aria-pressed="${test === kind}" onclick="selectSteeringTest('${kind}')">${escapeHtml(label)}</button>`).join("")}
+    ${pageHead(stepEyebrow(session, id), def.label)}
+    <p class="finds"><strong>What this finds:</strong> ${escapeHtml(def.finds)}</p>
+    ${phaseStrip(def.phases, done ? def.phases.length : 0)}
+    ${status}
+    <div class="step-body">
+      ${setupDiagram(id)}
+      <ol class="instruction-list step-instructions">${def.steps.map(step => `<li>${step}</li>`).join("")}</ol>
     </div>
-    ${steeringInstructions(test)}
-    <p>${plate("Drift", full.steering_drift >= 1, "needed")}
-      ${plate("Left full lock", full.steering_left >= 1, "needed")}
-      ${plate("Right full lock", full.steering_right >= 1, "needed")}</p>
-    ${renderSteeringDiagram()}
-    ${points.length >= 2 ? renderFitChart(points, fit, servoLimits()) : ""}
-    <div class="button-row">
-      <button class="button" type="button" onclick="startCapture('${test}')">Record ${escapeHtml(testName.toLowerCase())}</button>
-      ${ready ? `<button class="button button-ghost" type="button" onclick="setStage('report')">Build report</button>` : ""}
-    </div>
+    ${def.tip ? `<p class="tip">${escapeHtml(def.tip)}</p>` : ""}
+    <div class="button-row">${forward}${record}</div>
+    ${isCircle ? `<p class="small muted extra-link">Optional extra: a circle with the stick only <em>half</em> way over shows whether the steering is linear. It does not count toward this test.
+      <button class="link-button" type="button" onclick="recordHalfLock('${def.kind}')">Record a half-lock circle</button></p>` : ""}
   </section>
+  ${isCircle ? `<section><h2>Live steering</h2>${renderSteeringDiagram()}</section>` : ""}
   <section>
-    <h2>Accepted runs</h2>
-    ${acceptedRunsTable(session, ["steering_drift", "steering_left", "steering_right", "steering_center"])}
+    <h2>Runs for this test</h2>
+    ${acceptedRunsTable(session, [def.kind])}
+    ${points.length >= 2 ? `<h3>Steering fit so far</h3>${renderFitChart(points, linearFit(points), servoLimits())}` : ""}
   </section>`;
 }
 
 function renderRecording(session) {
   const active = session.active_capture;
+  const def = STEPS[active.kind];
   const progress = app.snapshot.capture_progress;
   const isCircle = active.kind === "steering_left" || active.kind === "steering_right";
   const dist = finite(progress?.odom_distance_m) ? `${progress.odom_distance_m.toFixed(2)} m` : "--";
   const turns = isCircle && finite(progress?.odom_yaw_rad)
     ? `${(progress.odom_yaw_rad / (2 * Math.PI)).toFixed(2)} turns (odometry estimate)` : "";
   return `<section>
-    ${pageHead(session.stage === "steering" ? "Steering calibration" : "Wheel calibration", `Recording ${kindLabel(active.kind).toLowerCase()}`)}
+    ${pageHead(def ? stepEyebrow(session, active.kind) : "Recording", `Recording: ${kindLabel(active.kind)}`)}
+    ${def ? phaseStrip(def.phases, 2) : ""}
     <div class="recording-timer"><span class="rec-dot" aria-hidden="true"></span>
       <span id="capture-timer">${fmt(app.snapshot.capture_duration_sec, 1, "--")} s</span></div>
     <p class="mono">Distance <span id="capture-dist">${escapeHtml(dist)}</span>${turns ? `, <span id="capture-turns">${escapeHtml(turns)}</span>` : `<span id="capture-turns"></span>`}</p>
-    <p>Stop the car and release LB before pressing Stop.</p>
+    <p class="now-do">${escapeHtml(def?.during || "Stop the car and release LB before pressing Stop.")}</p>
     <div class="button-row">
       <button class="button button-danger" type="button" onclick="stopCapture()">Stop</button>
     </div>
-  </section>`;
+  </section>
+  ${isCircle ? `<section><h2>Live steering</h2>${renderSteeringDiagram()}</section>` : ""}`;
 }
 
 function summaryDefs(summary) {
@@ -810,52 +1074,59 @@ function warningsBlock(warnings) {
   return `<ul class="warning-list">${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul>`;
 }
 
+function letterLabel(letter, text) {
+  return `<span class="field-letter" aria-hidden="true">${letter}</span>${text}`;
+}
+
 function driftForm() {
-  return `<div class="field">
-      <label class="field-label" for="drift-forward">Forward distance along the line (m)</label>
-      <input id="drift-forward" class="input" type="number" min="0.01" step="0.01">
+  return `${driftDiagram(true)}
+    <div class="field">
+      <label class="field-label" for="drift-forward">${letterLabel("A", "Distance along the line (m)")}</label>
+      <input id="drift-forward" class="input" type="number" min="0.01" step="0.01" placeholder="e.g. 5.00">
     </div>
     <div class="field">
-      <label class="field-label" for="drift-side-mag">Sideways offset at the end (m)</label>
-      <input id="drift-side-mag" class="input" type="number" min="0" step="0.01">
+      <label class="field-label" for="drift-side-mag">${letterLabel("B", "Sideways gap from the line (m)")}</label>
+      <input id="drift-side-mag" class="input" type="number" min="0" step="0.01" placeholder="e.g. 0.12">
+      <p class="field-hint">Seen from behind the car, looking the way it drove.</p>
     </div>
     <div class="radio-row" role="radiogroup" aria-label="Side of the line">
-      <label><input type="radio" name="drift-side" value="left"> Left of the line</label>
-      <label><input type="radio" name="drift-side" value="right"> Right of the line</label>
+      <label><input type="radio" name="drift-side" value="left"> Ended left of the line</label>
+      <label><input type="radio" name="drift-side" value="right"> Ended right of the line</label>
     </div>
     <div class="check-row">
-      <label><input id="drift-online" type="checkbox"> Ended exactly on the line</label>
+      <label><input id="drift-online" type="checkbox"> Ended exactly on the line (B is 0)</label>
     </div>`;
 }
 
-function circleForm() {
-  return `<div class="radio-row" role="radiogroup" aria-label="Circle measurement method">
-      <label><input type="radio" name="circle-method" value="axle_centre" checked
-        onchange="toggleCircleMethod()"> Rear-axle centre</label>
-      <label><input type="radio" name="circle-method" value="rear_tires"
-        onchange="toggleCircleMethod()"> Inner and outer rear tires</label>
-    </div>
-    <div id="circle-axle-field" class="field">
-      <label class="field-label" for="circle-diameter">Diameter (m)</label>
-      <input id="circle-diameter" class="input" type="number" min="0.1" step="0.01" placeholder="e.g. 3.20">
-    </div>
-    <div id="circle-tire-fields" class="field-row" hidden>
+function circleForm(kind) {
+  const side = kind === "steering_left" ? "left" : "right";
+  const tires = app.circleMethod === "rear_tires";
+  return `<div id="circle-fig-tires" ${tires ? "" : "hidden"}>${circleDiagram(side, true, "rear_tires")}</div>
+    <div id="circle-fig-axle" ${tires ? "hidden" : ""}>${circleDiagram(side, true, "axle_centre")}</div>
+    <div id="circle-tire-fields" class="field-row" ${tires ? "" : "hidden"}>
       <div class="field">
-        <label class="field-label" for="circle-inner">Inner tire circle diameter (m)</label>
-        <input id="circle-inner" class="input" type="number" min="0.1" step="0.01" placeholder="e.g. 2.90">
+        <label class="field-label" for="circle-inner">${letterLabel("A", `Inner (${side}) tire, across the circle (m)`)}</label>
+        <input id="circle-inner" class="input" type="number" min="0.1" step="0.01" placeholder="e.g. 2.45">
       </div>
       <div class="field">
-        <label class="field-label" for="circle-outer">Outer tire circle diameter (m)</label>
-        <input id="circle-outer" class="input" type="number" min="0.1" step="0.01" placeholder="e.g. 3.20">
+        <label class="field-label" for="circle-outer">${letterLabel("B", "Outer tire, across the circle (m)")}</label>
+        <input id="circle-outer" class="input" type="number" min="0.1" step="0.01" placeholder="e.g. 2.95">
       </div>
     </div>
+    <div id="circle-axle-field" class="field" ${tires ? "hidden" : ""}>
+      <label class="field-label" for="circle-diameter">${letterLabel("C", "Rear-axle centre, across the circle (m)")}</label>
+      <input id="circle-diameter" class="input" type="number" min="0.1" step="0.01" placeholder="e.g. 2.70">
+    </div>
+    <p><button id="circle-method-toggle" class="link-button" type="button" onclick="toggleCircleMethod()">${
+      tires ? "Measured under the rear-axle centre instead?" : "Measured the two tires instead?"}</button></p>
     <div class="check-row">
-      <label><input id="circle-fulllock" type="checkbox" checked> Stick was held fully over (full lock)</label>
+      <label><input id="circle-fulllock" type="checkbox" ${app.halfLockNext ? "" : "checked"}> <span>The stick was held <strong>fully</strong> ${side} (full lock). Untick for a half-lock extra.</span></label>
     </div>`;
 }
 
 function movementForm() {
-  return `<div class="field">
+  return `${distanceDiagram(true)}
+    <div class="field">
       <label class="field-label" for="trial-direction">Direction</label>
       <select id="trial-direction" class="select">
         <option value="forward">Forward</option>
@@ -863,35 +1134,28 @@ function movementForm() {
       </select>
     </div>
     <div class="field">
-      <label class="field-label" for="trial-distance">Measured distance (m)</label>
-      <input id="trial-distance" class="input" type="number" min="0.01" step="0.001" value="5">
+      <label class="field-label" for="trial-distance">${letterLabel("A", "Measured distance (m)")}</label>
+      <input id="trial-distance" class="input" type="number" min="0.01" step="0.001" placeholder="e.g. 5.000">
+      <p class="field-hint">Always a positive number, even for a reverse run.</p>
     </div>`;
-}
-
-function reviewEyebrow(kind) {
-  if (kind === "movement") return "Wheel calibration, distance run";
-  if (kind === "stationary") return "Wheel calibration, stationary baseline";
-  if (kind === "steering_drift") return "Steering calibration, straight-line drift";
-  if (kind === "steering_left") return "Steering calibration, left circle";
-  if (kind === "steering_right") return "Steering calibration, right circle";
-  if (kind === "steering_center") return "Steering calibration, centred";
-  return "Check this run";
 }
 
 function renderReview(session) {
   const pending = session.pending_capture;
   const summary = pending.summary || {};
+  const def = STEPS[pending.kind];
   let form = "";
   if (pending.kind === "movement") form = movementForm();
   else if (pending.kind === "steering_drift") form = driftForm();
-  else if (pending.kind === "steering_left" || pending.kind === "steering_right") form = circleForm();
+  else if (pending.kind === "steering_left" || pending.kind === "steering_right") form = circleForm(pending.kind);
+  else form = `<p>Nothing to measure for this test. If the car stayed still, accept the run.</p>`;
   return `<section>
-    ${pageHead(reviewEyebrow(pending.kind), "Check this run")}
-    ${summaryDefs(summary)}
+    ${pageHead(def ? stepEyebrow(session, pending.kind) : "Check this run", `Measure: ${kindLabel(pending.kind)}`)}
+    ${def ? phaseStrip(def.phases, def.phases.length - 1) : ""}
     ${warningsBlock(summary.warnings)}
     ${form}
     <div class="field">
-      <label class="field-label" for="trial-notes">Notes</label>
+      <label class="field-label" for="trial-notes">Notes (optional)</label>
       <textarea id="trial-notes" class="textarea"></textarea>
     </div>
     <div class="check-row">
@@ -901,6 +1165,7 @@ function renderReview(session) {
       <button class="button" type="button" onclick="acceptPending()">Accept run</button>
       <button class="button button-ghost" type="button" onclick="discardPending()">Discard</button>
     </div>
+    <details class="details"><summary>What the car recorded</summary>${summaryDefs(summary)}</details>
   </section>`;
 }
 
@@ -947,13 +1212,23 @@ function reportFitPoints(trialResults) {
 function renderReport(session) {
   const report = session.report;
   if (!report) {
-    const back = hasSteering(session) ? "steering" : "movement";
+    const remaining = remainingSteps(session);
+    if (remaining.length) {
+      return `<section>
+        ${pageHead("Report", "Report")}
+        <p class="lead">Finish ${remaining.length === 1 ? "this test" : `these ${remaining.length} tests`} first. The report needs every test to give a trustworthy suggestion.</p>
+        <ul class="todo-list">${remaining.map(id => `<li><button class="link-button" type="button" onclick="goToStep('${id}')">${
+          escapeHtml(`${STEPS[id].group}: ${STEPS[id].label}`)}</button></li>`).join("")}</ul>
+        <div class="button-row">
+          <button class="button" type="button" disabled>Generate report</button>
+        </div>
+      </section>`;
+    }
     return `<section>
       ${pageHead("Report", "Report")}
-      <p class="lead">Generate the report to turn the accepted runs into suggestions.</p>
+      <p class="lead">Every test is done. Generate the report to turn the accepted runs into suggested values.</p>
       <div class="button-row">
         <button class="button" type="button" onclick="generateReport()">Generate report</button>
-        <button class="button button-ghost" type="button" onclick="setStage('${back}')">Back to tests</button>
       </div>
     </section>`;
   }
@@ -1008,12 +1283,12 @@ function renderReport(session) {
     </section>`;
   }
 
-  const wheel = report.movement ? `<button class="button button-ghost" type="button" onclick="setStage('movement')">Add a wheel run</button>` : "";
-  const steer = report.steering ? `<button class="button button-ghost" type="button" onclick="setStage('steering')">Add a steering test</button>` : "";
+  const wheel = report.movement ? `<button class="button button-ghost" type="button" onclick="goToStep('movement')">Add a wheel run</button>` : "";
+  const steer = report.steering ? `<button class="button button-ghost" type="button" onclick="goToStep('steering_drift')">Add a steering test</button>` : "";
   html += `<section><div class="button-row">
       <a class="button" href="/api/report/md">Download Markdown</a>
       <a class="button button-ghost" href="/api/report/json">Download JSON</a>
-      <button class="button button-ghost" type="button" onclick="generateReport()">Recalculate</button>
+      <button class="button button-ghost" type="button" onclick="generateReport()" ${remainingSteps(session).length ? "disabled" : ""}>Recalculate</button>
       ${wheel}${steer}
     </div></section>`;
   return html;
@@ -1032,7 +1307,7 @@ function renderWizardView() {
   const view = document.getElementById("wizard-view");
   if (!view) return;
   view.dataset.rendered = "true";
-  if (!session) {
+  if (!session || app.choosingMode) {
     view.innerHTML = renderSetup();
     return;
   }
@@ -1044,31 +1319,70 @@ function renderWizardView() {
     view.innerHTML = renderReview(session);
     return;
   }
-  if (session.stage === "preflight") view.innerHTML = renderPreflight();
-  else if (session.stage === "stationary") view.innerHTML = hasWheel(session) ? renderStationary(session) : renderPreflight();
-  else if (session.stage === "movement") view.innerHTML = hasWheel(session) ? renderMovement(session) : renderPreflight();
-  else if (session.stage === "steering") view.innerHTML = hasSteering(session) ? renderSteering(session) : renderPreflight();
-  else if (session.stage === "report") view.innerHTML = renderReport(session);
-  else view.innerHTML = renderPreflight();
+  const id = currentStepId(session);
+  if (id === "report") view.innerHTML = renderReport(session);
+  else if (STEPS[id]?.kind && sessionSteps(session).includes(id)) view.innerHTML = renderTestStep(session, id);
+  else view.innerHTML = renderPreflight(session);
 }
 
-window.toggleSetup = function toggleSetup(which) {
-  if (which === "wheel") app.wheelSelected = !app.wheelSelected;
-  if (which === "steering") app.steeringSelected = !app.steeringSelected;
+window.selectCalibrationMode = function selectCalibrationMode(mode) {
+  if (!CALIBRATION_MODES.some(item => item.value === mode)) return;
+  app.setupParameters = currentParameterValues();
+  app.setupMode = mode;
   renderWizardView();
 };
 
-window.selectSteeringTest = function selectSteeringTest(kind) {
-  app.steeringTest = kind;
+window.openCalibrationSetup = function openCalibrationSetup() {
+  const session = app.snapshot?.session;
+  if (session?.active_capture) {
+    toast("Stop recording before changing calibration.", "error");
+    return;
+  }
+  app.setupMode = session?.mode || app.setupMode;
+  app.setupParameters = {...(session?.current_parameters || app.snapshot?.live_parameters)};
+  app.choosingMode = true;
+  renderNav();
   renderWizardView();
+};
+
+window.cancelCalibrationSetup = function cancelCalibrationSetup() {
+  app.choosingMode = false;
+  app.setupParameters = null;
+  renderNav();
+  renderWizardView();
+};
+
+window.goToStep = async function goToStep(id) {
+  const session = app.snapshot?.session;
+  const def = STEPS[id];
+  if (!session || !def || !sessionSteps(session).includes(id)) return;
+  if (session.active_capture || session.pending_capture) return;
+  if (id === "report" && reportLocked(session)) {
+    toast("Finish every test before building the report.", "error");
+    return;
+  }
+  if (def.stage === "steering") app.steeringTest = id;
+  if (typeof window.scrollTo === "function") window.scrollTo(0, 0);
+  if (session.stage === def.stage) {
+    renderNav();
+    renderWizardView();
+    return;
+  }
+  await window.setStage(def.stage);
 };
 
 window.toggleCircleMethod = function toggleCircleMethod() {
-  const method = document.querySelector('input[name="circle-method"]:checked')?.value;
-  const axle = document.getElementById("circle-axle-field");
-  const tires = document.getElementById("circle-tire-fields");
-  if (axle) axle.hidden = method !== "axle_centre";
-  if (tires) tires.hidden = method !== "rear_tires";
+  app.circleMethod = app.circleMethod === "rear_tires" ? "axle_centre" : "rear_tires";
+  const tires = app.circleMethod === "rear_tires";
+  const show = (id, visible) => { const el = document.getElementById(id); if (el) el.hidden = !visible; };
+  show("circle-tire-fields", tires);
+  show("circle-fig-tires", tires);
+  show("circle-axle-field", !tires);
+  show("circle-fig-axle", !tires);
+  const toggle = document.getElementById("circle-method-toggle");
+  if (toggle) {
+    toggle.textContent = tires ? "Measured under the rear-axle centre instead?" : "Measured the two tires instead?";
+  }
 };
 
 window.createSession = async function createSession() {
@@ -1078,10 +1392,21 @@ window.createSession = async function createSession() {
     return;
   }
   try {
+    const replaceExisting = Boolean(app.snapshot?.session);
+    if (app.snapshot?.session?.active_capture) {
+      toast("Stop recording before starting a new calibration.", "error");
+      return;
+    }
+    if (replaceExisting && !confirm("Archive the current session and start the selected calibration?")) return;
     await api("new_session", {
       mode,
       current_parameters: currentParameterValues(),
+      replace_existing: replaceExisting,
     });
+    app.choosingMode = false;
+    app.setupParameters = null;
+    renderNav();
+    renderWizardView();
     toast("Session started.");
   } catch (error) {
     toast(error.message, "error");
@@ -1097,6 +1422,7 @@ window.setStage = async function setStage(stage) {
 };
 
 window.startCapture = async function startCapture(kind) {
+  if (STEERING_STEPS.includes(kind)) app.steeringTest = kind;
   try {
     await api("start_capture", {kind});
   } catch (error) {
@@ -1104,6 +1430,11 @@ window.startCapture = async function startCapture(kind) {
     const suffix = health?.odom ? ` Odom is ${health.odom.status}.` : "";
     toast(`${error.message}${suffix}`, "error");
   }
+};
+
+window.recordHalfLock = function recordHalfLock(kind) {
+  app.halfLockNext = true;
+  return window.startCapture(kind);
 };
 
 window.stopCapture = async function stopCapture() {
@@ -1139,7 +1470,7 @@ window.acceptPending = async function acceptPending() {
         const rawOffset = document.getElementById("drift-side-mag")?.value ?? "";
         const offset = Number(rawOffset);
         if (rawOffset.trim() === "" || !Number.isFinite(offset)) {
-          toast("Enter the sideways offset, or tick Ended exactly on the line.", "error");
+          toast("Enter the sideways gap B, or tick Ended exactly on the line.", "error");
           return;
         }
         const magnitude = Math.abs(offset);
@@ -1155,7 +1486,7 @@ window.acceptPending = async function acceptPending() {
         }
       }
     } else if (pending.kind === "steering_left" || pending.kind === "steering_right") {
-      const method = document.querySelector('input[name="circle-method"]:checked')?.value || "axle_centre";
+      const method = app.circleMethod;
       extra.measurement_method = method;
       extra.full_lock = document.getElementById("circle-fulllock")?.checked === true;
       if (method === "rear_tires") {
@@ -1165,7 +1496,9 @@ window.acceptPending = async function acceptPending() {
         extra.measured_diameter_m = Number(document.getElementById("circle-diameter").value);
       }
     }
+    if (STEERING_STEPS.includes(pending.kind)) app.steeringTest = pending.kind;
     await api("accept_capture", extra);
+    app.halfLockNext = false;
     toast("Run accepted and saved on the car.");
   } catch (error) {
     toast(error.message, "error");
@@ -1176,6 +1509,7 @@ window.discardPending = async function discardPending() {
   if (!confirm("Discard this run? It cannot be recovered.")) return;
   try {
     await api("discard_capture");
+    app.halfLockNext = false;
     toast("Run discarded.");
   } catch (error) {
     toast(error.message, "error");
@@ -1183,6 +1517,11 @@ window.discardPending = async function discardPending() {
 };
 
 window.generateReport = async function generateReport() {
+  const session = app.snapshot?.session;
+  if (session && remainingSteps(session).length) {
+    toast("Finish every test before building the report.", "error");
+    return;
+  }
   try {
     await api("generate_report");
     toast("Report saved on the car.");
@@ -1201,21 +1540,7 @@ window.deleteTrial = async function deleteTrial(trialId) {
   }
 };
 
-document.getElementById("new-session-button").addEventListener("click", async () => {
-  if (!confirm("Start a new session? The current session will be archived on the car before replacement.")) return;
-  try {
-    const mode = app.snapshot?.session?.mode || "movement";
-    const params = app.snapshot?.session?.current_parameters || app.snapshot.live_parameters;
-    await api("new_session", {
-      mode,
-      current_parameters: params,
-      replace_existing: true,
-    });
-    toast("Session started.");
-  } catch (error) {
-    toast(error.message, "error");
-  }
-});
+document.getElementById("new-session-button").addEventListener("click", openCalibrationSetup);
 
 connectSocket();
 fetchState();

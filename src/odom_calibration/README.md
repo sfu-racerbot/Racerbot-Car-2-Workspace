@@ -21,7 +21,7 @@ command the car.
 
 - A browser wizard at `http://<car-ip>:8090/`. You drive with the physical remote. The page only records.
 - **Wheel calibration**: a stationary baseline plus tape-measured 5–10 m distance runs. Three runs are recommended (two forward, one reverse).
-- **Steering calibration**: a straight-line drift run plus full-lock left and right circles. One full-lock circle per side is required before the report.
+- **Steering calibration**: a straight-line drift run plus full-lock left and right half circles. All three are required before the report unlocks.
 - The report suggests parameter values but writes nothing. You copy them into `vesc.yaml` by hand.
 - Captures stop automatically at five minutes. Closing the browser or losing Wi-Fi never erases accepted trials.
 - Limits: a tape measure cannot see tire slip, surface changes, tire wear, battery state, or drivetrain backlash. Odometry stays an estimate.
@@ -55,6 +55,12 @@ confirms that the node (a running ROS program) is read-only.
 
 Open `http://<car-ip>:8090/` from a browser on the same trusted network.
 
+The wizard launch uses UDP for Fast DDS so it can receive telemetry when
+bringup runs under a different Linux account. Shared-memory permissions can
+otherwise leave every topic missing, with the wizard waiting for odometry
+and never seeing LB. If running the node directly rather than this launch,
+set `FASTDDS_BUILTIN_TRANSPORTS=UDPv4` in that terminal first.
+
 Reports and the active crash-recovery session are stored in
 `~/.ros/odom_calibration/`. The browser can download the final report as JSON
 or Markdown.
@@ -82,8 +88,15 @@ creating a session.
 
 ### 1. Choose a mode
 
-At setup the operator ticks one or both boxes: **Wheel calibration** and
-**Steering calibration**. The internal mode names are still `movement`,
+At setup choose **Wheel calibration**, **Steering calibration**, or
+**Both calibrations**.
+
+Use **Change calibration** in the header or sidebar
+to reopen this choice for an existing session. Cancel keeps that session;
+starting the selected calibration archives it and begins at preflight.
+Finish any active recording before changing calibration.
+
+The internal mode names are still `movement`,
 `steering`, and `movement_steering`.
 
 - **Wheel calibration only** (mode `movement`): stationary baseline plus forward/reverse distance scale. Pick this when distances read wrong.
@@ -92,6 +105,40 @@ At setup the operator ticks one or both boxes: **Wheel calibration** and
 
 The stages follow the mode (`MODE_STAGES` in `session_store.py` and
 `web/wizard.js`).
+
+The left sidebar lists **every test as its own numbered step**, in the order
+to do them. Do them all, top to bottom:
+
+| Mode | Sidebar steps |
+|---|---|
+| Wheels | Check the car → Stand still → Distance runs → Report |
+| Steering | Check the car → Drive straight → Left circle → Right circle → Report |
+| Both | Check the car → Stand still → Distance runs → Drive straight → Left circle → Right circle → Report |
+
+The **Report** step stays locked until every test step is done: one
+stand-still run, two distance runs, one drift run, and one full-lock circle
+per side. A half-lock circle does not count.
+
+Every test page has the same layout:
+
+- a one-line **What this finds**;
+- a progress strip (for example *Line up → Record → Drive → Stop → Measure*);
+- a top-down setup diagram;
+- numbered instructions.
+
+The measuring screen after **Stop** shows a second diagram with each distance
+lettered **A**, **B** or **C**. The input boxes carry the same letters.
+
+The three steering tests share the server's single `steering` stage. Which
+of them is open is browser state only (`app.steeringTest` in
+`web/wizard.js`). A reopened session lands on its first unfinished steering
+test.
+
+UI regression checks run with `python3 -m pytest src/odom_calibration/test/`
+and require Node.js. `test_wizard_ui` exercises calibration selection,
+replacement confirmation, cancel, and the recording guard. `test_wizard_steps`
+exercises the per-test sidebar steps, the report lock, resuming, and the
+circle measuring form.
 
 `movement` runs preflight, stationary, movement, report. `steering` runs
 preflight, steering, report. `movement_steering` runs all five.
@@ -226,15 +273,27 @@ the same thing as `atan(wheelbase * 2d / (s^2 + d^2))`.
 
 </details>
 
-The circle test measures how far the wheels really turn. Mark the ground
-under the rear-axle centre. Hold LB, hold the steering stick fully to one
-side, and drive one slow full circle back to the mark. Then measure the
-circle with either method the wizard offers.
+The circle tests measure how far the wheels really turn. Each one is a
+**half circle** (180 degrees), measured straight across:
 
-The **rear-axle centre** method takes one diameter: the circle traced by the
-rear-axle centre, so `radius = diameter / 2`. The **inner and outer rear
-tires** method takes two diameters and the wizard uses their midpoint, so
-`radius = (inner + outer) / 4`.
+1. Put a small tape mark on the floor right behind the middle of each rear
+   tire.
+2. Start recording. Hold LB, hold the steering stick fully to one side, and
+   drive slowly until the car points back the way it came.
+3. Stop, release LB, stop recording.
+4. Mark behind each rear tire again.
+5. Measure across the circle between the two inner-tire marks (**A**) and
+   between the two outer-tire marks (**B**).
+
+Only the recorded servo value and the typed diameters feed the calculation,
+so half a circle gives the same answer as a full one. It is far easier to
+measure across.
+
+The default **inner and outer rear tires** method takes those two diameters
+and the wizard uses their midpoint, so `radius = (inner + outer) / 4`. The
+measuring screen also offers a **rear-axle centre** method behind a link:
+mark under the rear-axle centre at both ends, measure one diameter (**C**),
+so `radius = diameter / 2`.
 
 The tire-midpoint method needs no track-width constant. The axle centre sits
 exactly midway between the two rear tires, so averaging the two tire radii
@@ -255,8 +314,8 @@ as a bonus check instead.
 </details>
 
 Hold the stick fully over for the graded circles (the "full lock" checkbox).
-The steering page only offers "Build report" once at least one full-lock
-left circle and one full-lock right circle are accepted.
+The Report step only unlocks once the drift run, at least one full-lock left
+circle, and one full-lock right circle are accepted.
 
 Full lock measures the real tightest turn because of the servo clamp. The
 servo command the wizard records is the value after `vesc_driver` applies
@@ -284,11 +343,13 @@ driving node's `max_steering_angle` past what the car reaches: the planner
 must only ask for angles the servo can produce.
 
 While a circle records, the page shows a live "turns so far" readout. It is
-an odometry estimate (integrated odom yaw divided by 2π), good enough to
-tell you when the circle is complete, but not ground truth.
+an odometry estimate (integrated odom yaw divided by 2π). It reads about
+`0.50` at half a circle: good enough to tell you when to stop, but not
+ground truth.
 
-A second circle with the stick held only halfway over is allowed (uncheck
-full lock). It does not count toward the full-lock requirement, but it shows
+A second circle with the stick held only halfway over is allowed. Use the
+"Record a half-lock circle" link on the circle page, or untick full lock
+when measuring. It does not count toward the full-lock requirement, but it shows
 whether the steering is linear.
 
 It warns about unstable servo input, missing left/right coverage, unexpected
