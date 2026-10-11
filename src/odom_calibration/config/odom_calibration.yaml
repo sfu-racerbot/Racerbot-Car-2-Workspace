@@ -2,10 +2,15 @@ odom_calibration_node:
   ros__parameters:
     odom_topic: /odom
     vesc_state_topic: /sensors/core
+    # After vesc_driver's servo_min/servo_max clamp: what the servo receives.
     servo_topic: /sensors/servo_position_command
+    # Before the clamp: compared with servo_topic to spot clipping.
+    servo_command_topic: /commands/servo/position
     drive_topic: /ackermann_cmd
     joy_topic: /joy
     deadman_button: 4
+    # joy_teleop.yaml's human_control steering axis (this F710's right stick).
+    steering_axis: 3
     host: 0.0.0.0
     port: 8090
     telemetry_rate_hz: 5.0
@@ -13,14 +18,33 @@ odom_calibration_node:
     max_capture_sec: 300.0
     max_samples_per_topic: 30000
     report_directory: "~/.ros/odom_calibration"
-    # Used until live values can be read from vesc_to_odom_node.
-    speed_to_erpm_gain: -4614.0
+
+    # --- Writing vesc.yaml -------------------------------------------------
+    # The report and the drive-straight step can write accepted values into
+    # vesc.yaml after a confirmation. A timestamped backup goes to
+    # <report_directory>/backups/ first. Set false to make the wizard
+    # suggest-only. Empty path = the vesc.yaml bringup loads, followed through
+    # the --symlink-install link back to src/.
+    allow_apply: true
+    vesc_yaml_path: ""
+
+    # --- This car ------------------------------------------------------------
+    # Change these for another car; nothing else in the wizard is car-specific.
+    vehicle_model: "Traxxas Ford Fiesta ST Rally VXL 74276-4 (car 2)"
+    physical_width_m: 0.30
+    physical_length_m: 0.535
+    # Largest steering angle any driving node may request (gap_follow.yaml and
+    # pure_pursuit.yaml max_steering_angle). The range check warns when the
+    # servo cannot reach it on both sides.
+    planner_max_steering_rad: 0.26
+
+    # Fallbacks, used only until the live values are read from the running
+    # nodes (vesc_to_odom_node, ackermann_to_vesc_node, vesc_driver_node).
+    speed_to_erpm_gain: -4447.983786
     speed_to_erpm_offset: 0.0
     steering_angle_to_servo_gain: -1.2135
-    steering_angle_to_servo_offset: 0.5304
+    steering_angle_to_servo_offset: 0.5904
     # Measured 2026-08-24, front axle to rear axle. Matches vesc.yaml.
     wheelbase: 0.36
-    # Servo clamp applied by vesc_driver. Must match vesc.yaml servo_min /
-    # servo_max; the report uses them to show the steering the car can reach.
     servo_min: 0.15
     servo_max: 0.85

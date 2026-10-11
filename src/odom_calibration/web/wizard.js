@@ -10,7 +10,7 @@ const app = {
   setupParameters: null,
   // The server has one "steering" stage; the page tracks which of its three
   // tests is open so each one can be its own sidebar step.
-  steeringTest: "steering_drift",
+  steeringTest: "steering_sweep",
   steeringSession: null,
   circleMethod: "rear_tires",
   halfLockNext: false,
@@ -23,7 +23,7 @@ const MODE_STAGES = {
   steering: ["preflight", "steering", "report"],
 };
 
-const STEERING_STEPS = ["steering_drift", "steering_left", "steering_right"];
+const STEERING_STEPS = ["steering_sweep", "steering_drift", "steering_left", "steering_right"];
 
 // Every step in the sidebar. A step's id equals the capture kind it records.
 const STEPS = {
@@ -54,6 +54,21 @@ const STEPS = {
     ],
     tip: "Do three runs: two forward and one in reverse. For the reverse run, start at the far end and drive backwards. You pick Forward or Reverse when you enter the distance.",
     during: "Hold LB and drive smoothly down the lane. Stop, release LB, then press Stop.",
+  },
+  steering_sweep: {
+    stage: "steering", kind: "steering_sweep", group: "Steering", label: "Steering range", need: 1,
+    finds: "Whether full left and full right turn the wheels equally, and if not, whether software settings or the hardware cause it.",
+    phases: ["Wheels up", "Record", "Full left, full right", "Stop", "Measure"],
+    steps: [
+      "Put the car on a stand so <strong>the front wheels are off the ground</strong> and can turn freely.",
+      "Zero a phone angle app with the phone flat against the outside of a front tyre, wheels pointing straight.",
+      "Press <strong>Record</strong>.",
+      "Hold LB. Push the steering stick <strong>fully left</strong> and hold it for 3 seconds while a helper reads the angle of each front wheel. Note whether the servo buzzes or strains.",
+      "Still holding LB, push the stick <strong>fully right</strong> for 3 seconds and read both wheels again.",
+      "Centre the stick, release LB, then press <strong>Stop</strong> and type in the angles.",
+    ],
+    tip: "The angles are optional, but without them the wizard can only check the software half. Leave the throttle alone: only the steering stick moves.",
+    during: "Hold LB. Full left for 3 s, then full right for 3 s. Read the wheel angles. Centre, release LB, then press Stop.",
   },
   steering_drift: {
     stage: "steering", kind: "steering_drift", group: "Steering", label: "Drive straight", need: 1,
@@ -217,6 +232,7 @@ function updateSnapshot(snapshot) {
       `${(snapshot.capture_progress.odom_yaw_rad / (2 * Math.PI)).toFixed(2)} turns (odometry estimate)`;
   }
   updateDiagramLive();
+  updateChainLive();
 }
 
 function renderKey(snapshot) {
@@ -231,6 +247,8 @@ function renderKey(snapshot) {
     session.stage,
     session.active_capture?.started_at || "",
     session.pending_capture?.id || "",
+    (snapshot.pending_restart || []).join(","),
+    snapshot.apply?.allowed ? "apply" : "",
   ].join(":");
 }
 
@@ -246,6 +264,7 @@ function trialCounts(session) {
   const counts = {
     stationary: 0,
     movement: 0,
+    steering_sweep: 0,
     steering_center: 0,
     steering_drift: 0,
     steering_left: 0,
@@ -331,9 +350,9 @@ function renderConnection() {
 }
 
 const CALIBRATION_MODES = [
-  {value: "steering", label: "Steering calibration", short: "Steering", detail: "3 tests: drive straight, then one left and one right full-lock circle. Fixes a car that pulls to one side or turns too sharply or too gently. About 15 minutes."},
+  {value: "steering", label: "Steering calibration", short: "Steering", detail: "4 tests: a wheels-up steering range check (hardware or software?), drive straight, then one left and one right full-lock circle. Fixes a car that pulls to one side, turns unequally, or turns too sharply or too gently. About 20 minutes."},
   {value: "movement", label: "Wheel calibration", short: "Wheels", detail: "2 tests: stand still for 5 seconds, then 2 or 3 measured distance runs. Fixes a car that reports the wrong distance. About 15 minutes."},
-  {value: "movement_steering", label: "Both calibrations", short: "Wheels + steering", detail: "All 5 tests in one session: the wheel tests first, then the steering tests. About 30 minutes."},
+  {value: "movement_steering", label: "Both calibrations", short: "Wheels + steering", detail: "All 6 tests in one session: the wheel tests first, then the steering tests. About 35 minutes."},
 ];
 
 function stepStatus(session, id, active, locked) {
@@ -486,7 +505,7 @@ function renderSetup() {
     speed_to_erpm_gain: -4614,
     speed_to_erpm_offset: 0,
     steering_angle_to_servo_gain: -1.2135,
-    steering_angle_to_servo_offset: 0.5304,
+    steering_angle_to_servo_offset: 0.5904,
     wheelbase: 0.36,
   };
   const mode = selectedMode();
@@ -536,6 +555,7 @@ function renderPreflight(session) {
       ${topicRow("odom", health.odom, true)}
       ${topicRow("vesc", health.vesc, false)}
       ${topicRow("servo", health.servo, false)}
+      ${topicRow("servo_cmd", health.servo_cmd, false)}
       ${topicRow("drive", health.drive, false)}
       ${topicRow("joy", health.joy, false)}
     </ul>
@@ -549,6 +569,7 @@ function renderPreflight(session) {
 function kindLabel(kind) {
   if (kind === "stationary") return "Stand still";
   if (kind === "movement") return "Distance run";
+  if (kind === "steering_sweep") return "Steering range";
   if (kind === "steering_drift") return "Drive straight";
   if (kind === "steering_left") return "Left circle";
   if (kind === "steering_right") return "Right circle";
@@ -769,7 +790,21 @@ function circleDiagram(side, measure, method = "rear_tires") {
   return figure(svg, caption, "0 0 440 258", `${side} full-lock half circle`);
 }
 
+function sweepDiagram() {
+  const stand = `<rect class="dg-watch-button" x="60" y="96" width="70" height="22"/>`;
+  const svg = `${carSvg(95, 92, 0, {steer: -22})}${stand}
+    ${label(95, 140, "front wheels off the ground", "middle")}
+    <rect class="dg-mark" x="40" y="44" width="10" height="20" transform="rotate(-22 45 54)"/>
+    ${label(30, 26, "phone flat on the tyre", "start", true)}
+    <path class="dg-path" d="M 210 70 A 40 40 0 0 0 290 70"/>${arrowHead(290, 70, 0.6, -0.8)}${arrowHead(210, 70, -0.6, -0.8)}
+    ${label(250, 104, "full left, then full right", "middle")}
+    ${label(250, 122, "3 seconds each, LB held", "middle")}`;
+  return figure(svg, "Wheels up, LB held: hold the stick fully left, then fully right, and read each front wheel's angle with a phone. Orange = the phone.",
+    "0 0 330 150", "Steering range check with the wheels off the ground", "step-figure-small");
+}
+
 function setupDiagram(id) {
+  if (id === "steering_sweep") return sweepDiagram();
   if (id === "stationary") return stationaryDiagram();
   if (id === "movement") return distanceDiagram(false);
   if (id === "steering_drift") return driftDiagram(false);
@@ -929,8 +964,8 @@ function sdPathD(angle, wheelbase) {
 
 function impliedReadout(raw) {
   return raw === null
-    ? "Live wheel angle not available (check the current settings)"
-    : `Live: the stick is asking for ${(Math.abs(raw) * 180 / Math.PI).toFixed(1)}° ${raw >= 0 ? "left" : "right"} (using the current, uncalibrated settings)`;
+    ? "Commanded angle not available (check the current settings)"
+    : `Commanded: ${(Math.abs(raw) * 180 / Math.PI).toFixed(1)}° ${raw >= 0 ? "left" : "right"}. This is what the servo is told after the servo_min/servo_max clamp, not a measurement of the wheels.`;
 }
 
 function renderSteeringDiagram() {
@@ -987,6 +1022,99 @@ function updateDiagramLive() {
   }
 }
 
+const VERDICT_TEXT = {
+  software: "Software", hardware: "Hardware", both: "Software and hardware",
+  mixed: "Software limit, hardware stops early", symmetric: "Both sides equal",
+  unknown: "Software equal, hardware not measured", insufficient: "Not enough data",
+};
+
+// Live values of every software layer, for the wheels-up range check.
+function renderChainLive() {
+  return `<dl class="def-list chain-live">
+    <div><dt>Stick (axis)</dt><dd id="chain-axis" class="mono">--</dd></div>
+    <div><dt>Command</dt><dd id="chain-command" class="mono">--</dd></div>
+    <div><dt>Servo before clamp</dt><dd id="chain-servo-cmd" class="mono">--</dd></div>
+    <div><dt>Servo after clamp</dt><dd id="chain-servo" class="mono">--</dd></div>
+  </dl>`;
+}
+
+function updateChainLive() {
+  const t = app.snapshot?.telemetry || {};
+  const set = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+  set("chain-axis", finite(t.steer_axis) ? signed(t.steer_axis, 2) : "--");
+  set("chain-command", finite(t.command_steering) ? `${signed(t.command_steering * 180 / Math.PI, 1)}°` : "--");
+  set("chain-servo-cmd", finite(t.servo_command) ? t.servo_command.toFixed(4) : "--");
+  set("chain-servo", finite(t.servo) ? t.servo.toFixed(4) : "--");
+}
+
+function renderChainDiagnosis(chain) {
+  if (!chain || chain.verdict === "insufficient") {
+    return `<p class="small muted">${escapeHtml(chain?.summary || "No steering range check yet.")}</p>`;
+  }
+  const good = chain.verdict === "symmetric";
+  const rows = (chain.layers || []).map(layer => `<tr>
+      <td>${escapeHtml(layer.label)}</td>
+      <td class="num">${escapeHtml(layer.left_text ?? "n/a")}</td>
+      <td class="num">${escapeHtml(layer.right_text ?? "n/a")}</td>
+      <td><span class="layer-status ${escapeHtml(layer.status)}">${escapeHtml(layer.status)}</span>${
+        layer.finding ? `<span class="layer-finding">${escapeHtml(layer.finding)}</span>` : ""}</td></tr>`).join("");
+  const next = (chain.recommendations || []).map(r => `<li>${escapeHtml(r)}</li>`).join("");
+  return `<div class="chain-card">
+    <p class="status-plate ${good ? "good" : ""}">Cause: ${escapeHtml(VERDICT_TEXT[chain.verdict] || chain.verdict)}</p>
+    <p class="lead">${escapeHtml(chain.summary)}</p>
+    <div class="runs-table chain-table"><table class="data-table">
+      <thead><tr><th>Layer, stick to wheels</th><th>Full left</th><th>Full right</th><th>Result</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    ${next ? `<h3>What to do</h3><ol class="instruction-list">${next}</ol>` : ""}
+  </div>`;
+}
+
+function applyAllowed() {
+  return Boolean(app.snapshot?.apply?.allowed);
+}
+
+function restartBanner() {
+  const waiting = app.snapshot?.pending_restart || [];
+  if (!waiting.length) return "";
+  return `<p class="warning-banner"><strong>Restart bringup.</strong> vesc.yaml now has new ${
+    escapeHtml(waiting.join(", "))}, but the running car still uses the old value${waiting.length === 1 ? "" : "s"}. Stop bringup (Ctrl+C) and start it again, then re-run the test.</p>`;
+}
+
+function appliedHistory(session) {
+  const changes = (session.applied_changes || []);
+  if (!changes.length) return "";
+  const latest = [...changes].reverse().find(change => !change.restored);
+  const items = changes.map(change => `<li><span class="mono">${escapeHtml(Object.entries(change.after || {})
+      .map(([name, value]) => `${name} ${fmt(change.before?.[name], 6, "?")} → ${fmt(value, 6)}`).join(", "))}</span>
+      <span class="small muted">${escapeHtml(change.at || "")}${change.restored ? ", undone" : ""}. Backup: ${escapeHtml(change.backup || "")}</span>${
+      change.in_source_tree === false ? `<span class="small">This edited the installed copy, which the next colcon build overwrites.</span>` : ""}</li>`).join("");
+  return `<h3>Changes written to vesc.yaml</h3><ul class="applied-list">${items}</ul>
+    ${latest && applyAllowed() ? `<button class="button button-ghost button-small" type="button" onclick="restoreBackup()">Undo the last change</button>` : ""}`;
+}
+
+function renderCentreCard(session) {
+  const centre = app.snapshot?.centre_offset;
+  if (!centre) return "";
+  const angle = centre.drift_angle_rad;
+  const drift = finite(angle)
+    ? `${Math.abs(angle * 180 / Math.PI).toFixed(2)}° ${angle >= 0 ? "left" : "right"}` : "not available";
+  let body;
+  if (centre.blocked) {
+    body = `<p class="warning-banner">No offset suggested: ${escapeHtml(centre.blocked)}.</p>`;
+  } else if (centre.straight) {
+    body = `<p class="done-banner"><span aria-hidden="true">✓</span> The car drives straight (within 0.14°). The centre offset is done.</p>`;
+  } else {
+    body = `<p>Suggested <span class="mono">steering_angle_to_servo_offset</span>: <strong class="mono">${fmt(centre.suggested_offset, 4)}</strong>
+      (now ${fmt(centre.current_offset, 4)}, change ${signed(centre.suggested_offset - centre.current_offset, 4)}).</p>
+      ${applyAllowed() ? `<div class="button-row"><button class="button" type="button" onclick="applyCentreOffset()">Write this offset to vesc.yaml</button></div>
+      <p class="small muted">Then restart bringup and record another drive-straight run. Repeat until it says the car drives straight.</p>`
+      : `<p class="small muted">Copy it into the shared block of vesc.yaml, restart bringup, and record another drive-straight run.</p>`}`;
+  }
+  return `<section><h2>Centre offset</h2>
+    <p>Latest run (${centre.run_count} so far) curved ${escapeHtml(drift)}.</p>${body}
+    ${appliedHistory(session)}</section>`;
+}
+
 function stepEyebrow(session, id) {
   const position = groupPosition(session, id);
   return position ? `${position.group} calibration · test ${position.index} of ${position.total}` : "";
@@ -1017,6 +1145,7 @@ function renderTestStep(session, id) {
     ${pageHead(stepEyebrow(session, id), def.label)}
     <p class="finds"><strong>What this finds:</strong> ${escapeHtml(def.finds)}</p>
     ${phaseStrip(def.phases, done ? def.phases.length : 0)}
+    ${restartBanner()}
     ${status}
     <div class="step-body">
       ${setupDiagram(id)}
@@ -1028,6 +1157,9 @@ function renderTestStep(session, id) {
       <button class="link-button" type="button" onclick="recordHalfLock('${def.kind}')">Record a half-lock circle</button></p>` : ""}
   </section>
   ${isCircle ? `<section><h2>Live steering</h2>${renderSteeringDiagram()}</section>` : ""}
+  ${id === "steering_sweep" ? `<section><h2>Live steering chain</h2>${renderChainLive()}</section>
+    <section><h2>Hardware or software?</h2>${renderChainDiagnosis(app.snapshot?.steering_chain)}</section>` : ""}
+  ${id === "steering_drift" ? renderCentreCard(session) : ""}
   <section>
     <h2>Runs for this test</h2>
     ${acceptedRunsTable(session, [def.kind])}
@@ -1054,7 +1186,8 @@ function renderRecording(session) {
       <button class="button button-danger" type="button" onclick="stopCapture()">Stop</button>
     </div>
   </section>
-  ${isCircle ? `<section><h2>Live steering</h2>${renderSteeringDiagram()}</section>` : ""}`;
+  ${isCircle ? `<section><h2>Live steering</h2>${renderSteeringDiagram()}</section>` : ""}
+  ${active.kind === "steering_sweep" ? `<section><h2>Live steering chain</h2>${renderChainLive()}</section>` : ""}`;
 }
 
 function summaryDefs(summary) {
@@ -1124,6 +1257,33 @@ function circleForm(kind) {
     </div>`;
 }
 
+function sweepForm() {
+  const box = (id, text) => `<div class="field">
+      <label class="field-label" for="${id}">${text}</label>
+      <input id="${id}" class="input" type="number" min="0" max="60" step="0.1" placeholder="degrees">
+    </div>`;
+  return `<p>Type the angles your helper read, in degrees from straight ahead. Leave a box empty if that wheel was not measured.</p>
+    <h3>Stick fully left</h3>
+    <div class="field-row">${box("sweep-ll-left", "Left front wheel (°)")}${box("sweep-ll-right", "Right front wheel (°)")}</div>
+    <div class="check-row"><label><input id="sweep-buzz-left" type="checkbox"> The servo buzzed or strained at full left</label></div>
+    <h3>Stick fully right</h3>
+    <div class="field-row">${box("sweep-rl-left", "Left front wheel (°)")}${box("sweep-rl-right", "Right front wheel (°)")}</div>
+    <div class="check-row"><label><input id="sweep-buzz-right" type="checkbox"> The servo buzzed or strained at full right</label></div>`;
+}
+
+function sweepPayload() {
+  const read = id => {
+    const raw = document.getElementById(id)?.value ?? "";
+    return String(raw).trim() === "" ? undefined : Number(raw);
+  };
+  return {
+    left_lock: {left_wheel_deg: read("sweep-ll-left"), right_wheel_deg: read("sweep-ll-right")},
+    right_lock: {left_wheel_deg: read("sweep-rl-left"), right_wheel_deg: read("sweep-rl-right")},
+    buzz_left: document.getElementById("sweep-buzz-left")?.checked === true,
+    buzz_right: document.getElementById("sweep-buzz-right")?.checked === true,
+  };
+}
+
 function movementForm() {
   return `${distanceDiagram(true)}
     <div class="field">
@@ -1146,6 +1306,7 @@ function renderReview(session) {
   const def = STEPS[pending.kind];
   let form = "";
   if (pending.kind === "movement") form = movementForm();
+  else if (pending.kind === "steering_sweep") form = sweepForm();
   else if (pending.kind === "steering_drift") form = driftForm();
   else if (pending.kind === "steering_left" || pending.kind === "steering_right") form = circleForm(pending.kind);
   else form = `<p>Nothing to measure for this test. If the car stayed still, accept the run.</p>`;
@@ -1174,14 +1335,20 @@ function statusPlate(status) {
   return `<p class="status-plate ${ready ? "good" : ""}">${ready ? "Ready" : "Needs review"}</p>`;
 }
 
-function paramTable(current, suggestions, keys) {
-  const rows = keys.filter(name => name in suggestions).map(name => {
+function paramTable(current, suggestions, keys, blocked = {}, notReady = {}) {
+  const rows = keys.filter(name => name in suggestions || name in blocked).map(name => {
     const now = current[name];
+    if (name in blocked) {
+      return `<tr><td class="mono">${escapeHtml(name)}</td>
+        <td class="num">${fmt(now, 6)}</td>
+        <td colspan="2"><span class="layer-status limited">blocked</span> ${escapeHtml(blocked[name])}</td></tr>`;
+    }
     const suggested = suggestions[name];
     const change = finite(now) && finite(suggested) ? signed(suggested - now, 6) : "";
+    const note = notReady[name] ? `<span class="layer-finding">Not ready to apply: ${escapeHtml(notReady[name])}</span>` : "";
     return `<tr><td class="mono">${escapeHtml(name)}</td>
       <td class="num">${fmt(now, 6)}</td>
-      <td class="num">${fmt(suggested, 6)}</td>
+      <td class="num">${fmt(suggested, 6)}${note}</td>
       <td class="num">${escapeHtml(change)}</td></tr>`;
   });
   if (!rows.length) return `<p class="small muted">No suggestions in this section.</p>`;
@@ -1190,8 +1357,9 @@ function paramTable(current, suggestions, keys) {
     <tbody>${rows.join("")}</tbody></table>`;
 }
 
-function yamlBlock(suggestions, keys) {
-  const lines = keys.filter(name => name in suggestions).map(name => {
+function yamlBlock(suggestions, keys, blocked = {}) {
+  const lines = keys.filter(name => name in suggestions || name in blocked).map(name => {
+    if (name in blocked) return `# ${name}: blocked, ${blocked[name]}`;
     const value = suggestions[name];
     return finite(value) ? `${name}: ${value.toFixed(6)}` : `# ${name}: not enough data`;
   });
@@ -1207,6 +1375,15 @@ function reportFitPoints(trialResults) {
     }
   }
   return points;
+}
+
+function applyButton(report, keys, label) {
+  if (!applyAllowed()) return "";
+  const ready = keys.filter(name => name in (report.parameter_suggestions || {})
+    && !(name in (report.not_ready_to_apply || {})));
+  if (!ready.length) return `<p class="small muted">Nothing here is ready to write to vesc.yaml yet.</p>`;
+  return `<div class="button-row"><button class="button" type="button"
+    onclick="applyReport('${ready.join(",")}')">${escapeHtml(label)}</button></div>`;
 }
 
 function renderReport(session) {
@@ -1233,6 +1410,8 @@ function renderReport(session) {
     </section>`;
   }
   const suggestions = report.parameter_suggestions || {};
+  const blocked = report.blocked_suggestions || {};
+  const notReady = report.not_ready_to_apply || {};
   const current = report.current_parameters || {};
   let html = `<section>${pageHead("Report", "Report")}${statusPlate(report.overall_status)}
     <p class="lead">${escapeHtml(report.safety_note)}</p></section>`;
@@ -1241,10 +1420,11 @@ function renderReport(session) {
     const movement = report.movement;
     html += `<section><h2>Wheel calibration</h2>${sectorRule()}${statusPlate(movement.status)}
       <p>${movement.usable_trial_count} usable of ${movement.accepted_trial_count} accepted runs.</p>
-      ${paramTable(current, suggestions, ["speed_to_erpm_gain", "speed_to_erpm_offset"])}
+      ${paramTable(current, suggestions, ["speed_to_erpm_gain", "speed_to_erpm_offset"], blocked, notReady)}
       ${warningsBlock(movement.warnings)}
       <p class="yaml-label">Put these in the vesc_to_odom_node section of vesc.yaml (odometry only)</p>
-      ${yamlBlock(suggestions, ["speed_to_erpm_gain", "speed_to_erpm_offset"])}
+      ${yamlBlock(suggestions, ["speed_to_erpm_gain", "speed_to_erpm_offset"], blocked)}
+      ${applyButton(report, ["speed_to_erpm_gain", "speed_to_erpm_offset"], "Write wheel values to vesc.yaml")}
     </section>`;
   }
 
@@ -1275,13 +1455,17 @@ function renderReport(session) {
       </table>
       ${reachLine}${trackLine}${residualLine}
       ${paramTable(current, suggestions,
-        ["steering_angle_to_servo_gain", "steering_angle_to_servo_offset"])}
+        ["steering_angle_to_servo_gain", "steering_angle_to_servo_offset"], blocked, notReady)}
       ${warningsBlock(steering.warnings)}
       <p class="yaml-label">Put these in the shared steering values in vesc.yaml</p>
       ${yamlBlock(suggestions,
-        ["steering_angle_to_servo_gain", "steering_angle_to_servo_offset"])}
-    </section>`;
+        ["steering_angle_to_servo_gain", "steering_angle_to_servo_offset"], blocked)}
+      ${applyButton(report, ["steering_angle_to_servo_gain", "steering_angle_to_servo_offset"], "Write steering values to vesc.yaml")}
+    </section>
+    <section><h2>Steering range: hardware or software?</h2>${sectorRule()}
+      ${renderChainDiagnosis(report.steering_chain)}</section>`;
   }
+  html += `<section>${restartBanner()}${appliedHistory(session)}</section>`;
 
   const wheel = report.movement ? `<button class="button button-ghost" type="button" onclick="goToStep('movement')">Add a wheel run</button>` : "";
   const steer = report.steering ? `<button class="button button-ghost" type="button" onclick="goToStep('steering_drift')">Add a steering test</button>` : "";
@@ -1457,7 +1641,9 @@ window.acceptPending = async function acceptPending() {
     notes: document.getElementById("trial-notes")?.value || "",
   };
   try {
-    if (pending.kind === "movement") {
+    if (pending.kind === "steering_sweep") {
+      Object.assign(extra, sweepPayload());
+    } else if (pending.kind === "movement") {
       extra.direction = document.getElementById("trial-direction").value;
       extra.measured_distance_m = Number(document.getElementById("trial-distance").value);
     } else if (pending.kind === "steering_drift") {
@@ -1525,6 +1711,37 @@ window.generateReport = async function generateReport() {
   try {
     await api("generate_report");
     toast("Report saved on the car.");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+};
+
+async function applyParameters(extra, question) {
+  if (!confirm(question)) return;
+  try {
+    const result = await api("apply_parameters", {confirmed: true, ...extra});
+    toast(`vesc.yaml updated (backup: ${result.applied?.backup || "saved"}). Restart bringup to use it.`);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+window.applyReport = function applyReport(names) {
+  const list = String(names).split(",").filter(Boolean);
+  return applyParameters({source: "report", names: list},
+    `Write ${list.join(", ")} into vesc.yaml? A backup is saved first. The car only uses the new values after bringup restarts.`);
+};
+
+window.applyCentreOffset = function applyCentreOffset() {
+  return applyParameters({source: "centre"},
+    "Write the suggested steering offset into vesc.yaml? A backup is saved first. Restart bringup afterwards, then record another drive-straight run.");
+};
+
+window.restoreBackup = async function restoreBackup() {
+  if (!confirm("Put back the vesc.yaml from before the last change? Restart bringup afterwards.")) return;
+  try {
+    await api("restore_backup", {confirmed: true});
+    toast("vesc.yaml restored from the backup. Restart bringup.");
   } catch (error) {
     toast(error.message, "error");
   }

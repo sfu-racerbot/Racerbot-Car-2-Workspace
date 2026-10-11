@@ -7,6 +7,7 @@ synthetic data sets before it is trusted with measurements from the car.
 
 from __future__ import annotations
 
+import bisect
 import math
 import statistics
 from typing import Iterable
@@ -152,6 +153,63 @@ def _wrapped_delta(start: float, end: float):
     return math.atan2(math.sin(end - start), math.cos(end - start))
 
 
+# A steering sample only describes the turn being measured while the driver
+# holds LB and the car is actually rolling. Before LB is pressed and after it
+# is released, teleop sends a centred command, so the servo sits on the
+# configured offset; when that idle time outweighs the drive, a plain median
+# over the whole capture reads the offset back for every circle and the
+# fitted gain collapses to zero (2026-10-06 session).
+MIN_MOVING_SPEED_MPS = 0.15
+# A reading older than this cannot vouch for a later sample.
+SAMPLE_MATCH_AGE_SEC = 0.5
+# Fewer filtered servo samples than this cannot represent a circle or a drift.
+MIN_ACTIVE_SERVO_SAMPLES = 10
+
+
+class _Lookup:
+    """Latest sample at or before a time, ignoring samples older than max_age."""
+
+    def __init__(self, samples, field, max_age=SAMPLE_MATCH_AGE_SEC):
+        pairs = sorted(
+            (float(sample['t']), sample.get(field))
+            for sample in samples
+            if _finite(sample.get('t'))
+        )
+        self.times = [time for time, _ in pairs]
+        self.values = [value for _, value in pairs]
+        self.max_age = max_age
+
+    def at(self, time):
+        index = bisect.bisect_right(self.times, time) - 1
+        if index < 0 or time - self.times[index] > self.max_age:
+            return None
+        return self.values[index]
+
+
+def active_samples(capture: dict, topic: str, require_moving: bool,
+                   min_speed: float = MIN_MOVING_SPEED_MPS):
+    """Samples of ``topic`` taken while LB was held (and, optionally, moving).
+
+    A sample with no recent ``/joy`` (or ``/odom`` when movement is required)
+    is excluded: unknown is not the same as held.
+    """
+    lb = _Lookup(capture.get('joy', []), 'lb_held')
+    speed = _Lookup(capture.get('odom', []), 'speed')
+    kept = []
+    for sample in capture.get(topic, []):
+        time = sample.get('t')
+        if not _finite(time):
+            continue
+        if lb.at(float(time)) is not True:
+            continue
+        if require_moving:
+            moving = speed.at(float(time))
+            if not _finite(moving) or abs(float(moving)) < min_speed:
+                continue
+        kept.append(sample)
+    return kept
+
+
 def summarize_capture(capture: dict, max_gap_sec: float = 0.5):
     """Convert raw asynchronous topic samples into one reviewable trial."""
     odom = list(capture.get('odom', []))
@@ -233,7 +291,26 @@ def summarize_capture(capture: dict, max_gap_sec: float = 0.5):
                 'Odometry and forward-positive raw ERPM disagree on direction.'
             )
 
+    kind = capture.get('kind')
+    servo_active = _series_stats(
+        active_samples(capture, 'servo', require_moving=True), 'value')
+    if kind in STEERING_KINDS and kind != 'steering_center' and servo:
+        if servo_active['count'] < MIN_ACTIVE_SERVO_SAMPLES:
+            warnings.append(
+                f"Only {servo_active['count']} servo samples were recorded "
+                'while LB was held and the car was moving; this run cannot '
+                'be used for steering. Hold LB the whole time you drive.'
+            )
+    extra = {}
+    if kind == 'steering_sweep':
+        # Imported here: steering_chain imports this module.
+        from odom_calibration import steering_chain
+        extra['sweep'] = steering_chain.sweep_summary(capture)
+        warnings.extend(extra['sweep']['warnings'])
+
     return {
+        **extra,
+        'servo_active': servo_active,
         'kind': capture.get('kind'),
         'started_at': capture.get('started_at'),
         'duration_sec': wall_duration,
@@ -384,7 +461,13 @@ def movement_calibration(session: dict):
             source = 'raw VESC integral'
             record['corrected_raw_erpm_integral'] = corrected
         elif _finite(odom_distance):
-            candidate = current_gain * float(odom_distance) / truth
+            # /odom was scaled by whatever gain was live when this run was
+            # recorded; a gain applied since must not rescale old runs.
+            recorded_gain = (trial.get('parameters_at_capture') or {}).get(
+                'speed_to_erpm_gain')
+            scale = float(recorded_gain) if _finite(recorded_gain) \
+                and recorded_gain != 0.0 else current_gain
+            candidate = scale * float(odom_distance) / truth
             source = 'integrated odometry fallback'
             record['warnings'].append(
                 'Raw VESC integration unavailable; candidate uses current odometry scale.'
@@ -510,6 +593,18 @@ ASYMMETRY_WARNING_FRACTION = 0.10
 # Rear-tire track widths from different circles that disagree by more than
 # this suggest a marking or measuring error.
 TRACK_SPREAD_WARNING_M = 0.03
+# A rear-axle radius outside this range is a typing or unit mistake: the
+# wheelbase-0.36 m car cannot steer past ~40 degrees (0.43 m), and a "full
+# lock" circle wider than 20 m is a straight line.
+MIN_CIRCLE_RADIUS_M = 0.43
+MAX_CIRCLE_RADIUS_M = 20.0
+# A half circle is pi radians; odometry yaw well short of that means the
+# operator measured across an arc, not a diameter. Odometry is an estimate,
+# so this warns rather than rejects.
+MIN_CIRCLE_YAW_RAD = 0.75 * math.pi
+# Repeat full-lock circles on one side whose radii differ by more than this
+# fraction disagree too much to average.
+CIRCLE_REPEAT_SPREAD_FRACTION = 0.10
 
 
 def drift_steering_angle(wheelbase, forward_m, lateral_m):
@@ -617,6 +712,24 @@ def _servo_limits(session: dict):
     return None
 
 
+def _steering_servo_stats(kind, summary):
+    """Servo statistics a steering trial should be fitted with, and why.
+
+    Returns (stats, source). ``active``: LB held and moving, the only samples
+    that describe the measured path. ``whole_capture``: a session recorded
+    before the filter existed. ``too_few_active``: the filter left too little
+    to trust. A stationary centre capture keeps the whole capture by design.
+    """
+    if kind == 'steering_center':
+        return summary.get('servo', {}) or {}, 'whole_capture'
+    active = summary.get('servo_active')
+    if active is None:
+        return summary.get('servo', {}) or {}, 'whole_capture'
+    if (active.get('count') or 0) < MIN_ACTIVE_SERVO_SAMPLES:
+        return active, 'too_few_active'
+    return active, 'active'
+
+
 def _side_gain(points):
     fit = _linear_fit(points)
     return fit[0] if fit else None
@@ -641,21 +754,34 @@ def steering_calibration(session: dict):
     for index, trial in enumerate(trials, start=1):
         kind = trial.get('kind')
         summary = trial.get('summary', {})
-        servo = summary.get('servo', {}).get('median')
+        stats, source = _steering_servo_stats(kind, summary)
+        servo = stats.get('median')
         item = {
             'trial_id': trial.get('id'),
             'trial_number': index,
             'kind': kind,
             'median_servo': servo,
+            'servo_source': source,
             'usable': False,
             'warnings': [],
         }
+        if source == 'too_few_active':
+            item['warnings'].append(
+                f"Only {stats.get('count', 0)} servo samples were taken while "
+                'LB was held and the car was moving; re-record this run.')
+            trial_results.append(item)
+            continue
+        if source == 'whole_capture':
+            item['warnings'].append(
+                'Recorded before idle time was filtered out; its servo value '
+                'may include time with LB released. Re-record if it sits off '
+                'the fitted line.')
         if not _finite(servo):
             item['warnings'].append('No finite servo command was captured.')
             trial_results.append(item)
             continue
-        servo_p05 = summary.get('servo', {}).get('p05')
-        servo_p95 = summary.get('servo', {}).get('p95')
+        servo_p05 = stats.get('p05')
+        servo_p95 = stats.get('p95')
         if _finite(servo_p05) and _finite(servo_p95):
             servo_span = float(servo_p95) - float(servo_p05)
             item['servo_span'] = servo_span
@@ -699,6 +825,14 @@ def steering_calibration(session: dict):
                 'measurement_method', 'axle_centre')
             item['full_lock'] = bool(trial.get('full_lock', False))
             item['rear_axle_radius_m'] = radius
+            if not MIN_CIRCLE_RADIUS_M <= radius <= MAX_CIRCLE_RADIUS_M:
+                item['warnings'].append(
+                    f'Rear-axle radius {radius:.2f} m is outside '
+                    f'{MIN_CIRCLE_RADIUS_M:.1f}–{MAX_CIRCLE_RADIUS_M:.0f} m, '
+                    'which no steered circle on this car can produce; check '
+                    'that the numbers are diameters in metres.')
+                trial_results.append(item)
+                continue
             if track is not None:
                 item['rear_track_m'] = track
                 track_widths.append(track)
@@ -714,6 +848,15 @@ def steering_calibration(session: dict):
                         'Odometry yaw sign disagrees with the confirmed turn direction.'
                     )
                 item['odom_turns'] = float(yaw) / (2.0 * math.pi)
+            yaw_samples = (summary.get('odom_yaw_integration') or {}).get(
+                'sample_count', 0)
+            if (_finite(yaw) and yaw_samples >= 5
+                    and abs(float(yaw)) < MIN_CIRCLE_YAW_RAD):
+                item['warnings'].append(
+                    f'Odometry says the car turned only '
+                    f'{abs(float(yaw)) / (2.0 * math.pi):.2f} turns. Measure '
+                    'across the circle only after a full half circle (0.50 '
+                    'turns); a shorter arc is not a diameter.')
 
         item['actual_steering_angle_rad'] = actual_angle
         item['usable'] = True
@@ -790,6 +933,16 @@ def steering_calibration(session: dict):
         ]
         full = [item for item in circles if item.get('full_lock')]
         full_radius = median(item['rear_axle_radius_m'] for item in full)
+        radii = [item['rear_axle_radius_m'] for item in full]
+        if len(radii) >= 2 and full_radius:
+            spread = (max(radii) - min(radii)) / full_radius
+            if spread > CIRCLE_REPEAT_SPREAD_FRACTION:
+                warnings.append(
+                    f'The {side} full-lock circles disagree by '
+                    f'{spread * 100.0:.0f}% in radius; re-measure them or '
+                    'remove the odd one before trusting the fit.')
+                if status == 'good':
+                    status = 'low'
         sides[side] = {
             'circle_count': len(circles),
             'full_lock_count': len(full),
@@ -858,6 +1011,78 @@ def steering_calibration(session: dict):
 MODES_WITH_MOVEMENT = ('movement', 'movement_steering')
 MODES_WITH_STEERING = ('movement_steering', 'steering')
 
+# Bounds a suggestion must sit inside before it is shown as a value, exported
+# or applied. They catch broken fits, not fine calibration: a real
+# recalibration of this car moved the odometry gain by 3.6% (2026-09-23).
+SPEED_GAIN_RATIO_RANGE = (0.5, 2.0)
+MAX_SPEED_OFFSET_ERPM = 1000.0
+STEERING_GAIN_MAGNITUDE_RANGE = (0.1, 5.0)
+CONFIDENT_STATUSES = ('good', 'high')
+
+
+def _same_sign(a, b):
+    return math.copysign(1.0, a) == math.copysign(1.0, b)
+
+
+def vet_suggestion(name, value, current, status, limits=None):
+    """Return (blocked_reason, apply_reason) for one suggested value.
+
+    ``blocked_reason`` is set when the value is not a usable number for this
+    car at all; such a value is never displayed as a suggestion, exported or
+    applied. ``apply_reason`` is set when the value is plausible but the
+    evidence behind it is too weak to write into vesc.yaml.
+    """
+    if status in ('invalid', 'insufficient'):
+        return f'the {name} fit is {status}', None
+    if not _finite(value):
+        return 'no usable value was computed', None
+    value = float(value)
+    if name == 'speed_to_erpm_gain':
+        if value == 0.0:
+            return 'a zero gain would stop odometry counting distance', None
+        if _finite(current) and current != 0.0:
+            if not _same_sign(value, current):
+                return 'its sign is the reverse of the configured gain', None
+            ratio = abs(value / current)
+            low, high = SPEED_GAIN_RATIO_RANGE
+            if not low <= ratio <= high:
+                return (f'it is {ratio:.2f}x the configured gain; outside '
+                        f'{low}-{high}x is a broken run, not a calibration'), None
+    elif name == 'speed_to_erpm_offset':
+        if abs(value) > MAX_SPEED_OFFSET_ERPM:
+            return (f'{abs(value):.0f} ERPM at standstill means the wheels '
+                    'were moving during the baseline'), None
+    elif name == 'steering_angle_to_servo_gain':
+        low, high = STEERING_GAIN_MAGNITUDE_RANGE
+        if not low <= abs(value) <= high:
+            return (f'|gain| {abs(value):.3f} is outside {low}-{high}; the '
+                    'servo would barely move or would slam to its limits'), None
+        if _finite(current) and current != 0.0 and not _same_sign(value, current):
+            return ('its sign is the reverse of the configured gain; left '
+                    'and right would swap'), None
+    elif name == 'steering_angle_to_servo_offset':
+        low, high = limits if limits else (0.0, 1.0)
+        if not low < value < high:
+            return (f'{value:.4f} is outside the servo range '
+                    f'{low:.2f}-{high:.2f}'), None
+    if status not in CONFIDENT_STATUSES:
+        return None, f'confidence is {status}; add consistent runs first'
+    return None, None
+
+
+def _vet_all(raw, current, statuses, limits):
+    suggestions, blocked, not_ready = {}, {}, {}
+    for name, value in raw.items():
+        blocked_reason, apply_reason = vet_suggestion(
+            name, value, current.get(name), statuses[name], limits)
+        if blocked_reason:
+            blocked[name] = blocked_reason
+            continue
+        suggestions[name] = float(value)
+        if apply_reason:
+            not_ready[name] = apply_reason
+    return suggestions, blocked, not_ready
+
 
 def build_report(session: dict):
     mode = session.get('mode')
@@ -871,20 +1096,36 @@ def build_report(session: dict):
         if mode in MODES_WITH_STEERING
         else None
     )
-    suggestions = {}
+    raw, part_status = {}, {}
     if movement:
-        suggestions.update({
+        raw.update({
             'speed_to_erpm_gain': movement['suggested_speed_to_erpm_gain'],
             'speed_to_erpm_offset': movement['suggested_speed_to_erpm_offset'],
         })
+        part_status['speed_to_erpm_gain'] = movement['status']
+        # The offset comes from the stationary baseline, not the gain fit.
+        part_status['speed_to_erpm_offset'] = (
+            'good' if movement['offset_source'] == 'stationary capture'
+            else 'insufficient')
     if steering:
-        suggestions.update({
+        raw.update({
             'steering_angle_to_servo_gain':
                 steering['suggested_steering_angle_to_servo_gain'],
             'steering_angle_to_servo_offset':
                 steering['suggested_steering_angle_to_servo_offset'],
         })
+        part_status['steering_angle_to_servo_gain'] = steering['status']
+        part_status['steering_angle_to_servo_offset'] = steering['status']
+    suggestions, blocked, not_ready = _vet_all(
+        raw, session.get('current_parameters', {}), part_status,
+        _servo_limits(session))
+    diagnosis = None
+    if mode in MODES_WITH_STEERING:
+        from odom_calibration import steering_chain
+        diagnosis = steering_chain.diagnose_session(session, steering)
     statuses = [part['status'] for part in (movement, steering) if part]
+    if blocked:
+        statuses.append('invalid')
     overall = (
         'ready'
         if statuses and all(status in ('good', 'high') for status in statuses)
@@ -918,7 +1159,10 @@ def build_report(session: dict):
         ],
         'movement': movement,
         'steering': steering,
+        'steering_chain': diagnosis,
         'parameter_suggestions': suggestions,
+        'blocked_suggestions': blocked,
+        'not_ready_to_apply': not_ready,
         'safety_note': ' '.join(notes),
     }
 
@@ -942,12 +1186,27 @@ def report_markdown(report: dict):
         '',
         '```yaml',
     ]
+    not_ready = report.get('not_ready_to_apply', {})
     for name, value in report.get('parameter_suggestions', {}).items():
         if _finite(value):
-            lines.append(f'{name}: {_format_number(value, 6)}')
+            note = f'  # not ready: {not_ready[name]}' if name in not_ready else ''
+            lines.append(f'{name}: {_format_number(value, 6)}{note}')
         else:
             lines.append(f'# {name}: insufficient data')
+    for name, reason in report.get('blocked_suggestions', {}).items():
+        lines.append(f'# {name}: blocked, {reason}')
     lines.append('```')
+    chain = report.get('steering_chain')
+    if chain:
+        lines.extend(['', '## Steering range: hardware or software?', ''])
+        lines.append(f"- Verdict: **{chain.get('verdict')}**. {chain.get('summary', '')}")
+        for layer in chain.get('layers', []):
+            lines.append(
+                f"- {layer['label']}: left {layer.get('left_text', 'n/a')}, "
+                f"right {layer.get('right_text', 'n/a')} ({layer['status']})"
+                + (f". {layer['finding']}" if layer.get('finding') else ''))
+        for step in chain.get('recommendations', []):
+            lines.append(f'- Next: {step}')
     movement = report.get('movement')
     if movement:
         lines.extend(['', '## Movement calibration', ''])

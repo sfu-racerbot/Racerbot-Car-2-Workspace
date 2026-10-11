@@ -27,8 +27,12 @@ from vesc_msgs.msg import VescStateStamped
 import tornado.ioloop
 import tornado.web
 import tornado.websocket
+import yaml
 
 from odom_calibration import calibration_math
+from odom_calibration import steering_chain
+from odom_calibration import vesc_yaml
+from odom_calibration import wizard_actions
 from odom_calibration.session_store import (
     CAPTURE_KINDS,
     SessionStore,
@@ -46,6 +50,17 @@ PARAMETER_NAMES = (
     'steering_angle_to_servo_gain',
     'steering_angle_to_servo_offset',
     'wheelbase',
+)
+# Where each live value is read from: the node that actually uses it. The
+# servo command comes from ackermann_to_vesc_node and the clamp from
+# vesc_driver_node, so a value edited for one node but not restarted in the
+# other shows up as a mismatch instead of hiding behind the odom node's copy.
+LIVE_SOURCES = (
+    ('vesc_to_odom_node',
+     ('speed_to_erpm_gain', 'speed_to_erpm_offset', 'wheelbase')),
+    ('ackermann_to_vesc_node',
+     ('steering_angle_to_servo_gain', 'steering_angle_to_servo_offset')),
+    ('vesc_driver_node', ('servo_min', 'servo_max')),
 )
 
 
@@ -157,6 +172,7 @@ class CaptureRecorder:
             'odom': [],
             'vesc': [],
             'servo': [],
+            'servo_cmd': [],
             'drive': [],
             'joy': [],
         }
@@ -222,6 +238,13 @@ class JsonHandler(tornado.web.RequestHandler):
         self.finish(json.dumps(payload, allow_nan=False))
 
     def parse_json(self):
+        # A browser sends application/json cross-origin only after a CORS
+        # preflight, which this server never approves. Refusing every other
+        # content type stops another web page from posting a "simple"
+        # text/plain request at the car, now that an action can edit vesc.yaml.
+        content_type = self.request.headers.get('Content-Type', '')
+        if content_type.split(';')[0].strip().lower() != 'application/json':
+            raise WizardError('Requests must be sent as application/json.', status=415)
         try:
             payload = json.loads(self.request.body.decode('utf-8'))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -292,9 +315,18 @@ class OdomCalibrationNode(Node):
         self.declare_parameter('vesc_state_topic', '/sensors/core')
         self.declare_parameter(
             'servo_topic', '/sensors/servo_position_command')
+        self.declare_parameter(
+            'servo_command_topic', '/commands/servo/position')
         self.declare_parameter('drive_topic', '/ackermann_cmd')
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('deadman_button', 4)
+        self.declare_parameter('steering_axis', 3)
+        self.declare_parameter('vesc_yaml_path', '')
+        self.declare_parameter('allow_apply', True)
+        self.declare_parameter('planner_max_steering_rad', 0.26)
+        self.declare_parameter('vehicle_model', 'unnamed car')
+        self.declare_parameter('physical_width_m', 0.30)
+        self.declare_parameter('physical_length_m', 0.535)
         self.declare_parameter('host', '0.0.0.0')
         self.declare_parameter('port', 8090)
         self.declare_parameter('telemetry_rate_hz', 5.0)
@@ -308,7 +340,7 @@ class OdomCalibrationNode(Node):
         self.declare_parameter(
             'steering_angle_to_servo_gain', -1.2135)
         self.declare_parameter(
-            'steering_angle_to_servo_offset', 0.5304)
+            'steering_angle_to_servo_offset', 0.5904)
         self.declare_parameter('wheelbase', 0.36)
         self.declare_parameter('servo_min', 0.15)
         self.declare_parameter('servo_max', 0.85)
@@ -319,6 +351,21 @@ class OdomCalibrationNode(Node):
         self.drive_topic = self.get_parameter('drive_topic').value
         self.joy_topic = self.get_parameter('joy_topic').value
         self.deadman_button = int(self.get_parameter('deadman_button').value)
+        self.steering_axis = int(self.get_parameter('steering_axis').value)
+        self.servo_command_topic = self.get_parameter(
+            'servo_command_topic').value
+        self.allow_apply = bool(self.get_parameter('allow_apply').value)
+        self.vesc_yaml_path = self._resolve_vesc_yaml(
+            self.get_parameter('vesc_yaml_path').value)
+        self.vehicle_settings = {
+            'model': str(self.get_parameter('vehicle_model').value),
+            'physical_width_m': float(
+                self.get_parameter('physical_width_m').value),
+            'physical_length_m': float(
+                self.get_parameter('physical_length_m').value),
+            'planner_max_steering_rad': float(
+                self.get_parameter('planner_max_steering_rad').value),
+        }
         self.host = self.get_parameter('host').value
         self.port = int(self.get_parameter('port').value)
         self.telemetry_rate_hz = max(
@@ -367,23 +414,31 @@ class OdomCalibrationNode(Node):
             'odom_pose': None,
             'raw_forward_erpm': None,
             'servo': None,
+            'servo_command': None,
+            'steer_axis': None,
             'command_speed': None,
             'command_steering': None,
             'lb_held': False,
             'joy_button_available': False,
         }
         self.live_parameters = dict(self.default_parameters)
+        self.live_servo_limits = [self.servo_min, self.servo_max]
+        self.live_parameter_sources = {
+            node: 'not read yet (using configured fallback)'
+            for node, _ in LIVE_SOURCES
+        }
         self.live_parameter_status = 'configured fallback'
         self.monitors = {
             'odom': TopicMonitor('Odometry'),
             'vesc': TopicMonitor('Raw VESC'),
-            'servo': TopicMonitor('Servo command'),
+            'servo': TopicMonitor('Servo command (after clamp)'),
+            'servo_cmd': TopicMonitor('Servo command (before clamp)'),
             'drive': TopicMonitor('Selected drive command'),
             'joy': TopicMonitor('Remote / LB'),
         }
         self.ws_clients = set()
         self._loop = None
-        self._parameter_request_inflight = False
+        self._parameter_requests_inflight = set()
 
         self.odom_sub = self.create_subscription(
             Odometry, self.odom_topic, self.odom_callback, 10)
@@ -395,22 +450,32 @@ class OdomCalibrationNode(Node):
         )
         self.servo_sub = self.create_subscription(
             Float64, self.servo_topic, self.servo_callback, 10)
+        self.servo_cmd_sub = self.create_subscription(
+            Float64, self.servo_command_topic, self.servo_command_callback, 10)
         self.drive_sub = self.create_subscription(
             AckermannDriveStamped, self.drive_topic, self.drive_callback, 10)
         self.joy_sub = self.create_subscription(
             Joy, self.joy_topic, self.joy_callback, 10)
 
-        self.parameter_client = AsyncParameterClient(
-            self, 'vesc_to_odom_node')
+        # Polled for the node's whole life, not just until the first answer:
+        # bringup is restarted after every vesc.yaml change, and the wizard
+        # must notice the new values rather than keep reporting the old ones.
+        self.parameter_clients = {
+            node: AsyncParameterClient(self, node) for node, _ in LIVE_SOURCES
+        }
         self.parameter_timer = self.create_timer(
             2.0, self._request_live_parameters)
         self.telemetry_timer = self.create_timer(
             1.0 / self.telemetry_rate_hz, self._telemetry_tick)
 
         self.get_logger().info(
-            'Odometry calibration wizard is read-only: it creates no ROS '
-            'publishers and cannot command the car. '
-            f'Open http://<this-car-IP>:{self.port}/ after the web server starts.'
+            'Odometry calibration wizard creates no ROS publishers and cannot '
+            'command the car. '
+            + (f'After a confirmation in the page it can write calibration '
+               f'values into {self.vesc_yaml_path} (backup first). '
+               if self.allow_apply and self.vesc_yaml_path else
+               'Writing vesc.yaml is off. ')
+            + f'Open http://<this-car-IP>:{self.port}/ after the web server starts.'
         )
 
     # ROS callbacks ---------------------------------------------------------
@@ -476,6 +541,17 @@ class OdomCalibrationNode(Node):
                 self.active_recorder.add(
                     'servo', {'t': now, 'value': value})
 
+    def servo_command_callback(self, msg):
+        now = time.monotonic()
+        value = float(msg.data)
+        valid = math.isfinite(value)
+        with self._lock:
+            self.monitors['servo_cmd'].update(now, valid=valid)
+            self.latest['servo_command'] = _number_or_none(value)
+            if self.active_recorder:
+                self.active_recorder.add(
+                    'servo_cmd', {'t': now, 'value': value})
+
     def drive_callback(self, msg):
         now = time.monotonic()
         speed = float(msg.drive.speed)
@@ -497,40 +573,94 @@ class OdomCalibrationNode(Node):
         now = time.monotonic()
         available = len(msg.buttons) > self.deadman_button
         held = bool(msg.buttons[self.deadman_button]) if available else False
+        axis = (
+            _number_or_none(float(msg.axes[self.steering_axis]))
+            if len(msg.axes) > self.steering_axis else None)
         with self._lock:
             self.monitors['joy'].update(
                 now, _header_seconds(msg), valid=available)
             self.latest['lb_held'] = held
             self.latest['joy_button_available'] = available
+            self.latest['steer_axis'] = axis
             if self.active_recorder:
                 self.active_recorder.add('joy', {
                     't': now,
                     'lb_held': held,
+                    'steer_axis': axis,
                 })
 
     # Live parameter discovery ---------------------------------------------
 
     def _request_live_parameters(self):
-        if self._parameter_request_inflight:
-            return
-        if not self.parameter_client.services_are_ready():
-            return
-        self._parameter_request_inflight = True
-        future = self.parameter_client.get_parameters(list(PARAMETER_NAMES))
-        future.add_done_callback(self._live_parameters_done)
+        for node, names in LIVE_SOURCES:
+            if node in self._parameter_requests_inflight:
+                continue
+            client = self.parameter_clients[node]
+            if not client.services_are_ready():
+                with self._lock:
+                    if self.live_parameter_sources[node].startswith('read'):
+                        self.live_parameter_sources[node] = (
+                            'not running (last values kept)')
+                continue
+            self._parameter_requests_inflight.add(node)
+            future = client.get_parameters(list(names))
+            future.add_done_callback(
+                lambda done, node=node, names=names:
+                    self._live_parameters_done(node, names, done))
 
-    def _live_parameters_done(self, future):
-        self._parameter_request_inflight = False
+    def _live_parameters_done(self, node, names, future):
+        self._parameter_requests_inflight.discard(node)
         try:
             values = calibration_math.parameter_values_from_response(
-                PARAMETER_NAMES, future.result())
+                names, future.result())
         except Exception as exc:
-            self.live_parameter_status = f'query failed: {exc}'
+            with self._lock:
+                self.live_parameter_sources[node] = f'query failed: {exc}'
             return
         with self._lock:
-            self.live_parameters = values
-            self.live_parameter_status = 'read from vesc_to_odom_node'
-        self.parameter_timer.cancel()
+            for name, value in values.items():
+                if name == 'servo_min':
+                    self.live_servo_limits[0] = value
+                elif name == 'servo_max':
+                    self.live_servo_limits[1] = value
+                else:
+                    self.live_parameters[name] = value
+            self.live_parameter_sources[node] = 'read'
+            read = [n for n, s in self.live_parameter_sources.items() if s == 'read']
+            self.live_parameter_status = (
+                f"read from {', '.join(read)}" if read else 'configured fallback')
+            self._sync_session_to_car()
+
+    def _sync_session_to_car(self):
+        """Follow the car's live values; called with the lock held.
+
+        After a vesc.yaml change and a bringup restart the car runs new
+        values. The session's "current" values must follow, or the report
+        compares suggestions against settings the car no longer has.
+        """
+        if self.session is None or self.active_recorder:
+            return
+        changed = wizard_actions.sync_session_parameters(
+            self.session, self.live_parameters, self.live_servo_limits)
+        if changed:
+            touch(self.session, 'parameters_changed_on_car', '; '.join(changed))
+            self.store.save(self.session)
+            self._schedule_broadcast()
+
+    @staticmethod
+    def _resolve_vesc_yaml(configured):
+        """The vesc.yaml bringup really loads, followed back to the source.
+
+        With ``colcon build --symlink-install`` the installed config is a
+        symlink into src/, so resolving it lands on the git-tracked file.
+        """
+        if configured:
+            return Path(os.path.expanduser(configured)).resolve()
+        try:
+            share = get_package_share_directory('f1tenth_stack')
+        except Exception:  # Package not built: apply stays unavailable.
+            return None
+        return Path(share, 'config', 'vesc.yaml').resolve()
 
     # Session and capture actions ------------------------------------------
 
@@ -579,12 +709,10 @@ class OdomCalibrationNode(Node):
                 parameters = self._validated_parameters(
                     payload.get('current_parameters'))
                 vehicle = {
-                    'model': 'Traxxas Ford Fiesta ST Rally VXL 74276-4',
+                    **self.vehicle_settings,
                     'wheelbase_m': parameters['wheelbase'],
-                    'physical_width_m': 0.30,
-                    'physical_length_m': 0.535,
-                    'servo_min': self.servo_min,
-                    'servo_max': self.servo_max,
+                    'servo_min': self.live_servo_limits[0],
+                    'servo_max': self.live_servo_limits[1],
                 }
                 try:
                     self.session = new_session(mode, parameters, vehicle)
@@ -647,7 +775,82 @@ class OdomCalibrationNode(Node):
                     'markdown': str(markdown_path),
                 }
                 return self._save_and_snapshot()
+            if action == 'apply_parameters':
+                return self._apply_parameters(payload)
+            if action == 'restore_backup':
+                return self._restore_backup(payload)
         raise WizardError(f'Unknown action: {action!r}.')
+
+    # Writing vesc.yaml ----------------------------------------------------
+
+    def _apply_guard(self, payload):
+        if not self.allow_apply:
+            raise WizardError(
+                'Applying is switched off on this car (allow_apply: false). '
+                'Copy the values into vesc.yaml by hand.', status=403)
+        if self.vesc_yaml_path is None:
+            raise WizardError(
+                'vesc.yaml could not be located; set vesc_yaml_path in '
+                'odom_calibration.yaml.', status=409)
+        if self.active_recorder or self.session.get('active_capture'):
+            raise WizardError('Stop recording first.', status=409)
+        if payload.get('confirmed') is not True:
+            raise WizardError('Explicit confirmation is required to edit vesc.yaml.')
+
+    def _updates(self, payload):
+        try:
+            if payload.get('source') == 'report':
+                return wizard_actions.report_updates(
+                    self.session.get('report'), payload.get('names'))
+            if payload.get('source') == 'centre':
+                return wizard_actions.centre_updates(
+                    self.session, self.live_servo_limits)
+        except ValueError as exc:
+            raise WizardError(str(exc), status=409) from exc
+        raise WizardError("source must be 'report' or 'centre'.")
+
+    def _apply_parameters(self, payload):
+        self._apply_guard(payload)
+        source = payload.get('source')
+        updates = self._updates(payload)
+        try:
+            result = vesc_yaml.apply(
+                self.vesc_yaml_path, updates, self.store.directory / 'backups',
+                label=f"{source}-{str(self.session.get('session_id'))[:8]}")
+        except (OSError, ValueError) as exc:
+            raise WizardError(f'vesc.yaml was not changed: {exc}', status=409) from exc
+        record = {
+            **result,
+            'source': source,
+            'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'restored': False,
+            # A path inside install/ is a copy that the next colcon build
+            # overwrites; only a path in src/ survives and shows in git.
+            'in_source_tree': '/install/' not in result['path'],
+        }
+        self.session.setdefault('applied_changes', []).append(record)
+        touch(self.session, 'vesc_yaml_applied', json.dumps(record['after']))
+        self.get_logger().warning(
+            f"vesc.yaml updated: {record['after']} (backup {record['backup']}). "
+            'Restart bringup for the car to use the new values.')
+        return {**self._save_and_snapshot(), 'applied': record}
+
+    def _restore_backup(self, payload):
+        self._apply_guard(payload)
+        changes = [
+            change for change in self.session.get('applied_changes', [])
+            if not change.get('restored')
+        ]
+        if not changes:
+            raise WizardError('Nothing applied in this session is left to undo.')
+        change = changes[-1]
+        try:
+            result = vesc_yaml.restore(change['path'], change['backup'])
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            raise WizardError(f'vesc.yaml was not restored: {exc}', status=409) from exc
+        change['restored'] = True
+        touch(self.session, 'vesc_yaml_restored', change['backup'])
+        return {**self._save_and_snapshot(), 'restored': result}
 
     def _start_capture(self, payload):
         if self.active_recorder or self.session.get('active_capture'):
@@ -661,7 +864,16 @@ class OdomCalibrationNode(Node):
         if not capture_allowed(self.session.get('mode'), kind):
             raise WizardError('That test is not part of this session.')
         health = self._health_snapshot(time.monotonic())
-        if kind != 'stationary' and health['odom']['status'] not in (
+        if kind == 'steering_sweep':
+            # Wheels off the ground: the servo chain matters, odometry not.
+            if health['servo']['status'] not in ('good', 'warning'):
+                raise WizardError(
+                    'The servo command topic is silent. Hold LB for a moment '
+                    'with the sticks centred, then try again.',
+                    status=409,
+                    details={'health': health},
+                )
+        elif kind != 'stationary' and health['odom']['status'] not in (
                 'good', 'warning'):
             raise WizardError(
                 'Fresh odometry is required before movement capture.',
@@ -670,6 +882,12 @@ class OdomCalibrationNode(Node):
             )
         self.active_recorder = CaptureRecorder(
             kind, self.max_samples_per_topic)
+        # What the car was running for this run. Later vesc.yaml changes must
+        # not reinterpret it (the odometry fallback and the centre-offset
+        # step both depend on the values that produced the recording).
+        self.active_recorder.parameters = copy.deepcopy(
+            self.session.get('current_parameters', {}))
+        self.active_recorder.servo_limits = list(self.live_servo_limits)
         self.session['active_capture'] = {
             'kind': kind,
             'started_at': self.active_recorder.started_at,
@@ -681,7 +899,10 @@ class OdomCalibrationNode(Node):
     def _stop_capture(self, automatic=False):
         if not self.active_recorder:
             raise WizardError('There is no capture running.', status=409)
-        capture = self.active_recorder.finish()
+        recorder = self.active_recorder
+        capture = recorder.finish()
+        capture['parameters'] = getattr(recorder, 'parameters', None)
+        capture['servo_limits'] = getattr(recorder, 'servo_limits', None)
         self.active_recorder = None
         summary = calibration_math.summarize_capture(capture)
         if automatic:
@@ -693,6 +914,8 @@ class OdomCalibrationNode(Node):
             'id': str(uuid.uuid4()),
             'kind': capture['kind'],
             'summary': summary,
+            'parameters_at_capture': capture.get('parameters'),
+            'servo_limits_at_capture': capture.get('servo_limits'),
         }
         touch(self.session, 'capture_stopped', capture['kind'])
         return self._save_and_snapshot()
@@ -716,6 +939,12 @@ class OdomCalibrationNode(Node):
                 raise WizardError('Confirm forward or reverse direction.')
             trial['measured_distance_m'] = float(distance)
             trial['direction'] = direction
+        elif kind == 'steering_sweep':
+            try:
+                trial['measurements'] = \
+                    steering_chain.validate_sweep_measurement(payload)
+            except ValueError as exc:
+                raise WizardError(str(exc)) from exc
         elif kind in calibration_math.STEERING_KINDS:
             try:
                 fields = calibration_math.validate_steering_measurement(kind, payload)
@@ -754,18 +983,40 @@ class OdomCalibrationNode(Node):
                 }
             else:
                 capture_progress = None
+            steering_view = {}
+            if self.session is not None and self.session.get('mode') in \
+                    calibration_math.MODES_WITH_STEERING:
+                steering_view = {
+                    'steering_chain': steering_chain.diagnose_session(self.session),
+                    'centre_offset': steering_chain.centre_offset_suggestion(
+                        self.session, calibration_math.drift_steering_angle),
+                }
             return {
                 'session': copy.deepcopy(self.session),
                 'telemetry': copy.deepcopy(self.latest),
                 'health': self._health_snapshot(now),
                 'live_parameters': copy.deepcopy(self.live_parameters),
+                'live_servo_limits': list(self.live_servo_limits),
                 'live_parameter_status': self.live_parameter_status,
+                'live_parameter_sources': dict(self.live_parameter_sources),
+                'pending_restart': self._pending_restart(),
+                'apply': {
+                    'allowed': self.allow_apply and self.vesc_yaml_path is not None,
+                    'path': str(self.vesc_yaml_path) if self.vesc_yaml_path else None,
+                },
+                **steering_view,
                 'capture_duration_sec': active_duration,
                 'capture_progress': capture_progress,
                 'read_only': True,
                 'report_directory': str(self.store.directory),
                 'server_time': time.time(),
             }
+
+    def _pending_restart(self):
+        """Applied values the running car has not picked up yet."""
+        if self.session is None:
+            return []
+        return wizard_actions.pending_restart(self.session, self.live_parameters)
 
     def _telemetry_tick(self):
         should_stop = False

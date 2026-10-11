@@ -78,7 +78,9 @@ function browser() {
     assert.ok(page.element("wizard-view").innerHTML.includes("Preflight"));
     const nav = page.element("step-nav").innerHTML;
     assert.equal(nav.includes("Distance runs"), mode !== "steering");
-    assert.equal(nav.includes("Steering tests"), mode !== "movement");
+    // Each steering test is its own sidebar step (README, "Guided workflow").
+    assert.equal(nav.includes("Left circle"), mode !== "movement");
+    assert.equal(nav.includes("Steering range"), mode !== "movement");
     const numbers = [...nav.matchAll(/class="step-number" aria-hidden="true">(\d+)/g)]
       .map(match => Number(match[1]));
     assert.deepEqual(numbers, Array.from({length: numbers.length}, (_, i) => i + 1));
@@ -94,7 +96,7 @@ function browser() {
   assert.equal(canceled.requests.length, 0, "declining replacement must send no write");
   canceled.sandbox.cancelCalibrationSetup();
   assert.ok(canceled.element("wizard-view").innerHTML.includes("Distance runs"));
-  assert.ok(!canceled.element("step-nav").innerHTML.includes("Steering tests"));
+  assert.ok(!canceled.element("step-nav").innerHTML.includes("Left circle"));
 
   const recording = browser();
   recording.snapshot("steering", {active_capture: {kind: "steering_drift", started_at: "now"}});

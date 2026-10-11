@@ -590,3 +590,21 @@ input[type="checkbox"], input[type="radio"] { width: 1.1rem; height: 1.1rem; acc
   .run-card .run-measure { flex-basis: 100%; }
   .run-card .run-meta { flex-basis: 100%; color: var(--muted); font-size: .85rem; }
 }
+
+/* Steering range check and vesc.yaml writes */
+.warning-banner { border-left: 3px solid var(--warn); padding: 0.5rem 1rem; }
+.chain-card .lead { margin-top: 0.5rem; }
+.chain-table td:last-child { min-width: 14rem; }
+.layer-status {
+  display: inline-block; font-size: 0.75rem; text-transform: uppercase;
+  letter-spacing: 0.04em; border: 1px solid var(--muted); color: var(--muted);
+  padding: 0 0.35rem; margin-right: 0.35rem;
+}
+.layer-status.ok { border-color: var(--good); color: var(--good); }
+.layer-status.limited, .layer-status.asymmetric, .layer-status.short,
+.layer-status.mismatch { border-color: var(--bad); color: var(--bad); }
+.layer-finding { display: block; font-size: 0.85rem; color: var(--muted); margin-top: 0.15rem; }
+.applied-list { padding-left: 1.1rem; }
+.applied-list li { margin-bottom: 0.5rem; overflow-wrap: anywhere; }
+.applied-list .small { display: block; }
+.chain-live { grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); }

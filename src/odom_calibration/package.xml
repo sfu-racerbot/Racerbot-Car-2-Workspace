@@ -3,7 +3,7 @@
 <package format="3">
   <name>odom_calibration</name>
   <version>0.1.0</version>
-  <description>Read-only guided Web wizard for VESC odometry and steering calibration.</description>
+  <description>Guided Web wizard for VESC odometry and steering calibration. Publishes no ROS topics.</description>
   <maintainer email="bryanmaubc@gmail.com">racerbotcar-2</maintainer>
   <license>MIT</license>
 
@@ -15,6 +15,7 @@
   <depend>vesc_msgs</depend>
   <depend>ament_index_python</depend>
   <depend>python3-tornado</depend>
+  <depend>python3-yaml</depend>
 
   <test_depend>python3-pytest</test_depend>
 

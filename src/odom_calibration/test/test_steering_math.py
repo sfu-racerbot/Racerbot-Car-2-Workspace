@@ -375,5 +375,64 @@ def test_combined_report_still_has_both_parts():
         _session(_full_car_trials(), mode='movement_steering'))
     assert report['movement'] is not None
     assert report['steering'] is not None
-    assert 'speed_to_erpm_gain' in report['parameter_suggestions']
+    # No distance runs in this session: the wheel gain has no data, so it is
+    # blocked with a reason rather than suggested as None.
+    assert 'speed_to_erpm_gain' not in report['parameter_suggestions']
+    assert 'insufficient' in report['blocked_suggestions']['speed_to_erpm_gain']
     assert 'steering_angle_to_servo_gain' in report['parameter_suggestions']
+
+
+# --- circle consistency checks (2026-10 wizard review) -----------------------
+
+def _circle(identifier, kind, radius, yaw=None, yaw_samples=50):
+    angle = math.atan(WHEELBASE / radius) * (1 if kind == 'steering_left' else -1)
+    trial = _trial(identifier, kind, _servo(angle), measurement_method='axle_centre',
+                   full_lock=True, measured_diameter_m=2.0 * radius)
+    if yaw is not None:
+        trial['summary']['odom_yaw_rad'] = yaw
+        trial['summary']['odom_yaw_integration'] = {'sample_count': yaw_samples}
+    return trial
+
+
+@pytest.mark.parametrize('radius,usable', [
+    (0.42, False), (0.43, True),      # MIN_CIRCLE_RADIUS_M boundary
+    (20.0, True), (20.01, False),     # MAX_CIRCLE_RADIUS_M boundary
+])
+def test_impossible_circle_radius_is_rejected(radius, usable):
+    report = calibration_math.steering_calibration(
+        _session([_circle('c', 'steering_left', radius)]))
+    item = report['trial_results'][0]
+    assert item['usable'] is usable
+    assert any('which no steered circle' in w for w in item['warnings']) is not usable
+
+
+@pytest.mark.parametrize('yaw,warned', [
+    (math.pi, False),
+    (0.75 * math.pi, False),          # MIN_CIRCLE_YAW_RAD, exactly
+    (0.74 * math.pi, True),
+    (math.pi / 2.0, True),
+])
+def test_short_arc_is_warned(yaw, warned):
+    report = calibration_math.steering_calibration(
+        _session([_circle('c', 'steering_left', 1.4, yaw=yaw)]))
+    item = report['trial_results'][0]
+    assert any('turned only' in w for w in item['warnings']) is warned
+    assert item['usable'] is True   # odometry is an estimate: warn, not reject
+
+
+def test_short_arc_check_needs_odometry_samples():
+    report = calibration_math.steering_calibration(
+        _session([_circle('c', 'steering_left', 1.4, yaw=0.1, yaw_samples=4)]))
+    assert not any('turned only' in w for w in report['trial_results'][0]['warnings'])
+
+
+@pytest.mark.parametrize('second_radius,warned', [(1.54, False), (1.56, True)])
+def test_disagreeing_repeat_circles_are_warned(second_radius, warned):
+    # Median of 1.40 and second radius; spread / median against 10 %.
+    trials = _full_car_trials() + [
+        _circle('l1', 'steering_left', 1.40), _circle('l2', 'steering_left', second_radius)]
+    trials = [t for t in trials if t['id'] != 'left']
+    report = calibration_math.steering_calibration(_session(trials))
+    median = (1.40 + second_radius) / 2.0
+    assert ((second_radius - 1.40) / median > 0.10) is warned
+    assert any('left full-lock circles disagree' in w for w in report['warnings']) is warned

@@ -236,7 +236,10 @@ def test_markdown_never_writes_none_as_parameter_value():
     }
     markdown = calibration_math.report_markdown(
         calibration_math.build_report(session))
-    assert '# speed_to_erpm_gain: insufficient data' in markdown
+    # Spec (README "Applying a suggestion"): a value with no data is listed
+    # as blocked, with its reason, and never written as a YAML value.
+    assert ('# speed_to_erpm_gain: blocked, the speed_to_erpm_gain fit is '
+            'insufficient') in markdown
     assert 'speed_to_erpm_gain: None' not in markdown
 
 

@@ -11,3 +11,11 @@ __pycache__/
 .sim
 .venv-f1tenth/
 .pytest_cache/
+# `ros2 run tf2_tools view_frames` output, written into whatever folder it
+# was run from.
+frames_*.gv
+frames_*.pdf
+# Hand-made config backups. The calibration wizard keeps its own in
+# ~/.ros/odom_calibration/backups/; git history keeps every committed version.
+*.bak
+*.bak.*

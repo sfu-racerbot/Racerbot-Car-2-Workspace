@@ -35,6 +35,7 @@ MODE_STAGES = {
 CAPTURE_KINDS = (
     'stationary',
     'movement',
+    'steering_sweep',
     'steering_center',
     'steering_drift',
     'steering_left',

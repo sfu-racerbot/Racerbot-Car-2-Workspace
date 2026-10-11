@@ -72,10 +72,11 @@ function browser() {
 (async () => {
   // Each test is its own sidebar step, in the order to do them, numbered 1..N.
   const expected = {
-    steering: ["Check the car", "Drive straight", "Left circle", "Right circle", "Report"],
+    steering: ["Check the car", "Steering range", "Drive straight", "Left circle",
+      "Right circle", "Report"],
     movement: ["Check the car", "Stand still", "Distance runs", "Report"],
     movement_steering: ["Check the car", "Stand still", "Distance runs",
-      "Drive straight", "Left circle", "Right circle", "Report"],
+      "Steering range", "Drive straight", "Left circle", "Right circle", "Report"],
   };
   for (const [mode, labels] of Object.entries(expected)) {
     const page = browser();
@@ -85,10 +86,12 @@ function browser() {
     assert.equal(nav.includes("segmented"), false, "no tabs inside a step");
   }
 
-  // The report stays locked until drift AND both full-lock circles exist.
-  // Each case removes one required test; the report must refuse in every one.
-  const full = [trial("steering_drift"), trial("steering_left"), trial("steering_right")];
-  for (const missing of ["steering_drift", "steering_left", "steering_right"]) {
+  // The report stays locked until the range check, drift AND both full-lock
+  // circles exist. Each case removes one required test; the report must
+  // refuse in every one.
+  const full = [trial("steering_sweep"), trial("steering_drift"), trial("steering_left"),
+    trial("steering_right")];
+  for (const missing of ["steering_sweep", "steering_drift", "steering_left", "steering_right"]) {
     const page = browser();
     page.snapshot("steering", {trials: full.filter(t => t.kind !== missing)});
     const report = stepButton(page.element("step-nav").innerHTML, "report");
@@ -99,8 +102,8 @@ function browser() {
   }
   // A half-lock circle is an extra; it must not stand in for the full-lock test.
   const halfLock = browser();
-  halfLock.snapshot("steering", {trials: [trial("steering_drift"), trial("steering_left"),
-    trial("steering_right", {full_lock: false})]});
+  halfLock.snapshot("steering", {trials: [trial("steering_sweep"), trial("steering_drift"),
+    trial("steering_left"), trial("steering_right", {full_lock: false})]});
   assert.match(stepButton(halfLock.element("step-nav").innerHTML, "report"), / disabled/);
   // With every test done, the report unlocks and generating sends the request.
   const complete = browser();
@@ -124,9 +127,11 @@ function browser() {
   // A restored steering session opens on its first unfinished test, and that
   // page's Record button records that test's kind and no other.
   const resumeCases = [
-    [[], "steering_drift", "Drive straight"],
-    [[trial("steering_drift")], "steering_left", "Left circle"],
-    [[trial("steering_drift"), trial("steering_left")], "steering_right", "Right circle"],
+    [[], "steering_sweep", "Steering range"],
+    [[trial("steering_sweep")], "steering_drift", "Drive straight"],
+    [[trial("steering_sweep"), trial("steering_drift")], "steering_left", "Left circle"],
+    [[trial("steering_sweep"), trial("steering_drift"), trial("steering_left")],
+      "steering_right", "Right circle"],
   ];
   for (const [trials, kind, title] of resumeCases) {
     const page = browser();

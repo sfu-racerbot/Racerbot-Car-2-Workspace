@@ -34,7 +34,7 @@ setup(
     zip_safe=True,
     maintainer='racerbotcar-2',
     maintainer_email='bryanmaubc@gmail.com',
-    description='Read-only guided odometry and steering calibration wizard.',
+    description='Guided odometry and steering calibration wizard (no ROS publishers).',
     license='MIT',
     tests_require=['pytest'],
     entry_points={
