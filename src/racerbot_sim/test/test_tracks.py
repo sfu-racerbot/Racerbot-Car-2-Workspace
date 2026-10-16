@@ -83,22 +83,34 @@ def test_every_named_layout_builds_and_is_big_enough_to_close_a_lap():
             assert _lap_length(line) > 20.0, f'{name} is too short to map'
 
 
-def _min_turning_radius():
-    """This car's tightest circle, from the two configured numbers.
-
-    Read out of gap_follow.yaml rather than written here, because it moved:
-    the wheelbase was believed to be the 0.324 m Traxxas publishes until the
-    car was tape-measured at 0.36 m on 2026-08-24, and a LONGER wheelbase
-    turns WIDER for the same rack angle -- 1.22 m became 1.35 m. A test
-    carrying its own copy of that number would have kept asserting the old,
-    more permissive limit.
-    """
+def _config_params(package, config, node):
     path = os.path.join(os.path.dirname(__file__), '..', '..',
-                        'gap_follow', 'config', 'gap_follow.yaml')
+                        package, 'config', config)
     with open(path, encoding='utf-8') as handle:
-        params = yaml.safe_load(handle)['gap_follow_node']['ros__parameters']
-    # Bicycle model: kappa = tan(delta) / L, and the radius is 1/kappa.
-    return params['wheelbase'] / math.tan(params['max_steering_angle'])
+        return yaml.safe_load(handle)[node]['ros__parameters']
+
+
+def _min_turning_radius():
+    """The tightest circle any part of the stack will drive or plan.
+
+    Read out of the configs rather than written here, because it moves: the
+    wheelbase was believed to be the 0.324 m Traxxas publishes until the car
+    was tape-measured at 0.36 m on 2026-08-24 (1.22 m became 1.35 m), and the
+    2026-10-16 steering calibration raised the controllers to 0.349 rad and
+    the race planner to 0.30 rad.
+
+    The planner's circle is the wider of the two and the one that decides
+    whether a course is raced: auto_map_race refuses a line tighter than its
+    profile_max_steering_angle, so a layout that clears only gap_follow's
+    circle would be a course the race stack cannot plan. Bicycle model:
+    kappa = tan(delta) / L, and the radius is 1/kappa.
+    """
+    gap = _config_params('gap_follow', 'gap_follow.yaml', 'gap_follow_node')
+    plan = _config_params('pure_pursuit', 'auto_map_race.yaml',
+                          'auto_map_race_node')
+    return max(
+        gap['wheelbase'] / math.tan(gap['max_steering_angle']),
+        plan['profile_wheelbase'] / math.tan(plan['profile_max_steering_angle']))
 
 
 def test_every_layout_corner_can_actually_be_driven():
@@ -111,10 +123,11 @@ def test_every_layout_corner_can_actually_be_driven():
 
         centreline radius + (corridor width - car width) / 2
 
-    and that is what has to clear the turning circle. asb_10000's 1.20 m and
-    indoor_tight's 1.10 m centrelines are both INSIDE the 1.35 m circle --
-    they are driveable only because the corridor gives the car somewhere to
-    swing out to, and calling them undriveable would be wrong.
+    and that is what has to clear the turning circle. indoor_tight's 1.10 m
+    centreline is INSIDE the planner's 1.16 m circle (and asb_10000's 1.20 m
+    was inside the old 1.35 m one) -- driveable only because the corridor
+    gives the car somewhere to swing out to, and calling them undriveable
+    would be wrong.
 
     The version of this test before the car was re-measured compared the
     bare centreline radius against 0.9 x the turning radius. The 0.9 had no
@@ -123,9 +136,12 @@ def test_every_layout_corner_can_actually_be_driven():
     perfectly driveable.
     """
     turning_radius = _min_turning_radius()
-    assert turning_radius == pytest.approx(1.353, abs=0.01), (
-        'the configured geometry no longer gives this car a 1.35 m circle; '
-        'check gap_follow.yaml wheelbase/max_steering_angle')
+    # Cited spec: docs/hardware-reference.md (2026-10-16 calibration) gives the
+    # planner 0.30 rad on the 0.36 m wheelbase, 0.36 / tan(0.30) = 1.164 m.
+    assert turning_radius == pytest.approx(0.36 / math.tan(0.30), abs=0.005), (  # 5 mm
+        'the configured geometry no longer gives the race planner the '
+        'documented 1.16 m circle; check auto_map_race.yaml / gap_follow.yaml '
+        'against docs/hardware-reference.md')
     car_width = _car_width()
     assert tracks.LAYOUTS, 'no layouts to check'
     for name, spec in tracks.LAYOUTS.items():
