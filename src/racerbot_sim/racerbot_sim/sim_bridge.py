@@ -65,6 +65,11 @@ CAR_WIDTH = 0.31
 CAR_LENGTH = 0.58
 LIDAR_OFFSET_X = 0.26
 LIDAR_OFFSET_Z = 0.11
+# Full-lock wheel angles, measured with circles 2026-10-16
+# (docs/hardware-reference.md): left at servo 0.178, right at servo_max 0.95.
+# Replaces gym's stock +/-0.4189 rad, which described another car.
+STEERING_MAX_LEFT = math.atan(0.36 / 0.645)     # +0.509 rad, 29.2 deg
+STEERING_MAX_RIGHT = -math.atan(0.36 / 0.750)   # -0.448 rad, 25.6 deg
 INTEGRATOR_DT = 0.005
 # The car's Hokuyo UST-10LX: 1081 beams at 0.25 deg over 270 deg. The older
 # harness uses 819; docs/sim-fidelity-audit.md measured the correction as
@@ -207,6 +212,16 @@ class DeadReckonedOdometry:
         self.yaw_rate = yaw_rate
 
 
+def vehicle_parameter_updates() -> dict:
+    """This car's overrides of gym's stock F1TENTH_VEHICLE_PARAMETERS."""
+    return dict(
+        lf=WHEELBASE / 2.0, lr=WHEELBASE / 2.0,
+        width=CAR_WIDTH, length=CAR_LENGTH,
+        collision_body_center_x=WHEELBASE / 2.0,
+        s_min=STEERING_MAX_RIGHT, s_max=STEERING_MAX_LEFT,
+    )
+
+
 class SimBridge:
     """One ego car plus zero or more scripted opponents on a closed loop."""
 
@@ -240,10 +255,7 @@ class SimBridge:
             base_link_to_lidar_tf=(LIDAR_OFFSET_X, 0.0, 0.0),
         )
         params = F1TENTH_VEHICLE_PARAMETERS.with_updates(
-            lf=WHEELBASE / 2.0, lr=WHEELBASE / 2.0,
-            width=CAR_WIDTH, length=CAR_LENGTH,
-            collision_body_center_x=WHEELBASE / 2.0,
-        )
+            **vehicle_parameter_updates())
         env_config = EnvConfig(
             seed=config.seed,
             map_name=str(config.track_path),

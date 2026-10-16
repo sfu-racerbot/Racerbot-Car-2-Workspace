@@ -91,7 +91,7 @@ The good news from re-running with working detection: **`gap_solo` and
 | 2 | Friction circle on steering | F2–F5, R4 | car can no longer corner past `μg`; braking now costs cornering |
 | 3 | Proportional steering servo | F6, R3 | removes a permanent 0.08 rad limit cycle |
 | 4 | 1081 LiDAR beams | F9, R2 | matches the Hokuyo UST-10LX; measured free |
-| 5 | Real steering limits, +0.313/−0.263 rad | F12 | the car's servo travel, from `vesc.yaml` |
+| 5 | Real steering limits, +0.509/−0.448 rad | F12 | measured full lock, 2026-10-16 circles (`docs/hardware-reference.md`); was +0.313/−0.263 from the old unmeasured servo map |
 | 6 | Real speed ceiling, 5.039 m/s | F13 | the VESC eRPM cap |
 | 7 | `a_max = μg` = 6.87 m/s² | F1 | was 9.51 (0.97 g), an asphalt figure |
 | 8 | Pose/odometry/scan error | F7–F9, R5 | controllers no longer see ground truth |

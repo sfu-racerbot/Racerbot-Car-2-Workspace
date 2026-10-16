@@ -195,3 +195,31 @@ def test_a_finite_command_passes_through_unchanged():
     """Including the boundary values that are legal: zero and negative."""
     assert sim_bridge.sanitize_command(-0.26, 0.0) == (-0.26, 0.0, True)
     assert sim_bridge.sanitize_command(0.2, -1.5) == (0.2, -1.5, True)
+
+
+# --- steering limits ------------------------------------------------------
+
+def test_steering_limits_are_the_measured_full_lock_circles():
+    """Oracle: the 2026-10-16 full-lock half circles in
+    docs/hardware-reference.md, angle = atan(wheelbase / rear-axle radius),
+    with radius = (inner diameter + 0.27 m track) / 2. Left: 1.02 m inner at
+    servo 0.178. Right: 1.23 m inner at servo_max 0.95."""
+    left = math.atan(0.36 / ((1.02 + 0.27) / 2.0))
+    right = math.atan(0.36 / ((1.23 + 0.27) / 2.0))
+    updates = sim_bridge.vehicle_parameter_updates()
+    assert updates['s_max'] == pytest.approx(left, abs=1e-6)     # rad
+    assert updates['s_min'] == pytest.approx(-right, abs=1e-6)   # rad
+    assert math.degrees(updates['s_max']) == pytest.approx(29.2, abs=0.05)
+    assert math.degrees(-updates['s_min']) == pytest.approx(25.6, abs=0.05)
+
+
+@pytest.mark.parametrize('package, node', [
+    ('gap_follow', 'gap_follow_node'), ('pure_pursuit', 'pure_pursuit_node')])
+def test_simulated_car_reaches_the_shipped_steering_limit_both_ways(package, node):
+    """A sim car that steers less than the controller may ask for would hide
+    the controller's own clamp; one that only steers less on one side is the
+    2026-10-10 bug in simulated form."""
+    limit = _car_params(package, node)['max_steering_angle']
+    updates = sim_bridge.vehicle_parameter_updates()
+    assert updates['s_max'] >= limit
+    assert -updates['s_min'] >= limit
