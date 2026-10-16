@@ -42,9 +42,9 @@ odom_calibration_node:
     # nodes (vesc_to_odom_node, ackermann_to_vesc_node, vesc_driver_node).
     speed_to_erpm_gain: -4447.983786
     speed_to_erpm_offset: 0.0
-    steering_angle_to_servo_gain: -1.2135
+    steering_angle_to_servo_gain: -0.78
     steering_angle_to_servo_offset: 0.5904
     # Measured 2026-08-24, front axle to rear axle. Matches vesc.yaml.
     wheelbase: 0.36
     servo_min: 0.15
-    servo_max: 0.85
+    servo_max: 0.95

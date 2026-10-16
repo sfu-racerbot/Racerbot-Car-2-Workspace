@@ -45,6 +45,12 @@ wheels:
 - Raising the offset from 0.5304 to 0.5904 to stop the left drift moved the
   whole range towards `servo_max` and used up the right-hand headroom.
 
+Fixed on 2026-10-16 with full-lock circles at several `servo_max` values.
+The gain itself was about 1.5× too large (the car really turned 29.2° left),
+so the fix was a new gain of `-0.78`, `servo_max: 0.95` and a 25° full-stick
+scale, not only a wider clamp. Numbers and the measured curve are in
+[hardware-reference.md](hardware-reference.md).
+
 The **Steering range** step finds this kind of problem for you. Put the car
 on a stand with the front wheels off the ground, hold LB, and hold the stick
 fully left and then fully right for about 3 seconds each. A helper reads each

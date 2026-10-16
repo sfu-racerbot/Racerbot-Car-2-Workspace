@@ -25,13 +25,29 @@ Physical connections, addresses, and config values for this specific car. Everyt
 ```yaml
 speed_to_erpm_gain: 4614.0
 speed_to_erpm_offset: 0.0
-steering_angle_to_servo_gain: -1.2135
-steering_angle_to_servo_offset: 0.5304
+steering_angle_to_servo_gain: -0.78    # MEASURED 2026-10-16, see below
+steering_angle_to_servo_offset: 0.5904
 servo_min: 0.15
-servo_max: 0.85
+servo_max: 0.95
 wheelbase: 0.36   # meters, MEASURED on this car 2026-08-24
 ```
-The servo formula: `servo_position = -1.2135 × steering_angle + 0.5304`. Steering angle `0.0` → servo position `0.5304` (center). This is what you'll see repeatedly if you inspect `/commands/servo/position` — `0.5304` is neutral, not a bug.
+The servo formula: `servo_position = -0.78 × steering_angle + 0.5904`. Steering angle `0.0` → servo position `0.5904` (center; the car drives straight there). This is what you'll see repeatedly if you inspect `/commands/servo/position` — `0.5904` is neutral, not a bug.
+
+**Steering calibration, 2026-10-16.** The old `-1.2135` gain was never measured, and was about 1.5× too large: full stick asked for 19.5° and the car turned 29.2° left, while `servo_max: 0.85` cut the right side to 19.1° (the offset had already been raised from 0.5304 to 0.5904 to fix a left pull, which used up the right-hand servo range). Fixed with full-lock half circles, tape-measured inner tire to inner tire (rear-axle radius = (inner + 0.27 m track) / 2, angle = atan(0.36 / radius)):
+
+| Servo | Side | Inner diameter | Wheel angle |
+|---|---|---|---|
+| 0.178 | left | 1.02 m (twice) | 29.2° |
+| 0.318 | left | 1.60 m | 21.1° |
+| 0.85 | right | 1.81 m | 19.1° |
+| 0.90 | right | 1.40 m | 23.3° |
+| 0.95 | right | 1.23 m | 25.6° |
+| 1.00 | right | 1.20 m | 26.1° |
+
+- The linkage is **not linear**: each servo step turns the wheels less near full lock. `-0.78` is fitted at 19–29°; nothing below 19° was measured, which is where autonomy mostly steers.
+- The right side gains only 0.5° from 0.95 to 1.00 (within measuring error), so `servo_max` stops at 0.95. No buzzing, binding or heat at 1.00.
+- Full stick (`joy_teleop.yaml` scale) is **0.436 rad = 25°**, which both sides reach. Check: both full-lock circles came out equal, 1.33 m inner = 24.2°.
+- Re-centring the servo horn, a different servo, or any linkage change invalidates all of this. Redo the drive-straight run and the circles (`docs/odom-calibration.md`).
 
 **Servo output must be enabled in the VESC's own firmware config** — this is separate from anything in this repo and isn't visible to `ros2`/`colcon` at all. If a freshly-flashed or reset VESC has steering that does nothing despite `fault_code: 0` and a clean serial connection, check this first. Requires **VESC Tool** (official app, vesc-project.com) connected over USB — which means stopping the ROS bringup first, since only one process can hold the serial port. Full story in [troubleshooting.md](troubleshooting.md).
 

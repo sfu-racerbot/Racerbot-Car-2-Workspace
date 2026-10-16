@@ -8,6 +8,7 @@ layout are what the editor has to survive. The filesystem is used for real
 import math
 import os
 from pathlib import Path
+import re
 import sys
 
 import pytest
@@ -116,7 +117,12 @@ def test_refuses_a_duplicated_key():
 
 def test_verify_catches_any_other_change(original):
     tampered = vesc_yaml.update_text(original, {'steering_angle_to_servo_offset': 0.6})
-    tampered = tampered.replace('servo_max: 0.85', 'servo_max: 0.95')
+    # Tamper with whatever servo_max the real file holds today, and prove the
+    # tamper landed, so a recalibration cannot turn this into a no-op edit.
+    tampered, count = re.subn(r'^(\s*servo_max:\s*)\S+', r'\g<1>0.123', tampered,
+                              flags=re.MULTILINE)
+    assert count == 1
+    assert _params(tampered, '/**')['servo_max'] != _params(original, '/**')['servo_max']
     with pytest.raises(ValueError, match='changed other values in the /\\*\\* block'):
         vesc_yaml.verify(original, tampered, {'steering_angle_to_servo_offset': 0.6})
 
@@ -205,4 +211,17 @@ def test_real_file_round_trips_unchanged_values(original):
         'speed_to_erpm_gain': current['speed_to_erpm_gain'],
     })
     assert new == original
-    assert math.isclose(current['steering_angle_to_servo_gain'], -1.2135)
+    # Oracle: the gain as written on its own line of the file, read with a plain
+    # regex rather than YAML, so it is independent of read_values and of
+    # whatever the car is calibrated to today.
+    written = re.findall(r'^\s+steering_angle_to_servo_gain:\s*(\S+)', original,
+                         flags=re.MULTILINE)
+    assert len(written) == 1
+    assert math.isclose(current['steering_angle_to_servo_gain'], float(written[0]),
+                        abs_tol=0.0)
+    # And a value nobody calibrates to, so a reader that returns today's
+    # number without parsing it fails.
+    edited = re.sub(r'^(\s+steering_angle_to_servo_gain:\s*)\S+', r'\g<1>-1.234567',
+                    original, flags=re.MULTILINE)
+    assert math.isclose(vesc_yaml.read_values(edited)['steering_angle_to_servo_gain'],
+                        -1.234567, abs_tol=0.0)

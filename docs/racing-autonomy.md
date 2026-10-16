@@ -785,7 +785,9 @@ None of the above replaces wheels-off-ground testing, or a human ready to cut po
 ### Where `0.26 rad` comes from
 
 <details>
-<summary><b>The derivation</b> — from this car's real servo calibration, and asymmetric. Re-derive it if the servo ever changes.</summary>
+<summary><b>The derivation</b> — from this car's old servo calibration. Superseded on 2026-10-16; 0.26 is now conservative, not the limit.</summary>
+
+> **2026-10-16:** the steering was recalibrated with measured circles (`docs/hardware-reference.md`): gain `-0.78`, offset `0.5904`, `servo_max: 0.95`. Both sides now reach about 25°, so 0.26 rad (14.9°) is well inside what the car can do. The derivation below is the history of the old, unmeasured `-1.2135` calibration.
 
 This car's actual servo calibration lives in `src/f1tenth_system/f1tenth_stack/config/vesc.yaml`:
 

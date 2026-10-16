@@ -6,7 +6,13 @@
     speed_to_erpm_offset: 0.0
 
     # servo value (0 to 1) =  steering_angle_to_servo_gain * steering angle (radians) + steering_angle_to_servo_offset
-    steering_angle_to_servo_gain: -1.2135
+    # -0.78 (was -1.2135): fitted 2026-10-16 to tape-measured full-lock half circles
+    # (servo -> wheel angle, rear-axle radius, wheelbase 0.36), through the drive-straight
+    # offset 0.5904. Left: 0.318 -> 21.1, 0.178 -> 29.2 deg. Right: 0.85 -> 19.1,
+    # 0.90 -> 23.3, 0.95 -> 25.6, 1.00 -> 26.1 deg. The linkage is not linear: -0.78 is
+    # fitted at 19-29 deg; nothing below 19 deg was measured. Checked: 25 deg full stick
+    # (joy_teleop.yaml) gave equal left/right circles, 1.33 m inner = 24.2 deg.
+    steering_angle_to_servo_gain: -0.78
     steering_angle_to_servo_offset: 0.5904
 
     port: /dev/sensors/vesc
@@ -21,7 +27,10 @@
     position_min: 0.0
     position_max: 0.0
     servo_min: 0.15
-    servo_max: 0.85
+    # 0.95 (was 0.85): 0.85 capped right steering at 19.1 deg. Past 0.95 the right
+    # linkage gains only 0.5 deg (1.00 -> 26.1 deg, within measuring error), so it is
+    # near its stop; 0.95 keeps the servo off it. 2026-10-16 circles, no binding at 1.00.
+    servo_max: 0.95
 
 # No longer needed, all parameters are shared
 # ackermann_to_vesc_node:
