@@ -71,7 +71,7 @@ When the clamp is the cause, the report gives three ways out:
 - cap every steering command at the angle both sides can reach.
 
 It also warns when `gap_follow`/`pure_pursuit` ask for more steering
-(`max_steering_angle`, 0.26 rad) than both sides can reach, because those
+(`max_steering_angle`, 0.349 rad since 2026-10-16) than both sides can reach, because those
 commands are clipped on one side without any warning.
 
 ## Which part do you need?

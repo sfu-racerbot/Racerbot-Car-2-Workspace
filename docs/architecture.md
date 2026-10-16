@@ -164,7 +164,7 @@ The practical failure: enter a straight 15 cm off the left wall and the car trac
 
 **Three properties make this safe to add underneath an obstacle-avoidance pipeline:**
 
-- **It is bounded.** `centering_max_steering` (0.08 rad of the 0.26 rad the rack has) caps it, and `gap_follow_node` refuses to start if that is set above half the steering limit.
+- **It is bounded.** `centering_max_steering` (0.08 rad of the 0.349 rad steering limit) caps it, and `gap_follow_node` refuses to start if that is set above half the steering limit.
 - **It fades, never switches.** Full weight below a 4° aim bearing, zero above 15°, linear between — silent through a corner, where the fast line is deliberately *not* the middle.
 - **It needs two real walls.** Both sides must return a wall within `centering_zero_side_distance`. An opening on one side is not something to centre against.
 

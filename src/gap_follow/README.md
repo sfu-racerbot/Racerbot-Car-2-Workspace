@@ -247,7 +247,9 @@ forward cone closed and the clearance stop deadlocked it. The bearing law
 is also what the standard F1TENTH follow-the-gap reference uses.
 
 $\delta$ is then clipped to `max_steering_angle`. **This default changed
-from `0.4189 rad` (~24°) to `0.26 rad` (~15°)**, matching `pure_pursuit`.
+from `0.4189 rad` (~24°) to `0.26 rad` (~15°)**, matching `pure_pursuit`,
+and the shipped config went to `0.349 rad` (20°) after the 2026-10-16 steering
+calibration (`docs/hardware-reference.md`).
 `0.4189` was never physically achievable symmetrically: this car's servo
 calibration reaches `+0.313 rad` one way and only `-0.263 rad` the other, so
 anything past `0.26` was a command the servo saturated on one side and not
@@ -286,9 +288,9 @@ speed = min(desired_speed, self.last_commanded_speed + self.max_acceleration * d
 
 `min_speed` floors only the curvature ceiling, never the clearance one — the
 car must always be allowed to brake below its cruising floor when something
-is close. With the default `max_lateral_accel: 1.0` and the `0.26 rad`
-steering clamp, the curvature ceiling spans `2.0 m/s` straight-ahead down to
-about `1.10 m/s` at full lock; the clearance ceiling starts biting below
+is close. With the default `max_lateral_accel: 1.0` and the `0.349 rad`
+steering clamp, the curvature ceiling falls to about `0.99 m/s` at full lock
+(`sqrt(1.0 * 0.36 / tan(0.349))`; it was about `1.16 m/s` at 0.26 rad); the clearance ceiling starts biting below
 roughly `0.92m` of forward room.
 
 ### 9. Bound how fast a command may change
@@ -440,7 +442,7 @@ apex, only change the car's pace approaching one.
 | `min_safety_margin` | `0.18` m (== `safety_margin`, i.e. off) | Floor `safety_margin` may shrink to on a sensed-narrow straight |
 | `corner_speed_wide` | `1.4` m/s | Ceiling `corner_speed` may rise to on a sensed-wide corner |
 | `enable_cornering_anticipation` / `anticipation_near_depth` | `false` / `2.5` m | Extra speed cap from near/far gap-bearing disagreement (see below) — ships off, measured to over-brake in open rooms |
-| `max_steering_angle` | `0.26` rad (~15°) | Hard command clamp — the symmetric envelope this car's servo can actually reach |
+| `max_steering_angle` | `0.349` rad (20°) | Hard command clamp. Both sides reach ~25° since the 2026-10-16 calibration; 20° leaves margin for gain error |
 | `steering_gain` | `1.0` | Steering per radian of gap bearing, before the `max_steering_angle` clip. `1.0` points the wheels at the gap. Raise only if the car is slow to leave a wall; too high weaves |
 | `max_lateral_accel` | `1.0` m/s² | Cornering speed ceiling: $v \le \sqrt{a_{lat}/\|\kappa\|}$ |
 | `max_braking_decel` | `3.0` m/s² | **Safety-critical.** Braking authority the car *assumes it has* when deciding how fast it may drive for the clearance it can see. Set above real capability and it drives faster than it can stop. Not the same knob as `pure_pursuit`'s identically named command slew rate — don't copy that value here |
@@ -453,12 +455,14 @@ apex, only change the car's pace approaching one.
 
 ### Turning circle vs. course width — a hard geometric limit
 
-`max_steering_angle` 0.26 rad is the **symmetric physical envelope** of the
-servo, not a tuning choice: the calibration `servo = -1.2135*delta + 0.5304`
-over the usable `servo_min`/`servo_max` 0.15–0.85 range gives +0.3135 rad one
-way and −0.2634 rad the other, so ±0.26 is all the car has both ways. That
-fixes the **minimum turn radius at 1.218 m**, and no parameter in this file
-changes it.
+`max_steering_angle` is bounded by what the steering can physically reach
+both ways. Since the 2026-10-16 circle calibration (`servo = -0.78*delta +
+0.5904`, clip 0.15–0.95, `docs/hardware-reference.md`) that is about 25° each
+side; the config uses 0.349 rad (20°) for margin, a **minimum turn radius of
+0.99 m** on the 0.36 m wheelbase. (Before, the unmeasured `-1.2135` gain and
+0.85 clip left ±0.26 rad, 1.35 m.) Raising it past what both sides reach makes
+the car silently under-steer one way; `racerbot_launch`'s
+`test_steering_limits_fit_servo.py` refuses a limit the servo clips.
 
 On a 1.0 m course that is the binding constraint on what the car can drive:
 

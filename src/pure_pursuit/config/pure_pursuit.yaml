@@ -94,13 +94,14 @@ pure_pursuit_node:
     odom_timeout_sec: 0.5
 
     # --- Steering limit ---
-    # Derived from this car's actual servo calibration in vesc.yaml:
-    #   servo = -1.2135 * steering_angle + 0.5304, servo clamped to [0.15, 0.85]
-    # Solving both ends: +0.313 rad at servo=0.15, -0.263 rad at servo=0.85.
-    # Using the smaller magnitude (0.26) keeps every command physically
-    # achievable in both directions, with a small margin. Re-derive this
+    # 0.349 rad = 20 deg (was 0.26). Since the 2026-10-16 circle calibration
+    # (vesc.yaml gain -0.78, servo_max 0.95; docs/hardware-reference.md) both
+    # sides reach ~25 deg, so 20 leaves 5 deg for the gain's error below
+    # 19 deg, where nothing was measured. The planner (auto_map_race.yaml
+    # profile_max_steering_angle) plans to 0.30 so this controller keeps
+    # ~3 deg to correct with on the tightest planned corner. Re-derive both
     # if vesc.yaml's gain/offset/servo_min/servo_max ever change.
-    max_steering_angle: 0.26
+    max_steering_angle: 0.349
 
     # --- Safety watchdogs ---
     pose_timeout_sec: 0.5         # stop if localization hasn't updated within this long

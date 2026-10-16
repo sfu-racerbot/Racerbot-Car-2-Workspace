@@ -36,7 +36,7 @@ odom_calibration_node:
     # Largest steering angle any driving node may request (gap_follow.yaml and
     # pure_pursuit.yaml max_steering_angle). The range check warns when the
     # servo cannot reach it on both sides.
-    planner_max_steering_rad: 0.26
+    planner_max_steering_rad: 0.349
 
     # Fallbacks, used only until the live values are read from the running
     # nodes (vesc_to_odom_node, ackermann_to_vesc_node, vesc_driver_node).

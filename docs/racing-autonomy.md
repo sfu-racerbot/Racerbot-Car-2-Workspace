@@ -688,7 +688,7 @@ A target to the left ($y_{body}>0$) gives positive curvature; a target to the ri
 
 $$\delta = \arctan(L \cdot \kappa)$$
 
-That's finally clipped to `max_steering_angle` (default `0.26 rad`, ≈15°, derived from this car's real servo limits below) and rate-limited against the previous command by `max_steering_rate`.
+That's finally clipped to `max_steering_angle` (`0.349 rad`, 20°, set from this car's measured steering since 2026-10-16; history below) and rate-limited against the previous command by `max_steering_rate`.
 
 </details>
 
@@ -787,7 +787,7 @@ None of the above replaces wheels-off-ground testing, or a human ready to cut po
 <details>
 <summary><b>The derivation</b> — from this car's old servo calibration. Superseded on 2026-10-16; 0.26 is now conservative, not the limit.</summary>
 
-> **2026-10-16:** the steering was recalibrated with measured circles (`docs/hardware-reference.md`): gain `-0.78`, offset `0.5904`, `servo_max: 0.95`. Both sides now reach about 25°, so 0.26 rad (14.9°) is well inside what the car can do. The derivation below is the history of the old, unmeasured `-1.2135` calibration.
+> **2026-10-16:** the steering was recalibrated with measured circles (`docs/hardware-reference.md`): gain `-0.78`, offset `0.5904`, `servo_max: 0.95`. Both sides now reach about 25°. `max_steering_angle` is now **0.349 rad (20°)**, leaving 5° for gain error below 19° where nothing was measured, and the race planner's `profile_max_steering_angle` is **0.30 rad (17°)**, so the controller has steering left to correct with on the tightest planned corner. `racerbot_launch/test/test_steering_limits_fit_servo.py` checks every shipped limit against `vesc.yaml`'s servo clip. The derivation below is the history of the old, unmeasured `-1.2135` calibration.
 
 This car's actual servo calibration lives in `src/f1tenth_system/f1tenth_stack/config/vesc.yaml`:
 
@@ -1027,7 +1027,7 @@ All of these live in `src/pure_pursuit/config/pure_pursuit.yaml` — see that fi
 | `max_braking_decel` | `8.0` | m/s²; cap on how fast a *normal* command may fall. Emergency stops are never rate-limited |
 | `max_steering_rate` | `1.0` | rad/s; steering slew limit between commands |
 | `command_slew_max_dt` | `0.10` | s; longest interval one slew step may integrate, so a stalled loop can't cash in a jump |
-| `max_steering_angle` | `0.26` | rad; derived from this car's real servo limits, see above |
+| `max_steering_angle` | `0.349` | rad (20°); from the 2026-10-16 measured steering calibration, see above |
 | `odom_timeout_sec` | `0.5` | Lookahead falls back to the profiled speed past this. Not a stop watchdog |
 | `pose_timeout_sec` | `0.5` | Localization watchdog |
 | `max_cross_track_error` | `1.0` | Lost/kidnapped watchdog, meters |

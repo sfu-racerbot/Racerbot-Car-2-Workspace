@@ -170,11 +170,16 @@ auto_map_race_node:
 
     # --- Racing-line cleanup and acceptance (pure_pursuit/recorded_path.py) ---
     # Must match the car: these decide what "the rack cannot steer this" means.
-    profile_max_steering_angle: 0.26
+    # 0.30 rad = 17 deg (was 0.26): a 1.16 m minimum turning radius. Kept
+    # below pure_pursuit.yaml's 0.349 controller limit on purpose, so the
+    # tightest planned corner still leaves the controller steering to correct
+    # with. Both come from the 2026-10-16 calibration (hardware-reference.md).
+    profile_max_steering_angle: 0.30
     profile_wheelbase: 0.36
-    # Shortest wiggle kept before filtering harder. Just over the 1.35m
-    # minimum turning radius 0.26rad implies on the measured 0.36m
-    # wheelbase -- anything tighter in a recorded line is localisation, not
+    # Shortest wiggle kept before filtering harder. Set just over the 1.35m
+    # minimum turning radius the old 0.26rad limit implied on the measured
+    # 0.36m wheelbase (now 1.16m at 0.30rad; left at 1.5m, the
+    # conservative side) -- anything tighter in a recorded line is localisation, not
     # driving. (It read 1.22m while the wheelbase was believed to be
     # 0.324m; a longer wheelbase turns WIDER, so the car needs more room
     # for the same rack angle, not less, and this 1.5m sits closer to the

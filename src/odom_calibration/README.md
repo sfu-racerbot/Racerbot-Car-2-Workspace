@@ -444,7 +444,7 @@ steering the car can actually reach with those values.
 
 Compare it against `max_steering_angle` in the driving nodes' configs (for example
 `src/gap_follow/config/gap_follow.yaml` and
-`src/pure_pursuit/config/pure_pursuit.yaml`, both `0.26`). Do not raise a
+`src/pure_pursuit/config/pure_pursuit.yaml`, both `0.349` since 2026-10-16). Do not raise a
 driving node's `max_steering_angle` past what the car reaches: the planner
 must only ask for angles the servo can produce.
 

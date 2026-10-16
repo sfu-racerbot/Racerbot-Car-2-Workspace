@@ -148,7 +148,7 @@ and threshold. Set the period to `0.0` for transition-only logging.
 | `max_acceleration` / `max_braking_decel` | `6.0` / `8.0` m/s² | How fast a *normal* speed command may rise / fall. Emergency stops bypass both. See [docs/simulator.md](../../docs/simulator.md#the-adaptive-speed-work-two-values-the-traffic-scenario-pinned-down) before lowering `max_acceleration` |
 | `max_steering_rate` | `1.0` rad/s | Steering slew limit between commands |
 | `command_slew_max_dt` | `0.10` s | Longest interval one slew step may integrate over |
-| `max_steering_angle` | `0.26` rad | Derived from this car's real servo limits — see [docs/racing-autonomy.md](../../docs/racing-autonomy.md#where-026-rad-comes-from) |
+| `max_steering_angle` | `0.349` rad (20°) | From the 2026-10-16 measured steering calibration; the race planner uses 0.30 — see [docs/racing-autonomy.md](../../docs/racing-autonomy.md#where-026-rad-comes-from) |
 | `odom_timeout_sec` | `0.5` s | Past this, lookahead falls back to profiled speed. **Not** a stop watchdog |
 | `pose_timeout_sec` | `0.5` s | Localization watchdog |
 | `max_cross_track_error` | `1.0` m | Lost/kidnapped watchdog |

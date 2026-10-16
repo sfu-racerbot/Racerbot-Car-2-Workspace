@@ -79,12 +79,14 @@ gap_follow_node:
     #
     # Raised 2026-09-26 (1.1 -> 1.5, max 2.5 -> 3.5, min 0.8 -> 1.0) to make
     # the car faster. NOT yet validated on the car. Note max_lateral_accel
-    # below still caps the tightest corners near 1.1 m/s.
+    # below still caps the tightest corners near 1.0 m/s (full lock 0.349).
     corner_speed: 1.5
     max_speed: 3.5
     min_speed: 1.0
-    # Symmetric achievable envelope from the calibrated servo mapping.
-    max_steering_angle: 0.26
+    # 0.349 rad = 20 deg (was 0.26). Both sides reach ~25 deg since the
+    # 2026-10-16 steering calibration (docs/hardware-reference.md); 20 leaves
+    # 5 deg for the gain's error below 19 deg, where nothing was measured.
+    max_steering_angle: 0.349
     # Steering is proportional to the selected gap's bearing, clipped to
     # max_steering_angle: 1.0 means "point the wheels at the gap". This
     # replaced a Pure Pursuit curvature law that could not physically ask for
