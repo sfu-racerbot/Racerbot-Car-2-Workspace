@@ -80,7 +80,9 @@ function browser() {
     assert.equal(nav.includes("Distance runs"), mode !== "steering");
     // Each steering test is its own sidebar step (README, "Guided workflow").
     assert.equal(nav.includes("Left circle"), mode !== "movement");
-    assert.equal(nav.includes("Steering range"), mode !== "movement");
+    assert.equal(nav.includes("Drive straight"), mode !== "movement");
+    // The wheels-up range check was removed on 2026-10-16 (docs/odom-calibration.md).
+    assert.equal(nav.includes("Steering range"), false);
     const numbers = [...nav.matchAll(/class="step-number" aria-hidden="true">(\d+)/g)]
       .map(match => Number(match[1]));
     assert.deepEqual(numbers, Array.from({length: numbers.length}, (_, i) => i + 1));

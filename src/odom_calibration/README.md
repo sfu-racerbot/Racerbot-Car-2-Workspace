@@ -22,10 +22,12 @@ you confirm in the page; see [Applying a suggestion](#applying-a-suggestion).
 
 - A browser wizard at `http://<car-ip>:8090/`. You drive with the physical remote. The page only records.
 - **Wheel calibration**: a stationary baseline plus tape-measured 5–10 m distance runs. Three runs are recommended (two forward, one reverse).
-- **Steering calibration**: a wheels-up steering range check, a straight-line drift run, then full-lock left and right half circles. All four are required before the report unlocks.
-- The steering range check says whether unequal left/right steering comes from software (stick, teleop scale, servo clamp) or hardware (servo, linkage), layer by layer.
+- **Steering calibration**: a straight-line drift run, then full-lock left and right half circles, each measured across the inner rear tire only. All three are required before the report unlocks.
+- **Finds how far the steering goes**: extra full-lock circles at raised `servo_max` (or lowered `servo_min`) values form a per-side curve. The first step that adds less than 1° marks the linkage's stop, and the report suggests the servo limit and a full-stick angle both sides reach.
+- **Check circles**: every circle is compared with the angle the gain believed it commanded; the latest circle on both sides within 1° confirms the calibration.
+- **Servo clamp from the settings alone**: warns whenever `servo_min`/`servo_max` would clip full stick or the driving nodes' `max_steering_angle` on one side.
 - Steering runs are fitted only from samples taken while LB is held and the car moves at 0.15 m/s or more.
-- Impossible suggestions are blocked with a reason; plausible, confident ones can be written to `vesc.yaml` with a backup and an undo.
+- Impossible suggestions are blocked with a reason; plausible, confident ones can be written to `vesc.yaml` and `joy_teleop.yaml` with a backup of each and one undo for both.
 - Captures stop automatically at five minutes. Closing the browser or losing Wi-Fi never erases accepted trials.
 - Limits: a tape measure cannot see tire slip, surface changes, tire wear, battery state, or drivetrain backlash. Odometry stays an estimate.
 
@@ -88,12 +90,16 @@ that uses it:
 
 - `vesc_to_odom_node`: speed gain and offset, wheelbase;
 - `ackermann_to_vesc_node`: steering gain and offset;
-- `vesc_driver_node`: `servo_min`, `servo_max`.
+- `vesc_driver_node`: `servo_min`, `servo_max`;
+- `joy_teleop`: the full-stick steering angle
+  (`human_control.axis_mappings.drive-steering_angle.scale`).
 
 It keeps polling after the first answer, so a
-bringup restart with new values is noticed. The session's current values
-follow the car, and any report built on the old values is cleared. Until the
-nodes answer, the setup screen shows the fallbacks from
+bringup or teleop restart with new values is noticed. A request that gets no
+answer within 5 s (its node was killed by a restart) is sent again.
+
+The session's current values follow the car, and any report built on the old
+values is cleared. Until the nodes answer, the setup screen shows the fallbacks from
 `config/odom_calibration.yaml` and lets the operator correct them.
 
 ## Guided workflow
@@ -124,12 +130,13 @@ to do them. Do them all, top to bottom:
 | Mode | Sidebar steps |
 |---|---|
 | Wheels | Check the car → Stand still → Distance runs → Report |
-| Steering | Check the car → Steering range → Drive straight → Left circle → Right circle → Report |
-| Both | Check the car → Stand still → Distance runs → Steering range → Drive straight → Left circle → Right circle → Report |
+| Steering | Check the car → Drive straight → Left circle → Right circle → Report |
+| Both | Check the car → Stand still → Distance runs → Drive straight → Left circle → Right circle → Report |
 
 The **Report** step stays locked until every test step is done: one
-stand-still run, two distance runs, one steering range check, one drift run,
-and one full-lock circle per side. A half-lock circle does not count.
+stand-still run, two distance runs, one drift run, and one full-lock circle
+per side. A half-lock circle does not count. More circles per side are
+welcome: they are how the steering limit is found (section 6).
 
 Every test page has the same layout:
 
@@ -141,7 +148,7 @@ Every test page has the same layout:
 The measuring screen after **Stop** shows a second diagram with each distance
 lettered **A**, **B** or **C**. The input boxes carry the same letters.
 
-The four steering tests share the server's single `steering` stage. Which
+The three steering tests share the server's single `steering` stage. Which
 of them is open is browser state only (`app.steeringTest` in
 `web/wizard.js`). A reopened session lands on its first unfinished steering
 test.
@@ -153,14 +160,16 @@ and require Node.js.
   and the recording guard.
 - `test_wizard_steps`: the per-test sidebar steps, the report lock, resuming,
   and the circle measuring form.
-- `test_wizard_apply`: the range-check form, blocked suggestions, the write
-  buttons and their confirmations, the centre offset card, and the restart
-  banner.
+- `test_wizard_apply`: blocked suggestions, the write buttons and their
+  confirmations, the centre offset card, and the restart banner.
+- `test_wizard_circles`: the three steering steps and the inner-tire circle
+  form. Also the expected-diameter card, the curve and check tables, the
+  servo-limit and full-stick write, and the bringup/teleop restart banner.
 
-None of the package's tests need ROS sourced:
-`calibration_math.py`, `steering_chain.py`, `vesc_yaml.py` and
-`wizard_actions.py` hold every rule; `calibration_node.py` only wires them to
-ROS and HTTP.
+None of the package's tests need ROS sourced. `calibration_math.py`,
+`steering_curve.py`, `steering_chain.py`, `vesc_yaml.py`, `teleop_yaml.py`
+and `wizard_actions.py` hold every rule. `calibration_node.py` only wires
+them to ROS and HTTP.
 
 `movement` runs preflight, stationary, movement, report. `steering` runs
 preflight, steering, report. `movement_steering` runs all five.
@@ -170,11 +179,11 @@ editable values are `speed_to_erpm_gain`, `speed_to_erpm_offset`,
 `steering_angle_to_servo_gain`, `steering_angle_to_servo_offset`, and
 `wheelbase`.
 
-The servo clamp `servo_min` (`0.15`) and `servo_max` (`0.85`) is read live
+The servo clamp `servo_min` (`0.15`) and `servo_max` (`0.95`) is read live
 from `vesc_driver_node`; `config/odom_calibration.yaml` holds the fallback.
 Car-specific settings (`vehicle_model`, `physical_width_m`,
-`physical_length_m`, `planner_max_steering_rad`) are in the same file, so the
-wizard runs on another car by changing that one file.
+`physical_length_m`, `planner_max_steering_rad`, `rear_track_m`) are in the
+same file, so the wizard runs on another car by changing that one file.
 
 ### 2. Preflight
 
@@ -240,10 +249,9 @@ on their magnitudes, then restored to the configured gain sign.
 Statistical outliers, non-finite samples, timestamp gaps, and sign disagreements
 remain visible in the report.
 
-### 5. Steering range check (wheels off the ground)
+### 5. Servo clamp (no test needed)
 
-This test answers "is uneven steering a software or a hardware problem?". A
-steering command passes through five places before the wheels move:
+A steering command passes through five places before the wheels move:
 
 ```text
 stick -> joy_teleop scale -> /ackermann_cmd angle
@@ -251,42 +259,15 @@ stick -> joy_teleop scale -> /ackermann_cmd angle
       -> servo, horn, tie rods, wheels
 ```
 
-The first four are software and visible on ROS topics. The last is hardware,
-and only a measurement on the wheel can see it.
+The first four are settings, so the wizard works out the clamp's effect
+without driving. It shows how far each side can be commanded before
+`servo_min`/`servo_max` clips it. It warns when full stick, or the driving
+nodes' `max_steering_angle`, asks for more on either side. The card is on
+every circle step and in the report (`steering_chain.clamp_check`).
 
-1. Put the car on a stand with the front wheels off the ground.
-2. Zero a phone angle app against the outside of a front tyre, wheels straight.
-3. Press **Record**. Hold LB, hold the stick fully left for about 3 seconds
-   while a helper reads both front wheels, then fully right for 3 seconds.
-4. Centre, release LB, press **Stop**, type the angles (any box may stay
-   empty), and tick "servo buzzed or strained" for a side if it did.
-
-For each side the wizard takes the stretch where the command is within 90% of
-that side's largest command, so the stick moving out and back is ignored.
-It then reports, for each layer, the full-left and full-right value and
-whether they match:
-
-| Layer | Flagged when |
-|---|---|
-| Remote stick travel | either side reaches less than 0.95 of full |
-| Steering command | the two sides differ by more than 3% |
-| Servo before the clamp | it differs from `gain × angle + offset` by more than 0.01 (the car runs different values from the ones the wizard read) |
-| Servo clamp | `servo_min`/`servo_max` changes the value by more than 0.002 |
-| Steering the software commands | the two sides differ by more than 1° |
-| Wheels, measured | the two sides differ by more than 1.5°, or a wheel turns less than 80% of its command |
-
-The verdict compares the last two rows:
-
-- unequal software, wheels that follow it: **software**;
-- equal software, unequal wheels: **hardware**;
-- both unequal, by ratios more than 10% apart: **software and hardware**;
-- unequal software, equal wheels: something mechanical stops the bigger side early.
-
-Without wheel measurements the verdict covers software only.
-
-The check is recorded with the settings live at the time. After a
-`vesc.yaml` change the result says it is out of date until you record it
-again.
+The wheels-up "steering range" capture with a phone angle app was removed on
+2026-10-16. Sessions that contain one still load; the capture is ignored.
+Circles at several servo limits (section 6) measure the hardware half.
 
 ### 6. Steering
 
@@ -361,14 +342,16 @@ the same thing as `atan(wheelbase * 2d / (s^2 + d^2))`.
 The circle tests measure how far the wheels really turn. Each one is a
 **half circle** (180 degrees), measured straight across:
 
-1. Put a small tape mark on the floor right behind the middle of each rear
-   tire.
+1. Put a small tape mark on the floor right behind the middle of the inner
+   rear tire (the one on the inside of the turn).
 2. Start recording. Hold LB, hold the steering stick fully to one side, and
    drive slowly until the car points back the way it came.
 3. Stop, release LB, stop recording.
-4. Mark behind each rear tire again.
-5. Measure across the circle between the two inner-tire marks (**A**) and
-   between the two outer-tire marks (**B**).
+4. Mark behind the same tire again.
+5. Measure across the circle between the two marks (**A**).
+
+The page shows, before you drive, the diameter **A** a correct calibration
+gives with the settings the car runs now.
 
 Only the recorded servo value and the typed diameters feed the calculation,
 so half a circle gives the same answer as a full one. It is far easier to
@@ -389,15 +372,18 @@ Three more checks catch measuring mistakes:
 
 - a rear-axle radius outside 0.43–20 m is rejected (a typing or unit error);
 - odometry yaw short of 0.375 turns warns that the car did not finish a half circle;
-- repeat full-lock circles on one side whose radii differ by more than 10% are warned, and lower the confidence.
+- repeat circles at one setting (servo values within 0.01) whose radii differ by more than 10% are warned, and lower the confidence. Circles at different settings are expected to differ.
 
-The default **inner and outer rear tires** method takes those two diameters
-and the wizard uses their midpoint, so `radius = (inner + outer) / 4`. The
-measuring screen also offers a **rear-axle centre** method behind a link:
-mark under the rear-axle centre at both ends, measure one diameter (**C**),
-so `radius = diameter / 2`.
+The default **inner tire** method adds the configured rear track
+(`rear_track_m`, 0.27 m on car 2), so `radius = (inner + track) / 2`.
 
-The tire-midpoint method needs no track-width constant. The axle centre sits
+The measuring screen also offers two other methods behind links:
+
+- **both rear tires**: A and B, so `radius = (inner + outer) / 4`;
+- **rear-axle centre**: mark under the rear-axle centre at both ends and
+  measure one diameter **C**, so `radius = diameter / 2`.
+
+The both-tires method needs no track-width constant. The axle centre sits
 exactly midway between the two rear tires, so averaging the two tire radii
 gives the centre directly.
 
@@ -421,12 +407,37 @@ circle, and one full-lock right circle are accepted.
 
 Full lock means "the stick held fully over", which is not always the servo
 limit. The stick asks for at most the `joy_teleop.yaml` steering scale
-(0.34 rad); on one side that may stop short of the clamp, on the other the
-clamp may cut it.
+(0.436 rad since 2026-10-16); on one side that may stop short of the clamp, on
+the other the clamp may cut it.
 
 The servo value the wizard records is the one after the
-`vesc_driver` clamp, so it is what the servo really received. The steering
-range check shows which side is limited by what.
+`vesc_driver` clamp, so it is what the servo really received. The servo clamp
+card shows which side is limited by the clamp.
+
+**The fit.** With a drift run, the gain is the least-squares line through the
+drift runs' mean point (servo, drift angle), fitted to the circles. Without
+one, it falls back to a free line through every point. Circles past a side's
+stop (below) are listed but not fitted.
+
+**Finding the stop.** Each side's circles are merged by setting and ordered by
+servo travel from the centre. The report lists the wheel angle each step
+added. The first step of at least 0.02 servo that adds less than 1.0° marks
+the stop at its inner end. The report then suggests:
+
+- `servo_max` (or `servo_min`) at that stop, only ever a value a circle was
+  driven at, and only if it differs from the current limit;
+- `steering_stick_scale`, the full-stick angle: the smaller side's reach,
+  less 0.5°, rounded down to a whole degree, lowered further if the suggested
+  limits would clip it under the suggested gain.
+
+When a side's outermost circle is on its servo limit and still gaining, the
+report says so and suggests raising the limit about 0.05 after a wheels-up
+check. The step-by-step procedure is in
+[docs/odom-calibration.md](../../docs/odom-calibration.md#finding-how-far-the-steering-really-goes).
+
+**Check circles.** Every circle stores the angle the gain and offset live at
+the time believed they commanded. The report compares the latest full-lock
+circle per side with it; both within 1.0° marks the calibration confirmed.
 
 The report's per-side table lists each side's full-lock radius and angle
 plus an "On servo limit" column (within
@@ -491,6 +502,8 @@ Each suggestion is checked before it is shown:
 | `speed_to_erpm_offset` | more than 1000 ERPM (the wheels moved during the baseline) |
 | `steering_angle_to_servo_gain` | magnitude outside 0.1–5, or the opposite sign to the configured gain |
 | `steering_angle_to_servo_offset` | not strictly between `servo_min` and `servo_max` |
+| `servo_min` / `servo_max` | outside 0–1, or on or past the other limit |
+| `steering_stick_scale` | not in 0–0.70 rad |
 | any | its fit is `invalid` or `insufficient` |
 
 A blocked value is listed with its reason and never written as a YAML value
@@ -498,11 +511,11 @@ in the page or the downloaded report. A value whose section has `low`
 confidence is shown, marked "not ready to apply", and offered for neither
 writing nor copying without that note.
 
-**Write to vesc.yaml** (in the report, and on the drive-straight step for the
-centre offset) asks for a confirmation, then:
+**Write** (in the report, and on the drive-straight step for the centre
+offset) asks for a confirmation, then, for each file it touches:
 
-1. copies the current `vesc.yaml` to
-   `~/.ros/odom_calibration/backups/vesc.yaml.<UTC time>.<source>.bak`;
+1. copies the current file to
+   `~/.ros/odom_calibration/backups/<file>.<UTC time>.<source>.bak`;
 2. edits only the requested lines, keeping every comment;
 3. re-reads the result and refuses to save it unless exactly the requested
    values changed;
@@ -511,20 +524,26 @@ centre offset) asks for a confirmation, then:
 Speed values go into the **`vesc_to_odom_node` override** only (the odometry
 offset line is added after the gain if it is not there yet). The shared `/**`
 block's +4614 speed gain sets the motor command and is never touched.
-Steering values go into the shared `/**` block.
+Steering values and `servo_min`/`servo_max` go into the shared `/**` block.
+
+The full-stick angle goes into `joy_teleop.yaml`, on the one
+`human_control` → `drive-steering_angle` → `scale` line
+(`teleop_yaml.py`). The `default` profile is never touched. If the second
+file fails, the first is put back, so a write lands whole or not at all.
 
 The file is the one bringup
 loads, followed through the `--symlink-install` link back to `src/` (or
 `vesc_yaml_path` if set). If it resolves inside `install/` instead, the page
 warns that the next `colcon build` will overwrite the change.
 
-**Undo the last change** puts the latest backup back. Writing is refused while
+**Undo the last change** puts back every file the latest write touched. Writing is refused while
 a recording runs, and the whole feature is off with `allow_apply: false`. The
 API only accepts `application/json` requests, so another web page open in the
 same browser cannot trigger a write.
 
-The car keeps its old values until bringup restarts; every test page shows a
-**Restart bringup** banner until the live values match. After that:
+The car keeps its old values until bringup restarts (teleop, for the
+full-stick angle); every test page shows a **Restart bringup** or **Restart
+teleop** banner until the live values match. After that:
 
 1. test forward/reverse sign and steering with wheels off the ground;
 2. repeat a short, low-speed tape-measure trial;

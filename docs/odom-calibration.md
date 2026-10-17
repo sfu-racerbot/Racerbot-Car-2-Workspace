@@ -2,20 +2,24 @@
 
 > **Who this is for:** anyone whose car reports the wrong distance travelled, or whose steering angle doesn't match reality.
 > **Read first:** [operations.md](operations.md) — you need to be able to bring the car up and drive it first.
-> **You'll be able to:** calibrate VESC speed odometry and the steering conversion with a tape measure, using a browser wizard. You'll also find out whether uneven steering is a software or a hardware problem, and write the results into `vesc.yaml`.
-> **Time:** about 15 minutes for wheels, 20 for steering, 35 for both, with the car.
+> **You'll be able to:** calibrate VESC speed odometry and the steering conversion with a tape measure, using a browser wizard. You'll also find how far the steering really goes on each side, and write the results into `vesc.yaml` and `joy_teleop.yaml`.
+> **Time:** about 15 minutes for wheels, 15 for steering (plus about 5 per extra circle when finding the steering limit), 30 for both, with the car.
 
 ## Highlights
 
 - A browser wizard at `http://<car-ip>:8090/`. You drive the car with the physical remote. The page only records.
 - **Wheel calibration**: a stationary baseline plus 5–10 m tape-measured distance runs. Three runs are recommended (two forward, one reverse).
-- **Steering calibration**: a wheels-up **steering range check**, a straight-line drift run, then full-lock left and right half circles. All four are required before the report unlocks.
-- **Hardware or software?** The range check follows full left and full right through every software layer: stick, steering command, and servo value before and after the `servo_min`/`servo_max` clamp. It compares them with wheel angles you read with a phone, and names the first layer where the two sides stop matching.
+- **Steering calibration**: a straight-line drift run, then full-lock left and right half circles. All three are required before the report unlocks.
+- **One tape measurement per circle.** You mark only the inner rear tire and measure across the circle; the wizard adds the car's rear track (0.27 m on car 2, set in `odom_calibration.yaml`). Measuring both tires or the axle centre is still offered.
+- **Finding how far the steering goes**: drive more full-lock circles while raising `servo_max` (or lowering `servo_min`) a step at a time. The first step that adds less than 1° is the linkage's stop. The report then suggests a servo limit that stays off it, and a full-stick angle both sides reach.
+- **The fit goes through the drive-straight run.** The gain is the line through the measured straight-ahead point that best fits the circles; circles past the stop are shown but left out.
+- **Check circles confirm it.** Each circle is compared with the angle the gain *believed* it commanded. When the latest circle on both sides is within 1°, the report says the calibration is confirmed.
+- **Servo clamp, from the settings alone**: the wizard always works out whether `servo_min`/`servo_max` cut full stick or the driving nodes' `max_steering_angle` short on one side. That is the problem behind the 2026-10-10 12.3° right side, found with no test at all.
 - **Centre offset, step by step**: each drive-straight run suggests a new `steering_angle_to_servo_offset`. Write it, restart bringup, drive again, until the wizard says the car drives straight (within 0.14°).
 - Steering runs use only the samples taken **while LB is held and the car is moving**. Before this, time spent waiting with LB released could swamp a circle and give a steering gain of 0.
 - Every test is its own numbered step in the left sidebar. Do them top to bottom. Each step has a setup diagram, and each measuring screen has a lettered diagram (A, B, C) that matches the input boxes.
 - A suggestion that cannot be right (zero or wrong-sign gain, offset outside the servo range, a failed fit) is **blocked**: shown with its reason, never written as a value. A weak one (low confidence) is shown but not offered for writing.
-- **Write to vesc.yaml** buttons put accepted values into `vesc.yaml` after a confirmation. A timestamped backup is saved first, and **Undo the last change** puts it back. Set `allow_apply: false` in `odom_calibration.yaml` to turn writing off.
+- **Write** buttons put accepted values in place after a confirmation: gain, offset and servo limits into `vesc.yaml`, the full-stick angle into `joy_teleop.yaml`. A timestamped backup of each file is saved first, and **Undo the last change** puts back every file that write touched. Set `allow_apply: false` in `odom_calibration.yaml` to turn writing off.
 - The wizard creates no ROS publishers and cannot move the car. Captures stop by themselves at five minutes.
 - Limits: a tape measure cannot see tire slip, surface changes, tire wear, battery state, or drivetrain backlash.
 
@@ -31,7 +35,7 @@ Both conversions drift from the physical car over time. The wizard compares
 measured ground truth — a tape on the floor — against what the car counted,
 and suggests corrected values.
 
-## Is my steering problem hardware or software?
+## Why does one side steer less than the other?
 
 On 2026-10-10 the wizard showed about 19.5° of steering to the left and only
 12.3° to the right. Both numbers came from software settings, not from the
@@ -45,34 +49,66 @@ wheels:
 - Raising the offset from 0.5304 to 0.5904 to stop the left drift moved the
   whole range towards `servo_max` and used up the right-hand headroom.
 
+The wizard now finds this from the settings alone. Every circle step and the
+report show a **Servo clamp** card. It says how far each side can be
+commanded before `servo_min`/`servo_max` clips it.
+
+It also warns when full stick, or the driving nodes' `max_steering_angle`
+(0.349 rad since 2026-10-16), asks for more than that on either side. The car
+clips those commands without any warning, so it turns wider than it was told.
+
 Fixed on 2026-10-16 with full-lock circles at several `servo_max` values.
 The gain itself was about 1.5× too large (the car really turned 29.2° left),
 so the fix was a new gain of `-0.78`, `servo_max: 0.95` and a 25° full-stick
 scale, not only a wider clamp. Numbers and the measured curve are in
 [hardware-reference.md](hardware-reference.md).
 
-The **Steering range** step finds this kind of problem for you. Put the car
-on a stand with the front wheels off the ground, hold LB, and hold the stick
-fully left and then fully right for about 3 seconds each. A helper reads each
-front wheel's angle with a phone angle app. The report then shows every
-layer from stick to wheels and gives one verdict:
+## Finding how far the steering really goes
 
-| Verdict | Meaning |
-|---|---|
-| Software | The settings make the sides unequal; the wheels follow them. Fix the settings. |
-| Hardware | Software asks for equal angles; the wheels do not turn equally. Check the servo horn, tie rods, bellcrank and physical stops. |
-| Software and hardware | Both are unequal, by different amounts. Fix the settings first, then measure again. |
-| Software limit, hardware stops early | Software is unequal but the wheels turn equally, so something stops the bigger side. |
+The servo itself may travel 180°, but the VESC's 0–1 servo range and the
+steering linkage stop the wheels much sooner. Near full lock each servo step
+turns the wheels less, until a step adds nothing. To find that point:
 
-When the clamp is the cause, the report gives three ways out:
+1. Do the drive-straight run and one full-lock circle each way as normal.
+2. **Wheels off the ground first:** raise `servo_max` in `vesc.yaml` by
+   about 0.05 (or lower `servo_min`, for the other side), restart bringup,
+   hold LB and full lock for 3 seconds. Stop at any buzzing, heat, or the
+   linkage touching something, and go back one step.
+3. If full stick no longer reaches the new limit, raise the steering `scale`
+   in `joy_teleop.yaml` temporarily and restart teleop (`teleop_launch.py`,
+   the manual-driving program). The circle step's
+   **What to expect** card shows the servo value full stick sends.
+4. Drive another full-lock circle on that side and accept it.
+5. Repeat until the report says that side **levels off**: a step that adds
+   less than 1°, about one tape measurement's error.
 
-- re-centre the servo horn so the offset comes back near the middle of the servo range;
-- widen `servo_min`/`servo_max`, only after checking by hand that the linkage still moves there;
-- cap every steering command at the angle both sides can reach.
+The report then suggests:
 
-It also warns when `gap_follow`/`pure_pursuit` ask for more steering
-(`max_steering_angle`, 0.349 rad since 2026-10-16) than both sides can reach, because those
-commands are clipped on one side without any warning.
+- the `servo_max`/`servo_min` at the last circle before the stop (only ever a
+  value you drove);
+- a full-stick angle: the smaller side's reach, less 0.5°, rounded down to a
+  whole degree, and never clipped by the suggested limits.
+
+Write them, restart bringup and teleop, and drive one more full-lock circle
+each way. When both match what the car commanded within 1°, the report says
+the calibration is confirmed. Autonomy's `max_steering_angle` is not written
+by the wizard: set it by hand, below what both sides reach.
+
+<details>
+<summary><b>Where the numbers come from</b> (safe to skip)</summary>
+
+An inner-tire circle of diameter A, with rear track t, has a rear-axle radius
+R = (A + t) / 2. The bicycle model gives the wheel angle as
+atan(wheelbase / R). With car 2's 0.36 m wheelbase and 0.27 m track, a
+1.33 m inner circle is 24.2°.
+
+The gain is the least-squares slope through the drive-straight run's measured
+point: its servo value and its small drift angle. Pinning the line there means
+a few full-lock circles cannot move the centre the car really drives straight
+at. Circles at servo
+values within 0.01 of each other count as repeats of one setting.
+
+</details>
 
 ## Which part do you need?
 
@@ -108,31 +144,47 @@ the ground first, then repeat a short low-speed tape trial.
 
 Writing to `vesc.yaml` changes the values every driving node uses. The car
 only picks them up after bringup is restarted; until then every test page
-shows a **Restart bringup** banner. The backups are in
-`~/.ros/odom_calibration/backups/`, outside git.
+shows a **Restart bringup** banner. A new full-stick angle is in
+`joy_teleop.yaml` and needs teleop restarted, which the banner also says.
+The backups are in `~/.ros/odom_calibration/backups/`, outside git.
+
+Raising `servo_max` (or lowering `servo_min`) moves the servo somewhere it has
+never been. Always check it with the wheels off the ground first, and stop at
+any buzzing, heat or contact: a servo held against a stop overheats.
 
 ## How it was tested
 
 `tools/odom_calibration_e2e/run_e2e.py` runs the wizard against the car's
 real VESC conversion nodes, `ackermann_mux` and `joy_teleop`, with only the
-hardware simulated. It checks that the wizard recovers a simulated car's true
-steering and wheel values, names the right cause of uneven steering, and that
-writes, undo and bringup restarts all work. See
+hardware simulated. The simulated linkage has a hard stop on the right, and
+the run raises `servo_max` from 0.85 to 1.00 one circle at a time.
+
+It checks that the wizard recovers the simulated car's true steering and wheel
+values, and finds the stop at the right step. It also checks the servo_max and
+full-stick suggestions, writes to both files, undo, restarts and the check
+circles. See
 [its README](../tools/odom_calibration_e2e/README.md).
 
 ## Using it on another car
 
 Everything specific to one car is in
 `src/odom_calibration/config/odom_calibration.yaml`. That is `vehicle_model`,
-`physical_width_m`, `physical_length_m` and `planner_max_steering_rad`. It also
-holds the fallback values used until the live ones are read.
+`physical_width_m`, `physical_length_m`, `planner_max_steering_rad` and
+`rear_track_m`. It also holds the fallback values used until the live ones
+are read.
 
-The live values are read
-from the running nodes every 2 seconds: speed values from
-`vesc_to_odom_node`, steering values from `ackermann_to_vesc_node`, and
-`servo_min`/`servo_max` from `vesc_driver_node`. Run the steering range check
-first on a new car: it catches a clamp or linkage problem before you spend
-time on circles.
+`rear_track_m` is the rear tire centre-to-centre distance. Measure it once
+with the "both rear tires" option: outer minus inner diameter is twice the
+track.
+
+The live values are read from the running nodes every 2 seconds:
+
+- speed values from `vesc_to_odom_node`;
+- steering gain and offset from `ackermann_to_vesc_node`;
+- `servo_min`/`servo_max` from `vesc_driver_node`;
+- the full-stick angle from `joy_teleop`.
+ On a new car, read the **Servo clamp** card before driving any
+circle: it catches a clamp problem with no test at all.
 
 To start the wizard with another settings file:
 `ros2 launch odom_calibration odom_calibration_launch.py config:=/path/to/file.yaml`.

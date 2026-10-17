@@ -2,11 +2,12 @@
 
 vesc.yaml carries hand-written comments that record why each value is what
 it is (see docs/git-setup.md), so it is edited line by line rather than
-re-dumped through a YAML library. Only the four calibration values can be
+re-dumped through a YAML library. Only these calibration values can be
 written, each into the one block that owns it:
 
 - steering gain and offset live in the shared ``/**`` block, read by
   ackermann_to_vesc_node (the servo command) and vesc_to_odom_node alike;
+- servo_min / servo_max, the clamp vesc_driver_node applies, also in ``/**``;
 - the odometry speed gain and offset live in the ``vesc_to_odom_node``
   override, never in ``/**``, whose +4614 speed gain sets the motor command.
 
@@ -32,9 +33,19 @@ import yaml
 TARGET_BLOCKS = {
     'steering_angle_to_servo_gain': '/**',
     'steering_angle_to_servo_offset': '/**',
+    'servo_min': '/**',
+    'servo_max': '/**',
     'speed_to_erpm_gain': 'vesc_to_odom_node',
     'speed_to_erpm_offset': 'vesc_to_odom_node',
 }
+# The values a calibration report is built from; servo_min/servo_max are
+# limits the wizard may write but reads from the running vesc_driver_node.
+CALIBRATION_NAMES = (
+    'steering_angle_to_servo_gain',
+    'steering_angle_to_servo_offset',
+    'speed_to_erpm_gain',
+    'speed_to_erpm_offset',
+)
 # A missing key may be added after this sibling in its block. Only the odom
 # offset qualifies: it is inherited from /** until a calibration sets it.
 INSERT_AFTER = {'speed_to_erpm_offset': 'speed_to_erpm_gain'}
@@ -128,13 +139,14 @@ def verify(original_text, new_text, updates):
             raise ValueError(f'The edit changed other values in the {block} block.')
 
 
-def read_values(text):
-    """The current calibration values, from the blocks the car reads them in."""
+def read_values(text, names=CALIBRATION_NAMES):
+    """The current values of ``names``, from the blocks the car reads them in."""
     document = yaml.safe_load(text)
     shared = _parameters(document, '/**')
     odom = _parameters(document, 'vesc_to_odom_node')
     values = {}
-    for name, block in TARGET_BLOCKS.items():
+    for name in names:
+        block = TARGET_BLOCKS[name]
         source = odom if block == 'vesc_to_odom_node' else shared
         value = source.get(name, shared.get(name))
         if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -180,8 +192,7 @@ def apply(path, updates, backup_directory, label='calibration'):
     return {
         'path': str(path),
         'backup': str(backup),
-        'before': {name: value for name, value in read_values(original).items()
-                   if name in updates},
+        'before': read_values(original, tuple(updates)),
         'after': {name: float(value) for name, value in updates.items()},
     }
 

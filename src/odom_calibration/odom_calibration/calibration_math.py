@@ -12,6 +12,8 @@ import math
 import statistics
 from typing import Iterable
 
+from odom_calibration import steering_curve
+
 
 EPSILON = 1e-9
 
@@ -301,15 +303,7 @@ def summarize_capture(capture: dict, max_gap_sec: float = 0.5):
                 'while LB was held and the car was moving; this run cannot '
                 'be used for steering. Hold LB the whole time you drive.'
             )
-    extra = {}
-    if kind == 'steering_sweep':
-        # Imported here: steering_chain imports this module.
-        from odom_calibration import steering_chain
-        extra['sweep'] = steering_chain.sweep_summary(capture)
-        warnings.extend(extra['sweep']['warnings'])
-
     return {
-        **extra,
         'servo_active': servo_active,
         'kind': capture.get('kind'),
         'started_at': capture.get('started_at'),
@@ -580,7 +574,11 @@ STEERING_KINDS = (
     'steering_left',
     'steering_right',
 )
-CIRCLE_METHODS = ('axle_centre', 'rear_tires')
+CIRCLE_METHODS = ('inner_tire', 'rear_tires', 'axle_centre')
+# Rear track (m, rear tire centre to centre) assumed by the inner-tire-only
+# method when the session does not say. Car 2's is 0.27 m, from the inner and
+# outer circles of 2026-10-10 (docs/hardware-reference.md).
+DEFAULT_REAR_TRACK_M = 0.27
 # A servo reading this close to servo_min/servo_max is treated as clamped.
 SERVO_LIMIT_TOLERANCE = 0.002
 # A "centred wheels" capture whose servo value is this close to the configured
@@ -634,15 +632,26 @@ def drift_steering_angle(wheelbase, forward_m, lateral_m):
     return math.atan(wheelbase * curvature)
 
 
-def circle_radius(trial: dict):
+def circle_radius(trial: dict, rear_track_m=None):
     """Rear-axle-centre radius and (optionally) rear track for a circle trial.
 
+    ``inner_tire`` measures only across the inner rear tire's marks; the axle
+    centre is half the rear track further out, so its radius is
+    (inner + track) / 2 with the track from the car's settings.
     ``rear_tires`` uses the circles traced by the inner and outer rear tires.
     The axle centre sits midway between them, so its radius is the mean of
     the two radii exactly, with no track-width constant needed. The
     difference is the rear track, which becomes a free consistency check.
     """
     method = trial.get('measurement_method', 'axle_centre')
+    if method == 'inner_tire':
+        inner = trial.get('measured_inner_diameter_m')
+        if not _finite(inner) or float(inner) <= 0.0:
+            raise ValueError('Inner tire diameter must be positive.')
+        if not _finite(rear_track_m) or float(rear_track_m) <= 0.0:
+            raise ValueError('The rear track is not set, so an inner-tire '
+                             'circle cannot be converted; set rear_track_m.')
+        return (float(inner) + float(rear_track_m)) / 2.0, None
     if method == 'rear_tires':
         inner = trial.get('measured_inner_diameter_m')
         outer = trial.get('measured_outer_diameter_m')
@@ -690,6 +699,10 @@ def validate_steering_measurement(kind: str, payload: dict):
         raise ValueError('full_lock must be true or false.')
     method = payload.get('measurement_method', 'axle_centre')
     fields = {'measurement_method': method, 'full_lock': full_lock}
+    if method == 'inner_tire':
+        fields['measured_inner_diameter_m'] = _positive_number(
+            payload, 'measured_inner_diameter_m', 'Inner tire circle diameter')
+        return fields
     if method == 'axle_centre':
         fields['measured_diameter_m'] = _positive_number(
             payload, 'measured_diameter_m', 'Rear-axle circle diameter')
@@ -735,20 +748,51 @@ def _side_gain(points):
     return fit[0] if fit else None
 
 
+def _constrained_fit(points, anchor):
+    """Least-squares line through ``anchor`` exactly: (gain, offset, rmse).
+
+    ``anchor`` is the drive-straight runs' mean (angle, servo). A straight
+    run is the one direct measurement of the centre, so the line is pinned
+    to it rather than letting a few full-lock circles drag the centre off;
+    the gain is the slope that best fits the circles through that point.
+    """
+    if not points:
+        return None
+    anchor_angle, anchor_servo = anchor
+    denominator = sum((angle - anchor_angle) ** 2 for angle, _ in points)
+    if denominator <= EPSILON:
+        return None
+    gain = sum((angle - anchor_angle) * (servo - anchor_servo)
+               for angle, servo in points) / denominator
+    offset = anchor_servo - gain * anchor_angle
+    residuals = [servo - (gain * angle + offset) for angle, servo in points]
+    rmse = math.sqrt(statistics.fmean(value * value for value in residuals))
+    return gain, offset, rmse
+
+
+def _trial_parameters(trial, params):
+    at_capture = trial.get('parameters_at_capture') or {}
+    gain = at_capture.get('steering_angle_to_servo_gain',
+                          params.get('steering_angle_to_servo_gain'))
+    offset = at_capture.get('steering_angle_to_servo_offset',
+                            params.get('steering_angle_to_servo_offset'))
+    return gain, offset
+
+
 def steering_calibration(session: dict):
     params = session.get('current_parameters', {})
+    vehicle = session.get('vehicle', {}) or {}
     wheelbase = float(params.get('wheelbase', 0.36))
-    current_gain = float(params.get('steering_angle_to_servo_gain', -1.2135))
-    current_offset = float(params.get('steering_angle_to_servo_offset', 0.5304))
+    current_gain = float(params.get('steering_angle_to_servo_gain', -0.78))
+    current_offset = float(params.get('steering_angle_to_servo_offset', 0.5904))
+    rear_track = vehicle.get('rear_track_m', DEFAULT_REAR_TRACK_M)
     limits = _servo_limits(session)
     trials = [
         trial for trial in session.get('trials', [])
         if trial.get('accepted') and trial.get('kind') in STEERING_KINDS
     ]
     warnings = []
-    points = []
     trial_results = []
-    directions = set()
     track_widths = []
 
     for index, trial in enumerate(trials, start=1):
@@ -780,6 +824,7 @@ def steering_calibration(session: dict):
             item['warnings'].append('No finite servo command was captured.')
             trial_results.append(item)
             continue
+        servo = float(servo)
         servo_p05 = stats.get('p05')
         servo_p95 = stats.get('p95')
         if _finite(servo_p05) and _finite(servo_p95):
@@ -789,15 +834,16 @@ def steering_calibration(session: dict):
                 item['warnings'].append(
                     'Servo command varied substantially; hold steering steadier.'
                 )
-        if limits is not None:
+        capture_limits = trial.get('servo_limits_at_capture') or limits
+        if capture_limits:
             item['at_servo_limit'] = (
-                abs(float(servo) - limits[0]) <= SERVO_LIMIT_TOLERANCE
-                or abs(float(servo) - limits[1]) <= SERVO_LIMIT_TOLERANCE
+                abs(servo - capture_limits[0]) <= SERVO_LIMIT_TOLERANCE
+                or abs(servo - capture_limits[1]) <= SERVO_LIMIT_TOLERANCE
             )
 
         if kind == 'steering_center':
             actual_angle = 0.0
-            if abs(float(servo) - current_offset) <= CENTRE_ECHO_TOLERANCE:
+            if abs(servo - current_offset) <= CENTRE_ECHO_TOLERANCE:
                 item['warnings'].append(
                     'Servo value matches the configured offset, so this capture '
                     'only reads the current setting back. Use a straight-line '
@@ -816,7 +862,7 @@ def steering_calibration(session: dict):
                 continue
         else:
             try:
-                radius, track = circle_radius(trial)
+                radius, track = circle_radius(trial, rear_track)
             except ValueError as exc:
                 item['warnings'].append(str(exc))
                 trial_results.append(item)
@@ -838,7 +884,6 @@ def steering_calibration(session: dict):
                 track_widths.append(track)
             magnitude = math.atan(wheelbase / radius)
             actual_angle = magnitude if kind == 'steering_left' else -magnitude
-            directions.add(kind)
             yaw = summary.get('odom_yaw_rad')
             item['odom_yaw_rad'] = yaw
             if _finite(yaw) and abs(float(yaw)) > 0.2:
@@ -857,17 +902,67 @@ def steering_calibration(session: dict):
                     f'{abs(float(yaw)) / (2.0 * math.pi):.2f} turns. Measure '
                     'across the circle only after a full half circle (0.50 '
                     'turns); a shorter arc is not a diameter.')
+            gain_then, offset_then = _trial_parameters(trial, params)
+            item['check'] = steering_curve.check_circle(
+                actual_angle, servo, gain_then, offset_then)
 
         item['actual_steering_angle_rad'] = actual_angle
         item['usable'] = True
-        points.append((actual_angle, float(servo)))
         trial_results.append(item)
 
-    fit = _linear_fit(points)
-    has_centre_region = any(
-        item['usable'] and item['kind'] in ('steering_center', 'steering_drift')
-        for item in trial_results
-    )
+    usable = [item for item in trial_results if item['usable']]
+    drifts = [item for item in usable if item['kind'] == 'steering_drift']
+    centres = [item for item in usable if item['kind'] == 'steering_center']
+    circles = [item for item in usable
+               if item['kind'] in ('steering_left', 'steering_right')]
+
+    # The straight-ahead servo, used to order each side's circles by travel.
+    # Old sessions carry a stationary centre capture instead of a drift run.
+    centre_items = drifts or centres
+    if centre_items:
+        anchor = (statistics.fmean(i['actual_steering_angle_rad'] for i in centre_items),
+                  statistics.fmean(i['median_servo'] for i in centre_items))
+        centre_source = 'drive_straight' if drifts else 'centre_capture'
+    else:
+        anchor = None
+        centre_source = 'circles_only'
+    centre_servo = anchor[1] if anchor else current_offset
+
+    curves = {}
+    for side, kind in (('left', 'steering_left'), ('right', 'steering_right')):
+        side_items = [{'servo': i['median_servo'],
+                       'angle_rad': i['actual_steering_angle_rad'],
+                       'radius_m': i['rear_axle_radius_m'],
+                       'trial_id': i['trial_id']}
+                      for i in circles if i['kind'] == kind]
+        # Which servo limit this side runs towards: left is positive angle,
+        # and servo = gain * angle + offset, so the sign of the gain decides.
+        towards_max = (current_gain > 0.0) == (side == 'left')
+        limit = None
+        if limits:
+            limit = limits[1] if towards_max else limits[0]
+        curves[side] = steering_curve.side_curve(
+            side_items, centre_servo, limit, limits)
+        curves[side]['limit_name'] = 'servo_max' if towards_max else 'servo_min'
+        curves[side]['limit'] = limit
+
+    # Circles past a side's stop describe the linkage pushing against
+    # something, not its working range; they are shown but not fitted.
+    for item in circles:
+        side = 'left' if item['kind'] == 'steering_left' else 'right'
+        stop = curves[side]['stop']
+        if stop and abs(item['median_servo'] - centre_servo) > \
+                abs(stop['servo'] - centre_servo) + steering_curve.LIMIT_TOLERANCE:
+            item['beyond_stop'] = True
+    fit_circles = [i for i in circles if not i.get('beyond_stop')]
+    points = [(i['actual_steering_angle_rad'], i['median_servo'])
+              for i in fit_circles]
+
+    directions = {i['kind'] for i in fit_circles}
+    if anchor:
+        fit = _constrained_fit(points, anchor)
+    else:
+        fit = _linear_fit(points)
     max_commandable = None
     if fit is None:
         suggested_gain = None
@@ -875,27 +970,27 @@ def steering_calibration(session: dict):
         rmse = None
         status = 'insufficient'
         warnings.append(
-            'At least two distinct usable steering measurements are required.'
+            'Record a drive-straight run and at least one circle (or two '
+            'distinct circles) before the steering can be fitted.'
         )
     else:
         suggested_gain, suggested_offset, rmse = fit
-        for item in trial_results:
-            if item['usable']:
-                item['fit_residual_servo'] = item['median_servo'] - (
-                    suggested_gain * item['actual_steering_angle_rad']
-                    + suggested_offset)
+        for item in usable:
+            item['fit_residual_servo'] = item['median_servo'] - (
+                suggested_gain * item['actual_steering_angle_rad']
+                + suggested_offset)
         if abs(suggested_gain) < 0.1:
             status = 'invalid'
             warnings.append(
                 'Fitted steering gain is implausibly close to zero.'
             )
-        elif directions == {'steering_left', 'steering_right'} and len(points) >= 3:
+        elif directions == {'steering_left', 'steering_right'} and anchor:
             status = 'good' if rmse <= 0.02 else 'low'
         else:
             status = 'low'
         if directions != {'steering_left', 'steering_right'}:
             warnings.append('Record both a left and a right circle.')
-        if not has_centre_region:
+        if not anchor:
             warnings.append(
                 'No straight-line drift test was recorded; the steering '
                 'offset rests on the circles alone and is less certain.'
@@ -907,8 +1002,10 @@ def steering_calibration(session: dict):
             )
         if rmse > 0.02:
             warnings.append(
-                f"Steering fit residual is {rmse:.3f} servo units; repeat unstable trials."
-            )
+                f"Steering fit residual is {rmse:.3f} servo units. One straight "
+                'line does not describe this linkage well (it is usually not '
+                'linear near full lock); the gain is a compromise across the '
+                'circles you drove.')
         if limits is not None and status != 'invalid':
             ends = [(limit - suggested_offset) / suggested_gain for limit in limits]
             left, right = max(ends), min(ends)
@@ -919,46 +1016,87 @@ def steering_calibration(session: dict):
                     'left_min_radius_m': wheelbase / math.tan(left),
                     'right_min_radius_m': wheelbase / math.tan(-right),
                 }
+        smallest = min((abs(i['actual_steering_angle_rad']) for i in fit_circles),
+                       default=None)
+        if smallest is not None and math.degrees(smallest) > 15.0:
+            warnings.append(
+                f'The tightest-steering circle is the only kind recorded: the '
+                f'smallest angle measured is {math.degrees(smallest):.1f}°. '
+                'Driving nodes mostly steer below that, where this gain is '
+                'an extrapolation.')
 
-    centre_points = [
-        (item['actual_steering_angle_rad'], item['median_servo'])
-        for item in trial_results
-        if item['usable'] and item['kind'] in ('steering_center', 'steering_drift')
-    ]
-    sides = {}
-    for side, kind in (('left', 'steering_left'), ('right', 'steering_right')):
-        circles = [
-            item for item in trial_results
-            if item['usable'] and item['kind'] == kind
-        ]
-        full = [item for item in circles if item.get('full_lock')]
-        full_radius = median(item['rear_axle_radius_m'] for item in full)
-        radii = [item['rear_axle_radius_m'] for item in full]
-        if len(radii) >= 2 and full_radius:
-            spread = (max(radii) - min(radii)) / full_radius
-            if spread > CIRCLE_REPEAT_SPREAD_FRACTION:
+    for side, curve in curves.items():
+        if curve['stop']:
+            stop = curve['stop']
+            warnings.append(
+                f"The {side} steering levels off: going from servo "
+                f"{stop['servo']:.3f} to {stop['beyond_servo']:.3f} added only "
+                f"{stop['added_deg']:.1f}°, so the linkage is at or near its "
+                f"stop past {stop['servo']:.3f}. Circles past it are not "
+                'used in the fit.')
+        elif curve['still_gaining_at_limit']:
+            warnings.append(
+                f"The {side} steering still gains at {curve['limit_name']} "
+                f"{curve['limit']:.3f}. If you want more {side} lock, check "
+                f"wheels-up that nothing binds, raise {curve['limit_name']} "
+                'by about 0.05, and drive another full-lock circle.')
+        for point in curve['points']:
+            if point['radius_spread'] > steering_curve.REPEAT_SPREAD_FRACTION:
                 warnings.append(
-                    f'The {side} full-lock circles disagree by '
-                    f'{spread * 100.0:.0f}% in radius; re-measure them or '
-                    'remove the odd one before trusting the fit.')
+                    f"The {side} full-lock circles disagree by "
+                    f"{point['radius_spread'] * 100.0:.0f}% in radius (servo "
+                    f"{point['servo']:.3f}); re-measure them or remove the odd "
+                    'one before trusting the fit.')
                 if status == 'good':
                     status = 'low'
+
+    suggestions = {}
+    statuses = {}
+    new_limits = list(limits) if limits else None
+    for side, curve in curves.items():
+        value = steering_curve.servo_limit_suggestion(
+            curve, centre_servo, curve['limit'])
+        if value is not None:
+            suggestions[curve['limit_name']] = value
+            statuses[curve['limit_name']] = 'good'
+            if new_limits:
+                new_limits[0 if curve['limit_name'] == 'servo_min' else 1] = value
+    scale = None
+    if suggested_gain is not None and status != 'invalid':
+        scale = steering_curve.stick_scale_suggestion(
+            curves['left']['reach_deg'], curves['right']['reach_deg'],
+            suggested_gain, suggested_offset, new_limits)
+    if scale is not None:
+        suggestions['steering_stick_scale'] = scale
+        statuses['steering_stick_scale'] = status
+
+    sides = {}
+    for side, kind in (('left', 'steering_left'), ('right', 'steering_right')):
+        curve = curves[side]
+        side_circles = [i for i in circles if i['kind'] == kind]
+        reach = curve['reach_deg']
+        reach_items = [i for i in side_circles
+                       if curve['reach_servo'] is not None
+                       and abs(i['median_servo'] - curve['reach_servo'])
+                       <= steering_curve.SERVO_GROUP_TOLERANCE]
+        radius = (median(i['rear_axle_radius_m'] for i in reach_items)
+                  if reach_items else None)
+        side_points = [(i['actual_steering_angle_rad'], i['median_servo'])
+                       for i in fit_circles if i['kind'] == kind]
+        anchor_points = [anchor] if anchor else []
+        latest_full = [i for i in side_circles if i.get('full_lock')]
         sides[side] = {
-            'circle_count': len(circles),
-            'full_lock_count': len(full),
-            'full_lock_radius_m': full_radius,
-            'full_lock_angle_rad': (
-                math.atan(wheelbase / full_radius) * (1.0 if side == 'left' else -1.0)
-                if full_radius else None
-            ),
+            'circle_count': len(side_circles),
+            'full_lock_count': len(latest_full),
+            'full_lock_radius_m': radius,
+            'full_lock_angle_rad': (math.radians(reach) * (1.0 if side == 'left' else -1.0)
+                                    if reach is not None else None),
             'full_lock_at_servo_limit': (
-                all(item.get('at_servo_limit') for item in full)
-                if full and limits is not None else None
-            ),
-            'gain': _side_gain(centre_points + [
-                (item['actual_steering_angle_rad'], item['median_servo'])
-                for item in circles
-            ]) if centre_points and circles else None,
+                all(i.get('at_servo_limit') for i in reach_items)
+                if reach_items and limits is not None else None),
+            'gain': _side_gain(anchor_points + side_points)
+            if anchor_points and side_points else None,
+            'check': latest_full[-1].get('check') if latest_full else None,
         }
     left_gain, right_gain = sides['left']['gain'], sides['right']['gain']
     asymmetry = None
@@ -989,10 +1127,15 @@ def steering_calibration(session: dict):
                 w for w in item['warnings'] if 'configured offset' in w)
             break
 
+    checks = [sides[side]['check'] for side in ('left', 'right')]
+    confirmed = (all(check and check['passed'] for check in checks)
+                 if all(checks) else None)
+
     return {
         'status': status,
         'wheelbase_m': wheelbase,
-        'usable_point_count': len(points),
+        'usable_point_count': len(points) + len(centre_items),
+        'centre_source': centre_source,
         'suggested_steering_angle_to_servo_gain': suggested_gain,
         'current_steering_angle_to_servo_gain': current_gain,
         'suggested_steering_angle_to_servo_offset': suggested_offset,
@@ -1000,9 +1143,14 @@ def steering_calibration(session: dict):
         'fit_rmse_servo': rmse,
         'servo_limits': list(limits) if limits else None,
         'max_commandable_steering': max_commandable,
+        'curves': curves,
+        'limit_suggestions': suggestions,
+        'limit_statuses': statuses,
+        'calibration_confirmed': confirmed,
         'sides': sides,
         'side_gain_asymmetry': asymmetry,
         'rear_track_m': track,
+        'assumed_rear_track_m': rear_track,
         'trial_results': trial_results,
         'warnings': warnings,
     }
@@ -1017,6 +1165,8 @@ MODES_WITH_STEERING = ('movement_steering', 'steering')
 SPEED_GAIN_RATIO_RANGE = (0.5, 2.0)
 MAX_SPEED_OFFSET_ERPM = 1000.0
 STEERING_GAIN_MAGNITUDE_RANGE = (0.1, 5.0)
+# Full stick past this (rad, ~40 deg) is past anything a car this size steers.
+MAX_STICK_SCALE_RAD = 0.70
 CONFIDENT_STATUSES = ('good', 'high')
 
 
@@ -1065,6 +1215,18 @@ def vet_suggestion(name, value, current, status, limits=None):
         if not low < value < high:
             return (f'{value:.4f} is outside the servo range '
                     f'{low:.2f}-{high:.2f}'), None
+    elif name in ('servo_min', 'servo_max'):
+        if not 0.0 <= value <= 1.0:
+            return f'{value:.4f} is outside the 0-1 the servo signal has', None
+        other = None if not limits else (limits[1] if name == 'servo_min' else limits[0])
+        if limits and ((name == 'servo_min' and value >= other)
+                       or (name == 'servo_max' and value <= other)):
+            return (f'{value:.4f} would leave no servo range against the '
+                    f'other limit {other:.4f}'), None
+    elif name == 'steering_stick_scale':
+        if not 0.0 < value <= MAX_STICK_SCALE_RAD:
+            return (f'{value:.3f} rad is outside 0-{MAX_STICK_SCALE_RAD:.2f} '
+                    'rad'), None
     if status not in CONFIDENT_STATUSES:
         return None, f'confidence is {status}; add consistent runs first'
     return None, None
@@ -1082,6 +1244,21 @@ def _vet_all(raw, current, statuses, limits):
         if apply_reason:
             not_ready[name] = apply_reason
     return suggestions, blocked, not_ready
+
+
+def current_values(session: dict):
+    """Every value a report may suggest, as the car runs it now.
+
+    The vesc.yaml calibration values, plus the servo limits (vesc_driver) and
+    the full-stick steering angle (joy_teleop), which the session keeps in
+    its vehicle settings.
+    """
+    current = dict(session.get('current_parameters', {}))
+    vehicle = session.get('vehicle', {}) or {}
+    for name in ('servo_min', 'servo_max', 'steering_stick_scale'):
+        if _finite(vehicle.get(name)):
+            current[name] = float(vehicle[name])
+    return current
 
 
 def build_report(session: dict):
@@ -1116,13 +1293,20 @@ def build_report(session: dict):
         })
         part_status['steering_angle_to_servo_gain'] = steering['status']
         part_status['steering_angle_to_servo_offset'] = steering['status']
+        raw.update(steering['limit_suggestions'])
+        part_status.update(steering['limit_statuses'])
+    current = current_values(session)
     suggestions, blocked, not_ready = _vet_all(
-        raw, session.get('current_parameters', {}), part_status,
-        _servo_limits(session))
-    diagnosis = None
+        raw, current, part_status, _servo_limits(session))
+    clamp = None
     if mode in MODES_WITH_STEERING:
+        # Imported here: steering_chain imports this module.
         from odom_calibration import steering_chain
-        diagnosis = steering_chain.diagnose_session(session, steering)
+        vehicle = session.get('vehicle', {}) or {}
+        clamp = steering_chain.clamp_check(
+            session.get('current_parameters', {}), _servo_limits(session),
+            vehicle.get('steering_stick_scale'),
+            vehicle.get('planner_max_steering_rad'))
     statuses = [part['status'] for part in (movement, steering) if part]
     if blocked:
         statuses.append('invalid')
@@ -1152,14 +1336,14 @@ def build_report(session: dict):
         'mode': mode,
         'overall_status': overall,
         'vehicle': session.get('vehicle', {}),
-        'current_parameters': session.get('current_parameters', {}),
+        'current_parameters': current,
         'accepted_trials': [
             trial for trial in session.get('trials', [])
             if trial.get('accepted')
         ],
         'movement': movement,
         'steering': steering,
-        'steering_chain': diagnosis,
+        'clamp_check': clamp,
         'parameter_suggestions': suggestions,
         'blocked_suggestions': blocked,
         'not_ready_to_apply': not_ready,
@@ -1196,17 +1380,18 @@ def report_markdown(report: dict):
     for name, reason in report.get('blocked_suggestions', {}).items():
         lines.append(f'# {name}: blocked, {reason}')
     lines.append('```')
-    chain = report.get('steering_chain')
-    if chain:
-        lines.extend(['', '## Steering range: hardware or software?', ''])
-        lines.append(f"- Verdict: **{chain.get('verdict')}**. {chain.get('summary', '')}")
-        for layer in chain.get('layers', []):
+    clamp = report.get('clamp_check')
+    if clamp:
+        lines.extend(['', '## Servo clamp, from the current settings', ''])
+        if _finite(clamp.get('left_reach_rad')):
             lines.append(
-                f"- {layer['label']}: left {layer.get('left_text', 'n/a')}, "
-                f"right {layer.get('right_text', 'n/a')} ({layer['status']})"
-                + (f". {layer['finding']}" if layer.get('finding') else ''))
-        for step in chain.get('recommendations', []):
-            lines.append(f'- Next: {step}')
+                f"- servo_min/servo_max let the software command up to "
+                f"{math.degrees(clamp['left_reach_rad']):.1f} deg left and "
+                f"{math.degrees(clamp['right_reach_rad']):.1f} deg right.")
+        for finding in clamp.get('findings', []):
+            lines.append(f'- Warning: {finding}')
+        if not clamp.get('findings'):
+            lines.append('- Nothing asks for more steering than the clamp allows.')
     movement = report.get('movement')
     if movement:
         lines.extend(['', '## Movement calibration', ''])

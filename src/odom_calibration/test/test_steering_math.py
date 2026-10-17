@@ -360,8 +360,11 @@ def test_bad_stored_measurement_is_unusable_not_fitted():
 def test_steering_only_report_has_no_movement():
     report = calibration_math.build_report(_session(_full_car_trials()))
     assert report['movement'] is None
+    # Since 2026-10-16 the report also suggests the full-stick angle both
+    # sides reach (docs/odom-calibration.md); no servo limit, as no stop.
     assert set(report['parameter_suggestions']) == {
-        'steering_angle_to_servo_gain', 'steering_angle_to_servo_offset'}
+        'steering_angle_to_servo_gain', 'steering_angle_to_servo_offset',
+        'steering_stick_scale'}
     assert report['overall_status'] == 'ready'
     markdown = calibration_math.report_markdown(report)
     assert '## Steering calibration' in markdown
@@ -384,9 +387,10 @@ def test_combined_report_still_has_both_parts():
 
 # --- circle consistency checks (2026-10 wizard review) -----------------------
 
-def _circle(identifier, kind, radius, yaw=None, yaw_samples=50):
+def _circle(identifier, kind, radius, yaw=None, yaw_samples=50, servo=None):
     angle = math.atan(WHEELBASE / radius) * (1 if kind == 'steering_left' else -1)
-    trial = _trial(identifier, kind, _servo(angle), measurement_method='axle_centre',
+    servo = _servo(angle) if servo is None else servo
+    trial = _trial(identifier, kind, servo, measurement_method='axle_centre',
                    full_lock=True, measured_diameter_m=2.0 * radius)
     if yaw is not None:
         trial['summary']['odom_yaw_rad'] = yaw
@@ -429,8 +433,13 @@ def test_short_arc_check_needs_odometry_samples():
 @pytest.mark.parametrize('second_radius,warned', [(1.54, False), (1.56, True)])
 def test_disagreeing_repeat_circles_are_warned(second_radius, warned):
     # Median of 1.40 and second radius; spread / median against 10 %.
+    # A repeat is the same setting: both circles drove the same servo value.
+    # (Circles at different servo values are different settings since
+    # 2026-10-16 and are expected to differ; docs/odom-calibration.md.)
+    first = _circle('l1', 'steering_left', 1.40)
+    servo = first['summary']['servo']['median']
     trials = _full_car_trials() + [
-        _circle('l1', 'steering_left', 1.40), _circle('l2', 'steering_left', second_radius)]
+        first, _circle('l2', 'steering_left', second_radius, servo=servo)]
     trials = [t for t in trials if t['id'] != 'left']
     report = calibration_math.steering_calibration(_session(trials))
     median = (1.40 + second_radius) / 2.0

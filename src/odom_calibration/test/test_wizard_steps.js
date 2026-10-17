@@ -72,11 +72,11 @@ function browser() {
 (async () => {
   // Each test is its own sidebar step, in the order to do them, numbered 1..N.
   const expected = {
-    steering: ["Check the car", "Steering range", "Drive straight", "Left circle",
-      "Right circle", "Report"],
+    // The wheels-up "Steering range" step was removed on 2026-10-16.
+    steering: ["Check the car", "Drive straight", "Left circle", "Right circle", "Report"],
     movement: ["Check the car", "Stand still", "Distance runs", "Report"],
     movement_steering: ["Check the car", "Stand still", "Distance runs",
-      "Steering range", "Drive straight", "Left circle", "Right circle", "Report"],
+      "Drive straight", "Left circle", "Right circle", "Report"],
   };
   for (const [mode, labels] of Object.entries(expected)) {
     const page = browser();
@@ -86,12 +86,11 @@ function browser() {
     assert.equal(nav.includes("segmented"), false, "no tabs inside a step");
   }
 
-  // The report stays locked until the range check, drift AND both full-lock
-  // circles exist. Each case removes one required test; the report must
-  // refuse in every one.
-  const full = [trial("steering_sweep"), trial("steering_drift"), trial("steering_left"),
-    trial("steering_right")];
-  for (const missing of ["steering_sweep", "steering_drift", "steering_left", "steering_right"]) {
+  // The report stays locked until the drift run AND both full-lock circles
+  // exist. Each case removes one required test; the report must refuse in
+  // every one.
+  const full = [trial("steering_drift"), trial("steering_left"), trial("steering_right")];
+  for (const missing of ["steering_drift", "steering_left", "steering_right"]) {
     const page = browser();
     page.snapshot("steering", {trials: full.filter(t => t.kind !== missing)});
     const report = stepButton(page.element("step-nav").innerHTML, "report");
@@ -102,7 +101,7 @@ function browser() {
   }
   // A half-lock circle is an extra; it must not stand in for the full-lock test.
   const halfLock = browser();
-  halfLock.snapshot("steering", {trials: [trial("steering_sweep"), trial("steering_drift"),
+  halfLock.snapshot("steering", {trials: [trial("steering_drift"),
     trial("steering_left"), trial("steering_right", {full_lock: false})]});
   assert.match(stepButton(halfLock.element("step-nav").innerHTML, "report"), / disabled/);
   // With every test done, the report unlocks and generating sends the request.
@@ -127,11 +126,9 @@ function browser() {
   // A restored steering session opens on its first unfinished test, and that
   // page's Record button records that test's kind and no other.
   const resumeCases = [
-    [[], "steering_sweep", "Steering range"],
-    [[trial("steering_sweep")], "steering_drift", "Drive straight"],
-    [[trial("steering_sweep"), trial("steering_drift")], "steering_left", "Left circle"],
-    [[trial("steering_sweep"), trial("steering_drift"), trial("steering_left")],
-      "steering_right", "Right circle"],
+    [[], "steering_drift", "Drive straight"],
+    [[trial("steering_drift")], "steering_left", "Left circle"],
+    [[trial("steering_drift"), trial("steering_left")], "steering_right", "Right circle"],
   ];
   for (const [trials, kind, title] of resumeCases) {
     const page = browser();
@@ -161,13 +158,15 @@ function browser() {
   unfinished.snapshot("steering");
   assert.equal(unfinished.element("wizard-view").innerHTML.includes("goToStep('steering_left')"), false);
 
-  // The circle measuring screen defaults to the two-tire method and sends
-  // exactly what was typed into boxes A and B.
+  // The two-tire method (behind a link since 2026-10-16; the default is the
+  // inner tire only) sends exactly what was typed into boxes A and B.
   const circle = browser();
   circle.snapshot("steering", {pending_capture: {id: "p1", kind: "steering_left", summary: {}}});
+  circle.sandbox.setCircleMethod("rear_tires");
   const review = circle.element("wizard-view").innerHTML;
-  assert.match(review, /id="circle-axle-field"[^>]*hidden/, "axle method must start hidden");
+  assert.match(review, /id="circle-axle-field"[^>]*hidden/, "axle box stays hidden");
   assert.doesNotMatch(review, /id="circle-tire-fields"[^>]*hidden/);
+  assert.doesNotMatch(review, /id="circle-outer-field"[^>]*hidden/);
   circle.element("circle-inner").value = "2.41";
   circle.element("circle-outer").value = "2.97";
   circle.element("circle-fulllock").checked = true;
@@ -178,12 +177,13 @@ function browser() {
   assert.equal(circle.requests[0].measured_inner_diameter_m, 2.41);
   assert.equal(circle.requests[0].measured_outer_diameter_m, 2.97);
   assert.equal(circle.requests[0].full_lock, true);
-  // The "other way" link switches to the single axle-centre diameter.
+  // The axle-centre link switches to the single axle-centre diameter.
   const axle = browser();
   axle.snapshot("steering", {pending_capture: {id: "p2", kind: "steering_right", summary: {}}});
-  axle.sandbox.toggleCircleMethod();
-  assert.equal(axle.element("circle-axle-field").hidden, false);
-  assert.equal(axle.element("circle-tire-fields").hidden, true);
+  axle.sandbox.setCircleMethod("axle_centre");
+  const axleView = axle.element("wizard-view").innerHTML;
+  assert.doesNotMatch(axleView, /id="circle-axle-field"[^>]*hidden/);
+  assert.match(axleView, /id="circle-tire-fields"[^>]*hidden/);
   axle.element("circle-diameter").value = "2.70";
   await axle.sandbox.acceptPending();
   assert.equal(axle.requests[0].measurement_method, "axle_centre");

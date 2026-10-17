@@ -6,20 +6,27 @@
 
 `run_e2e.py` starts the car's real `ackermann_to_vesc_node`,
 `vesc_to_odom_node`, `ackermann_mux`, `joy_teleop` (with the real config
-files) and the wizard's real launch file. It fakes only the hardware: a
-scripted F710, and a VESC that clips the servo like `vesc_driver` and drives a
-simulated car whose true steering linkage and wheel scale differ from
-`vesc.yaml`. It then runs every wizard test over the HTTP API, "tape-measures"
+files, as temporary copies) and the wizard's real launch file.
+
+It fakes only the hardware: a scripted F710, and a VESC (the motor and servo
+controller) that clips the servo like `vesc_driver` and drives a simulated
+car. That car's true steering linkage and wheel scale differ from
+`vesc.yaml`, and its right steering has a hard stop at 24.6°.
+
+The harness runs every wizard test over the HTTP API, "tape-measures"
 each run from the simulated car, and checks:
 
-- the live values are read from all three nodes and every topic is healthy;
-- the range check finds the `servo_max` clamp and names software, hardware or both correctly;
+- the live values are read from all four nodes (including `joy_teleop`'s full-stick angle) and every topic is healthy;
+- the servo clamp check finds the 2026-10-10 `servo_max: 0.85` problem from settings alone;
 - drive-straight runs converge on the true centre offset, through a real write to a copy of `vesc.yaml` and a bringup restart;
+- right circles at `servo_max` 0.85, 0.90, 0.95 and 1.00, measured inner tire only, find the stop at 0.95; the report suggests `servo_max` 0.95 and a full-stick angle both sides reach;
 - the steering fit recovers the simulated linkage (within 3%) and the wheel gain the simulated scale (within 1%);
-- writes, undo, the WebSocket, the page and the JSON-only API all work.
+- one write updates both `vesc.yaml` and `joy_teleop.yaml`, both restarts are noticed, check circles then confirm the calibration, and undo restores both files exactly;
+- the WebSocket, the page and the JSON-only API all work.
 
 With `--browser`, it also clicks through a steering session in Chromium and
-fails on any JavaScript error.
+fails on any JavaScript error. That part was updated for the 2026-10-16
+rework but has not been run since: Playwright is not installed on car 2.
 
 **Terminal 1**, from a built workspace. The domain settings keep it off the
 car's ROS graph; never run it with the real driver stack up.
@@ -32,6 +39,5 @@ python3 tools/odom_calibration_e2e/run_e2e.py
 python3 tools/odom_calibration_e2e/run_e2e.py --browser /path/to/chromium
 ```
 
-**Working when:** it ends with `N passed, 0 failed` (37 with `--browser`) and
-exits 0. It takes about four minutes. Any `FAIL` line names the check; `--keep`
+**Working when:** it ends with `43 passed, 0 failed` and exits 0. It takes about four minutes. Any `FAIL` line names the check; `--keep`
 keeps the logs of every node.

@@ -32,7 +32,7 @@ def test_ready_report_value_becomes_an_update():
     ({}, ['steering_angle_to_servo_gain'], 'Generate the report first'),
     (_report(), [], 'at least one value'),
     (_report(), 'steering_angle_to_servo_gain', 'at least one value'),
-    (_report(), ['servo_max'], "'servo_max' cannot be applied"),
+    (_report(), ['brake_max'], "'brake_max' cannot be applied"),
     (_report(), ['speed_to_erpm_gain'], 'blocked: the speed_to_erpm_gain fit is insufficient'),
     (_report(), ['steering_angle_to_servo_offset'], 'not ready to apply: confidence is low'),
     (_report(), ['speed_to_erpm_offset'], 'no suggestion for speed_to_erpm_offset'),
