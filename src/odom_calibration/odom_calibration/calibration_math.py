@@ -808,13 +808,18 @@ def steering_calibration(session: dict):
             'servo_source': source,
             'usable': False,
             'warnings': [],
+            'warnings_overridden': bool(trial.get('warnings_overridden')),
         }
         if source == 'too_few_active':
+            if not (item['warnings_overridden'] and (stats.get('count') or 0) > 0):
+                item['warnings'].append(
+                    f"Only {stats.get('count', 0)} servo samples were taken while "
+                    'LB was held and the car was moving; re-record this run.')
+                trial_results.append(item)
+                continue
             item['warnings'].append(
                 f"Only {stats.get('count', 0)} servo samples were taken while "
-                'LB was held and the car was moving; re-record this run.')
-            trial_results.append(item)
-            continue
+                'LB was held and the car was moving; used anyway, as chosen.')
         if source == 'whole_capture':
             item['warnings'].append(
                 'Recorded before idle time was filtered out; its servo value '
@@ -911,6 +916,7 @@ def steering_calibration(session: dict):
         trial_results.append(item)
 
     usable = [item for item in trial_results if item['usable']]
+    overridden = {item['trial_id']: item['warnings_overridden'] for item in trial_results}
     drifts = [item for item in usable if item['kind'] == 'steering_drift']
     centres = [item for item in usable if item['kind'] == 'steering_center']
     circles = [item for item in usable
@@ -1042,12 +1048,15 @@ def steering_calibration(session: dict):
                 'by about 0.05, and drive another full-lock circle.')
         for point in curve['points']:
             if point['radius_spread'] > steering_curve.REPEAT_SPREAD_FRACTION:
+                kept = all(overridden.get(trial_id) for trial_id in point['trial_ids'])
                 warnings.append(
                     f"The {side} full-lock circles disagree by "
                     f"{point['radius_spread'] * 100.0:.0f}% in radius (servo "
-                    f"{point['servo']:.3f}); re-measure them or remove the odd "
-                    'one before trusting the fit.')
-                if status == 'good':
+                    f"{point['servo']:.3f}); "
+                    + ('kept anyway, as chosen for every one of them.' if kept else
+                       're-measure them or remove the odd one before trusting '
+                       'the fit.'))
+                if status == 'good' and not kept:
                     status = 'low'
 
     suggestions = {}

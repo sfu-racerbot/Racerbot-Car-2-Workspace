@@ -28,6 +28,7 @@ you confirm in the page; see [Applying a suggestion](#applying-a-suggestion).
 - **Servo clamp from the settings alone**: warns whenever `servo_min`/`servo_max` would clip full stick or the driving nodes' `max_steering_angle` on one side.
 - Steering runs are fitted only from samples taken while LB is held and the car moves at 0.15 m/s or more.
 - Impossible suggestions are blocked with a reason; plausible, confident ones can be written to `vesc.yaml` and `joy_teleop.yaml` with a backup of each and one undo for both.
+- **Overrides**: step the servo limit from the circle page, type your own value for any suggestion or setting, keep a flagged run, change the rear track, and undo everything from the session. Typed values still get the hard checks below.
 - Captures stop automatically at five minutes. Closing the browser or losing Wi-Fi never erases accepted trials.
 - Limits: a tape measure cannot see tire slip, surface changes, tire wear, battery state, or drivetrain backlash. Odometry stays an estimate.
 
@@ -431,8 +432,16 @@ the stop at its inner end. The report then suggests:
   limits would clip it under the suggested gain.
 
 When a side's outermost circle is on its servo limit and still gaining, the
-report says so and suggests raising the limit about 0.05 after a wheels-up
-check. The step-by-step procedure is in
+report says so. Each circle page's **Find how far the left/right side
+steers** card then offers the next step.
+
+That step is `source: 'limit_step'` (`wizard_actions.limit_step_updates`). It moves that side's limit by the step
+(0.005–0.1, default 0.05), stopping at 0 or 1. Which limit belongs to which
+side follows the gain's sign. When full stick would no longer reach the new
+limit, it also raises the full-stick angle to 0.01 rad past it, rounded up to
+0.01.
+
+The step-by-step procedure is in
 [docs/odom-calibration.md](../../docs/odom-calibration.md#finding-how-far-the-steering-really-goes).
 
 **Check circles.** Every circle stores the angle the gain and offset live at
@@ -536,7 +545,12 @@ loads, followed through the `--symlink-install` link back to `src/` (or
 `vesc_yaml_path` if set). If it resolves inside `install/` instead, the page
 warns that the next `colcon build` will overwrite the change.
 
-**Undo the last change** puts back every file the latest write touched. Writing is refused while
+**Undo the last change** puts back every file the latest write touched.
+**Undo everything from this session** (`everything: true`) puts each file
+back to its backup from before the session's first write still open, and
+closes every write since.
+
+Writing is refused while
 a recording runs, and the whole feature is off with `allow_apply: false`. The
 API only accepts `application/json` requests, so another web page open in the
 same browser cannot trigger a write.
@@ -549,6 +563,20 @@ teleop** banner until the live values match. After that:
 2. repeat a short, low-speed tape-measure trial;
 3. keep a spotter and hold LB for every powered movement; and
 4. keep the backup (or the old values) so the change is reversible.
+
+### Overrides
+
+| Action | Payload | Checked |
+|---|---|---|
+| `apply_parameters`, `source: 'manual'` | `values: {name: number}` from the **Change a setting by hand** and **Edit before writing** tables | every *Blocked when* row above except confidence, plus: the offset must stay inside the servo limits as changed |
+| `apply_parameters`, `source: 'limit_step'` | `side`, `step`, `raise_stick` | as `manual`, after the step is computed |
+| `accept_capture` | `use_despite_warnings: true` | a run with too few LB-held moving samples is used if it has at least one; a disagreeing repeat counts as kept only when every circle at that setting is kept |
+| `set_trial_override` | `trial_id`, `value` | the same, for a run already accepted; drops the old report |
+| `update_vehicle` | `rear_track_m` (0.10–0.60 m) | this session only; drops the old report |
+
+A kept run's warning stays in the report, reworded to "used anyway, as
+chosen". The snapshot's `steering_preview` carries the live curves and each
+run's warnings, so the circle pages update before the report is generated.
 
 To copy values by hand instead, the report's YAML blocks list the same values
 for the `vesc_to_odom_node` section and the shared steering section of

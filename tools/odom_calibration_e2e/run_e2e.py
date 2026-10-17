@@ -71,7 +71,7 @@ TRUE_STEER_OFFSET = 0.575         # servo value where the wheels point straight
 RIGHT_STOP_RAD = 0.43             # the right linkage's hard stop (24.6 deg)
 WHEELBASE = 0.36
 REAR_TRACK = 0.27                 # what odom_calibration.yaml says for car 2
-SWEEP_SCALE = 0.56                # full stick while finding the stop (rad)
+START_SCALE = 0.436               # car 2's full stick; the sweep raises it as needed (rad)
 
 
 class FakeCar(Node):
@@ -456,10 +456,10 @@ def run(check, wizard, car, stack, vesc_yaml, teleop_yaml, original_vesc, shared
     print('\n[steering 1] the 2026-10-10 settings: the clamp is found from settings alone')
     set_yaml_value(vesc_yaml, 'servo_max', '0.85')
     stack.restart_bringup(car)
-    set_stick_scale(teleop_yaml, SWEEP_SCALE)
+    set_stick_scale(teleop_yaml, START_SCALE)
     stack.restart_teleop()
     wait_for(lambda: wizard.state()['live_servo_limits'][1] == 0.85
-             and abs((wizard.state()['live_stick_scale'] or 0) - SWEEP_SCALE) < 1e-9, 40)
+             and abs((wizard.state()['live_stick_scale'] or 0) - START_SCALE) < 1e-9, 40)
     wizard.act('new_session', mode='steering', replace_existing=True)
     clamp = wizard.state()['clamp_check']
     gain, offset = shared['steering_angle_to_servo_gain'], shared['steering_angle_to_servo_offset']
@@ -472,6 +472,7 @@ def run(check, wizard, car, stack, vesc_yaml, teleop_yaml, original_vesc, shared
           f"{clamp['right_reach_rad']:.4f} vs {abs(right_reach):.4f}")
 
     print('\n[steering 2] drive straight, then find the right stop by raising servo_max')
+    vesc_at_start, teleop_at_start = vesc_yaml.read_text(), teleop_yaml.read_text()
     drift_angles = []
     for attempt in (1, 2):
         result = {}
@@ -524,14 +525,39 @@ def run(check, wizard, car, stack, vesc_yaml, teleop_yaml, original_vesc, shared
                    full_lock=True, **fields)
         return servo
 
-    circle('left', 'rear_tires')
-    for servo_max in ('0.85', '0.90', '0.95', '1.00'):
-        set_yaml_value(vesc_yaml, 'servo_max', servo_max)
-        stack.restart_bringup(car)
-        wait_for(lambda: abs(wizard.state()['live_servo_limits'][1] - float(servo_max)) < 1e-9, 30)
+    # The page's "Try more right lock" button, three times: each step writes
+    # the next servo_max, and raises full stick only when it would fall short.
+    raised = []
+    for servo_max in (0.85, 0.90, 0.95, 1.00):
+        if servo_max > 0.85:
+            applied = wizard.act('apply_parameters', confirmed=True, source='limit_step',
+                                 side='right', step=0.05, raise_stick=True)['applied']
+            stick = [a['after']['steering_stick_scale'] for a in applied
+                     if 'steering_stick_scale' in a['after']]
+            raised.append(bool(stick))
+            gain = wizard.state()['session']['current_parameters']['steering_angle_to_servo_gain']
+            offset = wizard.state()['session']['current_parameters']['steering_angle_to_servo_offset']
+            scale = stick[0] if stick else wizard.state()['live_stick_scale']
+            check(f'the step to servo_max {servo_max:.2f} leaves full stick past it',
+                  abs(yaml.safe_load(vesc_yaml.read_text())['/**']['ros__parameters']['servo_max']
+                      - servo_max) < 1e-9 and offset - gain * scale > servo_max,
+                  f'stick {scale}, sends {offset - gain * scale:.3f}')
+            stack.restart_bringup(car)
+            if stick:
+                stack.restart_teleop()
+            synced = wait_for(lambda: not wizard.state()['pending_restart'], 40)
+            check('the restarts are noticed', synced, json.dumps(wizard.state()['pending_restart']))
         servo = circle('right')
-        check(f'right circle at servo_max {servo_max} drove on the clamp',
-              abs(servo - float(servo_max)) < 0.002, f'{servo:.4f}')
+        check(f'right circle at servo_max {servo_max:.2f} drove on the clamp',
+              abs(servo - servo_max) < 0.002, f'{servo:.4f}')
+    check('full stick was raised only for the steps it could not reach',
+          raised[0] is False and raised[-1] is True, json.dumps(raised))
+    status, body = wizard.raw('/api/action', json.dumps({
+        'action': 'apply_parameters', 'confirmed': True, 'source': 'limit_step',
+        'side': 'right', 'step': 0.05, 'raise_stick': True}).encode())
+    check('no step past the end of the servo signal', status == 409
+          and b'end of the 0-1 servo signal' in body, body.decode()[:120])
+    circle('left', 'rear_tires')
     wizard.act('generate_report')
     report = wizard.state()['session']['report']
     steering = report['steering']
@@ -610,9 +636,52 @@ def run(check, wizard, car, stack, vesc_yaml, teleop_yaml, original_vesc, shared
     wizard.act('restore_backup', confirmed=True)
     check('undo still restores both files of the earlier write exactly',
           vesc_yaml.read_text() == vesc_before and teleop_yaml.read_text() == teleop_before)
+
+    print('\n[steering 4] overrides: keep a run, rear track, a value typed by hand, undo all')
+    trial_id = wizard.state()['session']['trials'][-1]['id']
+    wizard.act('set_trial_override', trial_id=trial_id, value=True)
+    session = wizard.state()['session']
+    check('a run can be kept despite warnings, and the old report is dropped',
+          session['trials'][-1]['warnings_overridden'] is True and session['report'] is None
+          and wizard.state()['steering_preview']['trials'][trial_id]['warnings_overridden'] is True)
+    wizard.act('set_trial_override', trial_id=trial_id, value=False)
+    status, _ = wizard.raw('/api/action', json.dumps(
+        {'action': 'update_vehicle', 'rear_track_m': 0.05}).encode())
+    check('a rear track that cannot be right is refused', status == 400, str(status))
+    wizard.act('update_vehicle', rear_track_m=0.30)
+    preview = wizard.state()['steering_preview']['curves']['right']['points'][-1]['angle_deg']
+    wizard.act('update_vehicle', rear_track_m=REAR_TRACK)
+    back = wizard.state()['steering_preview']['curves']['right']['points'][-1]['angle_deg']
+    check('changing the rear track changes the measured angles, and back',
+          preview < back and abs(back - steering['curves']['right']['points'][-1]['angle_deg']) < 1e-9,
+          f'{preview:.2f} vs {back:.2f}')
+    before_manual = vesc_yaml.read_text()
+    status, body = wizard.raw('/api/action', json.dumps({
+        'action': 'apply_parameters', 'confirmed': True, 'source': 'manual',
+        'values': {'steering_angle_to_servo_gain': 0.78}}).encode())
+    check('a typed value with the wrong sign is refused and nothing is written',
+          status == 409 and b'left and right would swap' in body
+          and vesc_yaml.read_text() == before_manual, body.decode()[:120])
+    wizard.act('apply_parameters', confirmed=True, source='manual', values={'servo_max': 0.97})
+    check('a typed servo_max is written as typed',
+          yaml.safe_load(vesc_yaml.read_text())['/**']['ros__parameters']['servo_max'] == 0.97)
+    wizard.act('restore_backup', confirmed=True, everything=True)
+    check('undo everything puts both files back to before the session\'s first write',
+          vesc_yaml.read_text() == vesc_at_start and teleop_yaml.read_text() == teleop_at_start)
+    status, body = wizard.raw('/api/action', json.dumps(
+        {'action': 'restore_backup', 'confirmed': True, 'everything': True}).encode())
+    check('then nothing is left to undo', status == 400 and b'left to undo' in body, str(status))
+    # That also undid the drive-straight fix, and a car that curves skews the
+    # wheel runs' tape distance. Put the fitted offset back by hand.
+    good_offset = steering['suggested_steering_angle_to_servo_offset']
+    wizard.act('apply_parameters', confirmed=True, source='manual',
+               values={'steering_angle_to_servo_offset': round(good_offset, 4)})
     stack.restart_bringup(car)
     stack.restart_teleop()
-    wait_for(lambda: not wizard.state()['pending_restart'], 40)
+    synced = wait_for(lambda: not wizard.state()['pending_restart'] and abs(
+        wizard.state()['session']['current_parameters']['steering_angle_to_servo_offset']
+        - round(good_offset, 4)) < 1e-9, 40)
+    check('a typed offset is live after the restart', synced)
 
     print('\n[wheels] stationary baseline and three tape runs')
     wizard.act('new_session', mode='movement', replace_existing=True)

@@ -20,6 +20,14 @@
 - Every test is its own numbered step in the left sidebar. Do them top to bottom. Each step has a setup diagram, and each measuring screen has a lettered diagram (A, B, C) that matches the input boxes.
 - A suggestion that cannot be right (zero or wrong-sign gain, offset outside the servo range, a failed fit) is **blocked**: shown with its reason, never written as a value. A weak one (low confidence) is shown but not offered for writing.
 - **Write** buttons put accepted values in place after a confirmation: gain, offset and servo limits into `vesc.yaml`, the full-stick angle into `joy_teleop.yaml`. A timestamped backup of each file is saved first, and **Undo the last change** puts back every file that write touched. Set `allow_apply: false` in `odom_calibration.yaml` to turn writing off.
+- **You stay in charge of every number** (see [Overriding the wizard](#overriding-the-wizard)):
+  - type your own value for any suggestion before writing it;
+  - change any setting by hand from any page;
+  - keep a run the wizard flags;
+  - change the rear track for this session;
+  - **Undo everything from this session** puts every file back the way it was before the first write.
+
+  The same safety checks apply to a number you type as to a suggestion.
 - The wizard creates no ROS publishers and cannot move the car. Captures stop by themselves at five minutes.
 - Limits: a tape measure cannot see tire slip, surface changes, tire wear, battery state, or drivetrain backlash.
 
@@ -69,18 +77,26 @@ The servo itself may travel 180°, but the VESC's 0–1 servo range and the
 steering linkage stop the wheels much sooner. Near full lock each servo step
 turns the wheels less, until a step adds nothing. To find that point:
 
+You never edit a file by hand for this. Each circle page has a
+**Find how far the left/right side steers** card that does it:
+
 1. Do the drive-straight run and one full-lock circle each way as normal.
-2. **Wheels off the ground first:** raise `servo_max` in `vesc.yaml` by
-   about 0.05 (or lower `servo_min`, for the other side), restart bringup,
-   hold LB and full lock for 3 seconds. Stop at any buzzing, heat, or the
-   linkage touching something, and go back one step.
-3. If full stick no longer reaches the new limit, raise the steering `scale`
-   in `joy_teleop.yaml` temporarily and restart teleop (`teleop_launch.py`,
-   the manual-driving program). The circle step's
-   **What to expect** card shows the servo value full stick sends.
-4. Drive another full-lock circle on that side and accept it.
-5. Repeat until the report says that side **levels off**: a step that adds
-   less than 1°, about one tape measurement's error.
+   The card shows a table: each servo value you drove, the wheel angle it
+   gave, and how much each step added.
+2. Press **Write servo_max 1.000 (now 0.950)** (or `servo_min`, on the other
+   side). The step is 0.05; change it in the **Step size** box (0.005–0.1).
+   If full stick would no longer reach the new limit, a ticked box also
+   raises the full-stick angle just past it, for now. The report suggests
+   the final full-stick angle later.
+3. Restart bringup (and teleop, `teleop_launch.py`, the manual-driving
+   program, if full stick was raised). The banner on the page says which.
+4. **Wheels off the ground first:** hold LB and full lock for 3 seconds.
+   Stop at any buzzing, heat, or the linkage touching something, and press
+   **Undo the last change**.
+5. Put the car down, drive another full-lock circle on that side and accept it.
+6. Repeat until the card says that side **levels off**: a step that adds
+   less than 1°, about one tape measurement's error. The button stops at the
+   end of the 0–1 servo signal.
 
 The report then suggests:
 
@@ -109,6 +125,28 @@ at. Circles at servo
 values within 0.01 of each other count as repeats of one setting.
 
 </details>
+
+## Overriding the wizard
+
+The wizard suggests; you decide. Every override below is written to the
+same files with the same backup and undo as a suggestion.
+
+| You want to | Where | What happens |
+|---|---|---|
+| Write your own number instead of a suggestion | Report, **Edit before writing** under *How far the steering goes* | Boxes start at the suggestions. Tick the ones to write and change any number, including one marked *not ready*. |
+| Change any setting at any time | **Change a setting by hand**, folded at the bottom of every page | Gain, offset, `servo_min`, `servo_max`, full stick (in degrees) and the odometry speed values. The table shows what the car runs now. |
+| Use a run the wizard flags | Tick **Use this run even though it has the warnings above** when accepting, or press **Use anyway** in the runs table | The warning stays visible and says *used anyway, as chosen*. A run with no LB-held moving samples is still never used. |
+| Use a different rear track | Circle pages, **Car measurements** | For this session only. To change it for good, edit `rear_track_m` in `odom_calibration.yaml`. |
+| Go back to where you started | **Undo everything from this session**, under *Changes written* | Each file goes back to its backup from before this session's first write. Then restart bringup and teleop. |
+
+Typing a number skips only the *confidence* check; it is your evidence, not
+the fit's. These are still refused, because the car could not steer or
+would steer the wrong way:
+
+- a gain of zero or the wrong sign;
+- an offset outside `servo_min`–`servo_max`;
+- a servo limit outside 0–1, or one that meets the other limit;
+- full stick past 0.70 rad (40°).
 
 ## Which part do you need?
 
@@ -157,12 +195,16 @@ any buzzing, heat or contact: a servo held against a stop overheats.
 `tools/odom_calibration_e2e/run_e2e.py` runs the wizard against the car's
 real VESC conversion nodes, `ackermann_mux` and `joy_teleop`, with only the
 hardware simulated. The simulated linkage has a hard stop on the right, and
-the run raises `servo_max` from 0.85 to 1.00 one circle at a time.
+the run raises `servo_max` from 0.85 to 1.00 one circle at a time, with
+the page's own step button.
 
 It checks that the wizard recovers the simulated car's true steering and wheel
 values, and finds the stop at the right step. It also checks the servo_max and
 full-stick suggestions, writes to both files, undo, restarts and the check
-circles. See
+circles.
+
+It also checks each override: a kept run, the rear track, a typed value (and
+a refused one), and undo-everything returning both files exactly. See
 [its README](../tools/odom_calibration_e2e/README.md).
 
 ## Using it on another car

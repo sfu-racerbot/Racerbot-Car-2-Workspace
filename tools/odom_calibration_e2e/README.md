@@ -19,9 +19,10 @@ each run from the simulated car, and checks:
 - the live values are read from all four nodes (including `joy_teleop`'s full-stick angle) and every topic is healthy;
 - the servo clamp check finds the 2026-10-10 `servo_max: 0.85` problem from settings alone;
 - drive-straight runs converge on the true centre offset, through a real write to a copy of `vesc.yaml` and a bringup restart;
-- right circles at `servo_max` 0.85, 0.90, 0.95 and 1.00, measured inner tire only, find the stop at 0.95; the report suggests `servo_max` 0.95 and a full-stick angle both sides reach;
+- right circles at `servo_max` 0.85, 0.90, 0.95 and 1.00, measured inner tire only, find the stop at 0.95. The report suggests `servo_max` 0.95 and a full-stick angle both sides reach. Each step is the page's own **Write servo_max** action, which raises full stick only when it would fall short, and refuses to go past 1.00;
 - the steering fit recovers the simulated linkage (within 3%) and the wheel gain the simulated scale (within 1%);
 - one write updates both `vesc.yaml` and `joy_teleop.yaml`, both restarts are noticed, check circles then confirm the calibration, and undo restores both files exactly;
+- overrides: a run kept despite warnings, a rear track change (and a refused one), a typed `servo_max` and a refused wrong-sign gain. **Undo everything** returns both files exactly to the start of the session;
 - the WebSocket, the page and the JSON-only API all work.
 
 With `--browser`, it also clicks through a steering session in Chromium and
@@ -39,5 +40,5 @@ python3 tools/odom_calibration_e2e/run_e2e.py
 python3 tools/odom_calibration_e2e/run_e2e.py --browser /path/to/chromium
 ```
 
-**Working when:** it ends with `43 passed, 0 failed` and exits 0. It takes about four minutes. Any `FAIL` line names the check; `--keep`
+**Working when:** it ends with `59 passed, 0 failed` and exits 0. It takes about four minutes. Any `FAIL` line names the check; `--keep`
 keeps the logs of every node.

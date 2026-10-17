@@ -56,6 +56,8 @@ PARAMETER_NAMES = (
 # servo command comes from ackermann_to_vesc_node and the clamp from
 # vesc_driver_node, so a value edited for one node but not restarted in the
 # other shows up as a mismatch instead of hiding behind the odom node's copy.
+# A rear track outside this (m) is a typing or unit mistake for a car this size.
+REAR_TRACK_RANGE_M = (0.10, 0.60)
 # A live-parameter request older than this is given up and sent again.
 PARAMETER_REQUEST_TIMEOUT_SEC = 5.0
 STICK_SCALE_PARAMETER = 'human_control.axis_mappings.drive-steering_angle.scale'
@@ -798,6 +800,29 @@ class OdomCalibrationNode(Node):
                 self.session['report'] = None
                 touch(self.session, 'trial_deleted', str(trial_id))
                 return self._save_and_snapshot()
+            if action == 'set_trial_override':
+                value = payload.get('value')
+                if not isinstance(value, bool):
+                    raise WizardError('value must be true or false.')
+                trial = next((t for t in self.session.get('trials', [])
+                              if t.get('id') == payload.get('trial_id')), None)
+                if trial is None:
+                    raise WizardError('Accepted trial was not found.', status=404)
+                trial['warnings_overridden'] = value
+                self.session['report'] = None
+                touch(self.session, 'trial_override', f"{trial['id']} {value}")
+                return self._save_and_snapshot()
+            if action == 'update_vehicle':
+                track = payload.get('rear_track_m')
+                if isinstance(track, bool) or not _finite(track) \
+                        or not REAR_TRACK_RANGE_M[0] <= float(track) <= REAR_TRACK_RANGE_M[1]:
+                    raise WizardError(
+                        f'Rear track must be {REAR_TRACK_RANGE_M[0]:g}-'
+                        f'{REAR_TRACK_RANGE_M[1]:g} m (rear tire centre to centre).')
+                self.session.setdefault('vehicle', {})['rear_track_m'] = float(track)
+                self.session['report'] = None
+                touch(self.session, 'vehicle_updated', f'rear_track_m {float(track)}')
+                return self._save_and_snapshot()
             if action == 'generate_report':
                 touch(self.session, 'report_generated')
                 self.session['report'] = calibration_math.build_report(
@@ -841,9 +866,21 @@ class OdomCalibrationNode(Node):
             if payload.get('source') == 'centre':
                 return wizard_actions.centre_updates(
                     self.session, self.live_servo_limits)
+            current = calibration_math.current_values(self.session)
+            if payload.get('source') == 'manual':
+                return wizard_actions.manual_updates(
+                    payload.get('values'), current, self.live_servo_limits)
+            if payload.get('source') == 'limit_step':
+                step = wizard_actions.limit_step_updates(
+                    current, self.live_servo_limits, self.live_stick_scale,
+                    payload.get('side'), payload.get('step'),
+                    payload.get('raise_stick') is True)
+                # The same hard checks as a value typed by hand.
+                return wizard_actions.manual_updates(
+                    step, current, self.live_servo_limits)
         except ValueError as exc:
             raise WizardError(str(exc), status=409) from exc
-        raise WizardError("source must be 'report' or 'centre'.")
+        raise WizardError("source must be 'report', 'centre', 'manual' or 'limit_step'.")
 
     def _apply_parameters(self, payload):
         self._apply_guard(payload)
@@ -893,24 +930,22 @@ class OdomCalibrationNode(Node):
 
     def _restore_backup(self, payload):
         self._apply_guard(payload)
-        changes = [
-            change for change in self.session.get('applied_changes', [])
-            if not change.get('restored')
-        ]
-        if not changes:
-            raise WizardError('Nothing applied in this session is left to undo.')
-        last = changes[-1].get('apply_id')
-        batch = [c for c in changes if last is not None and c.get('apply_id') == last] \
-            or changes[-1:]
+        try:
+            to_restore, to_close = wizard_actions.restore_plan(
+                self.session.get('applied_changes', []),
+                everything=payload.get('everything') is True)
+        except ValueError as exc:
+            raise WizardError(str(exc)) from exc
         results = []
-        for change in batch:
+        for change in to_restore:
             try:
                 results.append(vesc_yaml.restore(change['path'], change['backup']))
             except (OSError, ValueError, yaml.YAMLError) as exc:
                 raise WizardError(f"{change['path']} was not restored: {exc}",
                                   status=409) from exc
-            change['restored'] = True
             touch(self.session, 'config_restored', change['backup'])
+        for change in to_close:
+            change['restored'] = True
         return {**self._save_and_snapshot(), 'restored': results}
 
     def _start_capture(self, payload):
@@ -997,6 +1032,10 @@ class OdomCalibrationNode(Node):
             except ValueError as exc:
                 raise WizardError(str(exc)) from exc
             trial.update(fields)
+        override = payload.get('use_despite_warnings', False)
+        if not isinstance(override, bool):
+            raise WizardError('use_despite_warnings must be true or false.')
+        trial['warnings_overridden'] = override
         trial['notes'] = str(payload.get('notes', ''))[:2000]
         trial['accepted'] = True
         trial['confirmed_at'] = time.strftime(
@@ -1033,7 +1072,21 @@ class OdomCalibrationNode(Node):
             if self.session is not None and self.session.get('mode') in \
                     calibration_math.MODES_WITH_STEERING:
                 vehicle = self.session.get('vehicle', {}) or {}
+                try:
+                    full = calibration_math.steering_calibration(self.session)
+                    preview = {key: full[key] for key in (
+                        'curves', 'limit_suggestions', 'sides', 'status',
+                        'suggested_steering_angle_to_servo_gain',
+                        'suggested_steering_angle_to_servo_offset')}
+                    preview['trials'] = {
+                        item['trial_id']: {
+                            'usable': item['usable'], 'warnings': item['warnings'],
+                            'warnings_overridden': item['warnings_overridden']}
+                        for item in full['trial_results']}
+                except Exception as exc:  # a preview must never break the page
+                    preview = {'error': str(exc)}
                 steering_view = {
+                    'steering_preview': preview,
                     'clamp_check': steering_chain.clamp_check(
                         self.session.get('current_parameters', {}),
                         [vehicle.get('servo_min'), vehicle.get('servo_max')],

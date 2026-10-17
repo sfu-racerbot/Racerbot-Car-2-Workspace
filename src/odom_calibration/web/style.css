@@ -492,6 +492,12 @@ input[type="checkbox"], input[type="radio"] { width: 1.1rem; height: 1.1rem; acc
 }
 .details { margin-top: 1.5rem; color: var(--muted); }
 .details summary { cursor: pointer; padding: .6rem 0; }
+.details[open] > :not(summary) { color: var(--ink); }
+.details summary { font-weight: 600; }
+.input-small { max-width: 9rem; }
+.value-editor td { vertical-align: middle; }
+.value-editor input[type="checkbox"] { width: 1.2rem; height: 1.2rem; }
+.value-editor .layer-finding { display: block; }
 .key-dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%; background: var(--bad); vertical-align: middle; }
 [hidden] { display: none !important; }
 

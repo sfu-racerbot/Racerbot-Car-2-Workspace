@@ -15,6 +15,8 @@ const app = {
   circleMethod: "inner_tire",
   halfLockNext: false,
   navHtml: null,
+  // Servo-limit step size for "find how far this side steers".
+  limitStep: 0.05,
 };
 
 const MODE_STAGES = {
@@ -546,7 +548,16 @@ function renderPreflight(session) {
       <button class="button" type="button" ${odomReady ? "" : "disabled"} onclick="goToStep('${next}')">Start step 2: ${escapeHtml(STEPS[next].label)}</button>
       ${odomReady ? "" : `<span class="small muted">Waiting for odometry</span>`}
     </div>
-  </section>`;
+  </section>
+  ${manualPanel("preflight")}`;
+}
+
+// Every page offers the hand-edit table, folded away until wanted.
+function manualPanel(where) {
+  if (!applyAllowed()) return "";
+  return `<section><details class="details"><summary>Change a setting by hand</summary>
+    <p>Tick a setting, type the new value and press write. Use it to try your own number or put back a known-good one. It goes straight into the car's files.</p>
+    ${renderValueEditor(`manual-${where}`, Object.keys(EDITABLE))}</details></section>`;
 }
 
 function kindLabel(kind) {
@@ -583,6 +594,16 @@ function trialMeasurement(trial) {
   return "No tape measure";
 }
 
+// A run the fit flags (too few samples, a disagreeing repeat) can be kept
+// anyway; a kept run says so and can be switched back.
+function overrideToggle(trial) {
+  const result = app.snapshot?.steering_preview?.trials?.[trial.id];
+  const kept = Boolean(trial.warnings_overridden);
+  if (!kept && !(result?.warnings?.length || trial.summary?.warnings?.length)) return "";
+  return `${kept ? `<span class="layer-status ok">kept anyway</span>` : ""}<button class="button button-ghost button-small" type="button"
+    onclick="setTrialOverride('${escapeHtml(trial.id)}', ${!kept})">${kept ? "Stop keeping" : "Use anyway"}</button>`;
+}
+
 function acceptedRunsTable(session, kinds) {
   const trials = (session.trials || []).filter(t => t.accepted && kinds.includes(t.kind));
   if (!trials.length) return `<p class="small muted">No accepted runs yet.</p>`;
@@ -594,7 +615,7 @@ function acceptedRunsTable(session, kinds) {
       <td>${trialMeasurement(trial)}</td>
       <td class="num">${fmt(trial.summary?.servo?.median, 4)}</td>
       <td class="num">${signed(trial.summary?.odom_distance_m, 3)} m</td>
-      <td><button class="button button-ghost button-small" type="button"
+      <td>${overrideToggle(trial)}<button class="button button-ghost button-small" type="button"
         onclick="deleteTrial('${escapeHtml(trial.id)}')">Remove</button></td>
     </tr>`).join("")}</tbody>
   </table></div>`;
@@ -603,7 +624,7 @@ function acceptedRunsTable(session, kinds) {
       <strong>${escapeHtml(kindLabel(trial.kind))}</strong>
       <span class="run-measure">${trialMeasurement(trial)}</span>
       <span class="run-meta">Servo ${fmt(trial.summary?.servo?.median, 4, "--")}, odom ${signed(trial.summary?.odom_distance_m, 3, "--")} m</span>
-      <button class="button button-ghost button-small" type="button"
+      ${overrideToggle(trial)}<button class="button button-ghost button-small" type="button"
         onclick="deleteTrial('${escapeHtml(trial.id)}')">Remove</button>
     </li>`).join("")}</ul>`;
   return table + cards;
@@ -1062,6 +1083,145 @@ function renderExpectedCircle(session, side) {
     <p class="small muted">Clearly smaller means the wheels turn further than the gain thinks; clearly bigger, less. Within about ±5 cm is measuring error. After writing new values, restart bringup and teleop before checking.</p>`;
 }
 
+// Every value the wizard may write, as the page shows it. The full-stick
+// angle is typed in degrees and stored in radians.
+const EDITABLE = {
+  steering_angle_to_servo_gain: {label: "Steering gain", file: "vesc.yaml", digits: 4},
+  steering_angle_to_servo_offset: {label: "Straight-ahead servo (offset)", file: "vesc.yaml", digits: 4},
+  servo_min: {label: "servo_min (full-left end)", file: "vesc.yaml", digits: 3},
+  servo_max: {label: "servo_max (full-right end)", file: "vesc.yaml", digits: 3},
+  steering_stick_scale: {label: "Full stick steering", file: "joy_teleop.yaml", degrees: true, digits: 1},
+  speed_to_erpm_gain: {label: "Odometry speed gain", file: "vesc.yaml (odometry only)", digits: 2},
+  speed_to_erpm_offset: {label: "Odometry speed offset", file: "vesc.yaml (odometry only)", digits: 2},
+};
+const STEERING_EDITABLE = ["steering_angle_to_servo_gain", "steering_angle_to_servo_offset",
+  "servo_min", "servo_max", "steering_stick_scale"];
+
+// What the car runs now, for every editable value.
+function currentValues() {
+  const session = app.snapshot?.session || {};
+  const vehicle = session.vehicle || {};
+  const values = {...(session.current_parameters || {})};
+  for (const name of ["servo_min", "servo_max", "steering_stick_scale"]) {
+    if (finite(vehicle[name])) values[name] = vehicle[name];
+  }
+  if (finite(app.snapshot?.live_stick_scale)) values.steering_stick_scale = app.snapshot.live_stick_scale;
+  return values;
+}
+
+function shownValue(name, value) {
+  const def = EDITABLE[name];
+  if (!finite(value)) return "";
+  return (def.degrees ? value * 180 / Math.PI : value).toFixed(def.degrees ? 1 : def.digits);
+}
+
+// A table of values to write: tick a row, change its number, press write.
+// ``proposed`` prefills the boxes (a suggestion), else the current value.
+function renderValueEditor(formId, names, proposed = {}, ticked = []) {
+  const now = currentValues();
+  const rows = names.map(name => {
+    const def = EDITABLE[name];
+    const start = finite(proposed[name]) ? proposed[name] : now[name];
+    return `<tr><td><input id="${formId}-use-${name}" type="checkbox" ${ticked.includes(name) ? "checked" : ""}
+        aria-label="Write ${escapeHtml(def.label)}"></td>
+      <td>${escapeHtml(def.label)}${def.degrees ? " (°)" : ""}<span class="layer-finding">${escapeHtml(def.file)}</span></td>
+      <td class="num">${escapeHtml(shownValue(name, now[name]) || "unknown")}</td>
+      <td><input id="${formId}-val-${name}" class="input input-small" type="number" step="any"
+        value="${escapeHtml(shownValue(name, start))}"></td></tr>`;
+  }).join("");
+  return `<div class="runs-table"><table class="data-table value-editor">
+    <thead><tr><th>Write</th><th>Setting</th><th>Now</th><th>New value</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="button-row"><button class="button" type="button"
+      onclick="writeValueEditor('${formId}', '${names.join(",")}')">Write the ticked values</button></div>
+    <p class="small muted">The same safety checks as the suggestions apply (no wrong-sign gain, no offset outside the servo limits, servo values 0–1, full stick at most 40°). A backup is saved first; Undo puts it back.</p>`;
+}
+
+function sideCurve(side) {
+  return app.snapshot?.steering_preview?.curves?.[side] || null;
+}
+
+// Which servo limit ends this side: servo = gain * angle + offset with left
+// positive, so with the usual negative gain left runs to servo_min.
+function sideLimitName(side) {
+  const gain = currentValues().steering_angle_to_servo_gain;
+  const towardsMax = (finite(gain) && gain > 0) === (side === "left");
+  return towardsMax ? "servo_max" : "servo_min";
+}
+
+// "Find how far this side steers": the circles so far, and the next step.
+function renderLimitCard(session, side) {
+  const curve = sideCurve(side);
+  const now = currentValues();
+  const points = curve?.points || [];
+  const limitName = sideLimitName(side);
+  const limit = now[limitName];
+  const rows = points.map((point, index) => {
+    const step = index > 0 ? curve.steps[index - 1] : null;
+    const pastStop = curve.stop && Math.abs(point.servo - curve.stop.beyond_servo) < 1e-9;
+    return `<tr><td class="num">${point.servo.toFixed(3)}</td><td class="num">${point.angle_deg.toFixed(1)}°</td>
+      <td class="num">${step ? `${step.added_deg >= 0 ? "+" : ""}${step.added_deg.toFixed(1)}°` : ""}</td>
+      <td>${pastStop ? `<span class="layer-status limited">past the stop</span>` : ""}</td></tr>`;
+  }).join("");
+  const table = points.length ? `<div class="runs-table"><table class="data-table">
+    <thead><tr><th>Servo</th><th>Wheel angle</th><th>Added</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table></div>` : "";
+  let verdict;
+  if (!points.length) {
+    verdict = `<p>Drive one full-lock ${side} circle first. Then this card shows how far it got and offers the next step.</p>`;
+  } else if (curve.stop) {
+    verdict = `<p class="done-banner"><span aria-hidden="true">✓</span> The ${side} side levels off past servo ${curve.stop.servo.toFixed(3)}: the last step added only ${curve.stop.added_deg.toFixed(1)}°. The report suggests ${limitName} ${curve.stop.servo.toFixed(3)}.</p>`;
+  } else if (finite(limit) && Math.abs(points[points.length - 1].servo - limit) <= 0.005) {
+    verdict = `<p>Your last ${side} circle reached ${limitName} ${limit.toFixed(3)} at ${points[points.length - 1].angle_deg.toFixed(1)}°. To see whether the wheels can turn further, try the next step below.</p>`;
+  } else {
+    verdict = `<p>The last ${side} circle did not reach ${limitName}. That is fine if you only want to check the calibration.</p>`;
+  }
+  if (!applyAllowed() || !finite(limit)) return `${table}${verdict}`;
+  const towardsMax = limitName === "servo_max";
+  const next = Math.round((towardsMax ? Math.min(1, limit + app.limitStep) : Math.max(0, limit - app.limitStep)) * 10000) / 10000;
+  const atEnd = Math.abs(next - limit) < 1e-9;
+  const gain = now.steering_angle_to_servo_gain;
+  const offset = now.steering_angle_to_servo_offset;
+  const scale = now.steering_stick_scale;
+  const reaches = finite(gain) && finite(offset) && finite(scale)
+    && Math.abs(gain) * scale >= Math.abs(next - offset);
+  return `${table}${verdict}
+    <h3>Try more ${side} lock</h3>
+    ${atEnd ? `<p>${limitName} is already ${limit.toFixed(3)}, the end of the servo signal. There is no further step.</p>` : `
+    <div class="field-row">
+      <div class="field">
+        <label class="field-label" for="limit-step">Step size (servo units)</label>
+        <input id="limit-step" class="input input-small" type="number" min="0.005" max="0.1" step="0.005"
+          value="${app.limitStep}" onchange="setLimitStep(this.value)">
+      </div>
+    </div>
+    ${reaches ? "" : `<div class="check-row"><label><input id="limit-raise-stick" type="checkbox" checked>
+      Full stick does not reach ${next.toFixed(3)} yet. Also raise full stick enough to reach it (temporary; the report suggests the final value).</label></div>`}
+    <div class="button-row"><button class="button" type="button" onclick="stepLimit('${side}')">Write ${limitName} ${next.toFixed(3)} (now ${limit.toFixed(3)})</button></div>
+    <ol class="instruction-list">
+      <li>Restart bringup${reaches ? "" : " and teleop"} when the banner asks.</li>
+      <li><strong>Wheels off the ground:</strong> hold LB and full ${side} for 3 seconds. Stop at any buzzing, heat or the linkage touching something, and press <strong>Undo the last change</strong>.</li>
+      <li>If it was fine, put the car down and record another full-lock ${side} circle.</li>
+    </ol>`}`;
+}
+
+// The car's measurements the circles depend on.
+function renderCarCard(session) {
+  const params = currentParams();
+  const track = rearTrack(session);
+  return `<dl class="def-list">
+      <div><dt>Wheelbase</dt><dd>${finite(params.wheelbase) ? params.wheelbase.toFixed(3) : "unknown"} m <span class="small muted">(read from vesc.yaml)</span></dd></div>
+    </dl>
+    <div class="field-row">
+      <div class="field">
+        <label class="field-label" for="rear-track">Rear track: rear tire centre to centre (m)</label>
+        <input id="rear-track" class="input input-small" type="number" min="0.1" max="0.6" step="0.005" value="${track.toFixed(3)}">
+        <p class="field-hint">Used to turn an inner-tire circle into the rear-axle circle. Measure it once with "both rear tires": outer minus inner diameter is twice the track.</p>
+      </div>
+    </div>
+    <div class="button-row"><button class="button button-ghost button-small" type="button" onclick="saveRearTrack()">Save rear track</button></div>`;
+}
+
 function applyAllowed() {
   return Boolean(app.snapshot?.apply?.allowed);
 }
@@ -1085,7 +1245,8 @@ function appliedHistory(session) {
       <span class="small muted">${escapeHtml(change.at || "")}${change.restored ? ", undone" : ""}. Backup: ${escapeHtml(change.backup || "")}</span>${
       change.in_source_tree === false ? `<span class="small">This edited the installed copy, which the next colcon build overwrites.</span>` : ""}</li>`).join("");
   return `<h3>Changes written</h3><ul class="applied-list">${items}</ul>
-    ${latest && applyAllowed() ? `<button class="button button-ghost button-small" type="button" onclick="restoreBackup()">Undo the last change</button>` : ""}`;
+    ${latest && applyAllowed() ? `<div class="button-row"><button class="button button-ghost button-small" type="button" onclick="restoreBackup()">Undo the last change</button>${
+      changes.filter(change => !change.restored).length > 1 ? `<button class="button button-ghost button-small" type="button" onclick="restoreEverything()">Undo everything from this session</button>` : ""}</div>` : ""}`;
 }
 
 function renderCentreCard(session) {
@@ -1156,13 +1317,17 @@ function renderTestStep(session, id) {
   </section>
   ${isCircle ? `<section><h2>What to expect</h2>${renderExpectedCircle(session, def.side)}
     ${renderClampCheck(app.snapshot?.clamp_check)}</section>
+    <section><h2>Find how far the ${def.side} side steers</h2>${renderLimitCard(session, def.side)}
+    ${appliedHistory(session)}</section>
     <section><h2>Live steering</h2>${renderSteeringDiagram()}</section>` : ""}
   ${id === "steering_drift" ? renderCentreCard(session) : ""}
   <section>
     <h2>Runs for this test</h2>
     ${acceptedRunsTable(session, [def.kind])}
     ${points.length >= 2 ? `<h3>Steering fit so far</h3>${renderFitChart(points, linearFit(points), servoLimits())}` : ""}
-  </section>`;
+  </section>
+  ${isCircle ? `<section><details class="details"><summary>Car measurements</summary>${renderCarCard(session)}</details></section>` : ""}
+  ${manualPanel("step")}`;
 }
 
 function renderRecording(session) {
@@ -1299,6 +1464,9 @@ function renderReview(session) {
       <label class="field-label" for="trial-notes">Notes (optional)</label>
       <textarea id="trial-notes" class="textarea"></textarea>
     </div>
+    ${summary.warnings?.length ? `<div class="check-row">
+      <label><input id="trial-override" type="checkbox"> Use this run even though it has the warnings above.</label>
+    </div>` : ""}
     <div class="check-row">
       <label><input id="trial-confirmed" type="checkbox"> These measurements are for this run.</label>
     </div>
@@ -1491,6 +1659,10 @@ function renderReport(session) {
       ${paramTable(current, suggestions, LIMIT_KEYS, blocked, notReady)}
       ${finite(suggestions.steering_stick_scale) ? `<p>Suggested full stick: ${deg(suggestions.steering_stick_scale)}°, inside what both sides reach.</p>` : ""}
       ${applyButton(report, LIMIT_KEYS, "Write servo limits and full-stick angle")}
+      ${applyAllowed() ? `<details class="details"><summary>Edit before writing</summary>
+        <p>The boxes start at the suggestions. Tick what to write and change any number, including one marked not ready.</p>
+        ${renderValueEditor("report-steering", STEERING_EDITABLE, suggestions,
+          STEERING_EDITABLE.filter(name => finite(suggestions[name]) && !(name in notReady)))}</details>` : ""}
       <p class="small muted">servo_min / servo_max go into vesc.yaml (restart bringup); the full-stick angle into joy_teleop.yaml (restart teleop). Change autonomy's max_steering_angle by hand, below what both sides reach.</p>
     </section>
     <section><h2>Servo clamp, from the current settings</h2>${sectorRule()}
@@ -1505,7 +1677,7 @@ function renderReport(session) {
       <a class="button button-ghost" href="/api/report/json">Download JSON</a>
       <button class="button button-ghost" type="button" onclick="generateReport()" ${remainingSteps(session).length ? "disabled" : ""}>Recalculate</button>
       ${wheel}${steer}
-    </div></section>`;
+    </div></section>${manualPanel("report")}`;
   return html;
 }
 
@@ -1663,6 +1835,9 @@ window.acceptPending = async function acceptPending() {
     confirmed,
     notes: document.getElementById("trial-notes")?.value || "",
   };
+  if (pending.summary?.warnings?.length) {
+    extra.use_despite_warnings = document.getElementById("trial-override")?.checked === true;
+  }
   try {
     if (pending.kind === "movement") {
       extra.direction = document.getElementById("trial-direction").value;
@@ -1766,6 +1941,80 @@ window.restoreBackup = async function restoreBackup() {
   try {
     await api("restore_backup", {confirmed: true});
     toast("Restored from the backup. Restart bringup (and teleop if needed).");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+};
+
+window.setLimitStep = function setLimitStep(value) {
+  const step = Number(value);
+  if (!Number.isFinite(step) || step < 0.005 || step > 0.1) {
+    toast("The step must be between 0.005 and 0.1.", "error");
+    renderWizardView();
+    return;
+  }
+  app.limitStep = step;
+  renderWizardView();
+};
+
+window.stepLimit = function stepLimit(side) {
+  const limitName = sideLimitName(side);
+  const raise = document.getElementById("limit-raise-stick")?.checked === true;
+  return applyParameters({source: "limit_step", side, step: app.limitStep, raise_stick: raise},
+    `Write the next ${limitName} step for the ${side} side${raise ? ", and raise full stick to reach it" : ""}? A backup is saved first. ` +
+    `Then restart bringup${raise ? " and teleop" : ""}, and check with the wheels off the ground before driving: hold LB and full ${side} for 3 seconds. Stop at any buzzing, heat or contact, and press Undo.`);
+};
+
+window.writeValueEditor = function writeValueEditor(formId, names) {
+  const values = {};
+  const lines = [];
+  for (const name of String(names).split(",").filter(Boolean)) {
+    if (document.getElementById(`${formId}-use-${name}`)?.checked !== true) continue;
+    const raw = String(document.getElementById(`${formId}-val-${name}`)?.value ?? "").trim();
+    const typed = Number(raw);
+    if (raw === "" || !Number.isFinite(typed)) {
+      toast(`Type a number for ${EDITABLE[name].label}, or untick it.`, "error");
+      return undefined;
+    }
+    values[name] = EDITABLE[name].degrees ? typed * Math.PI / 180 : typed;
+    lines.push(`${EDITABLE[name].label}: ${shownValue(name, currentValues()[name]) || "?"} → ${raw}`);
+  }
+  if (!lines.length) {
+    toast("Tick at least one value to write.", "error");
+    return undefined;
+  }
+  return applyParameters({source: "manual", values},
+    `Write these values? A backup is saved first, and Undo puts it back.\n\n${lines.join("\n")}\n\nRestart bringup (and teleop, for full stick) for the car to use them.`);
+};
+
+window.saveRearTrack = async function saveRearTrack() {
+  const value = Number(document.getElementById("rear-track")?.value);
+  if (!Number.isFinite(value)) {
+    toast("Type the rear track in metres.", "error");
+    return;
+  }
+  try {
+    await api("update_vehicle", {rear_track_m: value});
+    toast("Rear track saved for this session.");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+};
+
+window.setTrialOverride = async function setTrialOverride(trialId, value) {
+  try {
+    await api("set_trial_override", {trial_id: trialId, value: value === true});
+    toast(value ? "This run is now used despite its warnings." : "This run's warnings apply again.");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+};
+
+window.restoreEverything = async function restoreEverything() {
+  if (!confirm("Put every file back the way it was before this session's first change? Restart bringup and teleop afterwards.")) return;
+  try {
+    await api("restore_backup", {confirmed: true, everything: true});
+    toast("Everything from this session undone. Restart bringup and teleop.");
   } catch (error) {
     toast(error.message, "error");
   }
