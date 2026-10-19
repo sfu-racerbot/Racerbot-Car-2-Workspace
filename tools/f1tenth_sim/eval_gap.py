@@ -97,6 +97,9 @@ DEFAULTS = dict(
     forward_stop_clearance=0.20,
     forward_stop_fov_deg=60.0,
     escape_creep_speed=0.40,
+    # aim_mode: 'midpoint' (aim_within_gap, the node's current law) or
+    # 'physical_center' (aim_physical_center, clearance-maximising).
+    aim_mode='midpoint',
     enable_adaptive_width=True,
     adaptive_width_narrow=1.4,
     adaptive_width_reference=2.6,
@@ -169,6 +172,10 @@ class GapController:
         self.last_command_time = None  # in sim steps
         self.stopped = False
         self.stop_reason = None
+        # Which speed ceiling won this tick, for the harness's binding-cap
+        # histogram: 'curve', 'clearance', 'corner', 'creep', 'accel', 'stop'.
+        self.binding_cap = None
+        self.cap_counts = None
 
     def command(self, scan, current_speed, step):
         p = self.p
@@ -262,8 +269,13 @@ class GapController:
         if emergency_tripped or ttc_tripped:
             creeping = True
 
-        target_in_window = gap_logic.aim_within_gap(
-            processed, gap_start, gap_end, beam_angles)
+        if p["aim_mode"] == "physical_center":
+            target_in_window = gap_logic.aim_physical_center(
+                processed, gap_start, gap_end, self.lidar.angle_increment,
+                free_depths=window)
+        else:
+            target_in_window = gap_logic.aim_within_gap(
+                processed, gap_start, gap_end, beam_angles)
         self.previous_target_idx = target_in_window
         target_angle = float(beam_angles[target_in_window])
         target_distance = float(processed[target_in_window])
@@ -313,13 +325,22 @@ class GapController:
                     p["max_braking_decel"], p["max_speed"]))
 
         desired_speed = min(normal_speed, clearance_speed)
-        if used_fallback:
+        binding = 'curve' if normal_speed <= clearance_speed else 'clearance'
+        if creeping:
+            binding = 'creep'
+        if used_fallback and effective_corner < desired_speed:
             desired_speed = min(desired_speed, effective_corner)
+            binding = 'corner'
+        else:
+            desired_speed = min(desired_speed, effective_corner) if used_fallback else desired_speed
 
         ramp_basis = max(self.last_commanded_speed,
                          min(abs(float(current_speed)), p["max_speed"]))
         accel_ceiling = ramp_basis + p["max_acceleration"] * dt
         speed = min(desired_speed, accel_ceiling)
+        if accel_ceiling < desired_speed:
+            binding = 'accel'
+        self.binding_cap = binding
 
         self.last_commanded_speed = speed
         self.last_command_time = step
@@ -339,10 +360,11 @@ class GapController:
         return width_factor, margin, corner
 
     def _stop(self, step, reason):
-        self.stopped = True
-        self.stop_reason = reason
         self.last_commanded_speed = 0.0
         self.last_command_time = step
+        self.stopped = True
+        self.stop_reason = reason
+        self.binding_cap = 'stop'
         return self.steering_basis, 0.0
 
 
@@ -373,6 +395,7 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float) -> dict:
     stuck_steps = 0
     last_pos = None
     stationary_window = 0
+    cap_histogram = {}
 
     for step in range(max_steps):
         ego = obs["agent_0"]
@@ -381,6 +404,8 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float) -> dict:
         steering, cmd_speed = ctrl.command(ego["scan"], speed_meas, step)
         stop_steps += int(ctrl.stopped)
         speeds.append(cmd_speed)
+        if ctrl.binding_cap is not None:
+            cap_histogram[ctrl.binding_cap] = cap_histogram.get(ctrl.binding_cap, 0) + 1
 
         # stuck detection: commanded to move but not moving
         pos = plant.truth(0)[:2]
@@ -431,6 +456,7 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float) -> dict:
             round(float(np.mean(np.abs(corridor_offsets))), 4)
             if corridor_offsets else None),
         "max_stuck_steps": stuck_steps,
+        "cap_histogram": cap_histogram,
     }
     result.update(plant_report)
     return result
@@ -514,6 +540,8 @@ def parse_set(values):
         default = DEFAULTS[name]
         if isinstance(default, bool):
             params[name] = raw.strip().lower() in ("1", "true", "yes", "on")
+        elif isinstance(default, str):
+            params[name] = raw.strip()
         else:
             params[name] = type(default)(float(raw))
     return params
@@ -551,7 +579,7 @@ def main(argv=None) -> int:
               f"time={res['sim_time_s']:7.1f}s vmean={res['mean_speed']:.2f} "
               f"stops={res['stop_steps']} stuck={res['max_stuck_steps']} "
               f"contact={res.get('contact_steps', 0)} "
-              f"minfwd={res['min_forward_scan_m']}", flush=True)
+              f"minfwd={res['min_forward_scan_m']} caps={res['cap_histogram']}", flush=True)
 
     passed = sum(1 for r in results if r["passed"])
     print(json.dumps({"passed": passed, "total": len(results),
