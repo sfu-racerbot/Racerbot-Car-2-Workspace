@@ -359,6 +359,80 @@ Each scenario is judged on every phase being reached, no node crashing, no wall 
 
 Useful flags: `--scenario solo` for one scenario, `--keep-logs` to keep the launch log for a passing run, `--output <file>` for the JSON report.
 
+### Comparing steering laws head-to-head
+
+`tools/f1tenth_sim/run_validation.py` also answers a harder question: **does
+steering law X beat our pure pursuit, in this simulator, at 40 Hz, without
+hitting anything?** This is the harness every new steering law (Stanley, LQR,
+MPC) must win in before it is selected on the car — see the "Choosing a
+steering law" section of [racing-autonomy.md](racing-autonomy.md).
+
+The first thing to run is the sanity check: pure pursuit against itself must
+**REJECT** (the promotion rule is strict — equal metrics are not "better"),
+with identical numbers on both sides (the harness is deterministic).
+
+```bash
+python3 tools/f1tenth_sim/run_validation.py --compare pure_pursuit \
+    --fidelity car --raceline shipped --tracks Spielberg --repeat-seeds 1
+```
+
+To compare a candidate law:
+
+```bash
+python3 tools/f1tenth_sim/run_validation.py --compare stanley lqr \
+    --fidelity car --raceline shipped \
+    --tracks Spielberg Silverstone BrandsHatch \
+    --seed 12345 --repeat-seeds 5 --output docs/tracking-law-comparison.json
+```
+
+`--compare` runs `pure_pursuit` plus each named law over the same tracks and
+seeds, prints a law × track table (mean/p95/max cross-track, lap time, law
+failures, and host compute p99 — **host wall time, not the Jetson**), and a
+PROMOTE / REJECT verdict per candidate. It refuses `--fidelity legacy` (gym's
+collision flag is untrustworthy there; the `car` profile checks contact
+independently). The exit code is non-zero unless every candidate promotes, so
+it can gate a change. The verdict logic is pure Python in
+`tools/f1tenth_sim/law_compare.py`, tested by
+`python3 -m pytest tools/f1tenth_sim/tests/ -v`.
+
+**Tuning and judging are different seeds.** Tune a law's parameters with
+`--seed 1000 --repeat-seeds 5`; judge with `--seed 12345 --repeat-seeds 5`. A
+law tuned and judged on the same seeds has been fitted to them. Tune with
+`--law-param stanley.gain=1.2` (repeatable), then write the tuned values into
+both the law's params dataclass in `pure_pursuit/tracking_laws.py` and
+`config/pure_pursuit.yaml` together — a test (`test_yaml_mirrors_the_param_dataclasses`)
+fails if they drift apart, which is what stops the harness and the car running
+different gains. Pure pursuit itself is always judged at its shipped parameters.
+
+### Judging results
+
+Recorded 2026-10-19 on the Jetson Orin Nano (host), at commit `superpowers/tracking-laws`,
+with the judging command:
+
+```bash
+python3 tools/f1tenth_sim/run_validation.py --compare stanley lqr \
+    --fidelity car --raceline shipped \
+    --tracks Spielberg Silverstone BrandsHatch \
+    --seed 12345 --repeat-seeds 5 \
+    --output docs/tracking-law-comparison.json
+```
+
+Full rows are in [docs/tracking-law-comparison.json](tracking-law-comparison.json).
+
+| Law | Verdict | Why |
+|---|---|---|
+| `stanley` | **REJECT** | Fails safety on every Silverstone run (laps < 1, and collisions at these seeds): it runs wide into corners the reactive safety net then stops for. On the laps it completes its cross-track is *better* than pure pursuit (Silverstone mean 0.022–0.057 m vs pure pursuit's 0.082 m on the tuning seeds), so the geometry is sound — the failure is arriving at corners too fast to stay within the safety margin. |
+| `lqr` | **REJECT** | Fails safety (laps < 1) on most Silverstone runs and one Spielberg run at the shipped `q_lateral=q_heading=r_steer=1.0`, the same run-wide-then-stopped pattern. Mean cross-track on completed laps was comparable to pure pursuit but never strictly better by enough to matter. |
+
+Neither law ships. Per the promotion rule the answer to a REJECT is "it does not
+ship", not "relax the rule" — the laws remain selectable for development via
+`steering_law:=...`, and the harness is the place to iterate on their tuning and
+speed interaction. Pure pursuit remains the default and the baseline. MPC is
+gated separately on spec 04 G0 (osqp install + Jetson benchmark) before it can
+even be judged.
+
+---
+
 A passing `solo` run on this Jetson, for calibration:
 
 | Phase | Reached at |

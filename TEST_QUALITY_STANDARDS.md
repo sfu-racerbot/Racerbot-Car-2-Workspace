@@ -321,6 +321,16 @@ Compare the collected count against `grep -c '^def test' src/<pkg>/test/*.py`. A
 which runner executes it. Never paper over a collection error with
 `--continue-on-collection-errors`.
 
+A test suite outside any `src/<pkg>/test/` directory is collected by **no** existing command. As of
+2026-10-18 the steering-law comparison harness has one: `tools/f1tenth_sim/tests/` (the promotion
+rule in `law_compare.py` and the harness's law routing). It is pure Python and runs unsourced:
+
+```bash
+python3 -m pytest tools/f1tenth_sim/tests/ -v
+```
+
+Add new harness-side tests there and keep that command in [docs/sim-validation.md](docs/sim-validation.md).
+
 ---
 
 ## 2. Positive criteria — what a real test verifies

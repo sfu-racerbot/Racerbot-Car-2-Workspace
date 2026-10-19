@@ -50,6 +50,7 @@ every autonomy node in this repo follows):
 import json
 import math
 import sys
+import time
 
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import PoseStamped
@@ -66,7 +67,13 @@ from std_msgs.msg import String
 
 from drive_intent import predict, schema
 from drive_intent.throttle import FailureLatch, IntentThrottle
-from pure_pursuit import live_tuning, racing_math
+from pure_pursuit import live_tuning, racing_math, tracking_laws
+
+
+class _MpcStopped(Exception):
+    """Internal control-flow: _steer_with_miss_policy already called _stop for
+    a latched MPC miss; the caller's generic handler must not re-stop as
+    steering_law_failed."""
 
 
 class OpponentTracker:
@@ -301,6 +308,33 @@ class PurePursuitNode(Node):
         # 'base_link' for /slam_pose. Converted to base_link on arrival.
         self.declare_parameter('pose_frame', 'laser')
 
+        # --- Tracking law (steering) selection ---
+        # Which steering law drives. 'pure_pursuit' (the default) is today's
+        # behavior, moved unchanged into tracking_laws.PurePursuitLaw. The
+        # alternatives must beat it in the comparison harness before being
+        # selected on the car. Launch-time only: built once here, never
+        # changed at runtime (see _parameter_callback). Laws steer; speed
+        # stays with the profile and the node's own caps.
+        self.declare_parameter('steering_law', 'pure_pursuit')
+        # Half-window for smoothing applied to the path ONLY for the signed
+        # curvature the laws read; the line being tracked stays unsmoothed.
+        self.declare_parameter('tracking_curvature_smoothing', 2)
+        self.declare_parameter('stanley.gain', 1.6)
+        self.declare_parameter('stanley.softening', 0.4)
+        self.declare_parameter('lqr.q_lateral', 1.0)
+        self.declare_parameter('lqr.q_heading', 1.0)
+        self.declare_parameter('lqr.r_steer', 1.0)
+        self.declare_parameter('lqr.v_grid_max', 6.0)
+        self.declare_parameter('mpc.dt', 0.05)
+        self.declare_parameter('mpc.horizon_steps', 20)
+        self.declare_parameter('mpc.q_lateral', 1.0)
+        self.declare_parameter('mpc.q_heading', 1.0)
+        self.declare_parameter('mpc.r_steer', 1.0)
+        self.declare_parameter('mpc.r_rate', 0.01)
+        self.declare_parameter('mpc.deadline_sec', 0.008)
+        self.declare_parameter('mpc.max_iter', 4000)
+        self.declare_parameter('mpc.max_consecutive_misses', 3)
+
         # --- Opponent detection mode: 'heuristic' (shape-based, no map
         # needed) or 'map' (ray-cast map subtraction via range_libc --
         # see map_subtraction.py). ---
@@ -521,6 +555,48 @@ class PurePursuitNode(Node):
                 'at least max_lookahead.')
 
         # ------------------------------------------------------------------
+        # Tracking law. Built once here, at launch; an unknown name or an
+        # invalid parameter refuses to start the node rather than driving on a
+        # half-configured law. For 'mpc' the node also keeps a pure-pursuit law
+        # as the single-tick miss fallback (spec 04); every other law uses the
+        # generic steering_law_failed stop on any exception.
+        # ------------------------------------------------------------------
+        self.steering_law_name = str(self.get_parameter('steering_law').value)
+        self.tracking_curvature_smoothing = int(
+            self.get_parameter('tracking_curvature_smoothing').value)
+        self._vehicle_limits = tracking_laws.VehicleLimits(
+            wheelbase=self.wheelbase,
+            max_steering_angle=self.max_steering_angle,
+            max_steering_rate=self.max_steering_rate,
+            control_dt=1.0 / self.control_rate_hz,
+        )
+        self._law_params = {
+            'min_lookahead': self.min_lookahead,
+            'max_lookahead': self.max_lookahead,
+            'lookahead_speed_gain': self.lookahead_speed_gain,
+        }
+        for prefix in ('stanley', 'lqr', 'mpc'):
+            for full_name in self._declared_law_param_names(prefix):
+                self._law_params[full_name] = self.get_parameter(full_name).value
+        try:
+            self.tracking_law = tracking_laws.make_law(
+                self.steering_law_name, self._vehicle_limits, self._law_params)
+        except (ValueError, RuntimeError) as exc:
+            raise RuntimeError(
+                f'pure_pursuit_node: could not build steering_law '
+                f"'{self.steering_law_name}': {exc}") from exc
+        # MPC's single-tick fallback (only built when MPC is the active law).
+        self._mpc_fallback_law = None
+        if self.steering_law_name == 'mpc':
+            self._mpc_fallback_law = tracking_laws.make_law(
+                'pure_pursuit', self._vehicle_limits, self._law_params)
+            self._mpc_timing = []  # rolling window of per-solve ms
+        self._mpc_fallback_active = False
+        self._last_law_predicted = ()
+        self._mpc_last_timing_log = None
+        self.path_context = None
+
+        # ------------------------------------------------------------------
         # Racing-line state. Normal launches still fail loudly if no file is
         # configured. The auto-map launch opts into wait_for_waypoints so it
         # can start this node stopped, generate a profile, and load it through
@@ -709,6 +785,18 @@ class PurePursuitNode(Node):
                 "pure_pursuit_node ready and stopped: waiting for an auto-generated "
                 "waypoints_file profile.")
 
+    def _declared_law_param_names(self, prefix: str):
+        """The dotted parameters belonging to one law ('stanley' -> ...)."""
+        return [
+            'stanley.gain', 'stanley.softening',
+        ] if prefix == 'stanley' else [
+            'lqr.q_lateral', 'lqr.q_heading', 'lqr.r_steer', 'lqr.v_grid_max',
+        ] if prefix == 'lqr' else [
+            'mpc.dt', 'mpc.horizon_steps', 'mpc.q_lateral', 'mpc.q_heading',
+            'mpc.r_steer', 'mpc.r_rate', 'mpc.deadline_sec', 'mpc.max_iter',
+            'mpc.max_consecutive_misses',
+        ]
+
     def _activate_profile(self, path: str):
         """Load and atomically activate a profiled racing-line CSV."""
         try:
@@ -727,6 +815,18 @@ class PurePursuitNode(Node):
             raise RuntimeError(
                 f"pure_pursuit_node: '{path}' has zero or invalid total path length.")
 
+        # Signed curvature for the tracking laws' feedforward/linearisation,
+        # from the smoothed path (raw recorded lines carry localization-jitter
+        # curvature noise). The line being *tracked* stays the unsmoothed xy.
+        smoothed = racing_math.smooth_path(
+            xy, self.tracking_curvature_smoothing, self.closed_loop)
+        signed_curvature = racing_math.estimate_signed_path_curvature(
+            smoothed, self.closed_loop)
+        path_context = tracking_laws.PathContext(
+            xy=xy, seg_len=seg_len, cumulative=cumulative,
+            speed_profile=speed_profile, curvature=signed_curvature,
+            closed=self.closed_loop)
+
         # Assign only after all validation and derived values succeed, so a
         # bad runtime update cannot damage a previously active profile.
         self.xy = xy
@@ -735,6 +835,8 @@ class PurePursuitNode(Node):
         self.seg_len = seg_len
         self.cumulative_arc_length = cumulative
         self.total_track_length = total_length
+        self.path_context = path_context
+        self.tracking_law.reset()
         self.prev_nearest_index = None
         if hasattr(self, 'opponent'):
             self.opponent = OpponentTracker(
@@ -833,6 +935,17 @@ class PurePursuitNode(Node):
                 self._log_profile_ready(str(parameter.value))
                 self._publish_racing_line(str(parameter.value))
                 continue
+            # The steering law and its gains are launch-time only: the law is
+            # built once in __init__ and cached, so accepting a runtime change
+            # would report a value the control loop never uses. Refuse loudly.
+            if (parameter.name == 'steering_law'
+                    or parameter.name.startswith(('stanley.', 'lqr.', 'mpc.'))
+                    or parameter.name == 'tracking_curvature_smoothing'):
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"'{parameter.name}' is launch-time only; the steering "
+                           "law is built once at startup and cannot be changed "
+                           "while the node is running")
             requested[parameter.name] = parameter.value
 
         accepted, reason = live_tuning.review(
@@ -1052,6 +1165,9 @@ class PurePursuitNode(Node):
             # Releasing LB is the operator acknowledging an exhausted
             # off-line recovery; the next hold may try once more.
             self._off_line_recovery_exhausted = False
+            # Same for MPC's miss latch: the operator re-arms the controller.
+            if self.steering_law_name == 'mpc':
+                self.tracking_law.miss_policy.clear()
             self._stop(stop_state, stop_detail)
             return
 
@@ -1236,9 +1352,36 @@ class PurePursuitNode(Node):
         dy = target_y - self.car_y
         x_body, y_body = racing_math.world_to_body(dx, dy, self.car_yaw)
         kappa = racing_math.steering_arc_curvature(x_body, y_body)
-        steering_unclipped = racing_math.steering_from_curvature(kappa, self.wheelbase)
-        steering_angle = steering_unclipped
-        steering_angle = float(np.clip(steering_angle, -self.max_steering_angle, self.max_steering_angle))
+
+        # --- Steering law. The seam (spec 00 Unit 3): while following the
+        # line, steering comes from the selected law, swapped in *between* the
+        # watchdogs above and the reactive net + shaping below, so every safety
+        # mechanism applies unchanged to every law. While *recovering* the law
+        # is bypassed and steering aims straight at the nearest point, exactly
+        # as before -- recovery and overtaking keep pure-pursuit geometry
+        # whatever law is selected. ---
+        law_detail = ''
+        if recovering:
+            steering_unclipped = racing_math.steering_from_curvature(kappa, self.wheelbase)
+            steering_angle = float(np.clip(
+                steering_unclipped, -self.max_steering_angle, self.max_steering_angle))
+        else:
+            tracking_input = tracking_laws.TrackingInput(
+                x=self.car_x, y=self.car_y, yaw=self.car_yaw,
+                speed=lookahead_speed, nearest_idx=nearest_idx,
+                previous_steering=self.steering_basis)
+            try:
+                result = self._steer_with_miss_policy(tracking_input)
+            except _MpcStopped:
+                return  # the latch already stopped the car this tick
+            except Exception as exc:  # noqa: BLE001 -- a crashing law must stop, not hang
+                self._stop('steering_law_failed',
+                           f"{self.steering_law_name}: {type(exc).__name__}: {exc}")
+                return
+            steering_angle = result.steering
+            steering_unclipped = result.unclipped
+            law_detail = result.detail
+            self._last_law_predicted = result.predicted
 
         # --- Speed: the profiled speed for where the car is right now --
         # or, while recovering, a fixed cautious crawl. The profile speed
@@ -1249,7 +1392,14 @@ class PurePursuitNode(Node):
         else:
             speed_cmd = float(np.clip(speed_here, self.min_speed, self.max_speed))
         hard_speed_cap = self.max_speed
-        decision_state = 'off_racing_line_recovery' if recovering else 'pure_pursuit'
+        decision_state = (
+            'off_racing_line_recovery' if recovering else self.steering_law_name)
+        # An MPC miss that fell back this tick is 'mpc_fallback', not 'mpc' --
+        # the distinction is exactly what race_diagnostics needs to count how
+        # often the fallback fires. (Flag set by _steer_with_miss_policy.)
+        if not recovering and self._mpc_fallback_active:
+            decision_state = 'mpc_fallback'
+            self._mpc_fallback_active = False
         # Named ceilings for the dashboard's decision panel. Kept as
         # separate locals rather than recovered afterwards from the final
         # number, because "which limit won" is exactly the thing a single
@@ -1291,6 +1441,8 @@ class PurePursuitNode(Node):
             f"from {lookahead_speed_source}={lookahead_speed:.2f}m/s, "
             f"profile speed={speed_here:.2f}m/s, path curvature={kappa:+.3f}/m"
             f"{clipped_text}")
+        if law_detail:
+            decision_detail += f"; {law_detail}"
         if not recovering and self.enable_lidar_safety and self.enable_opponent_overtake:
             # Skipped while recovering, same as the overtake reconsideration
             # above: last_opponent_status is stale from whichever tick last
@@ -1347,6 +1499,23 @@ class PurePursuitNode(Node):
         self._log_decision(
             decision_state, decision_detail, steering_angle, speed_cmd)
 
+        # MPC: one rolling timing line every 5 s while running, so G2 reads the
+        # solve-time distribution from the log without a separate profiler.
+        if self.steering_law_name == 'mpc' and self._mpc_timing:
+            now_mono = time.monotonic()
+            if (self._mpc_last_timing_log is None
+                    or now_mono - self._mpc_last_timing_log >= 5.0):
+                self._mpc_last_timing_log = now_mono
+                window = sorted(self._mpc_timing)
+                n = len(window)
+                p50 = window[n // 2]
+                p99 = window[min(n - 1, int(0.99 * n))]
+                policy = self.tracking_law.miss_policy
+                self.get_logger().info(
+                    f"mpc timing: n={n}, p50={p50:.2f}ms, p99={p99:.2f}ms, "
+                    f"max={window[-1]:.2f}ms, misses={policy._consecutive}, "
+                    f"latched={policy.latched()}")
+
         # Intent goes out last: the drive command for this tick is already
         # published above, whichever branch produced it.
         intent_factors = [schema.factor('profile speed', intent_profile_speed)]
@@ -1373,14 +1542,14 @@ class PurePursuitNode(Node):
             # plan. Under an overtake or a reactive override the controller
             # has chosen a heading, and drawing the line it is currently
             # ignoring would show intent it does not have.
-            nearest_idx=(nearest_idx if decision_state == 'pure_pursuit'
+            nearest_idx=(nearest_idx if decision_state == self.steering_law_name
                          else None),
         )
 
     def _intent_path(self, steering: float, speed: float, nearest_idx=None):
         """The trajectory this controller intends to follow, in base_link.
 
-        When the plan is "track the racing line", the pure pursuit law is
+        When the plan is "track the racing line", the active steering law is
         re-asked at every integration step rather than freezing the current
         steering angle. That is the whole diagnostic value of the arrow
         through a corner: a frozen arc leaves the line on a tangent and
@@ -1401,20 +1570,32 @@ class PurePursuitNode(Node):
 
         cursor = {'idx': int(nearest_idx)}
         step_dt = self.intent_horizon_sec / (self.intent_samples - 1)
+        # The intent arrow re-runs the ACTIVE law (spec 00 Unit 3 step 6) so
+        # the dashboard draws what the selected controller would actually do.
+        # For MPC it replays the solver's predicted sequence rather than
+        # re-solving (intent must not add solver load): at integration time t
+        # the plan value index floor(t / mpc.dt), held past the horizon.
+        mpc = (self.tracking_law if self.steering_law_name == 'mpc' else None)
+        mpc_plan = self._last_law_predicted
+        mpc_dt = mpc.params.dt if mpc is not None and mpc_plan else None
 
         def speed_of(i, x, y, yaw):
             return float(self.speed_profile[cursor['idx']])
 
         def steering_of(i, x, y, yaw):
             v = float(self.speed_profile[cursor['idx']])
-            lookahead = racing_math.adaptive_lookahead(
-                v, self.lookahead_speed_gain,
-                self.min_lookahead, self.max_lookahead)
-            target_idx = racing_math.find_lookahead_index(
-                self.seg_len, cursor['idx'], lookahead, closed=self.closed_loop)
-            tx, ty = self.xy[target_idx]
-            x_body, y_body = racing_math.world_to_body(tx - x, ty - y, yaw)
-            kappa = racing_math.steering_arc_curvature(x_body, y_body)
+            if mpc is not None and mpc_plan:
+                t = i * step_dt
+                k = min(int(math.floor(t / mpc_dt)), len(mpc_plan) - 1)
+                return float(np.clip(mpc_plan[k], -self.max_steering_angle,
+                                     self.max_steering_angle))
+            inp = tracking_laws.TrackingInput(
+                x=x, y=y, yaw=yaw, speed=v, nearest_idx=cursor['idx'],
+                previous_steering=0.0)
+            try:
+                steering = self.tracking_law.steer(inp, self.path_context).steering
+            except Exception:  # noqa: BLE001 -- intent failure disables intent, not the node
+                steering = 0.0
             # Advance along the line by the arc length this step covers,
             # rather than re-running a nearest-waypoint search: walking
             # forward is cheaper and monotonic, and a nearest-point search
@@ -1424,9 +1605,7 @@ class PurePursuitNode(Node):
             cursor['idx'] = racing_math.find_lookahead_index(
                 self.seg_len, cursor['idx'], max(1e-6, v * step_dt),
                 closed=self.closed_loop)
-            return float(np.clip(
-                racing_math.steering_from_curvature(kappa, self.wheelbase),
-                -self.max_steering_angle, self.max_steering_angle))
+            return steering
 
         world = predict.integrate(
             steering_of, speed_of, self.wheelbase, self.intent_horizon_sec,
@@ -2193,6 +2372,46 @@ class PurePursuitNode(Node):
             return now, self.command_slew_max_dt
         elapsed = (now - self.last_command_time).nanoseconds / 1e9
         return now, min(self.command_slew_max_dt, max(0.0, elapsed))
+
+    def _steer_with_miss_policy(self, tracking_input):
+        """Run the active law, applying spec 04's MPC miss policy on top.
+
+        Non-MPC laws, and any non-miss exception, propagate unchanged (the
+        caller turns them into a steering_law_failed stop). An MpcMiss that is
+        not yet latched falls back to pure pursuit for this tick only and sets
+        decision state 'mpc_fallback'; one that latches raises _stop directly.
+        """
+        if self.steering_law_name != 'mpc':
+            return self.tracking_law.steer(tracking_input, self.path_context)
+        policy = self.tracking_law.miss_policy
+        if policy.latched():
+            self._stop('mpc_miss_latched',
+                       'mpc miss latch is set; holding the stop until LB is released')
+            raise _MpcStopped()
+        started = time.perf_counter()
+        try:
+            result = self.tracking_law.steer(tracking_input, self.path_context)
+        except tracking_laws.MpcMiss as exc:
+            outcome = policy.on_miss()
+            if outcome == 'latched':
+                self._stop('mpc_miss_latched',
+                           f'mpc missed {policy.max_consecutive_misses} ticks in a '
+                           f'row (last: {exc}); holding until LB is released')
+                raise _MpcStopped()
+            # 'fallback': pure pursuit for this tick only, then resume.
+            result = self._mpc_fallback_law.steer(tracking_input, self.path_context)
+            result = tracking_laws.SteeringResult(
+                steering=result.steering, unclipped=result.unclipped,
+                detail=f'mpc_fallback ({exc}); {result.detail}',
+                predicted=result.predicted)
+            self._mpc_fallback_active = True
+            return result
+        policy.on_success()
+        elapsed_ms = (time.perf_counter() - started) * 1e3
+        self._mpc_timing.append(elapsed_ms)
+        if len(self._mpc_timing) > 400:
+            self._mpc_timing = self._mpc_timing[-400:]
+        return result
 
     def _shape_normal_command(self, desired_steering: float,
                               desired_speed: float, hard_speed_cap: float):

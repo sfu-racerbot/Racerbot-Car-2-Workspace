@@ -59,6 +59,45 @@ pure_pursuit_node:
     # Never draw an arrow longer than this, however fast the plan is.
     intent_max_length: 8.0
 
+    # --- Tracking law (steering) selection ---
+    # Which steering law pure_pursuit_node uses. 'pure_pursuit' (today's, the
+    # default) is the baseline; 'stanley', 'lqr' and 'mpc' are alternatives that
+    # must beat it in the comparison harness (docs/sim-validation.md) before
+    # they are selected on the car. Launch-time only -- not live-tunable, and
+    # never change it at runtime. Speed stays with the profile and the node's
+    # caps whatever is selected; laws output steering only. See
+    # docs/superpowers/specs/2026-09-27-tracking-00-overview.md.
+    steering_law: pure_pursuit
+    # Half-window for the moving average applied to the path *only* for the
+    # signed-curvature feedforward/linearisation the tracking laws read. Raw
+    # recorded lines have localization-jitter curvature noise; smoothing it
+    # stops the feedforward chattering. The laws still track the unsmoothed
+    # line, as pure pursuit does.
+    tracking_curvature_smoothing: 2
+
+    # --- Stanley (spec 02) ---
+    stanley.gain: 1.6        # 1/s -- lateral-error correction strength
+    stanley.softening: 0.4   # m/s -- keeps the correction bounded at low speed
+
+    # --- LQR (spec 03) ---
+    lqr.q_lateral: 1.0       # weight on cross-track error e
+    lqr.q_heading: 1.0       # weight on heading error theta
+    lqr.r_steer: 1.0         # weight on steering effort
+    lqr.v_grid_max: 6.0      # m/s -- top of the speed grid the gain is scheduled on
+
+    # --- MPC (spec 04). Requires osqp (see spec 04 G0 before enabling). ---
+    mpc.dt: 0.05             # s -- prediction step
+    mpc.horizon_steps: 20    # N -- 20 * 0.05 = 1.0 s of preview
+    mpc.q_lateral: 1.0
+    mpc.q_heading: 1.0
+    mpc.r_steer: 1.0
+    mpc.r_rate: 0.01         # weight on steering rate (smoothness)
+    mpc.deadline_sec: 0.008  # s -- a solve slower than this is a miss
+    mpc.max_iter: 4000
+    # Consecutive misses before the controller latches a stop (falls back to
+    # pure pursuit for a single tick below this).
+    mpc.max_consecutive_misses: 3
+
     # --- Pure pursuit geometry ---
     # Validated headlessly on Spielberg, Silverstone, and Brands Hatch in
     # F1TENTH Gym; see docs/simulator.md for scenarios and limitations.

@@ -872,3 +872,166 @@ def test_base_link_pose_to_laser_heading_north_moves_forward_along_y():
 
 def test_zero_offset_is_the_identity():
     assert racing_math.laser_pose_to_base_link(3.0, 4.0, 1.0, 0.0, 0.0) == (3.0, 4.0, 1.0)
+
+
+# ============================================================================
+# Signed path curvature (tracking laws read this; the velocity profile keeps
+# the unsigned original -- docs/superpowers/specs/2026-09-27-tracking-00-overview.md)
+# ============================================================================
+
+def _ccw_circle(radius, n=200):
+    angles = np.linspace(0.0, 2.0 * math.pi, n, endpoint=False)
+    return np.column_stack([radius * np.cos(angles), radius * np.sin(angles)])
+
+
+def test_signed_curvature_ccw_circle_is_positive_inverse_radius():
+    # Oracle: a circle of radius R traversed CCW has curvature +1/R at every
+    # point (closed form, uniform circular motion).
+    R = 2.0
+    kappa = racing_math.estimate_signed_path_curvature(_ccw_circle(R), closed=True)
+    np.testing.assert_allclose(kappa, 1.0 / R, atol=1e-3)  # 1/m
+
+
+def test_signed_curvature_cw_circle_is_negative_inverse_radius():
+    # The same points reversed are traversed clockwise -> -1/R.
+    R = 2.0
+    kappa = racing_math.estimate_signed_path_curvature(
+        _ccw_circle(R)[::-1], closed=True)
+    np.testing.assert_allclose(kappa, -1.0 / R, atol=1e-3)  # 1/m
+
+
+def test_signed_curvature_straight_line_is_zero():
+    xy = np.column_stack([np.linspace(0.0, 10.0, 50), np.zeros(50)])
+    kappa = racing_math.estimate_signed_path_curvature(xy, closed=False)
+    np.testing.assert_allclose(kappa, 0.0, atol=1e-12)
+
+
+def test_signed_curvature_magnitude_matches_unsigned_everywhere():
+    # Invariant: the signed variant must never change the magnitude the
+    # velocity profile already depends on -- it only adds the turn direction.
+    rng = np.random.default_rng(3)
+    # A random closed polyline that does not self-destruct into zero-length
+    # segments: a perturbed circle.
+    base = _ccw_circle(3.0, n=120)
+    base += rng.uniform(-0.3, 0.3, size=base.shape)
+    signed = racing_math.estimate_signed_path_curvature(base, closed=True)
+    unsigned = racing_math.estimate_path_curvature(base, closed=True)
+    np.testing.assert_allclose(np.abs(signed), unsigned, atol=1e-12)
+
+
+# ============================================================================
+# project_onto_path / interpolate_along
+# ============================================================================
+
+def _x_line(n=50, length=10.0):
+    xy = np.column_stack([np.linspace(0.0, length, n), np.zeros(n)])
+    return xy, racing_math.compute_segment_lengths(xy, closed=False)
+
+
+def test_projection_point_left_of_x_line_has_positive_error():
+    # Point (1.3, 0.2): left of a +x-heading path is +y, so e = +0.2.
+    xy, seg_len = _x_line()
+    nearest, _ = racing_math.find_nearest_index(xy, (1.3, 0.2), closed=False)
+    proj = racing_math.project_onto_path(xy, seg_len, (1.3, 0.2), nearest, closed=False)
+    assert proj.qx == pytest.approx(1.3, abs=1e-9)   # m
+    assert proj.qy == pytest.approx(0.0, abs=1e-9)   # m
+    assert proj.heading == pytest.approx(0.0, abs=1e-9)  # rad
+    assert proj.lateral_error == pytest.approx(0.2, abs=1e-9)   # m
+    assert 0.0 <= proj.t <= 1.0
+
+
+def test_projection_point_right_of_x_line_has_negative_error():
+    xy, seg_len = _x_line()
+    nearest, _ = racing_math.find_nearest_index(xy, (1.3, -0.2), closed=False)
+    proj = racing_math.project_onto_path(xy, seg_len, (1.3, -0.2), nearest, closed=False)
+    assert proj.lateral_error == pytest.approx(-0.2, abs=1e-9)  # m
+
+
+def test_projection_left_of_y_line_is_negative_x():
+    # Path heading +y (psi_p = pi/2): the left-hand side is at -x.
+    xy = np.column_stack([np.zeros(50), np.linspace(0.0, 10.0, 50)])
+    seg_len = racing_math.compute_segment_lengths(xy, closed=False)
+    nearest, _ = racing_math.find_nearest_index(xy, (-0.2, 1.0), closed=False)
+    proj = racing_math.project_onto_path(xy, seg_len, (-0.2, 1.0), nearest, closed=False)
+    assert proj.heading == pytest.approx(math.pi / 2.0, abs=1e-9)  # rad
+    assert proj.lateral_error == pytest.approx(0.2, abs=1e-9)      # m
+
+
+def test_projection_heading_wrap_seam():
+    # A path heading along -x sits on the +/-pi boundary. A point to its
+    # left (which is +y world when heading -x... i.e. rotate (0,1) by pi ->
+    # (0,-1) is right, so left is +y... verify against the formula directly:
+    # e = -sin(pi)*(dx) + cos(pi)*(dy) = -dy; a point at -y gives e = +0.2.
+    xy = np.column_stack([np.linspace(10.0, 0.0, 50), np.zeros(50)])
+    seg_len = racing_math.compute_segment_lengths(xy, closed=False)
+    nearest, _ = racing_math.find_nearest_index(xy, (5.0, -0.2), closed=False)
+    proj = racing_math.project_onto_path(xy, seg_len, (5.0, -0.2), nearest, closed=False)
+    assert abs(abs(proj.heading) - math.pi) == pytest.approx(0.0, abs=1e-9)
+    assert proj.lateral_error == pytest.approx(0.2, abs=1e-9)  # m
+
+
+def test_projection_open_path_beyond_end_clamps_to_last_segment():
+    xy, seg_len = _x_line()
+    n = len(xy)
+    nearest, _ = racing_math.find_nearest_index(xy, (12.0, 0.0), closed=False)
+    proj = racing_math.project_onto_path(xy, seg_len, (12.0, 0.0), nearest, closed=False)
+    assert proj.segment_index == n - 2          # the last real segment
+    assert proj.t == pytest.approx(1.0)
+    assert math.isfinite(proj.lateral_error)
+    # The projection is the last waypoint, so the residual is the overshoot.
+    assert proj.lateral_error == pytest.approx(0.0, abs=1e-9)
+
+
+def test_projection_skips_duplicate_waypoints():
+    xy = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 0.0], [2.0, 0.0]])
+    seg_len = racing_math.compute_segment_lengths(xy, closed=False)
+    proj = racing_math.project_onto_path(xy, seg_len, (1.5, 0.1), 2, closed=False)
+    assert proj.qx == pytest.approx(1.5, abs=1e-9)
+    assert proj.lateral_error == pytest.approx(0.1, abs=1e-9)
+
+
+def test_projection_all_zero_length_segments_raise():
+    xy = np.array([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
+    seg_len = racing_math.compute_segment_lengths(xy, closed=False)
+    with pytest.raises(ValueError, match='zero-length'):
+        racing_math.project_onto_path(xy, seg_len, (1.0, 0.0), 1, closed=False)
+
+
+def test_projection_nan_point_raises():
+    xy, seg_len = _x_line()
+    with pytest.raises(ValueError, match='finite'):
+        racing_math.project_onto_path(xy, seg_len, (math.nan, 0.0), 5, closed=False)
+
+
+def test_projection_arc_length_counts_from_waypoint_zero():
+    xy, seg_len = _x_line(n=50, length=10.0)
+    nearest, _ = racing_math.find_nearest_index(xy, (4.0, 0.1), closed=False)
+    proj = racing_math.project_onto_path(xy, seg_len, (4.0, 0.1), nearest, closed=False)
+    cumulative = racing_math.compute_cumulative_arc_length(seg_len)
+    expected = cumulative[proj.segment_index] + proj.t * seg_len[proj.segment_index]
+    assert proj.arc_length == pytest.approx(expected, abs=1e-9)
+    assert proj.arc_length == pytest.approx(4.0, abs=1e-6)
+
+
+def test_interpolate_along_blends_between_waypoints():
+    values = np.arange(5.0)
+    proj = racing_math.PathProjection(
+        segment_index=1, t=0.5, qx=0.0, qy=0.0, heading=0.0,
+        lateral_error=0.0, arc_length=0.0)
+    assert racing_math.interpolate_along(values, proj, closed=False) == pytest.approx(1.5)
+
+
+def test_interpolate_along_wraps_the_last_segment_when_closed():
+    values = np.arange(5.0)  # [0,1,2,3,4]; segment 4 -> 0 wraps
+    proj = racing_math.PathProjection(
+        segment_index=4, t=0.5, qx=0.0, qy=0.0, heading=0.0,
+        lateral_error=0.0, arc_length=0.0)
+    assert racing_math.interpolate_along(values, proj, closed=True) == pytest.approx(2.0)
+
+
+def test_interpolate_along_clamps_to_last_waypoint_when_open():
+    values = np.arange(5.0)
+    proj = racing_math.PathProjection(
+        segment_index=4, t=0.5, qx=0.0, qy=0.0, heading=0.0,
+        lateral_error=0.0, arc_length=0.0)
+    assert racing_math.interpolate_along(values, proj, closed=False) == pytest.approx(4.0)

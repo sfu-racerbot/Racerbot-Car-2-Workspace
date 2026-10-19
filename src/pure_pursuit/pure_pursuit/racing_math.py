@@ -27,6 +27,7 @@ diagrams. Short version of what lives in each section below:
 
 import csv
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -295,6 +296,139 @@ def find_lookahead_index(seg_len: np.ndarray, nearest_index: int, lookahead_dist
     return idx
 
 
+def _wrap_angle(angle: float) -> float:
+    """Wrap an angle to (-pi, pi]. Used for heading errors so a path just
+    across the +/-pi seam reads as a small turn, not a full revolution."""
+    return float((angle + math.pi) % (2.0 * math.pi) - math.pi)
+
+
+# A projected point on the path: which segment it sits on, how far along
+# that segment (t in [0, 1]), the projected point itself, the path heading
+# there, the signed lateral offset of the query point from the path, and
+# how far along the whole path (from waypoint 0) the projection is.
+# Returned by project_onto_path; the tracking laws read it, nothing else
+# writes it.
+@dataclass(frozen=True)
+class PathProjection:
+    """Orthogonal projection of a point onto the path (project_onto_path).
+
+    segment_index is the start waypoint of the chosen segment, t in [0,1]
+    the fraction along it, (qx,qy) the projected point, heading the segment
+    direction psi_p, lateral_error the signed cross-track offset
+    (+ = the point is left of the path), arc_length the distance from
+    waypoint 0 along the path to (qx,qy).
+    """
+    segment_index: int
+    t: float
+    qx: float
+    qy: float
+    heading: float
+    lateral_error: float
+    arc_length: float
+
+
+def project_onto_path(xy: np.ndarray, seg_len: np.ndarray, point,
+                      nearest_idx: int, closed: bool = True):
+    """Orthogonal projection of `point` onto the polyline near `nearest_idx`.
+
+    Considers the two segments adjacent to `nearest_idx` -- (i-1 -> i) and
+    (i -> i+1), wrapping when `closed` -- and returns the closer projection
+    (a `PathProjection`). At the ends of an open path only the one existing
+    segment is a candidate. `t` is clamped to [0, 1], so the projection of
+    a point past the end of an open path is the last waypoint (t=1 on the
+    last segment) rather than running off the path.
+
+    Signed lateral error follows the workspace convention (see
+    docs/superpowers/specs/2026-09-27-tracking-00-overview.md):
+
+        e = -sin(psi_p)*(px - qx) + cos(psi_p)*(py - qy)
+
+    positive when `point` is to the LEFT of the path's direction of travel.
+
+    Zero-length segments (duplicate waypoints) are skipped; if every
+    candidate segment is zero-length, raises ValueError -- a projection is
+    meaningless on a degenerate path. A non-finite `point` raises
+    ValueError for the same reason: downstream laws must never silently
+    track a NaN.
+    """
+    px, py = float(point[0]), float(point[1])
+    if not (math.isfinite(px) and math.isfinite(py)):
+        raise ValueError(
+            f'project_onto_path: point must be finite, got ({point[0]}, {point[1]})')
+    n = len(xy)
+    cumulative = compute_cumulative_arc_length(seg_len)
+
+    candidates = []
+    # Segment (i-1 -> i): the point *arriving at* nearest_idx.
+    prev_idx = nearest_idx - 1
+    if closed:
+        prev_idx %= n
+    if closed or nearest_idx > 0:
+        candidates.append(prev_idx)
+    # Segment (i -> i+1): the point *leaving* nearest_idx.
+    if closed or nearest_idx < n - 1:
+        candidates.append(nearest_idx % n)
+
+    best = None
+    for seg_idx in candidates:
+        a = xy[seg_idx]
+        b = xy[(seg_idx + 1) % n]
+        length = float(seg_len[seg_idx])
+        if length < 1e-9:
+            # Duplicate waypoints: zero-length segment has no direction to
+            # project onto; skip it.
+            continue
+        ax, ay = float(a[0]), float(a[1])
+        abx, aby = float(b[0]) - ax, float(b[1]) - ay
+        # Parametric position of the projection onto the (infinite) segment
+        # line, clamped into the segment.
+        t = ((px - ax) * abx + (py - ay) * aby) / (length * length)
+        t = min(1.0, max(0.0, t))
+        qx = ax + t * abx
+        qy = ay + t * aby
+        dx = px - qx
+        dy = py - qy
+        dist = math.hypot(dx, dy)
+        heading = math.atan2(aby, abx)
+        lateral = -math.sin(heading) * dx + math.cos(heading) * dy
+        arc_length = float(cumulative[seg_idx]) + t * length
+        projection = PathProjection(
+            segment_index=int(seg_idx), t=float(t), qx=qx, qy=qy,
+            heading=float(heading), lateral_error=float(lateral),
+            arc_length=arc_length)
+        if best is None or dist < best[0]:
+            best = (dist, projection)
+
+    if best is None:
+        raise ValueError(
+            'project_onto_path: every candidate segment is zero-length '
+            '(duplicate waypoints) -- cannot project onto a degenerate path')
+    return best[1]
+
+
+def interpolate_along(values: np.ndarray, projection: PathProjection,
+                      closed: bool = True) -> float:
+    """Linear interpolation of a per-waypoint field at a path projection.
+
+    `values[i]` is the field at waypoint i; the value at the projected point
+    `t` of the way along segment (segment_index -> segment_index+1) is
+
+        (1 - t) * values[segment_index] + t * values[segment_index + 1]
+
+    wrapping the end index on a closed loop. Every tracking law reads its
+    per-projection quantities (curvature, feedforward) through this one
+    helper so they all interpolate identically.
+    """
+    n = len(values)
+    start = projection.segment_index
+    end = start + 1
+    if end >= n:
+        end = 0 if closed else n - 1
+    a = float(values[start])
+    b = float(values[end])
+    return a + projection.t * (b - a)
+
+
 # ============================================================================
 # 4. Offline raceline generation
 # ============================================================================
@@ -382,6 +516,51 @@ def estimate_path_curvature(xy: np.ndarray, closed: bool = True) -> np.ndarray:
     cross = ((xy[:, 0] - prev_pts[:, 0]) * (next_pts[:, 1] - prev_pts[:, 1]) -
              (xy[:, 1] - prev_pts[:, 1]) * (next_pts[:, 0] - prev_pts[:, 0]))
     area = 0.5 * np.abs(cross)
+
+    denom = a * b * c
+    kappa = np.zeros(n)
+    valid = denom > 1e-9
+    kappa[valid] = 4.0 * area[valid] / denom[valid]
+    return kappa
+
+
+def estimate_signed_path_curvature(xy: np.ndarray, closed: bool = True) -> np.ndarray:
+    """Menger curvature with sign: + for a left (CCW) turn, - for right, 0 on
+    straights. Same magnitude as estimate_path_curvature(xy, closed) everywhere.
+
+    estimate_path_curvature is deliberately *unsigned*: the velocity profile
+    (compute_velocity_profile) only ever needs "how tight is this bend", and
+    braking for a left hairpin is identical to braking for a right one. The
+    tracking laws, by contrast, steer -- and a feedforward term
+    (delta_ff = atan(L * kappa)) has to know which *way* the path turns,
+    so they read curvature from this signed variant instead.
+
+    The sign comes from the shoelace cross product of (prev -> this) x
+    (prev -> next): positive (counterclockwise turn) means the path bends
+    left. Magnitude, the degenerate-colinear zero, and the open-path
+    endpoints staying 0 are all inherited unchanged from
+    estimate_path_curvature -- do not "fix" those here without fixing the
+    unsigned original too, or the two drift apart.
+    """
+    n = len(xy)
+    prev_pts = np.roll(xy, 1, axis=0)
+    next_pts = np.roll(xy, -1, axis=0)
+
+    if not closed:
+        prev_pts = prev_pts.copy()
+        next_pts = next_pts.copy()
+        prev_pts[0] = xy[0]
+        next_pts[-1] = xy[-1]
+
+    a = np.hypot(next_pts[:, 0] - xy[:, 0], next_pts[:, 1] - xy[:, 1])              # |B->C|
+    b = np.hypot(xy[:, 0] - prev_pts[:, 0], xy[:, 1] - prev_pts[:, 1])              # |A->B|
+    c = np.hypot(next_pts[:, 0] - prev_pts[:, 0], next_pts[:, 1] - prev_pts[:, 1])  # |A->C|
+
+    # Signed twice-area: positive when (A -> B -> C) turns counterclockwise
+    # (left). No abs() here -- the sign IS the answer.
+    cross = ((xy[:, 0] - prev_pts[:, 0]) * (next_pts[:, 1] - prev_pts[:, 1]) -
+             (xy[:, 1] - prev_pts[:, 1]) * (next_pts[:, 0] - prev_pts[:, 0]))
+    area = 0.5 * cross
 
     denom = a * b * c
     kappa = np.zeros(n)

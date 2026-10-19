@@ -90,6 +90,24 @@ Node behaviour when `steering_law == 'mpc'` (the node also constructs a `PurePur
 
 ## G0 — install and benchmark
 
+**Status 2026-10-19: the `MpcLaw` and its miss policy are implemented and unit-tested**
+(the MPC tests in `src/pure_pursuit/test/test_tracking_laws.py`, including the
+LQR-equivalence oracle, pass with osqp 1.1.3), and the benchmark script
+`tools/mpc_benchmark/benchmark_mpc.py` is ready. What is *not* done is the install
+decision below: osqp 1.1.3 is on PyPI with an aarch64 wheel, but this Jetson is
+Ubuntu 24.04 (PEP 668 blocks plain `pip install`), and the choice between
+`pip install --user`, a venv with `--system-site-packages`, and the resulting
+`package.xml`/`rosdep` line is a user decision. Until osqp is importable from the
+ROS Python, every MPC test and node path skips via `pytest.importorskip` (the only
+allowed skip) and `steering_law: mpc` refuses to start with a pointer here. **Do
+not wire MPC into the node for on-car use until G0's benchmark passes.**
+
+A first indication, *not* the G0 measurement (run on the development host through
+the harness, not under load on the Jetson, and including QP assembly): warm solves
+of the default N=20 / dt=0.05 problem land around 8 ms p50 on this machine, so the
+G0 p99 < 8 ms gate is plausibly tight and worth measuring properly before any
+commitment.
+
 1. **Install.** On 2026-09-27, `apt-cache policy python3-osqp` returned nothing on this Jetson (no apt package), and osqp was not importable. Find out whether PyPI has an aarch64 wheel for the current osqp release (don't build from source without asking), and whether rosdep has a key for it (`rosdep resolve python3-osqp-pip`). **Stop and ask the user before installing** — present: the exact version, `pip install --user` vs a venv with `--system-site-packages` (ROS runs on the system Python, Ubuntu 24.04's PEP 668 blocks plain pip), and the package.xml line you'll add (`<exec_depend>` with the rosdep key if it exists; otherwise document the install step in `docs/operations.md` and the package README). Pin the major.minor version.
 2. **Benchmark script** `tools/mpc_benchmark/benchmark_mpc.py` (pure Python + osqp, no ROS). Workload that exercises warm starting as driving does: take a closed profiled line (`--csv PATH`, a real one from `~/.ros/racerbot_auto/<ts>/` if present; otherwise a built-in synthetic loop — two 1.5 m-radius hairpins joined by straights with a chicane — profiled with `racing_math.compute_velocity_profile` at `v_max = 4.0`, `a_lat_max = 2.5`). Walk along it in 25 ms steps at the profile speed for 20,000 steps, with the pose perturbed by a slowly varying random walk (lateral within ±0.5 m, heading within ±0.3 rad, speed ±20 %, seeded), calling `steer()` each step. Report p50/p90/p99/p99.9/max solve time, misses by reason, and iterations p50/p99.
 3. **Record the environment** in the output: `nvpmodel -q`, whether `jetson_clocks` is active, the CPU governor, the osqp, numpy and Python versions, and the git commit.
