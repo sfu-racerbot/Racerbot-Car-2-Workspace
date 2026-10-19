@@ -233,18 +233,63 @@ def test_steering_law_is_not_live_tunable(node_factory, law_name):
     assert node.get_parameter('steering_law').value == law_name
 
 
-@pytest.mark.parametrize('law_name', ['pure_pursuit', 'stanley', 'lqr'])
-def test_law_params_are_not_live_tunable(node_factory, law_name):
+# Pure pursuit's lookahead knobs are deliberately live-tunable (a
+# pre-existing dashboard feature); test_live_lookahead_tune_reaches_the_law
+# below covers them. Only the new laws' dotted params must be refused.
+@pytest.mark.parametrize('law_name, dotted', [
+    ('stanley', 'stanley.gain'), ('lqr', 'lqr.q_lateral')])
+def test_law_params_are_not_live_tunable(node_factory, law_name, dotted):
     node = node_factory(law_name)
-    dotted = {'stanley': 'stanley.gain', 'lqr': 'lqr.q_lateral',
-              'pure_pursuit': 'min_lookahead'}[law_name]
-    # min_lookahead IS live-tunable for pure pursuit (a pre-existing knob), so
-    # only the stanley/lqr dotted params are checked to be refused.
-    if law_name == 'pure_pursuit':
-        pytest.skip('pure_pursuit lookahead params are legitimately live-tunable')
     result = node._parameter_callback([
         Parameter(dotted, Parameter.Type.DOUBLE, 9.9)])
     assert not result.successful
+
+
+def _tune(node, **values):
+    result = node._parameter_callback([
+        Parameter(name, Parameter.Type.DOUBLE, float(value))
+        for name, value in values.items()])
+    assert result.successful, result.reason
+
+
+def test_live_lookahead_tune_reaches_the_law(node_factory):
+    # The dashboard can live-tune min/max_lookahead and lookahead_speed_gain,
+    # and the node accepts them. PurePursuitLaw must then steer with the new
+    # values -- not keep the ones it was built with while the node reports
+    # the tuned ones back (the "dashboard reads a value the car is not using"
+    # failure live_tuning.py exists to prevent).
+    node = node_factory('pure_pursuit')
+    node.enable_deadman = True
+    _hold_lb(node)
+    _pose_slightly_left(node)
+    inp = tracking_laws.TrackingInput(
+        x=node.car_x, y=node.car_y, yaw=node.car_yaw, speed=0.0,
+        nearest_idx=racing_math.find_nearest_index(
+            node.xy, (node.car_x, node.car_y), closed=True)[0],
+        previous_steering=0.0)
+    for lookahead in (0.6, 2.0):
+        _tune(node, min_lookahead=lookahead, max_lookahead=lookahead,
+              lookahead_speed_gain=0.0)
+        # Oracle: plain pure pursuit geometry from racing_math at that
+        # lookahead (speed 0, gain 0 -> lookahead is exactly min_lookahead).
+        target = racing_math.find_lookahead_index(
+            node.seg_len, inp.nearest_idx, lookahead, closed=True)
+        bx, by = racing_math.world_to_body(
+            float(node.xy[target][0] - inp.x), float(node.xy[target][1] - inp.y), inp.yaw)
+        expected = float(np.clip(racing_math.steering_from_curvature(
+            racing_math.steering_arc_curvature(bx, by), node.wheelbase),
+            -node.max_steering_angle, node.max_steering_angle))
+        result = node.tracking_law.steer(inp, node.path_context)
+        assert result.steering == pytest.approx(expected, abs=1e-12)
+        assert f'lookahead={lookahead:.2f}m' in result.detail
+
+
+def test_live_steering_rate_tune_reaches_the_law_limits(node_factory):
+    # max_steering_rate is live-tunable too, and MPC's rate constraint reads
+    # it from the law's VehicleLimits.
+    node = node_factory('pure_pursuit')
+    _tune(node, max_steering_rate=2.5)
+    assert node.tracking_law.limits.max_steering_rate == 2.5
 
 
 @pytest.mark.parametrize('law_name', ['pure_pursuit', 'stanley', 'lqr'])
@@ -357,6 +402,39 @@ def test_mpc_latch_clears_when_lb_is_released(osqp_available, profiled_csv):
         node.control_loop()
         assert node.last_decision_state == 'mpc_fallback'
         assert published[-1].drive.speed > 0.0
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_live_lookahead_tune_reaches_the_mpc_fallback_law(osqp_available, profiled_csv):
+    node = _mpc_node(profiled_csv)
+    try:
+        _tune(node, min_lookahead=0.9, max_lookahead=0.9, lookahead_speed_gain=0.0)
+        assert node._mpc_fallback_law.params == tracking_laws.PurePursuitParams(
+            min_lookahead=0.9, max_lookahead=0.9, lookahead_speed_gain=0.0)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_mpc_intent_never_runs_the_solver(osqp_available, profiled_csv):
+    # Drive-intent safety contract (docs/drive-intent.md): the diagnostic
+    # reads what the control path computed and must not run the controller
+    # again. With no MPC plan to replay, the arrow comes from the
+    # pure-pursuit fallback law, and the MPC law is never called.
+    node = _mpc_node(profiled_csv)
+    try:
+        _pose_slightly_left(node)
+        node._last_law_predicted = ()
+        calls = []
+        original = node.tracking_law.steer
+        node.tracking_law.steer = lambda *a, **k: (calls.append(1), original(*a, **k))[1]
+        nearest = racing_math.find_nearest_index(
+            node.xy, (node.car_x, node.car_y), closed=True)[0]
+        path = node._intent_path(0.0, 2.0, nearest_idx=nearest)
+        assert calls == []
+        assert len(path) >= 2
     finally:
         node.destroy_node()
         rclpy.shutdown()

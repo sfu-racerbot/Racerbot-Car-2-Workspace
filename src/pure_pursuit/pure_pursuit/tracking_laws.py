@@ -454,6 +454,11 @@ class MissPolicy:
         self._latched = False
 
 
+# How far past the steering-angle bound an OSQP solution may land before it
+# counts as a miss (see MpcLaw.steer). Above the solver's 1e-5 tolerance.
+BOUND_TOLERANCE = 1e-4
+
+
 class MpcLaw:
     """Linear time-varying MPC over the [e, theta] error, solved with OSQP.
 
@@ -568,6 +573,36 @@ class MpcLaw:
                     s = min(s, float(path.cumulative[-1]))
         return proj, speeds, kappas, ff
 
+    @staticmethod
+    def _condensed_dynamics(speeds, ff, dt_p, wheelbase):
+        """(Phi, Gamma) such that the stacked states x_1..x_N of
+        x_{k+1} = A_k x_k + B_k (delta_k - ff_k) are Phi x_0 + Gamma (delta - ff).
+
+        A_k = [[1, v_k dt_p], [0, 1]],  B_k = [[0], [v_k dt_p sec^2(ff_k) / L]].
+        Every A_k is a shear and a product of shears is the shear of the
+        summed offsets, so with c_k = a_0 + ... + a_k (a_k = v_k dt_p) and
+        b_j = v_j dt_p sec^2(ff_j) / L:
+          (A_k ... A_0)          = [[1, c_k], [0, 1]]               (Phi)
+          (A_k ... A_{j+1}) B_j  = [(c_k - c_j) b_j, b_j],  j <= k  (Gamma)
+        Closed form rather than an O(N^3) loop of 2x2 products: this runs
+        inside the solve deadline every tick.
+        """
+        speeds = np.asarray(speeds, dtype=float)
+        ff = np.asarray(ff, dtype=float)
+        n = len(speeds)
+        a = speeds * dt_p
+        b = speeds * dt_p / (np.cos(ff) ** 2) / wheelbase
+        c = np.cumsum(a)
+        lower = np.tril(np.ones((n, n)))
+        Phi = np.zeros((2 * n, 2))
+        Phi[0::2, 0] = 1.0
+        Phi[0::2, 1] = c
+        Phi[1::2, 1] = 1.0
+        Gamma = np.zeros((2 * n, n))
+        Gamma[0::2] = (c[:, None] - c[None, :]) * b[None, :] * lower
+        Gamma[1::2] = b[None, :] * lower
+        return Phi, Gamma
+
     def _build_qp(self, inp: TrackingInput, path: PathContext):
         proj, speeds, _kappas, ff = self._reference(inp, path)
         n = self.params.horizon_steps
@@ -579,31 +614,7 @@ class MpcLaw:
             inp.previous_steering,
             -self.limits.max_steering_angle, self.limits.max_steering_angle))
 
-        # Condensed dynamics: x_k = Phi_k x0 + sum_j Gamma[k,j] (delta_j - ff_j).
-        # x_{k+1} = A_k x_k + B_k (delta_k - ff_k), with
-        #   A_k = [[1, v_k dt_p], [0, 1]],  B_k = [[0], [v_k dt_p sec^2(ff_k) / L]].
-        # Build the (2N x N) response of x_1..x_N to the N decision variables,
-        # and the (2N) free response from x0.
-        Phi = np.zeros((2 * n, 2))
-        Gamma = np.zeros((2 * n, n))
-        A_roll = np.eye(2)
-        for k in range(n):
-            v = speeds[k]
-            A = np.array([[1.0, v * dt_p], [0.0, 1.0]])
-            B = np.array([[0.0], [v * dt_p / (math.cos(ff[k]) ** 2) / L]])
-            # free response: row block k gets A_roll propagated one more step
-            A_roll = A @ A_roll
-            Phi[2 * k:2 * k + 2] = A_roll
-            # forced response: input j moves x_k by (A_{k} ... A_{j+1}) B_j
-            # (the product of the A's *after* step j up to and including step k).
-            for j in range(k + 1):
-                M = None
-                for m in range(j + 1, k + 1):
-                    vm = speeds[m]
-                    Am = np.array([[1.0, vm * dt_p], [0.0, 1.0]])
-                    M = Am if M is None else Am @ M
-                col = B if M is None else M @ B
-                Gamma[2 * k:2 * k + 2, j] = col[:, 0]
+        Phi, Gamma = self._condensed_dynamics(speeds, ff, dt_p, L)
 
         x0 = np.array([e0, theta0])
 
@@ -710,7 +721,12 @@ class MpcLaw:
             self._warm_start = None
             raise MpcMiss('solution: non-finite or wrong-size decision vector')
         max_ang = self.limits.max_steering_angle
-        if np.any(delta > max_ang + 1e-6) or np.any(delta < -max_ang - 1e-6):
+        # OSQP (eps_abs = eps_rel = 1e-5, polishing off) only meets constraints
+        # to about 1e-5, so a tighter check than that turns every tick where
+        # the angle bound is active -- i.e. every tight corner -- into a miss.
+        # 1e-4 rad (0.006 deg) is above the solver's own tolerance and far
+        # below anything the servo resolves; the output is clipped below.
+        if np.any(delta > max_ang + BOUND_TOLERANCE) or np.any(delta < -max_ang - BOUND_TOLERANCE):
             self._warm_start = None
             raise MpcMiss('solution: violates the steering angle bound')
 

@@ -47,6 +47,7 @@ every autonomy node in this repo follows):
   publishes:   <drive_topic> ackermann_msgs/AckermannDriveStamped
 """
 
+import dataclasses
 import json
 import math
 import sys
@@ -785,17 +786,18 @@ class PurePursuitNode(Node):
                 "pure_pursuit_node ready and stopped: waiting for an auto-generated "
                 "waypoints_file profile.")
 
+    # Every launch-time parameter of each alternative law, by law.
+    _LAW_PARAM_NAMES = {
+        'stanley': ('stanley.gain', 'stanley.softening'),
+        'lqr': ('lqr.q_lateral', 'lqr.q_heading', 'lqr.r_steer', 'lqr.v_grid_max'),
+        'mpc': ('mpc.dt', 'mpc.horizon_steps', 'mpc.q_lateral', 'mpc.q_heading',
+                'mpc.r_steer', 'mpc.r_rate', 'mpc.deadline_sec', 'mpc.max_iter',
+                'mpc.max_consecutive_misses'),
+    }
+
     def _declared_law_param_names(self, prefix: str):
         """The dotted parameters belonging to one law ('stanley' -> ...)."""
-        return [
-            'stanley.gain', 'stanley.softening',
-        ] if prefix == 'stanley' else [
-            'lqr.q_lateral', 'lqr.q_heading', 'lqr.r_steer', 'lqr.v_grid_max',
-        ] if prefix == 'lqr' else [
-            'mpc.dt', 'mpc.horizon_steps', 'mpc.q_lateral', 'mpc.q_heading',
-            'mpc.r_steer', 'mpc.r_rate', 'mpc.deadline_sec', 'mpc.max_iter',
-            'mpc.max_consecutive_misses',
-        ]
+        return list(self._LAW_PARAM_NAMES[prefix])
 
     def _activate_profile(self, path: str):
         """Load and atomically activate a profiled racing-line CSV."""
@@ -962,7 +964,35 @@ class PurePursuitNode(Node):
             setattr(self, tunable.target_attr, tunable.store(value))
             self._tunable_values[name] = value
             self.get_logger().info(f'live tune: {name} {previous} -> {value}')
+        if accepted.keys() & self._LAW_TUNABLES:
+            self._refresh_law_tunables()
         return SetParametersResult(successful=True)
+
+    # Live-tunable parameters a steering law copies at construction. A tune of
+    # any of these must be pushed into the law, or the node would report the
+    # new value while the law kept steering with the old one.
+    _LAW_TUNABLES = frozenset(
+        ('min_lookahead', 'max_lookahead', 'lookahead_speed_gain', 'max_steering_rate'))
+
+    def _refresh_law_tunables(self):
+        """Push the live-tunable values into the active law (and MPC's
+        pure-pursuit fallback). Nothing else a law holds depends on them --
+        LQR's gain table depends only on control_dt and the wheelbase."""
+        self._vehicle_limits = dataclasses.replace(
+            self._vehicle_limits, max_steering_rate=self.max_steering_rate)
+        pure_pursuit_params = tracking_laws.PurePursuitParams(
+            min_lookahead=self.min_lookahead,
+            max_lookahead=self.max_lookahead,
+            lookahead_speed_gain=self.lookahead_speed_gain)
+        self._law_params.update(
+            min_lookahead=self.min_lookahead, max_lookahead=self.max_lookahead,
+            lookahead_speed_gain=self.lookahead_speed_gain)
+        for law in (self.tracking_law, self._mpc_fallback_law):
+            if law is None:
+                continue
+            law.limits = self._vehicle_limits
+            if isinstance(law, tracking_laws.PurePursuitLaw):
+                law.params = pure_pursuit_params
 
     # ------------------------------------------------------------------------
     # Sensor callbacks -- cache-only, see the comment in __init__ above.
@@ -1575,9 +1605,13 @@ class PurePursuitNode(Node):
         # For MPC it replays the solver's predicted sequence rather than
         # re-solving (intent must not add solver load): at integration time t
         # the plan value index floor(t / mpc.dt), held past the horizon.
+        # The intent must never run the MPC solver itself (drive-intent safety
+        # contract: read only what the control path computed). Without a plan
+        # to replay, it re-asks MPC's own pure-pursuit fallback instead.
         mpc = (self.tracking_law if self.steering_law_name == 'mpc' else None)
         mpc_plan = self._last_law_predicted
         mpc_dt = mpc.params.dt if mpc is not None and mpc_plan else None
+        replay_law = self._mpc_fallback_law if mpc is not None else self.tracking_law
 
         def speed_of(i, x, y, yaw):
             return float(self.speed_profile[cursor['idx']])
@@ -1593,7 +1627,7 @@ class PurePursuitNode(Node):
                 x=x, y=y, yaw=yaw, speed=v, nearest_idx=cursor['idx'],
                 previous_steering=0.0)
             try:
-                steering = self.tracking_law.steer(inp, self.path_context).steering
+                steering = replay_law.steer(inp, self.path_context).steering
             except Exception:  # noqa: BLE001 -- intent failure disables intent, not the node
                 steering = 0.0
             # Advance along the line by the arc length this step covers,
@@ -2395,7 +2429,7 @@ class PurePursuitNode(Node):
             outcome = policy.on_miss()
             if outcome == 'latched':
                 self._stop('mpc_miss_latched',
-                           f'mpc missed {policy.max_consecutive_misses} ticks in a '
+                           f'mpc missed {policy.max_consecutive} ticks in a '
                            f'row (last: {exc}); holding until LB is released')
                 raise _MpcStopped()
             # 'fallback': pure pursuit for this tick only, then resume.

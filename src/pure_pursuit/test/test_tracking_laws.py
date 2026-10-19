@@ -630,6 +630,27 @@ def _mpc(**overrides):
     return make('mpc', **params)
 
 
+def test_mpc_condensed_dynamics_match_step_by_step_simulation():
+    # Oracle: roll the time-varying model forward one step at a time, with
+    # speed and feedforward changing along the horizon (test 1's LQR
+    # equivalence only covers constant speed, where every shear is the same).
+    # No osqp needed: this is the model, not the solver.
+    rng = np.random.default_rng(7)
+    n, dt_p = 12, 0.05
+    speeds = rng.uniform(0.5, 4.0, n)
+    ff = rng.uniform(-0.3, 0.3, n)
+    delta = rng.uniform(-0.35, 0.35, n)
+    x0 = np.array([0.12, -0.05])
+    Phi, Gamma = tracking_laws.MpcLaw._condensed_dynamics(speeds, ff, dt_p, L)
+    stacked = Phi @ x0 + Gamma @ (delta - ff)
+    x = x0.copy()
+    for k in range(n):
+        A = np.array([[1.0, speeds[k] * dt_p], [0.0, 1.0]])
+        B = np.array([0.0, speeds[k] * dt_p / math.cos(ff[k]) ** 2 / L])
+        x = A @ x + B * (delta[k] - ff[k])
+        assert stacked[2 * k:2 * k + 2] == pytest.approx(x, abs=1e-12)
+
+
 def test_mpc_test1_lqr_equivalence(osqp_available):
     # An unconstrained finite-horizon problem with the DARE terminal cost IS
     # LQR, for any N. Wide limits, no rate weight, dt_p = control_dt.
@@ -805,6 +826,48 @@ def test_mpc_test8b_a_miss_drops_the_warm_start(osqp_available):
     except tracking_laws.MpcMiss:
         pass
     assert tight._warm_start is None        # a miss drops it
+
+
+class _FixedSolution:
+    """Stands in for the OSQP solver object (a third-party boundary) and
+    returns one fixed, 'solved' decision vector."""
+
+    def __init__(self, x):
+        self.x = np.asarray(x, dtype=float)
+
+    def update(self, **_kwargs):
+        pass
+
+    def warm_start(self, **_kwargs):
+        pass
+
+    def solve(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(x=self.x, info=SimpleNamespace(status='solved', iter=1))
+
+
+@pytest.mark.parametrize('overshoot, is_miss', [
+    (0.0, False),
+    (0.5 * tracking_laws.BOUND_TOLERANCE, False),   # within OSQP's own accuracy
+    (2.0 * tracking_laws.BOUND_TOLERANCE, True),
+    (0.05, True),
+])
+def test_mpc_bound_check_tolerates_solver_accuracy_but_not_real_violations(
+        osqp_available, overshoot, is_miss):
+    # OSQP meets constraints to ~1e-5 (eps_abs/eps_rel, no polishing). A
+    # solution that far past the angle bound is the solver's accuracy, not a
+    # bad solve, and must be clipped and used; one clearly past it is a miss.
+    ctx = straight_context(speed=1.5)
+    law = _mpc()
+    n = law.params.horizon_steps
+    law._solver = _FixedSolution([LIMITS.max_steering_angle + overshoot] * n)
+    inp = TrackingInput(x=0.0, y=0.0, yaw=0.0, speed=1.5,
+                        nearest_idx=0, previous_steering=0.0)
+    if is_miss:
+        with pytest.raises(tracking_laws.MpcMiss, match='solution: violates'):
+            law.steer(inp, ctx)
+    else:
+        assert law.steer(inp, ctx).steering == LIMITS.max_steering_angle
 
 
 def test_mpc_test9_non_finite_input_is_not_a_miss(osqp_available):
