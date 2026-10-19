@@ -49,7 +49,7 @@ except ImportError as exc:
     ) from exc
 
 from gap_follow import gap_logic
-from pure_pursuit import racing_math
+from pure_pursuit import racing_math, tracking_laws
 
 from sim_fidelity import CALIBRATION, FidelityPlant, PROFILES
 from sim_fidelity.calibration import unmeasured as unmeasured_parameters
@@ -234,6 +234,16 @@ class PathPlan:
         )
         return cls(xy=xy, seg_len=seg_len, speed=speed)
 
+    def path_context(self, tracking_curvature_smoothing: int = 2):
+        """The PathContext the node would build for this plan (spec 00):
+        signed curvature from the smoothed path, unsmoothed xy tracked."""
+        smoothed = racing_math.smooth_path(xy=self.xy, half_window=tracking_curvature_smoothing, closed=True)
+        curvature = racing_math.estimate_signed_path_curvature(smoothed, closed=True)
+        return tracking_laws.PathContext(
+            xy=self.xy, seg_len=self.seg_len,
+            cumulative=racing_math.compute_cumulative_arc_length(self.seg_len),
+            speed_profile=self.speed, curvature=curvature, closed=True)
+
 
 class CommandShaper:
     """Deterministic equivalent of pure_pursuit_node's final command stage."""
@@ -282,27 +292,67 @@ class CommandShaper:
 
 
 class PathFollower:
+    """Follows a PathPlan with a pluggable steering law (spec 01).
+
+    The default is a pure_pursuit TrackingLaw built from the same lookahead
+    parameters the node ships, so `pure_pursuit` here reproduces the previous
+    hard-coded PathFollower exactly (the refactor proof in spec 01). A
+    TrackingLawError (or any steer exception) commands speed 0 for the tick
+    and increments law_fail_steps, mirroring the node's stop.
+    """
+
+    VEHICLE_LIMITS = tracking_laws.VehicleLimits(
+        wheelbase=WHEELBASE, max_steering_angle=STEERING_LIMIT,
+        max_steering_rate=MAX_STEERING_RATE, control_dt=CONTROL_DT)
+
     def __init__(
         self,
         plan: PathPlan,
         *,
+        law=None,
+        law_name: str = "pure_pursuit",
+        law_params: Optional[dict] = None,
         min_lookahead: float = 0.6,
         max_lookahead: float = 1.5,
         lookahead_gain: float = 0.15,
         use_measured_lookahead: bool = True,
     ):
         self.plan = plan
+        self.path_context = plan.path_context()
         self.min_lookahead = min_lookahead
         self.max_lookahead = max_lookahead
         self.lookahead_gain = lookahead_gain
         self.use_measured_lookahead = use_measured_lookahead
         self.previous_index: Optional[int] = None
+        self.law_fail_steps = 0
+        self.mpc_miss_steps = 0
+        self.mpc_fallback_steps = 0
+        self._compute_ms: list[float] = []
+        if law is None:
+            params = {'min_lookahead': min_lookahead,
+                      'max_lookahead': max_lookahead,
+                      'lookahead_speed_gain': lookahead_gain}
+            params.update(law_params or {})
+            law = tracking_laws.make_law(law_name, self.VEHICLE_LIMITS, params)
+        self.law = law
+        # MPC's single-tick fallback (spec 04), mirrored from the node.
+        self._mpc_fallback = None
+        if isinstance(self.law, tracking_laws.MpcLaw):
+            self._mpc_fallback = tracking_laws.make_law(
+                'pure_pursuit', self.VEHICLE_LIMITS,
+                {'min_lookahead': min_lookahead, 'max_lookahead': max_lookahead,
+                 'lookahead_speed_gain': lookahead_gain})
+
+    @property
+    def law_compute_ms(self):
+        return list(self._compute_ms)
 
     def command(
         self,
         state: np.ndarray,
         speed: Optional[float] = None,
         target_override: Optional[tuple[float, float]] = None,
+        previous_steering: float = 0.0,
     ) -> tuple[float, float, int, int, float]:
         car_x, car_y, _delta, velocity, yaw = np.asarray(state, dtype=float)[:5]
         nearest, error = racing_math.find_nearest_index(
@@ -332,17 +382,48 @@ class PathFollower:
         target_index = racing_math.find_lookahead_index(
             self.plan.seg_len, nearest, lookahead, closed=True
         )
-        target_x, target_y = (
-            self.plan.xy[target_index]
-            if target_override is None
-            else target_override
-        )
-        x_body, y_body = racing_math.world_to_body(
-            float(target_x - car_x), float(target_y - car_y), float(yaw)
-        )
-        curvature = racing_math.steering_arc_curvature(x_body, y_body)
-        steering = racing_math.steering_from_curvature(curvature, WHEELBASE)
-        steering = float(np.clip(steering, -STEERING_LIMIT, STEERING_LIMIT))
+        if target_override is not None:
+            # Overtaking stays pure-pursuit geometry, as in the node.
+            x_body, y_body = racing_math.world_to_body(
+                float(target_override[0] - car_x), float(target_override[1] - car_y),
+                float(yaw))
+            curvature = racing_math.steering_arc_curvature(x_body, y_body)
+            steering = racing_math.steering_from_curvature(curvature, WHEELBASE)
+            steering = float(np.clip(steering, -STEERING_LIMIT, STEERING_LIMIT))
+            return steering, speed_command, nearest, target_index, float(error)
+
+        started = time.perf_counter()
+        try:
+            result = self.law.steer(tracking_laws.TrackingInput(
+                x=float(car_x), y=float(car_y), yaw=float(yaw),
+                speed=abs(float(velocity)), nearest_idx=nearest,
+                previous_steering=float(previous_steering)),
+                self.path_context)
+            steering = result.steering
+            if isinstance(self.law, tracking_laws.MpcLaw):
+                self.law.miss_policy.on_success()
+        except tracking_laws.MpcMiss:
+            # Mirror spec 04's node policy exactly: fall back to pure pursuit
+            # for this tick until the consecutive-miss limit, then latch a
+            # stop. The latch clears only at the end of a run (no LB here).
+            policy = self.law.miss_policy
+            outcome = policy.on_miss()
+            self.mpc_miss_steps += 1
+            if outcome == 'latched':
+                steering, speed_command = 0.0, 0.0
+            else:
+                self.mpc_fallback_steps += 1
+                fb = self._mpc_fallback.steer(tracking_laws.TrackingInput(
+                    x=float(car_x), y=float(car_y), yaw=float(yaw),
+                    speed=abs(float(velocity)), nearest_idx=nearest,
+                    previous_steering=float(previous_steering)),
+                    self.path_context)
+                steering = fb.steering
+        except Exception:
+            # Mirror the node: a non-miss law failure commands a stop.
+            self.law_fail_steps += 1
+            steering, speed_command = 0.0, 0.0
+        self._compute_ms.append((time.perf_counter() - started) * 1e3)
         return steering, speed_command, nearest, target_index, float(error)
 
 
@@ -730,7 +811,9 @@ def apply_fallback_safety(
     return steering, 1.0, "avoid"
 
 
-def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
+def run_pure_solo(track: str, seed: int, timeout_s: float,
+                  law_name: str = "pure_pursuit",
+                  law_params: Optional[dict] = None) -> dict:
     plant = make_plant(track, 1, seed)
     line = plant.env.unwrapped.track.raceline
     plan = PathPlan.from_track(plant.env.unwrapped.track)
@@ -740,13 +823,16 @@ def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
     # clock, and the scenario's 0.5m limit would fail the comparison before
     # the car had turned a wheel.
     obs, _ = plant.reset(plan_initial_pose(plan, line))
-    follower = PathFollower(plan)
+    follower = PathFollower(plan, law_name=law_name, law_params=law_params)
     command_shaper = CommandShaper()
     max_cross_track = 0.0
+    cross_track_sum = 0.0
+    cross_track_sq: list[float] = []
     truth_index = None
     min_scan = math.inf
     avoid_steps = 0
     stop_steps = 0
+    lap_time_s = None
     started = time.monotonic()
     max_steps = math.ceil(timeout_s / CONTROL_DT)
 
@@ -757,7 +843,8 @@ def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
             # so the max_cross_track_error watchdog below trips on the same
             # information the node has. The reported metric uses truth.
             steering, speed, _nearest, _target, error = follower.command(
-                ego["std_state"]
+                ego["std_state"],
+                previous_steering=command_shaper.previous_steering,
             )
             _truth_nearest, truth_error = racing_math.find_nearest_index(
                 plan.xy,
@@ -768,6 +855,8 @@ def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
             )
             truth_index = _truth_nearest
             max_cross_track = max(max_cross_track, float(truth_error))
+            cross_track_sum += float(truth_error)
+            cross_track_sq.append(float(truth_error))
             min_scan = min(
                 min_scan, closest_valid(ego["scan"], math.radians(30.0))
             )
@@ -788,6 +877,8 @@ def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
             obs, _reward, done, _truncated, info = plant.step(
                 [(steering, speed)]
             )
+            if lap_time_s is None and float(info["lap_counts"][0]) >= 1.0:
+                lap_time_s = float(info["sim_time"])
             if done or obs["agent_0"]["collision"]:
                 break
         else:
@@ -795,13 +886,30 @@ def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
     finally:
         plant.close()
 
+    compute = sorted(follower.law_compute_ms)
+    n_compute = len(compute)
+
+    def _pct(p):
+        return round(compute[min(n_compute - 1, int(p * n_compute))], 4) \
+            if n_compute else None
+
     result = result_base(
         "pure_solo", track, obs, info, step + 1, time.monotonic() - started
     )
     result.update(plant.report())
     result.update(
         {
+            "steering_law": law_name,
             "max_cross_track_m": round(max_cross_track, 4),
+            "mean_cross_track_m": round(
+                cross_track_sum / max(1, len(cross_track_sq)), 4),
+            "p95_cross_track_m": round(
+                float(np.percentile(cross_track_sq, 95)), 4)
+            if cross_track_sq else None,
+            "lap_time_s": lap_time_s,
+            "law_fail_steps": follower.law_fail_steps,
+            "law_compute_ms_p50": _pct(0.50),
+            "law_compute_ms_p99": _pct(0.99),
             "min_forward_scan_m": round(min_scan, 4),
             "avoid_steps": avoid_steps,
             "stop_steps": stop_steps,
@@ -812,6 +920,13 @@ def run_pure_solo(track: str, seed: int, timeout_s: float) -> dict:
             ),
         }
     )
+    if law_name == "mpc":
+        policy = follower.law.miss_policy
+        result.update({
+            "mpc_miss_steps": follower.mpc_miss_steps,
+            "mpc_fallback_steps": follower.mpc_fallback_steps,
+            "mpc_latched": policy.latched(),
+        })
     result["passed"] = (
         result["laps"] >= 1.0
         and not result["collision"]
@@ -865,7 +980,8 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
             opponent = obs["agent_1"]
 
             steering, speed, nearest, target, error = ego_follower.command(
-                ego["std_state"]
+                ego["std_state"],
+                previous_steering=ego_command_shaper.previous_steering,
             )
             # Progress and cross-track come from ground truth, so completing
             # a lap means the car really went round rather than its estimate
@@ -1009,6 +1125,7 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
                     ego["std_state"],
                     speed=speed,
                     target_override=target_xy,
+                    previous_steering=ego_command_shaper.previous_steering,
                 )
 
             dynamic_mask = racing_math.dynamic_beam_mask(
@@ -1188,7 +1305,50 @@ def parse_args() -> argparse.Namespace:
              "closest stand-in for a hand-recorded lap, and the thing the "
              "optimizer is actually replacing (default: %(default)s).",
     )
+    parser.add_argument(
+        "--steering-law",
+        choices=tracking_laws.LAW_NAMES,
+        default="pure_pursuit",
+        help="Steering law for the pure and traffic scenarios (default: "
+             "%(default)s).",
+    )
+    parser.add_argument(
+        "--law-param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Override a law parameter, repeatable, e.g. "
+             "--law-param stanley.gain=1.2. Unknown keys are an error.",
+    )
+    parser.add_argument(
+        "--compare",
+        nargs="+",
+        metavar="LAW",
+        help="Run pure_pursuit plus each named law over the same "
+             "tracks x seeds x raceline, and print the comparison table and "
+             "promotion verdicts. Implies --scenario pure. Requires "
+             "--fidelity car.",
+    )
     return parser.parse_args()
+
+
+def _parse_law_params(overrides):
+    """Turn repeated KEY=VALUE strings into a params dict, erroring on keys no
+    law uses."""
+    known = set()
+    for prefix in ('stanley', 'lqr', 'mpc'):
+        for name in getattr(tracking_laws, f'{prefix.capitalize()}Params').__dataclass_fields__:
+            known.add(f'{prefix}.{name}')
+    known |= {'min_lookahead', 'max_lookahead', 'lookahead_speed_gain'}
+    params = {}
+    for item in overrides:
+        if '=' not in item:
+            raise SystemExit(f'--law-param expects KEY=VALUE, got {item!r}')
+        key, _, value = item.partition('=')
+        if key not in known:
+            raise SystemExit(f'--law-param: unknown key {key!r}')
+        params[key] = float(value)
+    return params
 
 
 def main() -> int:
@@ -1198,6 +1358,20 @@ def main() -> int:
     RACELINE_SOURCE = args.raceline
     select_profile(args.fidelity)
     tracks = args.tracks[:1] if args.quick else args.tracks
+    law_params = _parse_law_params(args.law_param)
+
+    if args.compare:
+        # The comparison is meaningless under the legacy profile: gym's own
+        # collision flag is untrustworthy there (CLAUDE.md), and spec 01
+        # forbids it outright.
+        if args.fidelity != DEFAULT_PROFILE:
+            raise SystemExit(
+                "--compare requires --fidelity car: the verdict is only "
+                "trustworthy when collision comes from FidelityPlant's own "
+                "_wall_contact/_chassis_contact, not gym's flag (see "
+                "CLAUDE.md).")
+        return _run_comparison(args, tracks, law_params)
+
     results: list[dict] = []
 
     for seed in range(args.seed, args.seed + max(1, args.repeat_seeds)):
@@ -1205,11 +1379,14 @@ def main() -> int:
         if args.scenario in ("all", "gap"):
             batch += [run_gap_solo(t, seed, args.timeout) for t in tracks]
         if args.scenario in ("all", "pure"):
-            batch += [run_pure_solo(t, seed, args.timeout) for t in tracks]
+            batch += [run_pure_solo(t, seed, args.timeout,
+                                    law_name=args.steering_law,
+                                    law_params=law_params) for t in tracks]
         if args.scenario in ("all", "traffic"):
             batch.append(run_pure_traffic(tracks[0], seed, args.timeout))
         for result in batch:
             result["seed"] = seed
+            result["raceline"] = RACELINE_SOURCE
             print(json.dumps(result, sort_keys=True), flush=True)
         results += batch
 
@@ -1244,6 +1421,77 @@ def main() -> int:
         )
     )
     return 0 if report["passed"] else 1
+
+
+def _run_comparison(args, tracks, law_params) -> int:
+    """Run pure_pursuit plus each --compare law over the same tracks x seeds
+    and print the promotion verdicts (spec 01)."""
+    laws = ["pure_pursuit"] + list(args.compare)
+    seeds = list(range(args.seed, args.seed + max(1, args.repeat_seeds)))
+    rows_by_law: dict[str, list[dict]] = {law: [] for law in laws}
+    for law in laws:
+        for seed in seeds:
+            for track in tracks:
+                result = run_pure_solo(
+                    track, seed, args.timeout,
+                    law_name=law, law_params=law_params)
+                result["seed"] = seed
+                result["raceline"] = RACELINE_SOURCE
+                # The verdict is only meaningful on the car fidelity profile.
+                assert result["fidelity_profile"] == "car", (
+                    f"--compare row has fidelity {result['fidelity_profile']!r}")
+                rows_by_law[law].append(result)
+                print(json.dumps(result, sort_keys=True), flush=True)
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import law_compare
+
+    baseline = rows_by_law["pure_pursuit"]
+    verdicts = {}
+    print("\n=== tracking-law comparison "
+          f"(tracks={tracks}, seeds={seeds}, raceline={RACELINE_SOURCE}, "
+          "fidelity=car) ===")
+    print("note: law_compute_ms is HOST wall time, not the Jetson\n")
+    header = (f"{'law':<13} {'track':<12} {'mean_ct':>8} {'p95_ct':>8} "
+              f"{'max_ct':>8} {'lap_s':>8} {'fails':>6} {'p99_ms':>7}")
+    print(header)
+    print("-" * len(header))
+    for law in laws:
+        for r in rows_by_law[law]:
+            print(f"{law:<13} {r['track']:<12} "
+                  f"{r['mean_cross_track_m']:>8.4f} "
+                  f"{(r['p95_cross_track_m'] or 0):>8.4f} "
+                  f"{r['max_cross_track_m']:>8.4f} "
+                  f"{(r['lap_time_s'] or 0):>8.2f} "
+                  f"{r['law_fail_steps']:>6d} "
+                  f"{(r['law_compute_ms_p99'] or 0):>7.2f}")
+        # Verdict for every compared law, including a pure_pursuit self-test
+        # (which must REJECT on condition 2 with identical metrics -- a
+        # built-in determinism/strictness check, spec 01).
+        if law in args.compare:
+            v = law_compare.verdict(baseline, rows_by_law[law])
+            verdicts[law] = v.verdict
+            print(f"\n{law}: {v.verdict}")
+            for reason in v.reasons:
+                print(f"    - {reason}")
+    print()
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps({
+            "schema_version": 2,
+            "compare": True,
+            "seed": args.seed,
+            "tracks": tracks,
+            "raceline": RACELINE_SOURCE,
+            "fidelity_profile": PROFILE.name,
+            "laws": laws,
+            "verdicts": verdicts,
+            "results": [r for law in laws for r in rows_by_law[law]],
+        }, indent=2, sort_keys=True) + "\n")
+    # The comparison itself is the product; exit non-zero if any candidate was
+    # rejected, so a CI/launch gate can read it.
+    return 0 if all(v == "PROMOTE" for v in verdicts.values()) else 1
 
 
 if __name__ == "__main__":

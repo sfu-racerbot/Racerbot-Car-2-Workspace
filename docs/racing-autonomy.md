@@ -1000,6 +1000,43 @@ But it needs an accurate dynamics model, a QP or NLP solver running fast enough 
 
 ---
 
+## Choosing a steering law
+
+The controller can steer with one of four laws, selected at launch with
+`steering_law` (or `ros2 launch pure_pursuit pure_pursuit_launch.py steering_law:=<law>`).
+Everything else the node does — the LB deadman, the localization and cross-track
+watchdogs, off-line recovery, overtaking, the reactive LiDAR safety net, and the
+steering slew and curvature speed caps — is **unchanged** by the choice. The law
+is swapped in *between* those, and only ever picks a steering angle; speed stays
+with the profile and the node's caps no matter what is selected.
+
+The four laws, in plain words:
+
+- **`pure_pursuit`** (the default) steers toward a point some distance ahead on the
+  line. Simple, robust, and the baseline every other law must beat.
+- **`stanley`** looks at the *front axle* instead: how far it is to the side of the
+  line and which way the car is pointing, plus the steering a bend needs anyway. It
+  corrects sideways error directly and has no lookahead to tune.
+- **`lqr`** describes how far off the line the car is and how crooked it is as two
+  numbers, and applies a fixed feedback rule (`steering = feedforward − K·[e, θ]`)
+  tuned to trade hugging the line against gentle steering. The gain `K` is scheduled
+  on speed.
+- **`mpc`** plans the next second of steering moves (20 moves, 50 ms apart) that keep
+  the car on the line through the bends ahead, while never exceeding the servo's
+  angle or speed limits — then applies the first and re-plans next tick. It is the
+  only law that sees a bend coming precisely and respects the steering rate as a
+  hard limit. It needs the `osqp` solver; see
+  `docs/superpowers/specs/2026-09-27-tracking-04-mpc.md` (G0) before enabling it.
+
+**A law is only selected on the car after it has beaten pure pursuit in the
+simulator comparison harness** — selecting a law is never evidence it is better.
+The harness, the promotion rule, and the judging protocol live in
+[docs/sim-validation.md](sim-validation.md). The law and its gains are launch-time
+only (never live-tunable from the dashboard), because the node builds the law once
+at startup and a runtime change would report a value the control loop never uses.
+
+---
+
 ## Parameter reference
 
 All of these live in `src/pure_pursuit/config/pure_pursuit.yaml` — see that file for inline comments too.

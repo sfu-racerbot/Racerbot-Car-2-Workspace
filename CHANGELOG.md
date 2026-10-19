@@ -6,6 +6,58 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-10-19 — Pluggable steering laws for the race controller
+
+`pure_pursuit_node` can now steer with a choice of tracking law —
+`pure_pursuit` (today's, the default), `stanley`, `lqr`, or `mpc` —
+selected at launch with `steering_law`, without changing anything else the
+node does. Every safety mechanism (LB deadman, pose-stale/frozen and
+cross-track watchdogs, off-line recovery, opponent overtaking, the reactive
+LiDAR net, steering slew and curvature speed cap) applies to every law,
+because the law is swapped in *between* them rather than beside them. The
+laws output steering only; speed stays with the profile and the node's caps.
+
+### Behaviour changes
+
+- **New parameter `steering_law`** (default `pure_pursuit`, launch-time only)
+  plus per-law `stanley.*`, `lqr.*`, `mpc.*` gains and
+  `tracking_curvature_smoothing`. All are refused at runtime (the law is built
+  once at startup), and none are live-tunable from the dashboard. The launch
+  file passes `steering_law:=...` through.
+- **New failure states** in the decision log and `race_diagnostics`:
+  `steering_law_failed` (a law that cannot produce a trustworthy command stops
+  the car), `mpc_fallback` (a single-tick pure-pursuit fallback on an MPC miss),
+  and `mpc_miss_latched` (MPC gave up after `max_consecutive_misses`; cleared
+  by releasing LB).
+- **`/drive_intent`** re-runs the *active* law (replays the MPC solver's
+  predicted sequence rather than re-solving).
+
+### Code
+
+- `pure_pursuit/racing_math.py`: `estimate_signed_path_curvature`,
+  `project_onto_path`, `interpolate_along` (all ROS-free, all unit-tested).
+- `pure_pursuit/tracking_laws.py` (new, ROS-free): the `TrackingLaw` seam,
+  `PurePursuitLaw` (today's steering moved unchanged, verified by a
+  change-detector test against the pre-refactor computation), `StanleyLaw`,
+  `LqrLaw` + `LqrGainTable`, `MpcLaw` + `MissPolicy`, and `make_law`.
+- `tools/f1tenth_sim/run_validation.py`: `PathFollower` steers through the
+  pluggable law; `--steering-law`, `--law-param`, and `--compare` run a
+  candidate against pure pursuit over the same tracks × seeds. Refactor proof:
+  identical `pure_solo` metrics before/after. The promotion rule is pure
+  Python in `tools/f1tenth_sim/law_compare.py`, tested in
+  `tools/f1tenth_sim/tests/` (`python3 -m pytest tools/f1tenth_sim/tests/ -v`).
+- `tools/mpc_benchmark/benchmark_mpc.py` (new): the spec 04 G0 solve-time
+  benchmark, ready for the osqp install decision.
+
+### Judging results (spec 01)
+
+Both `stanley` and `lqr` **REJECT** at the shipped starting gains on the
+judging seeds (`docs/tracking-law-comparison.json`, command and analysis in
+`docs/sim-validation.md`). Neither ships; pure pursuit remains the default and
+the baseline. MPC is gated on spec 04 G0 (the osqp install decision and a
+Jetson benchmark) before it can be judged. Specs:
+`docs/superpowers/specs/2026-09-27-tracking-*.md`.
+
 ## 2026-09-27 (latest) — The dashboard moves to sfu-racerbot/web-dashboards
 
 `web_dashboard` and `usb_cam_stream` moved, with their git history

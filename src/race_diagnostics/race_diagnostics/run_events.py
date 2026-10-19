@@ -49,6 +49,9 @@ CRITICAL_PATTERNS = [
         # label, not a stop, and deliberately excluded).
         r'lidar_scan_missing|lidar_scan_stale|avoidance_scan_empty|'
         r'avoidance_boxed_in|waiting_for_profile|control_exception|'
+        # Tracking-law failure states (spec 00): a law that cannot produce a
+        # trustworthy command, and MPC's consecutive-miss latch.
+        r'steering_law_failed|mpc_miss_latched|'
         # Deadman states, independently implemented and independently
         # logged by every node that can publish a drive command.
         r'waiting_for_joy|joy_stale|deadman_button_missing|deadman_released'
@@ -67,6 +70,13 @@ CRITICAL_PATTERNS = [
     ('escape_maneuver', re.compile(
         r'\[(emergency_escape|ttc_escape|body_contact_escape|'
         r'off_racing_line_recovery)\]')),
+    # pure_pursuit_node's tracking-law states (spec 00 Unit 3 step 5): the
+    # selected law's own name is the DRIVE decision state, and MPC's
+    # single-tick fallback is the one to watch -- a fallback tick is benign,
+    # a latch (mpc_miss_latched, a watchdog STOP state above) means the
+    # controller gave up on MPC.
+    ('tracking_law', re.compile(
+        r'\[(pure_pursuit|stanley|lqr|mpc|mpc_fallback)\]')),
     # auto_map_race_node's OWN stop states -- not a driving node's safety
     # watchdog, but a supervisor narrating why it is forwarding nothing this
     # tick: waiting for the selected controller's next command, echoing that
