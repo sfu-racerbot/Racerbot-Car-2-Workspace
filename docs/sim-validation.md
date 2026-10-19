@@ -398,7 +398,9 @@ it can gate a change. The verdict logic is pure Python in
 **Tuning and judging are different seeds.** Tune a law's parameters with
 `--seed 1000 --repeat-seeds 5`; judge with `--seed 12345 --repeat-seeds 5`. A
 law tuned and judged on the same seeds has been fitted to them. Tune with
-`--law-param stanley.gain=1.2` (repeatable), then write the tuned values into
+`--law-param stanley.gain=1.2` (repeatable) — or, faster, with
+`tools/f1tenth_sim/law_sweep.py`, which runs the same comparison in parallel
+([steering-laws.md](steering-laws.md#tuning-stanley-and-lqr)) — then write the tuned values into
 both the law's params dataclass in `pure_pursuit/tracking_laws.py` and
 `config/pure_pursuit.yaml` together — a test (`test_yaml_mirrors_the_param_dataclasses`)
 fails if they drift apart, which is what stops the harness and the car running
@@ -406,30 +408,36 @@ different gains. Pure pursuit itself is always judged at its shipped parameters.
 
 ### Judging results
 
-Recorded 2026-10-19 on the Jetson Orin Nano (host), at commit `superpowers/tracking-laws`,
-with the judging command:
+Recorded 2026-10-19 on the Jetson Orin Nano (host), after the tuning described in
+[steering-laws.md](steering-laws.md#how-the-laws-were-tuned), with:
 
 ```bash
-python3 tools/f1tenth_sim/run_validation.py --compare stanley lqr \
-    --fidelity car --raceline shipped \
-    --tracks Spielberg Silverstone BrandsHatch \
-    --seed 12345 --repeat-seeds 5 \
+python3 tools/f1tenth_sim/law_sweep.py --laws stanley lqr mpc --seed 12345 --repeat-seeds 5 \
     --output docs/tracking-law-comparison.json
 ```
 
-Full rows are in [docs/tracking-law-comparison.json](tracking-law-comparison.json).
+`law_sweep.py` runs the same `run_pure_solo` runs and the same
+`law_compare.verdict` as `run_validation.py --compare`, three at a time. Full
+rows are in [docs/tracking-law-comparison.json](tracking-law-comparison.json).
 
-| Law | Verdict | Why |
-|---|---|---|
-| `stanley` | **REJECT** | Fails safety on every Silverstone run (laps < 1, and collisions at these seeds): it runs wide into corners the reactive safety net then stops for. On the laps it completes its cross-track is *better* than pure pursuit (Silverstone mean 0.022–0.057 m vs pure pursuit's 0.082 m on the tuning seeds), so the geometry is sound — the failure is arriving at corners too fast to stay within the safety margin. |
-| `lqr` | **REJECT** | Fails safety (laps < 1) on most Silverstone runs and one Spielberg run at the shipped `q_lateral=q_heading=r_steer=1.0`, the same run-wide-then-stopped pattern. Mean cross-track on completed laps was comparable to pure pursuit but never strictly better by enough to matter. |
+| Law | Runs passed | Mean cross-track | Mean lap | Verdict |
+|---|---|---|---|---|
+| `pure_pursuit` | 15/15 | 0.0690 m | 147.6 s | (baseline) |
+| `stanley` | 15/15 | 0.0679 m | 151.7 s | **PROMOTE** |
+| `lqr` | 15/15 | 0.0714 m | 145.2 s | **PROMOTE** |
+| `mpc` | 15/15 | 0.0694 m | 145.3 s | **PROMOTE** |
 
-Neither law ships. Per the promotion rule the answer to a REJECT is "it does not
-ship", not "relax the rule" — the laws remain selectable for development via
-`steering_law:=...`, and the harness is the place to iterate on their tuning and
-speed interaction. Pure pursuit remains the default and the baseline. MPC is
-gated separately on spec 04 G0 (osqp install + Jetson benchmark) before it can
-even be judged.
+All three are now *eligible* to be selected on the car, but every margin is
+under 5% and simulator-only, so **pure pursuit stays the default** until one has
+been run on the car (wheels off, then low speed).
+
+An earlier judging run (same day, before tuning) rejected both Stanley and LQR.
+That run is superseded, and the reasons are kept in
+[steering-laws.md](steering-laws.md#how-the-laws-were-tuned):
+
+- Stanley's formula counted the bend's steering twice and ran to the *inside* of corners.
+- Neither Stanley nor LQR compensated for the ~0.1 s between the pose and the wheels moving.
+- The harness itself modelled a stale 0.26 rad steering limit.
 
 ---
 

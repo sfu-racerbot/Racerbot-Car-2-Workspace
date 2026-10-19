@@ -13,6 +13,12 @@ top of upstream from the outside. Nothing here is ever pushed upstream, and a
 tools/f1tenth_sim/
 ├── setup.sh              # clones upstream, pinned; refuses a dirty checkout
 ├── run_validation.py     # the scenarios and the controllers under test
+├── law_compare.py        # the steering-law promotion rule (pure Python, tested)
+├── law_sweep.py          # steering-law comparison, runs in parallel (docs/steering-laws.md)
+├── gap_mirror.py         # gap_follow's per-scan pipeline, held to the node by a test
+├── eval_gap.py           # gap_follow on the indoor layouts and gym circuits, scored
+├── sweep_gap.py          # eval_gap over tracks x seeds in parallel (docs/gap-follow.md)
+├── trace_gap.py          # per-tick CSV/plot of every gap_follow decision on one track
 ├── README.md             # this file
 └── sim_fidelity/         # our fidelity layer
     ├── calibration.py    # this car's parameters, each tagged with provenance
@@ -358,7 +364,12 @@ Two deliberate non-changes worth knowing about, both cases where the obvious
   introduce unseeded randomness; reproducibility is what the harness is for.
 - **`run_validation.py` re-implements the node's command stage.** Audit R6 is
   still open, and it remains the highest-probability way for the harness to
-  pass while the real node does something different.
+  pass while the real node does something different. Since 2026-10-19 its
+  steering limit, rate, accelerations and lookahead defaults are read from
+  `src/pure_pursuit/config/pure_pursuit.yaml` rather than copied (the copy
+  had drifted to a 0.26 rad limit). `gap_follow`'s copy, `gap_mirror.py`, is
+  held to the node by `src/gap_follow/test/test_gap_mirror_parity.py`
+  ([docs/gap-follow.md](../../docs/gap-follow.md#keeping-the-mirror-honest)).
 - **None of this makes the simulator a safety argument.** Passing here is
   evidence against algorithm and regression errors, nothing more. The
   wheels-off-the-ground → low speed → open space order in

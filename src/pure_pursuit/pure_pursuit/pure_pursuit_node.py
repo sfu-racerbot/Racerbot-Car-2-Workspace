@@ -320,21 +320,26 @@ class PurePursuitNode(Node):
         # Half-window for smoothing applied to the path ONLY for the signed
         # curvature the laws read; the line being tracked stays unsmoothed.
         self.declare_parameter('tracking_curvature_smoothing', 2)
-        self.declare_parameter('stanley.gain', 1.6)
-        self.declare_parameter('stanley.softening', 0.4)
+        self.declare_parameter('stanley.gain', 5.0)
+        self.declare_parameter('stanley.softening', 1.0)
+        self.declare_parameter('stanley.delay_compensation', 0.10)
+        self.declare_parameter('stanley.steering_time_constant', 0.05)
         self.declare_parameter('lqr.q_lateral', 1.0)
         self.declare_parameter('lqr.q_heading', 1.0)
         self.declare_parameter('lqr.r_steer', 1.0)
         self.declare_parameter('lqr.v_grid_max', 6.0)
+        self.declare_parameter('lqr.delay_compensation', 0.08)
+        self.declare_parameter('lqr.steering_time_constant', 0.05)
         self.declare_parameter('mpc.dt', 0.05)
         self.declare_parameter('mpc.horizon_steps', 20)
-        self.declare_parameter('mpc.q_lateral', 1.0)
+        self.declare_parameter('mpc.q_lateral', 4.0)
         self.declare_parameter('mpc.q_heading', 1.0)
         self.declare_parameter('mpc.r_steer', 1.0)
         self.declare_parameter('mpc.r_rate', 0.01)
         self.declare_parameter('mpc.deadline_sec', 0.008)
         self.declare_parameter('mpc.max_iter', 4000)
         self.declare_parameter('mpc.max_consecutive_misses', 3)
+        self.declare_parameter('mpc.delay_compensation', 0.05)
 
         # --- Opponent detection mode: 'heuristic' (shape-based, no map
         # needed) or 'map' (ray-cast map subtraction via range_libc --
@@ -586,6 +591,10 @@ class PurePursuitNode(Node):
             raise RuntimeError(
                 f'pure_pursuit_node: could not build steering_law '
                 f"'{self.steering_law_name}': {exc}") from exc
+        law_params = getattr(self.tracking_law, 'params', None)
+        self.get_logger().info(
+            f"steering law: {self.steering_law_name}"
+            + (f" {law_params}" if law_params is not None else ""))
         # MPC's single-tick fallback (only built when MPC is the active law).
         self._mpc_fallback_law = None
         if self.steering_law_name == 'mpc':
@@ -788,11 +797,13 @@ class PurePursuitNode(Node):
 
     # Every launch-time parameter of each alternative law, by law.
     _LAW_PARAM_NAMES = {
-        'stanley': ('stanley.gain', 'stanley.softening'),
-        'lqr': ('lqr.q_lateral', 'lqr.q_heading', 'lqr.r_steer', 'lqr.v_grid_max'),
+        'stanley': ('stanley.gain', 'stanley.softening', 'stanley.delay_compensation',
+                    'stanley.steering_time_constant'),
+        'lqr': ('lqr.q_lateral', 'lqr.q_heading', 'lqr.r_steer', 'lqr.v_grid_max',
+                'lqr.delay_compensation', 'lqr.steering_time_constant'),
         'mpc': ('mpc.dt', 'mpc.horizon_steps', 'mpc.q_lateral', 'mpc.q_heading',
                 'mpc.r_steer', 'mpc.r_rate', 'mpc.deadline_sec', 'mpc.max_iter',
-                'mpc.max_consecutive_misses'),
+                'mpc.max_consecutive_misses', 'mpc.delay_compensation'),
     }
 
     def _declared_law_param_names(self, prefix: str):

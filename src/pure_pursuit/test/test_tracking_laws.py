@@ -152,11 +152,16 @@ def test_yaml_mirrors_the_param_dataclasses():
     stanley = tracking_laws.StanleyParams()
     assert cfg['stanley.gain'] == pytest.approx(stanley.gain)
     assert cfg['stanley.softening'] == pytest.approx(stanley.softening)
+    assert cfg['stanley.delay_compensation'] == pytest.approx(stanley.delay_compensation)
+    assert cfg['stanley.steering_time_constant'] == pytest.approx(
+        stanley.steering_time_constant)
     lqr = tracking_laws.LqrParams()
     assert cfg['lqr.q_lateral'] == pytest.approx(lqr.q_lateral)
     assert cfg['lqr.q_heading'] == pytest.approx(lqr.q_heading)
     assert cfg['lqr.r_steer'] == pytest.approx(lqr.r_steer)
     assert cfg['lqr.v_grid_max'] == pytest.approx(lqr.v_grid_max)
+    assert cfg['lqr.delay_compensation'] == pytest.approx(lqr.delay_compensation)
+    assert cfg['lqr.steering_time_constant'] == pytest.approx(lqr.steering_time_constant)
     mpc = tracking_laws.MpcParams()
     assert cfg['mpc.dt'] == pytest.approx(mpc.dt)
     assert cfg['mpc.horizon_steps'] == mpc.horizon_steps
@@ -167,6 +172,7 @@ def test_yaml_mirrors_the_param_dataclasses():
     assert cfg['mpc.deadline_sec'] == pytest.approx(mpc.deadline_sec)
     assert cfg['mpc.max_iter'] == mpc.max_iter
     assert cfg['mpc.max_consecutive_misses'] == mpc.max_consecutive_misses
+    assert cfg['mpc.delay_compensation'] == pytest.approx(mpc.delay_compensation)
 
 
 # ============================================================================
@@ -175,7 +181,11 @@ def test_yaml_mirrors_the_param_dataclasses():
 # ============================================================================
 
 def _stanley():
-    return make('stanley', **{'stanley.gain': GAIN, 'stanley.softening': SOFTENING})
+    # The bare law: delay compensation and output smoothing off (they have
+    # their own tests below), so each expected value is the formula alone.
+    return make('stanley', **{'stanley.gain': GAIN, 'stanley.softening': SOFTENING,
+                              'stanley.delay_compensation': 0.0,
+                              'stanley.steering_time_constant': 0.0})
 
 
 def test_stanley_test1_on_line_zero():
@@ -239,42 +249,18 @@ def test_stanley_test5_heading_wrap_seam():
     assert abs(r.steering) < 0.2   # a missing wrap would give ~ +/- 2pi
 
 
-def test_stanley_test6_circle_feedforward_ccw():
-    # The feedforward term: a car on a gentle (R=20 m) CCW circle, rear axle on
-    # it and tangent, at speed. theta_e ~ 0 and e_f ~ L^2/(2R) is tiny, so the
-    # command is dominated by the +atan(L*kappa) feedforward. A large R keeps
-    # the result well under the 0.26 clip and the discretization negligible.
-    ctx = circle_context(radius=20.0, spacing=0.02, ccw=True, speed=1.0)
-    alpha = math.pi / 4.0
-    r_poly = 20.0 - (ctx.seg_len[0] / 2.0) ** 2 / (2.0 * 20.0)
-    rear = np.array([r_poly * math.cos(alpha), r_poly * math.sin(alpha)])
-    yaw = alpha + math.pi / 2.0
-    nearest, _ = racing_math.find_nearest_index(ctx.xy, (rear[0], rear[1]), closed=True)
-    r = _stanley().steer(TrackingInput(x=rear[0], y=rear[1], yaw=yaw, speed=1.0,
-                                       nearest_idx=nearest, previous_steering=0.0), ctx)
-    # Closed form: feedforward plus the (small) lateral correction the chord
-    # inset produces, recomputed rather than assumed zero.
-    front = rear + L * np.array([math.cos(yaw), math.sin(yaw)])
-    nf, _ = racing_math.find_nearest_index(ctx.xy, front, closed=True)
-    proj_f = racing_math.project_onto_path(ctx.xy, ctx.seg_len, front, nf, True)
-    theta_e = (proj_f.heading - yaw + math.pi) % (2 * math.pi) - math.pi
-    kappa_f = racing_math.interpolate_along(ctx.curvature, proj_f, True)
-    expected = (theta_e
-                - math.atan(GAIN * proj_f.lateral_error / (1.0 + SOFTENING))
-                + math.atan(L * kappa_f))
-    assert r.steering == pytest.approx(expected, abs=1e-9)  # rad
-    # And the feedforward really is the R=20 value (a dropped term fails this).
-    assert math.atan(L * kappa_f) == pytest.approx(math.atan(L / 20.0), abs=1e-3)
-    assert abs(r.steering - math.atan(L * kappa_f)) < 0.03
+def _stanley_on_circle(radius, ccw):
+    """Stanley's command with the rear axle on a circle, tangent to it.
 
-
-def test_stanley_test7_circle_feedforward_cw_negated():
-    # Mirror of test 6 on the same gentle circle traversed CW.
-    ctx = circle_context(radius=20.0, spacing=0.02, ccw=False, speed=1.0)
+    Returns (command, closed-form value of the formula at that pose, the
+    front axle's lateral error). The closed form is recomputed here from
+    the projection, independently of the law's code path."""
+    ctx = circle_context(radius=radius, spacing=0.01, ccw=ccw, speed=1.0)
     alpha = math.pi / 4.0
-    r_poly = 20.0 - (ctx.seg_len[0] / 2.0) ** 2 / (2.0 * 20.0)
+    # On the polygon, not the true circle: the chord midpoint is inset.
+    r_poly = radius - (ctx.seg_len[0] / 2.0) ** 2 / (2.0 * radius)
     rear = np.array([r_poly * math.cos(alpha), r_poly * math.sin(alpha)])
-    yaw = alpha - math.pi / 2.0
+    yaw = alpha + (math.pi / 2.0 if ccw else -math.pi / 2.0)
     nearest, _ = racing_math.find_nearest_index(ctx.xy, (rear[0], rear[1]), closed=True)
     r = _stanley().steer(TrackingInput(x=rear[0], y=rear[1], yaw=yaw, speed=1.0,
                                        nearest_idx=nearest, previous_steering=0.0), ctx)
@@ -283,12 +269,50 @@ def test_stanley_test7_circle_feedforward_cw_negated():
     proj_f = racing_math.project_onto_path(ctx.xy, ctx.seg_len, front, nf, True)
     theta_e = (proj_f.heading - yaw + math.pi) % (2 * math.pi) - math.pi
     kappa_f = racing_math.interpolate_along(ctx.curvature, proj_f, True)
-    expected = (theta_e
-                - math.atan(GAIN * proj_f.lateral_error / (1.0 + SOFTENING))
-                + math.atan(L * kappa_f))
+    big_r = 1.0 / abs(kappa_f)
+    e_target = -math.copysign(math.hypot(big_r, L) - big_r, kappa_f)
+    expected = theta_e - math.atan(
+        GAIN * (proj_f.lateral_error - e_target) / (1.0 + SOFTENING))
+    return r, expected, proj_f.lateral_error
+
+
+def test_stanley_test6_circle_holds_the_kinematic_steering_ccw():
+    # Oracle: the kinematic bicycle. A car whose rear axle runs on a circle
+    # of radius R, tangent to it, keeps doing so only at delta = atan(L/R)
+    # -- so that is what Stanley must command there, with no lateral
+    # correction left over. (Spec 02's formula added +atan(L kappa) on top
+    # of theta_e, which already carries it, and commanded ~2x this; see
+    # docs/steering-laws.md#stanley.) R = 2 m keeps atan(L/R) = 0.178 rad
+    # well inside the 0.26 rad test clip, so a doubled term cannot hide.
+    r, expected, e_f = _stanley_on_circle(2.0, ccw=True)
+    assert r.steering == pytest.approx(expected, abs=1e-9)  # rad, the formula
+    # The front axle sits sqrt(R^2+L^2)-R outside (right of) a left bend.
+    assert e_f == pytest.approx(-(math.hypot(2.0, L) - 2.0), abs=1e-3)  # m
+    # 2 mrad: the path is a 1 cm polygon, so its heading and curvature are
+    # piecewise, not the circle's exact ones.
+    assert r.steering == pytest.approx(math.atan(L / 2.0), abs=2e-3)  # rad
+
+
+def test_stanley_test7_circle_holds_the_kinematic_steering_cw():
+    # Mirror of test 6: a right bend needs -atan(L/R), front axle outside
+    # (left of) the bend.
+    r, expected, e_f = _stanley_on_circle(2.0, ccw=False)
     assert r.steering == pytest.approx(expected, abs=1e-9)
-    assert math.atan(L * kappa_f) == pytest.approx(-math.atan(L / 20.0), abs=1e-3)
-    assert r.steering < 0.0
+    assert e_f == pytest.approx(math.hypot(2.0, L) - 2.0, abs=1e-3)
+    assert r.steering == pytest.approx(-math.atan(L / 2.0), abs=2e-3)
+
+
+def test_stanley_front_axle_offset_closed_form():
+    # Rear axle on a circle of radius R: the front axle is L ahead along the
+    # tangent, so at distance hypot(R, L) from the centre.
+    assert tracking_laws.StanleyLaw.front_axle_offset(0.0, L) == 0.0
+    for kappa in (0.5, -0.5, 1.0 / 1.35):
+        big_r = 1.0 / abs(kappa)
+        expected = -math.copysign(math.hypot(big_r, L) - big_r, kappa)
+        assert tracking_laws.StanleyLaw.front_axle_offset(kappa, L) == pytest.approx(
+            expected, abs=1e-12)  # m
+    assert tracking_laws.StanleyLaw.front_axle_offset(1.0, L) < 0.0   # left bend
+    assert tracking_laws.StanleyLaw.front_axle_offset(-1.0, L) > 0.0  # right bend
 
 
 def test_stanley_test8_standstill_uses_softening_and_clips():
@@ -379,8 +403,11 @@ def _riccati_recursion(A, B, Q, R, iterations=20000, tol=1e-12):
 
 
 def _lqr():
+    # The bare law, as _stanley(): prediction and smoothing off.
     return make('lqr', **{'lqr.q_lateral': 1.0, 'lqr.q_heading': 1.0,
-                          'lqr.r_steer': 1.0, 'lqr.v_grid_max': 6.0})
+                          'lqr.r_steer': 1.0, 'lqr.v_grid_max': 6.0,
+                          'lqr.delay_compensation': 0.0,
+                          'lqr.steering_time_constant': 0.0})
 
 
 def test_lqr_test1_gain_matches_riccati_recursion():
@@ -625,7 +652,8 @@ def osqp_available():
 
 
 def _mpc(**overrides):
-    params = {'mpc.deadline_sec': 10.0, 'mpc.max_iter': 8000}
+    params = {'mpc.deadline_sec': 10.0, 'mpc.max_iter': 8000,
+              'mpc.delay_compensation': 0.0}
     params.update(overrides)
     return make('mpc', **params)
 
@@ -662,8 +690,12 @@ def test_mpc_test1_lqr_equivalence(osqp_available):
     K = table.gain_at(1.5)
     expected = -(K[0] * e0 + K[1] * th0)
     for n in (5, 20):
+        # Weights pinned to the table's (1, 1, 1): the shipped defaults are
+        # tuned, and this is an identity, not a tuning check.
         law = tracking_laws.make_law('mpc', wide, {
             'mpc.dt': 0.05, 'mpc.horizon_steps': n, 'mpc.r_rate': 0.0,
+            'mpc.q_lateral': 1.0, 'mpc.q_heading': 1.0, 'mpc.r_steer': 1.0,
+            'mpc.delay_compensation': 0.0,
             'mpc.deadline_sec': 10.0, 'mpc.max_iter': 8000})
         r = law.steer(TrackingInput(x=1.0, y=e0, yaw=th0, speed=1.5,
                                     nearest_idx=5, previous_steering=0.0), ctx)
@@ -861,8 +893,10 @@ def test_mpc_bound_check_tolerates_solver_accuracy_but_not_real_violations(
     law = _mpc()
     n = law.params.horizon_steps
     law._solver = _FixedSolution([LIMITS.max_steering_angle + overshoot] * n)
-    inp = TrackingInput(x=0.0, y=0.0, yaw=0.0, speed=1.5,
-                        nearest_idx=0, previous_steering=0.0)
+    # Already at the bound, so the plan is rate-feasible and the angle bound
+    # is the only one in play.
+    inp = TrackingInput(x=0.0, y=0.0, yaw=0.0, speed=1.5, nearest_idx=0,
+                        previous_steering=LIMITS.max_steering_angle)
     if is_miss:
         with pytest.raises(tracking_laws.MpcMiss, match='solution: violates'):
             law.steer(inp, ctx)
@@ -987,3 +1021,199 @@ def test_pure_pursuit_matches_the_pre_refactor_node_computation():
                                          previous_steering=0.0), ctx)
         assert result.steering == pytest.approx(expected, abs=2e-5), \
             (px, py, yaw, v, result.steering, expected)
+
+
+# ============================================================================
+# Delay compensation, output smoothing, and MPC's exact-limit projection
+# (docs/steering-laws.md#delay-compensation-and-smoothing). Expected values
+# are the kinematic bicycle and the first-order filter in closed form.
+# ============================================================================
+
+def test_predict_input_without_delay_or_motion_is_the_input():
+    ctx = straight_context()
+    inp = TrackingInput(x=1.0, y=0.1, yaw=0.2, speed=2.0, nearest_idx=5,
+                        previous_steering=0.1)
+    assert tracking_laws.predict_input(inp, ctx, 0.0, L) == inp
+    still = TrackingInput(x=1.0, y=0.1, yaw=0.2, speed=0.0, nearest_idx=5,
+                          previous_steering=0.1)
+    assert tracking_laws.predict_input(still, ctx, 0.1, L) == still
+
+
+def test_predict_input_straight_ahead_and_nearest_index_follows():
+    # Wheels straight: the car moves v * delay along its heading. On a 1 cm
+    # path the nearest waypoint must be the global nearest to the new pose.
+    ctx = straight_context(n=1001, length=10.0)
+    inp = TrackingInput(x=1.0, y=0.1, yaw=0.0, speed=2.0, nearest_idx=100,
+                        previous_steering=0.0)
+    out = tracking_laws.predict_input(inp, ctx, 0.1, L)
+    assert out.x == pytest.approx(1.2, abs=1e-12)   # m
+    assert out.y == pytest.approx(0.1, abs=1e-12)
+    assert out.yaw == pytest.approx(0.0, abs=1e-12)
+    assert (out.speed, out.previous_steering) == (2.0, 0.0)
+    expected_idx, _ = racing_math.find_nearest_index(ctx.xy, (1.2, 0.1), closed=False)
+    assert out.nearest_idx == expected_idx == 120
+
+
+@pytest.mark.parametrize('delta', [0.2, -0.2])
+def test_predict_input_follows_the_bicycle_arc(delta):
+    # Oracle: rear axle on a circle about the instantaneous centre
+    # c = p + (1/kappa) * (-sin yaw, cos yaw), kappa = tan(delta)/L, swept
+    # through angle kappa * s for arc length s = v * delay.
+    ctx = straight_context(n=1001, length=10.0)
+    yaw0, v, delay = 0.3, 3.0, 0.1
+    inp = TrackingInput(x=2.0, y=0.0, yaw=yaw0, speed=v, nearest_idx=200,
+                        previous_steering=delta)
+    out = tracking_laws.predict_input(inp, ctx, delay, L)
+    kappa = math.tan(delta) / L
+    cx, cy = 2.0 - math.sin(yaw0) / kappa, 0.0 + math.cos(yaw0) / kappa
+    yaw1 = yaw0 + kappa * v * delay
+    assert out.x == pytest.approx(cx + math.sin(yaw1) / kappa, abs=1e-9)  # m
+    assert out.y == pytest.approx(cy - math.cos(yaw1) / kappa, abs=1e-9)
+    assert out.yaw == pytest.approx(yaw1, abs=1e-12)  # rad
+    expected_idx, _ = racing_math.find_nearest_index(ctx.xy, (out.x, out.y), closed=False)
+    assert out.nearest_idx == expected_idx
+
+
+def test_smooth_steering_is_a_first_order_filter():
+    assert tracking_laws.smooth_steering(0.2, -0.1, 0.0, 0.025) == 0.2
+    # tau = dt: halfway.
+    assert tracking_laws.smooth_steering(0.2, -0.1, 0.025, 0.025) == pytest.approx(
+        0.05, abs=1e-12)
+    # tau = 2 dt: a third of the way.
+    assert tracking_laws.smooth_steering(0.2, -0.1, 0.05, 0.025) == pytest.approx(
+        -0.1 + 0.3 / 3.0, abs=1e-12)
+
+
+def _smoothed_stanley(tau):
+    return make('stanley', **{'stanley.gain': GAIN, 'stanley.softening': SOFTENING,
+                              'stanley.delay_compensation': 0.0,
+                              'stanley.steering_time_constant': tau})
+
+
+def test_stanley_smoothing_moves_from_the_last_command():
+    ctx = straight_context(speed=1.0)
+    alpha = LIMITS.control_dt / (0.05 + LIMITS.control_dt)
+    r = _smoothed_stanley(0.05).steer(TrackingInput(
+        x=0.0, y=0.2, yaw=0.0, speed=1.0, nearest_idx=0, previous_steering=0.1), ctx)
+    bare = -math.atan(GAIN * 0.2 / (1.0 + SOFTENING))
+    assert r.steering == pytest.approx(0.1 + alpha * (bare - 0.1), abs=1e-12)  # rad
+    assert r.unclipped == pytest.approx(bare, abs=1e-12)
+
+
+def test_stanley_smoothing_filters_the_clipped_command():
+    # At standstill the bare law asks for -0.675 rad; the filter must move
+    # toward the clip (-0.26), not toward the request.
+    ctx = straight_context(speed=1.0)
+    alpha = LIMITS.control_dt / (0.05 + LIMITS.control_dt)
+    r = _smoothed_stanley(0.05).steer(TrackingInput(
+        x=0.0, y=0.2, yaw=0.0, speed=0.0, nearest_idx=0, previous_steering=0.1), ctx)
+    limit = LIMITS.max_steering_angle
+    assert r.steering == pytest.approx(0.1 + alpha * (-limit - 0.1), abs=1e-12)
+
+
+def test_lqr_smoothing_moves_from_the_last_command():
+    ctx = straight_context(speed=2.0)
+    inp = TrackingInput(x=1.0, y=0.1, yaw=0.05, speed=2.0, nearest_idx=5,
+                        previous_steering=0.05)
+    bare = _lqr().steer(inp, ctx).steering
+    smoothed = make('lqr', **{'lqr.delay_compensation': 0.0,
+                              'lqr.steering_time_constant': 0.05}).steer(inp, ctx)
+    alpha = LIMITS.control_dt / (0.05 + LIMITS.control_dt)
+    assert smoothed.steering == pytest.approx(0.05 + alpha * (bare - 0.05), abs=1e-12)
+
+
+def test_stanley_delay_compensation_steers_from_the_predicted_pose():
+    # Straight line, wheels straight, heading 0.1 rad off it at 2 m/s: in
+    # 0.1 s the rear axle moves 0.2 m along its heading, and the bare law is
+    # evaluated there (front axle L further on).
+    ctx = straight_context(n=1001, length=10.0)
+    yaw, v, delay = 0.1, 2.0, 0.1
+    law = make('stanley', **{'stanley.gain': GAIN, 'stanley.softening': SOFTENING,
+                             'stanley.delay_compensation': delay,
+                             'stanley.steering_time_constant': 0.0})
+    r = law.steer(TrackingInput(x=1.0, y=0.0, yaw=yaw, speed=v, nearest_idx=100,
+                                previous_steering=0.0), ctx)
+    e_f = (v * delay + L) * math.sin(yaw)
+    expected = -yaw - math.atan(GAIN * e_f / (v + SOFTENING))
+    assert r.steering == pytest.approx(expected, abs=1e-9)  # rad
+
+
+def _predicted_by_hand(x, y, yaw, v, delta, delay, ctx):
+    """The bicycle arc in centre form (independent of predict_input's)."""
+    s = v * delay
+    kappa = math.tan(delta) / L
+    if abs(kappa) < 1e-12:
+        x1, y1, yaw1 = x + s * math.cos(yaw), y + s * math.sin(yaw), yaw
+    else:
+        cx, cy = x - math.sin(yaw) / kappa, y + math.cos(yaw) / kappa
+        yaw1 = yaw + kappa * s
+        x1, y1 = cx + math.sin(yaw1) / kappa, cy - math.cos(yaw1) / kappa
+    idx, _ = racing_math.find_nearest_index(ctx.xy, (x1, y1), closed=ctx.closed)
+    return TrackingInput(x=x1, y=y1, yaw=yaw1, speed=v, nearest_idx=int(idx),
+                         previous_steering=delta)
+
+
+def test_lqr_delay_compensation_steers_from_the_predicted_pose():
+    ctx = circle_context(radius=3.0, spacing=0.01, ccw=True, speed=2.0)
+    # Heading 0.2 rad outward and the rack turned the wrong way: the car
+    # is about to move well off where it is now.
+    x, y, yaw, v, delta, delay = 3.05, 0.0, math.pi / 2.0 + 0.2, 2.0, -0.1, 0.08
+    nearest, _ = racing_math.find_nearest_index(ctx.xy, (x, y), closed=True)
+    law = make('lqr', **{'lqr.delay_compensation': delay,
+                         'lqr.steering_time_constant': 0.0})
+    r = law.steer(TrackingInput(x=x, y=y, yaw=yaw, speed=v, nearest_idx=nearest,
+                                previous_steering=delta), ctx)
+    expected = _lqr().steer(_predicted_by_hand(x, y, yaw, v, delta, delay, ctx), ctx)
+    assert r.steering == pytest.approx(expected.steering, abs=1e-9)  # rad
+    # And it is not the undelayed answer, or this proves nothing.
+    undelayed = _lqr().steer(TrackingInput(x=x, y=y, yaw=yaw, speed=v,
+                                           nearest_idx=nearest, previous_steering=delta), ctx)
+    assert abs(r.steering - undelayed.steering) > 0.01
+
+
+def test_mpc_delay_compensation_steers_from_the_predicted_pose(osqp_available):
+    ctx = circle_context(radius=3.0, spacing=0.01, ccw=True, speed=2.0)
+    x, y, yaw, v, delta, delay = 3.05, 0.0, math.pi / 2.0 + 0.2, 2.0, -0.1, 0.05
+    nearest, _ = racing_math.find_nearest_index(ctx.xy, (x, y), closed=True)
+    r = _mpc(**{'mpc.delay_compensation': delay}).steer(TrackingInput(
+        x=x, y=y, yaw=yaw, speed=v, nearest_idx=nearest, previous_steering=delta), ctx)
+    expected = _mpc().steer(_predicted_by_hand(x, y, yaw, v, delta, delay, ctx), ctx)
+    # 1e-6 rad: two separate OSQP solves of the same QP.
+    assert r.steering == pytest.approx(expected.steering, abs=1e-6)
+    undelayed = _mpc().steer(TrackingInput(x=x, y=y, yaw=yaw, speed=v,
+                                           nearest_idx=nearest, previous_steering=delta), ctx)
+    assert abs(r.steering - undelayed.steering) > 1e-3
+
+
+@pytest.mark.parametrize('dotted', [
+    'stanley.delay_compensation', 'stanley.steering_time_constant',
+    'lqr.delay_compensation', 'lqr.steering_time_constant'])
+def test_delay_and_smoothing_params_are_bounded(dotted):
+    law = dotted.split('.')[0]
+    for value in (0.0, 0.5):   # both ends are allowed
+        make(law, **{dotted: value})
+    for value in (-0.01, 0.51, math.nan, math.inf):
+        with pytest.raises(ValueError, match=dotted):
+            make(law, **{dotted: value})
+
+
+def test_mpc_delay_param_is_bounded(osqp_available):
+    _mpc(**{'mpc.delay_compensation': 0.5})
+    for value in (-0.01, 0.51, math.nan):
+        with pytest.raises(ValueError, match='mpc.delay_compensation'):
+            _mpc(**{'mpc.delay_compensation': value})
+
+
+def test_mpc_projection_onto_exact_limits():
+    project = tracking_laws.MpcLaw._project_onto_limits
+    # Rate: 1 rad/s * 0.025 s first, then 0.05 s a move.
+    out = project([0.3, -0.3, 0.0], 0.0, 0.26, 1.0, [0.025, 0.05, 0.05])
+    assert out == pytest.approx([0.025, -0.025, 0.0], abs=1e-12)
+    # Angle: within the rate step of 0.25 but past 0.26.
+    assert project([0.4], 0.25, 0.26, 1.0, [0.025]) == pytest.approx([0.26], abs=1e-12)
+    # A feasible plan passes through untouched.
+    plan = [0.01, 0.03, 0.05]
+    assert project(plan, 0.0, 0.26, 1.0, [0.025, 0.05, 0.05]) == plan
+    # A previous command past the bound is clamped before measuring from it:
+    # from 0.26 (not 0.4) the first move may drop to 0.235.
+    assert project([-0.3], 0.4, 0.26, 1.0, [0.025]) == pytest.approx([0.235], abs=1e-12)

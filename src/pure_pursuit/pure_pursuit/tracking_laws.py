@@ -107,6 +107,31 @@ def _require_finite(*values):
                 f'non-finite input to a steering law: {values}')
 
 
+def _check_delay(name: str, value: float) -> None:
+    if not (math.isfinite(value) and 0.0 <= value <= 0.5):
+        raise ValueError(f'{name} must be in [0, 0.5] s, got {value}')
+
+
+def smooth_steering(target: float, previous: float, time_constant: float,
+                    dt: float) -> float:
+    """First-order low-pass from the last command toward the law's output.
+
+    Stanley and LQR answer the measured error *now*, so localisation noise
+    reaches the rack at full gain: with the simulator's 2 cm of pose noise,
+    Stanley at gain 3 and 1 m/s jitters ~0.04 rad a tick, three times pure
+    pursuit (whose lookahead averages it away). The jitter is not free --
+    the speed cap reads it as curvature and slows the car
+    (docs/steering-laws.md#tuning-stanley-and-lqr). A time constant of a
+    tick or two removes it; the lag it adds is what delay_compensation is
+    for. Stateless: `previous` is the last command, TrackingInput's
+    previous_steering.
+    """
+    if time_constant <= 0.0:
+        return target
+    alpha = dt / (time_constant + dt)
+    return previous + alpha * (target - previous)
+
+
 def _wrap(angle: float) -> float:
     """Wrap to (-pi, pi] -- see the conventions table in spec 00."""
     return float((angle + math.pi) % (2.0 * math.pi) - math.pi)
@@ -141,6 +166,49 @@ def sample_at_arc(values: np.ndarray, cumulative: np.ndarray, s: float,
     span = seg_end - seg_start
     t = 0.0 if span < 1e-9 else (s - seg_start) / span
     return float(values[idx]) + t * (float(values[nxt]) - float(values[idx]))
+
+
+def predict_input(inp: 'TrackingInput', path: 'PathContext', delay: float,
+                  wheelbase: float) -> 'TrackingInput':
+    """The car `delay` seconds from now, if it holds its speed and steering.
+
+    A command is not acted on the instant it is computed: the pose it was
+    computed from is already a scan or two old, the command waits a tick in
+    transport, and the servo takes ~40 ms to reach it (the simulator's car
+    profile models all three, ~0.1 s together -- tools/f1tenth_sim/
+    sim_fidelity/calibration.py). Pure pursuit hides that by aiming a metre
+    or more ahead; a law that corrects the error *now* -- Stanley, LQR --
+    is always correcting an error the car has already moved past, and at
+    race speed that is an oscillation. Computing the law at the predicted
+    pose instead is standard delay compensation.
+
+    The prediction is the kinematic bicycle on a constant-curvature arc
+    (curvature tan(previous_steering)/wheelbase, the rack's current angle),
+    and the nearest waypoint is walked forward by the same distance then
+    refined locally, so the result can be handed to any law unchanged.
+    """
+    if delay <= 0.0:
+        return inp
+    distance = max(inp.speed, 0.0) * delay
+    if distance <= 0.0:
+        return inp
+    curvature = math.tan(inp.previous_steering) / wheelbase
+    yaw0 = inp.yaw
+    if abs(curvature) < 1e-9:
+        x = inp.x + distance * math.cos(yaw0)
+        y = inp.y + distance * math.sin(yaw0)
+        yaw = yaw0
+    else:
+        yaw = yaw0 + curvature * distance
+        x = inp.x + (math.sin(yaw) - math.sin(yaw0)) / curvature
+        y = inp.y - (math.cos(yaw) - math.cos(yaw0)) / curvature
+    walked = racing_math.find_lookahead_index(
+        path.seg_len, inp.nearest_idx, distance, closed=path.closed)
+    nearest, _ = racing_math.find_nearest_index(
+        path.xy, (x, y), closed=path.closed, prev_index=walked, search_window=6)
+    return TrackingInput(x=x, y=y, yaw=_wrap(yaw), speed=inp.speed,
+                         nearest_idx=int(nearest),
+                         previous_steering=inp.previous_steering)
 
 
 # ---------------------------------------------------------------------------
@@ -204,20 +272,41 @@ class PurePursuitLaw:
 
 @dataclass(frozen=True)
 class StanleyParams:
-    gain: float = 1.6           # stanley.gain, 1/s
-    softening: float = 0.4      # stanley.softening, m/s
+    # Tuned on the harness's tuning seeds, judged on the judging seeds
+    # (docs/steering-laws.md#tuning-stanley-and-lqr); keep in step with
+    # pure_pursuit.yaml.
+    gain: float = 5.0           # stanley.gain, 1/s
+    softening: float = 1.0      # stanley.softening, m/s
+    delay_compensation: float = 0.10  # stanley.delay_compensation, s (predict_input)
+    steering_time_constant: float = 0.05  # stanley.steering_time_constant, s (smooth_steering)
 
 
 class StanleyLaw:
-    """Stanley: steer by the front axle's lateral error plus heading error,
-    plus the curvature feedforward a bend needs anyway. Reference: Hoffmann
-    et al., ACC 2007.
+    """Stanley: steer by the front axle's heading error plus a correction for
+    its lateral error. Reference: Hoffmann et al., ACC 2007.
 
-        delta = theta_e - atan(k * e_f / (v + v_soft)) + atan(L * kappa_f)
+        delta = theta_e - atan(k * (e_f - e_f*) / (v + v_soft))
 
-    where theta_e = wrap(path_heading - yaw) is the heading error measured
-    path-minus-car (the negative of spec 00's `theta`), `e_f` the signed
-    lateral error of the *front* axle, and the last term the feedforward.
+    theta_e = wrap(path_heading - yaw) is measured at the *front* axle's
+    projection, path minus car (the negative of spec 00's `theta`); e_f is
+    the front axle's signed lateral error.
+
+    Two corrections to spec 02's formula, both from the kinematic bicycle
+    (docs/steering-laws.md#stanley):
+
+    * **No separate curvature feedforward.** On a bend the path heading at the
+      front axle's projection is already ahead of the car's heading by the
+      steering the bend needs (atan(L/R) on a circle), so theta_e carries the
+      feedforward. Spec 02 also added atan(L * kappa), which counted it twice:
+      at steady state that forces a front-axle offset of v*L*kappa/k to the
+      inside of the bend -- ~0.6 m at 3 m/s in a 1 m-radius corner, clipped
+      only by the steering limit -- and the car ran inside and hit the wall on
+      every Silverstone run in the harness.
+    * **The line is a rear-axle line.** Every racing line in this workspace is
+      a base_link (rear axle) path. A car whose rear axle follows a circle of
+      radius R has its front axle sqrt(R^2 + L^2) - R *outside* it, so that is
+      the front-axle offset e_f* Stanley steers to, not zero. Without it the
+      rear axle cuts L^2/(2R) inside every bend.
     """
 
     name = 'stanley'
@@ -227,15 +316,29 @@ class StanleyLaw:
             raise ValueError(f'stanley.gain must be > 0, got {params.gain}')
         if not (math.isfinite(params.softening) and params.softening > 0.0):
             raise ValueError(f'stanley.softening must be > 0, got {params.softening}')
+        _check_delay('stanley.delay_compensation', params.delay_compensation)
+        _check_delay('stanley.steering_time_constant', params.steering_time_constant)
         self.limits = limits
         self.params = params
 
     def reset(self) -> None:
         return None
 
+    @staticmethod
+    def front_axle_offset(kappa: float, wheelbase: float) -> float:
+        """Signed lateral offset of the front axle when the rear axle is on a
+        path of curvature `kappa` (+ = left): outside the bend, so negative
+        for a left turn."""
+        if abs(kappa) < 1e-9:
+            return 0.0
+        radius = 1.0 / abs(kappa)
+        return -math.copysign(math.hypot(radius, wheelbase) - radius, kappa)
+
     def steer(self, inp: TrackingInput, path: PathContext) -> SteeringResult:
-        _require_finite(inp.x, inp.y, inp.yaw, inp.speed)
+        _require_finite(inp.x, inp.y, inp.yaw, inp.speed, inp.previous_steering)
         L = self.limits.wheelbase
+        previous = inp.previous_steering
+        inp = predict_input(inp, path, self.params.delay_compensation, L)
         # The error is measured at the front axle, not the rear.
         xf = inp.x + L * math.cos(inp.yaw)
         yf = inp.y + L * math.sin(inp.yaw)
@@ -254,16 +357,18 @@ class StanleyLaw:
         e_f = proj.lateral_error
         theta_e = _wrap(proj.heading - inp.yaw)   # path minus car = -theta
         kappa_f = racing_math.interpolate_along(path.curvature, proj, path.closed)
+        e_target = self.front_axle_offset(kappa_f, L)
         v = max(inp.speed, 0.0)
 
-        feedforward = math.atan(L * kappa_f)
         unclipped = (theta_e
-                     - math.atan(self.params.gain * e_f / (v + self.params.softening))
-                     + feedforward)
-        steering = float(np.clip(
-            unclipped, -self.limits.max_steering_angle, self.limits.max_steering_angle))
-        detail = (f"stanley e_f={e_f:+.3f}m th_e={theta_e:+.3f}rad "
-                  f"ff={feedforward:+.3f}rad")
+                     - math.atan(self.params.gain * (e_f - e_target)
+                                 / (v + self.params.softening)))
+        limit = self.limits.max_steering_angle
+        steering = float(np.clip(smooth_steering(
+            float(np.clip(unclipped, -limit, limit)), previous,
+            self.params.steering_time_constant, self.limits.control_dt), -limit, limit))
+        detail = (f"stanley e_f={e_f:+.3f}m (target {e_target:+.3f}m) "
+                  f"th_e={theta_e:+.3f}rad")
         return SteeringResult(steering=steering, unclipped=float(unclipped),
                               detail=detail)
 
@@ -278,6 +383,8 @@ class LqrParams:
     q_heading: float = 1.0
     r_steer: float = 1.0
     v_grid_max: float = 6.0
+    delay_compensation: float = 0.08  # lqr.delay_compensation, s (predict_input)
+    steering_time_constant: float = 0.05  # lqr.steering_time_constant, s (smooth_steering)
 
 
 class LqrGainTable:
@@ -374,6 +481,8 @@ class LqrLaw:
     name = 'lqr'
 
     def __init__(self, limits: VehicleLimits, params: LqrParams):
+        _check_delay('lqr.delay_compensation', params.delay_compensation)
+        _check_delay('lqr.steering_time_constant', params.steering_time_constant)
         self.limits = limits
         self.params = params
         self._table = LqrGainTable(
@@ -384,8 +493,10 @@ class LqrLaw:
         return None
 
     def steer(self, inp: TrackingInput, path: PathContext) -> SteeringResult:
-        _require_finite(inp.x, inp.y, inp.yaw, inp.speed)
+        _require_finite(inp.x, inp.y, inp.yaw, inp.speed, inp.previous_steering)
         L = self.limits.wheelbase
+        previous = inp.previous_steering
+        inp = predict_input(inp, path, self.params.delay_compensation, L)
         proj = racing_math.project_onto_path(
             path.xy, path.seg_len, (inp.x, inp.y), inp.nearest_idx, path.closed)
         e = proj.lateral_error
@@ -394,8 +505,10 @@ class LqrLaw:
         K = self._table.gain_at(max(inp.speed, LqrGainTable.V_FLOOR))
         feedforward = math.atan(L * kappa)
         unclipped = feedforward - float(K[0]) * e - float(K[1]) * theta
-        steering = float(np.clip(
-            unclipped, -self.limits.max_steering_angle, self.limits.max_steering_angle))
+        limit = self.limits.max_steering_angle
+        steering = float(np.clip(smooth_steering(
+            float(np.clip(unclipped, -limit, limit)), previous,
+            self.params.steering_time_constant, self.limits.control_dt), -limit, limit))
         detail = (f"lqr e={e:+.3f}m th={theta:+.3f}rad "
                   f"K=[{K[0]:.2f},{K[1]:.2f}] ff={feedforward:+.3f}rad")
         return SteeringResult(steering=steering, unclipped=float(unclipped),
@@ -410,13 +523,14 @@ class LqrLaw:
 class MpcParams:
     dt: float = 0.05                    # prediction step, s
     horizon_steps: int = 20             # N
-    q_lateral: float = 1.0
+    q_lateral: float = 4.0
     q_heading: float = 1.0
     r_steer: float = 1.0
     r_rate: float = 0.01
     deadline_sec: float = 0.008
     max_iter: int = 4000
     max_consecutive_misses: int = 3
+    delay_compensation: float = 0.05    # mpc.delay_compensation, s (predict_input)
 
 
 class MissPolicy:
@@ -494,6 +608,7 @@ class MpcLaw:
             raise ValueError(f'mpc.deadline_sec must be > 0, got {params.deadline_sec}')
         if not (isinstance(params.max_iter, int) and params.max_iter >= 1):
             raise ValueError(f'mpc.max_iter must be an int >= 1, got {params.max_iter}')
+        _check_delay('mpc.delay_compensation', params.delay_compensation)
 
         self.limits = limits
         self.params = params
@@ -680,8 +795,10 @@ class MpcLaw:
         return H, q, A, l, u, ff, proj
 
     def steer(self, inp: TrackingInput, path: PathContext) -> SteeringResult:
-        _require_finite(inp.x, inp.y, inp.yaw, inp.speed)
+        _require_finite(inp.x, inp.y, inp.yaw, inp.speed, inp.previous_steering)
         started = time.perf_counter()
+        inp = predict_input(inp, path, self.params.delay_compensation,
+                            self.limits.wheelbase)
         H, q, A, l, u, ff, proj = self._build_qp(inp, path)
         n = self.params.horizon_steps
 
@@ -733,13 +850,35 @@ class MpcLaw:
         self._warm_start = delta
         self.solves_since_reset += 1
 
-        steering = float(np.clip(delta[0], -max_ang, max_ang))
+        planned = self._project_onto_limits(
+            delta, inp.previous_steering, max_ang, self.limits.max_steering_rate,
+            [self.limits.control_dt] + [self.params.dt] * (n - 1))
+        steering = planned[0]
         e = proj.lateral_error
         theta = _wrap(inp.yaw - proj.heading)
         detail = (f"mpc e={e:+.3f}m th={theta:+.3f}rad "
                   f"solve={elapsed * 1e3:.1f}ms it={result.info.iter}")
         return SteeringResult(steering=steering, unclipped=float(delta[0]),
-                              detail=detail, predicted=tuple(float(d) for d in delta))
+                              detail=detail, predicted=tuple(planned))
+
+    @staticmethod
+    def _project_onto_limits(delta, previous, max_angle, max_rate, taus):
+        """The plan moved, move by move, onto the exact angle and rate bounds.
+
+        OSQP meets its constraints only to ~1e-5, so a move at an active
+        bound can sit just past it; the plan that leaves this law (and the
+        intent the dashboard draws from it) must not. Each move is clamped to
+        within max_rate * tau of the one before, then to the angle bound; the
+        first is measured from the last command, as in _build_qp.
+        """
+        out = []
+        last = float(np.clip(previous, -max_angle, max_angle))
+        for value, tau in zip(delta, taus):
+            step = max_rate * tau
+            value = min(max(float(value), last - step), last + step)
+            last = min(max(value, -max_angle), max_angle)
+            out.append(last)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -762,28 +901,36 @@ def make_law(name: str, limits: VehicleLimits,
             lookahead_speed_gain=float(params.get('lookahead_speed_gain', 0.15)),
         ))
     if name == 'stanley':
+        d = StanleyParams()
         return StanleyLaw(limits, StanleyParams(
-            gain=float(params.get('stanley.gain', 1.6)),
-            softening=float(params.get('stanley.softening', 0.4)),
+            gain=float(params.get('stanley.gain', d.gain)),
+            softening=float(params.get('stanley.softening', d.softening)),
+            delay_compensation=float(params.get('stanley.delay_compensation', d.delay_compensation)),
+            steering_time_constant=float(params.get('stanley.steering_time_constant', d.steering_time_constant)),
         ))
     if name == 'lqr':
+        d = LqrParams()
         return LqrLaw(limits, LqrParams(
-            q_lateral=float(params.get('lqr.q_lateral', 1.0)),
-            q_heading=float(params.get('lqr.q_heading', 1.0)),
-            r_steer=float(params.get('lqr.r_steer', 1.0)),
-            v_grid_max=float(params.get('lqr.v_grid_max', 6.0)),
+            q_lateral=float(params.get('lqr.q_lateral', d.q_lateral)),
+            q_heading=float(params.get('lqr.q_heading', d.q_heading)),
+            r_steer=float(params.get('lqr.r_steer', d.r_steer)),
+            v_grid_max=float(params.get('lqr.v_grid_max', d.v_grid_max)),
+            delay_compensation=float(params.get('lqr.delay_compensation', d.delay_compensation)),
+            steering_time_constant=float(params.get('lqr.steering_time_constant', d.steering_time_constant)),
         ))
     if name == 'mpc':
+        d = MpcParams()
         return MpcLaw(limits, MpcParams(
-            dt=float(params.get('mpc.dt', 0.05)),
-            horizon_steps=int(params.get('mpc.horizon_steps', 20)),
-            q_lateral=float(params.get('mpc.q_lateral', 1.0)),
-            q_heading=float(params.get('mpc.q_heading', 1.0)),
-            r_steer=float(params.get('mpc.r_steer', 1.0)),
-            r_rate=float(params.get('mpc.r_rate', 0.01)),
-            deadline_sec=float(params.get('mpc.deadline_sec', 0.008)),
-            max_iter=int(params.get('mpc.max_iter', 4000)),
-            max_consecutive_misses=int(params.get('mpc.max_consecutive_misses', 3)),
+            dt=float(params.get('mpc.dt', d.dt)),
+            horizon_steps=int(params.get('mpc.horizon_steps', d.horizon_steps)),
+            q_lateral=float(params.get('mpc.q_lateral', d.q_lateral)),
+            q_heading=float(params.get('mpc.q_heading', d.q_heading)),
+            r_steer=float(params.get('mpc.r_steer', d.r_steer)),
+            r_rate=float(params.get('mpc.r_rate', d.r_rate)),
+            deadline_sec=float(params.get('mpc.deadline_sec', d.deadline_sec)),
+            max_iter=int(params.get('mpc.max_iter', d.max_iter)),
+            max_consecutive_misses=int(params.get('mpc.max_consecutive_misses', d.max_consecutive_misses)),
+            delay_compensation=float(params.get('mpc.delay_compensation', d.delay_compensation)),
         ))
     raise ValueError(
         f"unknown steering_law '{name}' (expected one of {LAW_NAMES})")

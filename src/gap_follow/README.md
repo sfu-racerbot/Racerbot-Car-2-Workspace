@@ -6,6 +6,12 @@
 
 Reactive "follow-the-gap" autonomy: no map, no localization, no memory of the track — every LIDAR scan is looked at fresh and the car steers into the biggest safe opening it currently sees. This file documents the algorithm and code in detail; for the broader workspace context (safety model, how to run it, how to write your own node) see [docs/architecture.md](../../docs/architecture.md), [docs/operations.md](../../docs/operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node), and [docs/writing-your-own-node.md](../../docs/writing-your-own-node.md).
 
+## New in October 2026: swept clearance, arc guard, corner setup
+
+Three additions change how this node drives through corridors: a speed limit from how far the *body* can drive along its arc, a check that the steered arc is clear, and a move to the outside wall before a turn. In the simulator they took the indoor layouts from 24 wall contacts in 60 runs to none, and lapped about 20% faster. **They have not been driven on the real car yet.**
+
+What each does, how to turn each off, the results, and the order to bring them up on the car (wheels off first): **[docs/gap-follow.md](../../docs/gap-follow.md)**. The step-by-step algorithm below describes the pipeline they sit in.
+
 ## Making the car faster
 
 Edit [`config/gap_follow.yaml`](config/gap_follow.yaml), **not** `gap_follow_node.py`. The launch file loads the YAML, and the YAML overrides every default in the code. Changing a number in the `.py` does nothing on the car.
@@ -499,6 +505,12 @@ deterministic matrix it completed
 Spielberg, Silverstone, and Brands Hatch without a collision. The full setup,
 commands, metrics, and checked-in JSON report are in
 [docs/simulator.md](../../docs/simulator.md).
+
+The indoor layouts this car actually drives in (`indoor_oval`, `indoor_tight`,
+`indoor_wide`, `asb_10000`, `asb_sharp`) are run by
+`tools/f1tenth_sim/sweep_gap.py`, through a copy of the per-scan pipeline
+(`tools/f1tenth_sim/gap_mirror.py`) that a test holds to the node's own commands.
+Commands and results: [docs/gap-follow.md](../../docs/gap-follow.md#checking-it-in-the-simulator).
 
 ## Tuning notes
 

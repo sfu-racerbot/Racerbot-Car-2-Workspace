@@ -6,6 +6,66 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-10-19 — gap_follow corridor rework; Stanley, LQR and MPC made usable
+
+Both changes are **simulator-validated only**. Bring them up wheels-off first,
+then at low speed ([docs/gap-follow.md](docs/gap-follow.md#validation),
+[docs/steering-laws.md](docs/steering-laws.md#safety)).
+
+### gap_follow
+
+- **Swept-path clearance** (`enable_swept_clearance`, on): the braking speed
+  ceiling uses how far the body can drive along its arc, not the nearest
+  return in the ±30° cone (which read hallway side walls as obstacles ahead).
+- **Arc guard** (`enable_arc_guard`, on): if the requested steering would
+  sweep the body into something, use the nearest clear steering angle, at
+  most `arc_guard_max_correction` (0.1745 rad) away.
+- **Corner setup** (`enable_corner_setup`, on): move toward the outside wall
+  before a corridor turn, so the car turns in late.
+- **`max_lateral_accel` 1.0 → 2.0 m/s²** — simulator only, not yet
+  validated on the floor.
+- New parameters (all documented in `config/gap_follow.yaml`); startup
+  refuses arc-guard/corner-setup authority above half of `max_steering_angle`.
+- Simulator, 5 indoor layouts × 2 directions × 6 seeds: 36/60 passed with 24
+  wall-contact runs → 60/60, none; `asb_10000` lap 24.6 → 18.9 s
+  (`docs/gap-follow-sim-results.json`).
+- Tools: `tools/f1tenth_sim/gap_mirror.py` (the simulator's copy of the
+  per-scan pipeline, reads the YAML, held to the node to 1e-6 by
+  `test_gap_mirror_parity.py`), `sweep_gap.py`, and `trace_gap.py` rebuilt on
+  it. `run_validation.py`'s stale `gap_command` was replaced by it.
+
+### pure_pursuit steering laws
+
+- **Stanley formula corrected** (a change to spec 02): the separate
+  `+atan(L·κ)` feedforward is gone (the front-axle heading error already
+  carries it, so it was counted twice and held the car inside every bend),
+  and the front axle is steered to the offset a rear-axle racing line implies.
+  Spec tests 6/7 now check the kinematic answer, `atan(L/R)` on a circle.
+- **New parameters:** `stanley.delay_compensation`, `lqr.delay_compensation`,
+  `mpc.delay_compensation` (predict the pose ~0.1 s ahead before steering),
+  `stanley.steering_time_constant`, `lqr.steering_time_constant` (output
+  low-pass against localisation jitter).
+- **Retuned defaults:** Stanley gain 5.0, softening 1.0; MPC `q_lateral` 4.0;
+  plus the values above. Dataclasses, YAML and node defaults all agree
+  (tested).
+- MPC's returned plan is projected onto the exact angle and rate limits.
+- The node logs `steering law: <name> <params>` at startup.
+- Review fixes: MPC miss latch read a non-existent attribute; live lookahead
+  and steering-rate tunes did not reach the law; `/drive_intent` could run the
+  MPC solver; MPC's condensed dynamics were wrong at varying speed; the bound
+  check was tighter than OSQP's accuracy.
+- `tools/f1tenth_sim/run_validation.py` reads its limits from
+  `pure_pursuit.yaml` (it had a stale 0.26 rad steering limit);
+  `tools/f1tenth_sim/law_sweep.py` runs comparisons in parallel.
+- **osqp 1.1.3 installed** on the car (`pip install --user
+  --break-system-packages osqp==1.1.3`). MPC benchmark G0 passed: p99.9
+  3.5 ms against an 8 ms deadline under load
+  (`docs/mpc-benchmark-2026-10-19.json`).
+- **Judging (seeds 12345–12349): Stanley, LQR and MPC all PROMOTE**, 15/15
+  runs each, no contact, every margin under 5%
+  (`docs/tracking-law-comparison.json`). This supersedes the REJECTs in the
+  entry below. Pure pursuit stays the default.
+
 ## 2026-10-19 — Pluggable steering laws for the race controller
 
 `pure_pursuit_node` can now steer with a choice of tracking law —

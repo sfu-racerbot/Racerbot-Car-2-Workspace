@@ -1015,8 +1015,8 @@ The four laws, in plain words:
 - **`pure_pursuit`** (the default) steers toward a point some distance ahead on the
   line. Simple, robust, and the baseline every other law must beat.
 - **`stanley`** looks at the *front axle* instead: how far it is to the side of the
-  line and which way the car is pointing, plus the steering a bend needs anyway. It
-  corrects sideways error directly and has no lookahead to tune.
+  line and which way the car is pointing. It corrects sideways error directly and
+  has no lookahead to tune.
 - **`lqr`** describes how far off the line the car is and how crooked it is as two
   numbers, and applies a fixed feedback rule (`steering = feedforward − K·[e, θ]`)
   tuned to trade hugging the line against gentle steering. The gain `K` is scheduled
@@ -1025,8 +1025,13 @@ The four laws, in plain words:
   the car on the line through the bends ahead, while never exceeding the servo's
   angle or speed limits — then applies the first and re-plans next tick. It is the
   only law that sees a bend coming precisely and respects the steering rate as a
-  hard limit. It needs the `osqp` solver; see
-  `docs/superpowers/specs/2026-09-27-tracking-04-mpc.md` (G0) before enabling it.
+  hard limit. It needs the `osqp` solver
+  ([install](steering-laws.md#installing-osqp-for-mpc)).
+
+How each law works, its parameters, how they were tuned, and the judged results
+are in **[steering-laws.md](steering-laws.md)**. In short: all three alternatives
+beat pure pursuit narrowly in the simulator (2026-10-19), none has driven the real
+car yet, and pure pursuit stays the default.
 
 **A law is only selected on the car after it has beaten pure pursuit in the
 simulator comparison harness** — selecting a law is never evidence it is better.

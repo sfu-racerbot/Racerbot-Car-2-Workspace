@@ -1,11 +1,14 @@
 # gap_follow improvement — handoff notes
 
-> **Status:** analysis complete, **no algorithm changes landed yet**. The
-> diagnosis is done and measured; the fix is designed but not implemented.
-> Everything below is measured, not assumed.
+> **Status (2026-10-19): implemented.** The fix this plan led to — swept-path
+> clearance, an arc guard and corner setup — landed on `main`. What it does,
+> how to switch each part off, and the measured results are in
+> **[gap-follow.md](gap-follow.md)**; read that first. This file is kept as the
+> record of the diagnosis. Its numbers describe the controller *before* the
+> fix, and "the algorithm is unchanged" below was true when it was written.
 
-Branch: `feat/gap-follow-improvement`. The algorithm in
-`src/gap_follow/gap_follow/` is **unchanged** from `superpowers/tracking-laws`
+Branch (at the time): `feat/gap-follow-improvement`. The algorithm in
+`src/gap_follow/gap_follow/` was then **unchanged** from `superpowers/tracking-laws`
 except for one dead-end experiment that was measured, found worse, and fully
 reverted (see "Dead end" below).
 

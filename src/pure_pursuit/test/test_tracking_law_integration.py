@@ -245,6 +245,26 @@ def test_law_params_are_not_live_tunable(node_factory, law_name, dotted):
     assert not result.successful
 
 
+@pytest.mark.parametrize('law_name, params_class', [
+    ('stanley', tracking_laws.StanleyParams), ('lqr', tracking_laws.LqrParams)])
+def test_node_defaults_are_the_law_defaults(node_factory, law_name, params_class):
+    # No params file: the node's declare_parameter defaults alone. They must
+    # build the same law the harness tunes and judges (tracking_laws' dataclass
+    # defaults), or a launch without the YAML runs untested gains.
+    node = node_factory(law_name)
+    assert node.tracking_law.params == params_class()
+
+
+@pytest.mark.parametrize('law_name, dotted, field', [
+    ('stanley', 'stanley.delay_compensation', 'delay_compensation'),
+    ('stanley', 'stanley.steering_time_constant', 'steering_time_constant'),
+    ('lqr', 'lqr.delay_compensation', 'delay_compensation'),
+    ('lqr', 'lqr.steering_time_constant', 'steering_time_constant')])
+def test_delay_and_smoothing_params_reach_the_law(node_factory, law_name, dotted, field):
+    node = node_factory(law_name, ['-p', f'{dotted}:=0.237'])
+    assert getattr(node.tracking_law.params, field) == 0.237
+
+
 def _tune(node, **values):
     result = node._parameter_callback([
         Parameter(name, Parameter.Type.DOUBLE, float(value))
@@ -336,6 +356,22 @@ def test_mpc_lb_held_drives(osqp_available, profiled_csv):
         node.control_loop()
         assert published[-1].drive.speed > 0.0
         assert node.last_decision_state == 'mpc'
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_mpc_node_defaults_are_the_law_defaults_and_delay_reaches_it(
+        osqp_available, profiled_csv):
+    node = _mpc_node(profiled_csv)
+    try:
+        assert node.tracking_law.params == tracking_laws.MpcParams()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+    node = _mpc_node(profiled_csv, **{'mpc.delay_compensation': 0.237})
+    try:
+        assert node.tracking_law.params.delay_compensation == 0.237
     finally:
         node.destroy_node()
         rclpy.shutdown()

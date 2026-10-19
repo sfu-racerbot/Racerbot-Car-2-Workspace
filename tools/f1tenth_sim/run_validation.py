@@ -57,12 +57,27 @@ from sim_fidelity.calibration import unmeasured as unmeasured_parameters
 from sim_fidelity.plant import DEFAULT_PROFILE, env_components
 
 
-CONTROL_DT = 0.025  # 40 Hz, matching pure_pursuit.yaml
+# The race controller's limits come from the file the car loads, so a change
+# there (the 2026-10-16 steering recalibration raised max_steering_angle
+# 0.26 -> 0.349 and this file kept 0.26 for three days) is what the harness
+# judges, with no second copy to forget.
+PURE_PURSUIT_CONFIG = (Path(__file__).resolve().parents[2] / "src" / "pure_pursuit"
+                       / "config" / "pure_pursuit.yaml")
+
+
+def _pure_pursuit_params() -> dict:
+    import yaml
+    data = yaml.safe_load(PURE_PURSUIT_CONFIG.read_text())
+    return data["pure_pursuit_node"]["ros__parameters"]
+
+
+PURE_PURSUIT_PARAMS = _pure_pursuit_params()
+CONTROL_DT = 1.0 / float(PURE_PURSUIT_PARAMS["control_rate_hz"])  # 40 Hz
 INTEGRATOR_DT = 0.005
 WHEELBASE = CALIBRATION.wheelbase
 CAR_WIDTH = CALIBRATION.width
 CAR_LENGTH = CALIBRATION.length
-STEERING_LIMIT = 0.26
+STEERING_LIMIT = float(PURE_PURSUIT_PARAMS["max_steering_angle"])
 LIDAR_OFFSET_X = CALIBRATION.lidar_offset_x
 FORWARD_STOP_CLEARANCE = 0.25
 FORWARD_STOP_FOV = math.radians(60.0)
@@ -71,10 +86,11 @@ TTC_COMMAND_FALLBACK_MAX_ODOM_SPEED = 0.10
 GAP_MAX_LATERAL_ACCEL = 1.0
 GAP_MAX_ACCELERATION = 3.0
 GAP_MAX_BRAKING_DECEL = 3.0
-MAX_STEERING_RATE = 1.0
-PURE_MAX_LATERAL_ACCEL = 2.5
-PURE_MAX_ACCELERATION = 6.0
-PURE_MAX_BRAKING_DECEL = 8.0
+MAX_STEERING_RATE = float(PURE_PURSUIT_PARAMS["max_steering_rate"])
+PURE_MAX_LATERAL_ACCEL = float(PURE_PURSUIT_PARAMS["max_lateral_accel"])
+PURE_MAX_ACCELERATION = float(PURE_PURSUIT_PARAMS["max_acceleration"])
+PURE_MAX_BRAKING_DECEL = float(PURE_PURSUIT_PARAMS["max_braking_decel"])
+PURE_MAX_SPEED = float(PURE_PURSUIT_PARAMS["max_speed"])
 # Mirrors pure_pursuit.yaml's overtake_lookahead_distance. Values at or below
 # max_lookahead (1.5) make the passing line a sharp turn that the curvature
 # speed cap brakes for, and the ego then stalls behind the opponent.
@@ -254,7 +270,7 @@ class CommandShaper:
         self.previous_speed = 0.0
 
     def command(self, desired_steering: float, desired_speed: float,
-                hard_speed_cap: float = 4.0,
+                hard_speed_cap: float = PURE_MAX_SPEED,
                 measured_speed: Optional[float] = None) -> tuple[float, float]:
         if desired_speed <= 0.0 or hard_speed_cap <= 0.0:
             self.previous_steering = desired_steering
@@ -271,14 +287,14 @@ class CommandShaper:
         commanded_curvature = math.tan(steering) / WHEELBASE
         online_curvature = max(abs(desired_curvature), abs(commanded_curvature))
         curve_speed = racing_math.curvature_speed_limit(
-            online_curvature, PURE_MAX_LATERAL_ACCEL, 4.0)
+            online_curvature, PURE_MAX_LATERAL_ACCEL, PURE_MAX_SPEED)
         speed_target = min(desired_speed, curve_speed, hard_speed_cap)
         # Mirrors the node: ramp from the car's measured speed when it is
         # higher than the last command, so a one-tick ceiling does not force a
         # slow climb back from a speed the car was never actually at.
         ramp_basis = self.previous_speed
         if measured_speed is not None:
-            ramp_basis = max(ramp_basis, min(abs(float(measured_speed)), 4.0))
+            ramp_basis = max(ramp_basis, min(abs(float(measured_speed)), PURE_MAX_SPEED))
         speed = racing_math.slew_rate_limit(
             speed_target,
             ramp_basis,
@@ -313,9 +329,9 @@ class PathFollower:
         law=None,
         law_name: str = "pure_pursuit",
         law_params: Optional[dict] = None,
-        min_lookahead: float = 0.6,
-        max_lookahead: float = 1.5,
-        lookahead_gain: float = 0.15,
+        min_lookahead: float = float(PURE_PURSUIT_PARAMS["min_lookahead"]),
+        max_lookahead: float = float(PURE_PURSUIT_PARAMS["max_lookahead"]),
+        lookahead_gain: float = float(PURE_PURSUIT_PARAMS["lookahead_speed_gain"]),
         use_measured_lookahead: bool = True,
     ):
         self.plan = plan
@@ -731,7 +747,7 @@ def run_pure_solo(track: str, seed: int, timeout_s: float,
                 speed = 0.0
                 stop_steps += 1
 
-            hard_speed_cap = 1.0 if safety == "avoid" else 4.0
+            hard_speed_cap = 1.0 if safety == "avoid" else PURE_MAX_SPEED
             steering, speed = command_shaper.command(
                 steering, speed, hard_speed_cap,
                 measured_speed=ego["std_state"][3])
@@ -1008,7 +1024,7 @@ def run_pure_traffic(track: str, seed: int, timeout_s: float) -> dict:
             )
             avoid_steps += int(safety == "avoid")
             stop_steps += int(safety == "stop")
-            hard_speed_cap = 1.0 if safety == "avoid" else 4.0
+            hard_speed_cap = 1.0 if safety == "avoid" else PURE_MAX_SPEED
             steering, speed = ego_command_shaper.command(
                 steering, speed, hard_speed_cap,
                 measured_speed=ego["std_state"][3])
