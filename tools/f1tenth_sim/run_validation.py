@@ -49,6 +49,7 @@ except ImportError as exc:
     ) from exc
 
 from gap_follow import gap_logic
+from gap_mirror import GapController, node_params
 from pure_pursuit import racing_math, tracking_laws
 
 from sim_fidelity import CALIBRATION, FidelityPlant, PROFILES
@@ -466,38 +467,11 @@ class OpponentProgress:
         ) % total_length
 
 
-# gap_follow.yaml's corridor-centering block, mirrored. ENABLE_CENTERING is
-# flipped by --no-centering so the same harness can measure the term's effect.
+# --no-centering flips this so the same harness can measure the term's effect.
 ENABLE_CENTERING = True
-GAP_STEERING_GAIN = 1.0
-CENTERING_GAIN = 0.25
-CENTERING_MAX_STEERING = 0.08
+# Only for the corridor-offset metric below (same window the node uses).
 CENTERING_SIDE_HALF_SPAN = math.radians(60.0) / 2.0
-CENTERING_FULL_BEARING = math.radians(4.0)
-CENTERING_ZERO_BEARING = math.radians(15.0)
-CENTERING_FULL_FORWARD_DEPTH = 2.5
-CENTERING_ZERO_FORWARD_DEPTH = 1.5
-CENTERING_FULL_SIDE_DISTANCE = 4.0
 CENTERING_ZERO_SIDE_DISTANCE = 5.0
-
-
-def centering_bias_for(clean: np.ndarray, valid: np.ndarray,
-                       aim_bearing: float, aim_depth: float) -> float:
-    """gap_follow_node._centering_bias against the full scan, not the cone."""
-    angles = LIDAR.angle_min + np.arange(
-        clean.size, dtype=float) * LIDAR.angle_increment
-    left = gap_logic.side_wall_distance(
-        clean, valid, angles, math.pi / 2.0, CENTERING_SIDE_HALF_SPAN)
-    right = gap_logic.side_wall_distance(
-        clean, valid, angles, -math.pi / 2.0, CENTERING_SIDE_HALF_SPAN)
-    bias, _ = gap_logic.corridor_centering_bias(
-        left, right, aim_bearing, aim_depth,
-        CENTERING_GAIN, CENTERING_MAX_STEERING,
-        CENTERING_FULL_BEARING, CENTERING_ZERO_BEARING,
-        CENTERING_FULL_FORWARD_DEPTH, CENTERING_ZERO_FORWARD_DEPTH,
-        CENTERING_FULL_SIDE_DISTANCE, CENTERING_ZERO_SIDE_DISTANCE,
-    )
-    return bias
 
 
 def corridor_offset(scan: np.ndarray) -> Optional[float]:
@@ -522,122 +496,25 @@ def corridor_offset(scan: np.ndarray) -> Optional[float]:
     return (right - left) / 2.0
 
 
-def gap_command(
-    scan: np.ndarray,
-    current_speed: float,
-    last_commanded_speed: float = 0.0,
-    last_commanded_steering: float = 0.0,
-    command_age_sec: float = math.inf,
-) -> tuple[float, float, float, bool]:
-    clean, valid = gap_logic.sanitize_ranges(
-        scan, max_range=10.0, range_min=0.05)
+def gap_controller() -> GapController:
+    """gap_follow's pipeline (gap_mirror.GapController) with the shipped
+    gap_follow.yaml -- the controller the car runs, not a hand-kept copy.
+
+    This replaced a gap_command() that re-implemented the pipeline with its
+    own hardcoded numbers and had fallen far behind the node (max_speed 2.0
+    vs 3.5, steering 0.26 vs 0.349, no adaptive width, hysteresis, escape
+    creep, swept-path clearance, arc guard or corner setup).
+    """
+    params = node_params()
+    params["enable_centering"] = ENABLE_CENTERING
+    return GapController(params, LIDAR)
+
+
+def nearest_valid_range(scan: np.ndarray) -> float:
+    """Closest valid return in the forward 180 degrees (the gap window)."""
+    clean, valid = gap_logic.sanitize_ranges(scan, max_range=10.0, range_min=LIDAR.range_min)
     lo, hi = cone_indices(math.pi / 2.0)
-    window = clean[lo : hi + 1]
-    window_valid = valid[lo : hi + 1]
-    beam_indices = np.arange(lo, hi + 1, dtype=float)
-    beam_angles = LIDAR.angle_min + beam_indices * LIDAR.angle_increment
-    boundaries = gap_logic.vehicle_boundary_distances(
-        beam_angles,
-        CAR_WIDTH,
-        CAR_LENGTH,
-        WHEELBASE,
-        LIDAR_OFFSET_X,
-    )
-    closest_index, closest_distance = gap_logic.closest_valid(
-        window, window_valid)
-
-    clearance = gap_logic.minimum_footprint_clearance(
-        window, window_valid, boundaries)
-    forward_clearance = gap_logic.minimum_footprint_clearance_in_cone(
-        window,
-        window_valid,
-        beam_angles,
-        boundaries,
-        FORWARD_STOP_FOV,
-    )
-    effective_speed = gap_logic.conservative_ttc_speed(
-        current_speed,
-        last_commanded_speed,
-        command_age_sec,
-        TTC_COMMAND_SPEED_TIMEOUT,
-        TTC_COMMAND_FALLBACK_MAX_ODOM_SPEED,
-    )
-    min_ttc = gap_logic.minimum_ttc(
-        window,
-        window_valid,
-        beam_angles,
-        effective_speed,
-        boundaries,
-        min_closing_speed=0.05,
-    )
-    if (
-        clearance <= 0.02
-        or forward_clearance <= FORWARD_STOP_CLEARANCE
-        or min_ttc <= 0.5
-    ):
-        return 0.0, 0.0, float(closest_distance), True
-
-    half_width = CAR_WIDTH / 2.0 + 0.10
-    window = gap_logic.disparity_extend(
-        window, LIDAR.angle_increment, 0.4, half_width)
-    if closest_index is not None:
-        window = gap_logic.safety_bubble(
-            window,
-            closest_index,
-            closest_distance,
-            LIDAR.angle_increment,
-            half_width,
-        )
-    gap_start, gap_end, used_fallback = gap_logic.find_gap_with_fallback(
-        window,
-        preferred_distance=2.0,
-        fallback_distance=0.8,
-        angle_increment=LIDAR.angle_increment,
-        min_gap_width_m=0.10,
-    )
-    if gap_start is None:
-        return 0.0, 0.0, float(closest_distance), True
-
-    target_in_window = gap_logic.aim_within_gap(
-        window, gap_start, gap_end, beam_angles)
-    target_index = lo + target_in_window
-    target_angle = LIDAR.angle_min + target_index * LIDAR.angle_increment
-    target_distance = float(window[target_in_window])
-    # Bearing steering, mirroring gap_follow_node. This replaced a pure
-    # pursuit curvature law whose helpers (target_curvature,
-    # steering_from_curvature) no longer exist in gap_logic -- the harness
-    # had been left calling them and could not run the gap scenario at all.
-    centering_bias = 0.0
-    if ENABLE_CENTERING:
-        centering_bias = centering_bias_for(
-            clean, valid, target_angle, target_distance)
-    desired_steering = float(
-        np.clip(GAP_STEERING_GAIN * target_angle + centering_bias,
-                -STEERING_LIMIT, STEERING_LIMIT))
-    steering = gap_logic.slew_rate_limit(
-        desired_steering,
-        last_commanded_steering,
-        CONTROL_DT,
-        MAX_STEERING_RATE,
-    )
-    limited_curvature = math.tan(desired_steering) / WHEELBASE
-    curve_speed = gap_logic.curvature_speed_limit(
-        limited_curvature, GAP_MAX_LATERAL_ACCEL, 2.0)
-    clearance_speed = gap_logic.braking_speed_limit(
-        forward_clearance,
-        FORWARD_STOP_CLEARANCE,
-        GAP_MAX_BRAKING_DECEL,
-        2.0,
-    )
-    desired_speed = min(max(0.8, curve_speed), clearance_speed)
-    if used_fallback:
-        desired_speed = min(desired_speed, 0.5)
-    # Mirrors the node: ramp from the car's measured speed when it exceeds the
-    # last command, so a transient ceiling does not brake a car that is still
-    # rolling at its old speed.
-    ramp_basis = max(last_commanded_speed, min(abs(float(current_speed)), 2.0))
-    speed = min(desired_speed, ramp_basis + GAP_MAX_ACCELERATION * CONTROL_DT)
-    return steering, float(speed), float(closest_distance), False
+    return gap_logic.closest_valid(clean[lo:hi + 1], valid[lo:hi + 1])[1]
 
 
 def result_base(
@@ -675,9 +552,7 @@ def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
     # only says how far it is from the reference raceline, which is a
     # different question when the reference is not the middle either.
     corridor_offsets = []
-    last_commanded_speed = 0.0
-    last_commanded_steering = 0.0
-    last_command_step = None
+    controller = gap_controller()
     started = time.monotonic()
     max_steps = math.ceil(timeout_s / CONTROL_DT)
 
@@ -685,23 +560,9 @@ def run_gap_solo(track: str, seed: int, timeout_s: float) -> dict:
         for step in range(max_steps):
             ego = obs["agent_0"]
             state = np.asarray(ego["std_state"], dtype=float)
-            command_age_sec = (
-                math.inf
-                if last_command_step is None
-                else (step - last_command_step) * CONTROL_DT
-            )
-            steering, speed, nearest_scan, stopped = gap_command(
-                ego["scan"],
-                float(state[3]),
-                last_commanded_speed,
-                last_commanded_steering,
-                command_age_sec,
-            )
-            last_commanded_speed = speed
-            last_commanded_steering = steering
-            last_command_step = step
-            min_scan = min(min_scan, nearest_scan)
-            stop_steps += int(stopped)
+            steering, speed = controller.command(ego["scan"], float(state[3]), step)
+            min_scan = min(min_scan, nearest_valid_range(ego["scan"]))
+            stop_steps += int(controller.stopped)
             offset = corridor_offset(ego["scan"])
             if offset is not None:
                 corridor_offsets.append(offset)

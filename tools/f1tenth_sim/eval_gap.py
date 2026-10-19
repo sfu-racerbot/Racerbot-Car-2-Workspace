@@ -55,6 +55,7 @@ from f1tenth_gym.envs.integrators import IntegratorType  # noqa: E402
 from f1tenth_gym.envs.observation import ObservationType  # noqa: E402
 
 from gap_follow import gap_logic  # noqa: E402
+from gap_mirror import GapController, node_params  # noqa: E402
 from racerbot_sim import tracks as sim_tracks  # noqa: E402
 from sim_fidelity import CALIBRATION, PROFILES  # noqa: E402
 from sim_fidelity.plant import DEFAULT_PROFILE, FidelityPlant, env_components  # noqa: E402
@@ -63,74 +64,45 @@ CONTROL_DT = 0.025
 INTEGRATOR_DT = 0.005
 
 GYM_TRACKS = ("Spielberg", "Silverstone", "BrandsHatch")
-INDOOR_TRACKS = ("indoor_oval", "indoor_tight", "indoor_wide", "asb_10000")
+INDOOR_TRACKS = ("indoor_oval", "indoor_tight", "indoor_wide", "asb_10000", "asb_sharp")
+# Harness-only layouts (not racerbot_sim LAYOUTS). asb_sharp is asb_10000
+# with a centreline radius equal to the corridor's half-width, so every INNER
+# corner is a true right angle -- the real hallway's blind corners, which the
+# rounded racerbot_sim layouts only approximate. (The outer corner stays
+# rounded, which leaves less room than a square one: conservative.)
+EXTRA_LAYOUTS = {
+    "asb_sharp": dict(half_x=7.5, half_y=5.5, radius=0.75, corridor_width=1.5),
+}
 
-# Default parameter set: mirrors config/gap_follow.yaml's shipped values so
-# the harness measures the algorithm the car actually runs. Every entry is
-# overridable with --set name=value.
-DEFAULTS = dict(
-    max_range=10.0,
-    forward_fov_deg=180.0,
-    min_gap_distance=2.0,
-    fallback_min_gap_distance=0.8,
-    gap_switch_margin=1.2,
-    corner_speed=1.5,
-    corner_speed_wide=1.9,
-    max_speed=3.5,
-    min_speed=1.0,
-    max_steering_angle=0.349,
-    steering_gain=1.0,
-    max_lateral_accel=1.0,
-    max_acceleration=3.0,
-    max_braking_decel=3.0,
-    max_steering_rate=1.0,
-    command_slew_max_dt=0.10,
-    car_width=CALIBRATION.width,
-    car_length=CALIBRATION.length,
-    wheelbase=CALIBRATION.wheelbase,
-    laser_offset_x=CALIBRATION.lidar_offset_x,
-    laser_offset_y=0.0,
-    safety_margin=0.18,
-    disparity_threshold=0.4,
-    min_centerline_gap_width=0.10,
-    emergency_stop_clearance=0.0,
-    forward_stop_clearance=0.20,
-    forward_stop_fov_deg=60.0,
-    escape_creep_speed=0.40,
-    # aim_mode: kept for harness experiments; only 'midpoint' is wired to a
-    # real law. physical_center measured strictly worse (slower, asb_10000
-    # fails) and was removed from gap_logic -- see git history for the dead
-    # end.
-    aim_mode='midpoint',
-    enable_adaptive_width=True,
-    adaptive_width_narrow=1.4,
-    adaptive_width_reference=2.6,
-    min_safety_margin=0.18,
-    enable_centering=True,
-    centering_gain=0.25,
-    centering_max_steering=0.08,
-    centering_side_fov_deg=60.0,
-    centering_full_bearing_deg=4.0,
-    centering_zero_bearing_deg=15.0,
-    centering_full_forward_depth=2.5,
-    centering_zero_forward_depth=1.5,
-    centering_full_side_distance=4.0,
-    centering_zero_side_distance=5.0,
-    enable_ttc=True,
-    ttc_threshold_sec=0.30,
-    ttc_min_closing_speed=0.05,
-    ttc_min_brake_speed=0.6,
-    ttc_command_speed_timeout_sec=0.5,
-    ttc_command_fallback_max_odom_speed=0.10,
-)
+# Parameters: exactly what the car loads (gap_follow.yaml, via
+# gap_mirror.node_params), every one overridable with --set name=value.
+DEFAULTS = node_params()
+
+
+# Indoor layouts already written by this process (or by a parent process
+# before it forked workers -- see sweep_gap.py), so parallel runs never race
+# on rewriting the same map files.
+_BUILT = {}
+
+
+def build_indoor_track(name: str) -> Path:
+    if name not in _BUILT:
+        directory = Path(ROOT) / ".sim" / "eval_gap_tracks"
+        if name in EXTRA_LAYOUTS:
+            spec = dict(EXTRA_LAYOUTS[name])
+            width = spec.pop("corridor_width")
+            _BUILT[name] = sim_tracks.write_track(
+                directory, name, sim_tracks.rounded_rectangle_centerline(**spec), width)
+        else:
+            _BUILT[name] = sim_tracks.build(name, directory)
+    return _BUILT[name]
 
 
 def make_plant(track_spec: str, seed: int) -> FidelityPlant:
     """Build a fidelity plant for a gym circuit name or an indoor layout."""
     components = env_components(PROFILES[DEFAULT_PROFILE], CALIBRATION)
     if track_spec in INDOOR_TRACKS:
-        directory = Path(ROOT) / ".sim" / "eval_gap_tracks"
-        map_name = str(sim_tracks.build(track_spec, directory).with_suffix(""))
+        map_name = str(build_indoor_track(track_spec).with_suffix(""))
     else:
         map_name = track_spec
     config = EnvConfig(
@@ -155,220 +127,22 @@ def make_plant(track_spec: str, seed: int) -> FidelityPlant:
     return FidelityPlant(env, PROFILES[DEFAULT_PROFILE], 1, seed, CONTROL_DT, CALIBRATION)
 
 
-class GapController:
-    """Composable replica of gap_follow_node._scan_step's decision pipeline.
-
-    Holds parameters as attributes and reproduces the node's per-scan chain:
-    sanitize -> side walls/adaptive width -> footprint/TTC -> disparity extend
-    -> safety bubble -> gap pick -> bearing steering -> speed ceilings -> slew.
-    State that the node keeps between ticks (previous aim for hysteresis,
-    steering basis, last command) lives here too.
-    """
-
-    def __init__(self, params: dict, lidar):
-        self.p = dict(params)
-        self.lidar = lidar
-        self.previous_target_idx = None
-        self.steering_basis = 0.0
-        self.last_commanded_speed = 0.0
-        self.last_command_time = None  # in sim steps
-        self.stopped = False
-        self.stop_reason = None
-        # Which speed ceiling won this tick, for the harness's binding-cap
-        # histogram: 'curve', 'clearance', 'corner', 'creep', 'accel', 'stop'.
-        self.binding_cap = None
-        self.cap_counts = None
-
-    def command(self, scan, current_speed, step):
-        p = self.p
-        clean, valid = gap_logic.sanitize_ranges(
-            scan, max_range=p["max_range"], range_min=self.lidar.range_min)
-
-        angles_all = self.lidar.angle_min + np.arange(
-            clean.size, dtype=float) * self.lidar.angle_increment
-
-        if p["enable_centering"] or p["enable_adaptive_width"]:
-            half_span = math.radians(p["centering_side_fov_deg"]) / 2.0
-            side_left = gap_logic.side_wall_distance(
-                clean, valid, angles_all, math.pi / 2.0, half_span)
-            side_right = gap_logic.side_wall_distance(
-                clean, valid, angles_all, -math.pi / 2.0, half_span)
-        else:
-            side_left = side_right = math.inf
-
-        width_factor, effective_margin, effective_corner = self._adaptive_width(
-            side_left, side_right)
-
-        half_fov = math.radians(p["forward_fov_deg"]) / 2.0
-        lo = int((-half_fov - self.lidar.angle_min) / self.lidar.angle_increment)
-        hi = int((half_fov - self.lidar.angle_min) / self.lidar.angle_increment)
-        lo = max(0, lo)
-        hi = min(clean.size - 1, hi)
-        window = clean[lo:hi + 1]
-        window_valid = valid[lo:hi + 1]
-        beam_angles = angles_all[lo:hi + 1]
-
-        boundaries = gap_logic.vehicle_boundary_distances(
-            beam_angles, p["car_width"], p["car_length"], p["wheelbase"],
-            p["laser_offset_x"], p["laser_offset_y"])
-
-        min_clearance = gap_logic.minimum_footprint_clearance(
-            window, window_valid, boundaries)
-        forward_clearance = gap_logic.minimum_footprint_clearance_in_cone(
-            window, window_valid, beam_angles, boundaries,
-            math.radians(p["forward_stop_fov_deg"]))
-
-        directional = math.isclose(
-            forward_clearance, min_clearance, rel_tol=0.0, abs_tol=1e-6)
-
-        emergency_tripped = False
-        if min_clearance <= p["emergency_stop_clearance"]:
-            if not directional:
-                return self._stop(step, "emergency_clearance")
-            emergency_tripped = True
-
-        creeping = forward_clearance <= p["forward_stop_clearance"]
-
-        ttc_tripped = False
-        if p["enable_ttc"]:
-            command_age = (
-                math.inf if self.last_command_time is None
-                else (step - self.last_command_time) * CONTROL_DT)
-            effective_speed = gap_logic.conservative_ttc_speed(
-                current_speed, self.last_commanded_speed, command_age,
-                p["ttc_command_speed_timeout_sec"],
-                p["ttc_command_fallback_max_odom_speed"])
-            if effective_speed >= p["ttc_min_brake_speed"]:
-                min_ttc = gap_logic.minimum_ttc(
-                    window, window_valid, beam_angles, effective_speed,
-                    boundaries, p["ttc_min_closing_speed"],
-                    p["car_width"] / 2.0 + p["safety_margin"],
-                    math.tan(self.steering_basis) / p["wheelbase"],
-                    p["laser_offset_x"], p["laser_offset_y"])
-                if min_ttc <= p["ttc_threshold_sec"]:
-                    if not directional:
-                        return self._stop(step, "ttc_brake")
-                    ttc_tripped = True
-
-        # Gap selection
-        closest_idx, closest_dist = gap_logic.closest_valid(window, window_valid)
-        half_width = p["car_width"] / 2.0 + effective_margin
-        processed = gap_logic.disparity_extend(
-            window, self.lidar.angle_increment, p["disparity_threshold"], half_width)
-        if closest_idx is not None:
-            processed = gap_logic.safety_bubble(
-                processed, closest_idx, closest_dist,
-                self.lidar.angle_increment, half_width)
-        gap_start, gap_end, used_fallback = gap_logic.find_gap_with_fallback(
-            processed, p["min_gap_distance"], p["fallback_min_gap_distance"],
-            self.lidar.angle_increment, p["min_centerline_gap_width"],
-            previous_target_idx=self.previous_target_idx,
-            switch_margin=p["gap_switch_margin"])
-
-        if gap_start is None:
-            return self._stop(step, "no_safe_gap")
-
-        if emergency_tripped or ttc_tripped:
-            creeping = True
-
-        target_in_window = gap_logic.aim_within_gap(
-            processed, gap_start, gap_end, beam_angles)
-        self.previous_target_idx = target_in_window
-        target_angle = float(beam_angles[target_in_window])
-        target_distance = float(processed[target_in_window])
-
-        centering_bias = 0.0
-        if p["enable_centering"] and not creeping:
-            centering_bias, _w = gap_logic.corridor_centering_bias(
-                side_left, side_right, target_angle, target_distance,
-                p["centering_gain"], p["centering_max_steering"],
-                math.radians(p["centering_full_bearing_deg"]),
-                math.radians(p["centering_zero_bearing_deg"]),
-                p["centering_full_forward_depth"],
-                p["centering_zero_forward_depth"],
-                p["centering_full_side_distance"],
-                p["centering_zero_side_distance"])
-
-        desired_steering = float(np.clip(
-            p["steering_gain"] * target_angle + centering_bias,
-            -p["max_steering_angle"], p["max_steering_angle"]))
-
-        dt = CONTROL_DT
-        if self.last_command_time is not None:
-            dt = min(p["command_slew_max_dt"],
-                     max(0.0, (step - self.last_command_time) * CONTROL_DT))
-        else:
-            dt = p["command_slew_max_dt"]
-
-        steering = gap_logic.slew_rate_limit(
-            desired_steering, self.steering_basis, dt, p["max_steering_rate"])
-        self.steering_basis = steering
-
-        limited_curvature = math.tan(desired_steering) / p["wheelbase"]
-        curve_speed = gap_logic.curvature_speed_limit(
-            limited_curvature, p["max_lateral_accel"], p["max_speed"])
-        normal_speed = max(p["min_speed"], curve_speed)
-
-        clearance_speed = gap_logic.braking_speed_limit(
-            forward_clearance, p["forward_stop_clearance"],
-            p["max_braking_decel"], p["max_speed"])
-        if creeping:
-            creep_reserve = max(p["emergency_stop_clearance"],
-                                p["forward_stop_clearance"] / 2.0)
-            clearance_speed = min(
-                p["escape_creep_speed"],
-                gap_logic.braking_speed_limit(
-                    forward_clearance, creep_reserve,
-                    p["max_braking_decel"], p["max_speed"]))
-
-        desired_speed = min(normal_speed, clearance_speed)
-        binding = 'curve' if normal_speed <= clearance_speed else 'clearance'
-        if creeping:
-            binding = 'creep'
-        if used_fallback and effective_corner < desired_speed:
-            desired_speed = min(desired_speed, effective_corner)
-            binding = 'corner'
-        else:
-            desired_speed = min(desired_speed, effective_corner) if used_fallback else desired_speed
-
-        ramp_basis = max(self.last_commanded_speed,
-                         min(abs(float(current_speed)), p["max_speed"]))
-        accel_ceiling = ramp_basis + p["max_acceleration"] * dt
-        speed = min(desired_speed, accel_ceiling)
-        if accel_ceiling < desired_speed:
-            binding = 'accel'
-        self.binding_cap = binding
-
-        self.last_commanded_speed = speed
-        self.last_command_time = step
-        self.stopped = False
-        return steering, float(speed)
-
-    def _adaptive_width(self, left, right):
-        p = self.p
-        if not p["enable_adaptive_width"]:
-            return 1.0, p["safety_margin"], p["corner_speed"]
-        width_factor = gap_logic.corridor_width_factor(
-            left, right, p["adaptive_width_narrow"], p["adaptive_width_reference"])
-        margin = gap_logic.scale_between(
-            width_factor, p["min_safety_margin"], p["safety_margin"])
-        corner = gap_logic.scale_between(
-            width_factor, p["corner_speed"], p["corner_speed_wide"])
-        return width_factor, margin, corner
-
-    def _stop(self, step, reason):
-        self.last_commanded_speed = 0.0
-        self.last_command_time = step
-        self.stopped = True
-        self.stop_reason = reason
-        self.binding_cap = 'stop'
-        return self.steering_basis, 0.0
+def _reverse_laps(plant) -> float:
+    """Laps driven *against* the track's direction. The gym only counts
+    forward laps; its signed Frenet progress goes negative in reverse."""
+    env = plant.env.unwrapped
+    s_max = env.track.centerline.spline.s_frame_max
+    return max(0.0, -float(env.cumulative_s[0]) / s_max)
 
 
-def run_track(track: str, params: dict, seed: int, timeout_s: float) -> dict:
+def run_track(track: str, params: dict, seed: int, timeout_s: float,
+              reverse: bool = False) -> dict:
+    """One lap of ``track``. ``reverse`` starts facing backwards, so the
+    indoor layouts (all counter-clockwise) get exercised with right turns."""
     plant = make_plant(track, seed)
     line = plant.env.unwrapped.track.raceline
-    start = np.array([[line.xs[0], line.ys[0], line.yaws[0]]], dtype=float)
+    start = np.array([[line.xs[0], line.ys[0],
+                       line.yaws[0] + (math.pi if reverse else 0.0)]], dtype=float)
     obs, _ = plant.reset(start)
     lidar = plant.env.unwrapped.sim.scan_sims[0]
     # Use the config's lidar for geometry: angle_min/increment come from the env.
@@ -393,6 +167,8 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float) -> dict:
     last_pos = None
     stationary_window = 0
     cap_histogram = {}
+    stop_reasons = {}
+    min_body_clear = math.inf
 
     for step in range(max_steps):
         ego = obs["agent_0"]
@@ -400,6 +176,10 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float) -> dict:
         speed_meas = float(state[3])
         steering, cmd_speed = ctrl.command(ego["scan"], speed_meas, step)
         stop_steps += int(ctrl.stopped)
+        min_body_clear = min(min_body_clear, ctrl.telemetry.get("min_clear", math.inf))
+        if ctrl.stopped:
+            reason = ctrl.stop_reason
+            stop_reasons[reason] = stop_reasons.get(reason, 0) + 1
         speeds.append(cmd_speed)
         if ctrl.binding_cap is not None:
             cap_histogram[ctrl.binding_cap] = cap_histogram.get(ctrl.binding_cap, 0) + 1
@@ -429,16 +209,19 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float) -> dict:
             min_forward = min(min_forward, fs)
 
         obs, _r, done, _t, info = plant.step([(steering, cmd_speed)])
+        if reverse and _reverse_laps(plant) >= 1.0:
+            break
         if done or obs["agent_0"]["collision"]:
             break
 
+    laps = _reverse_laps(plant) if reverse else float(info["lap_counts"][0])
     plant_report = plant.report()
     plant.close()
     wall_time = time.monotonic() - started
-    laps = float(info["lap_counts"][0])
     collision = bool(obs["agent_0"]["collision"]) or plant_report.get("contact_steps", 0) > 0
     result = {
         "track": track,
+        "reverse": reverse,
         "passed": bool(laps >= 1.0 and not collision),
         "laps": laps,
         "collision": collision,
@@ -454,6 +237,9 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float) -> dict:
             if corridor_offsets else None),
         "max_stuck_steps": stuck_steps,
         "cap_histogram": cap_histogram,
+        "stop_reasons": stop_reasons,
+        "min_body_clearance_m": (round(min_body_clear, 3)
+                                 if math.isfinite(min_body_clear) else None),
     }
     result.update(plant_report)
     return result
@@ -525,6 +311,17 @@ def cross_track(reference, idx, pos):
     return float(math.hypot(reference[idx, 0] - pos[0], reference[idx, 1] - pos[1]))
 
 
+def select_tracks(spec: str) -> list:
+    """'all', 'indoor', 'gym', or one track name."""
+    if spec == "all":
+        return list(INDOOR_TRACKS) + list(GYM_TRACKS)
+    if spec == "indoor":
+        return list(INDOOR_TRACKS)
+    if spec == "gym":
+        return list(GYM_TRACKS)
+    return [spec]
+
+
 def parse_set(values):
     params = dict(DEFAULTS)
     for item in values or []:
@@ -555,21 +352,16 @@ def main(argv=None) -> int:
     parser.add_argument("--set", action="append", default=[],
                         help="override a parameter, name=value (repeatable)")
     parser.add_argument("--output", help="write JSON results here")
+    parser.add_argument("--reverse", action="store_true",
+                        help="drive each track the other way round")
     args = parser.parse_args(argv)
 
-    if args.track == "all":
-        selected = list(INDOOR_TRACKS) + list(GYM_TRACKS)
-    elif args.track == "indoor":
-        selected = list(INDOOR_TRACKS)
-    elif args.track == "gym":
-        selected = list(GYM_TRACKS)
-    else:
-        selected = [args.track]
+    selected = select_tracks(args.track)
 
     params = parse_set(args.set)
     results = []
     for track in selected:
-        res = run_track(track, params, args.seed, args.timeout)
+        res = run_track(track, params, args.seed, args.timeout, args.reverse)
         results.append(res)
         status = "PASS" if res["passed"] else "FAIL"
         print(f"{status} {track:14s} laps={res['laps']:.2f} "

@@ -13,10 +13,10 @@
 #                       (on the 2026-08-06 run: ~80% of all driving ticks)
 #   corner_speed_wide   the same cap on a corner sensed as wide
 #   max_lateral_accel   curvature cap: v <= sqrt(max_lateral_accel / curvature).
-#                       At this car's tightest corners (~0.82/m) 1.0 gives
-#                       ~1.1 m/s, so above that raising corner_speed alone
-#                       changes nothing in those corners. A grip limit --
-#                       raise in small steps.
+#                       Since 2026-10-19 (2.0) this and the acceleration ramp
+#                       are what bind most ticks in simulation. A grip limit --
+#                       raise in small steps, and drop it back to 1.0 first if
+#                       the car feels too fast in corners on the floor.
 #   max_acceleration    SAFETY-CRITICAL: the braking the car assumes it has
 #                       for the clearance it sees. Raising it lets the car
 #                       drive faster than it can stop. Do not raise to go
@@ -94,7 +94,12 @@ gap_follow_node:
     # so it hugged walls instead of leaving them. Raise above 1.0 only if the
     # car is still slow to leave a wall; too high will make it weave.
     steering_gain: 1.0
-    max_lateral_accel: 1.0
+    # Raised 1.0 -> 2.0 on 2026-10-19 with the swept-path / corner-setup
+    # rework: 1.0 m/s^2 (~0.1 g) held the car near 1.4 m/s through every
+    # corner. 2.0 is still below pure_pursuit's 2.5 on the same car and well
+    # under the simulator's grip limit (0.7 g). Simulation only, not yet
+    # validated on the floor -- see docs/gap-follow.md#validation.
+    max_lateral_accel: 2.0
     max_acceleration: 3.0
     # SAFETY-CRITICAL, and NOT the same knob as pure_pursuit's identically
     # named one. Here it is the braking authority the car *assumes it has*
@@ -296,6 +301,65 @@ gap_follow_node:
     # this term only trims what it leaves behind.
     centering_full_side_distance: 4.0
     centering_zero_side_distance: 5.0
+
+    # --- Swept-path clearance (docs/gap-follow.md#swept-path-clearance) ---
+    # The braking speed ceiling uses how far the BODY can drive along the arc
+    # it is on before reaching an obstacle, instead of the minimum range in
+    # the +/-30deg forward cone. In a 1.5m hallway that cone reads the side
+    # walls (~1.25m) and capped the car at ~2.4m/s on empty straights.
+    # Creeping and the escape logic still use the cone, unchanged.
+    enable_swept_clearance: true
+    # Extra width on each side of the body counted as "in the path". Small on
+    # purpose: the 0.20m forward_stop_clearance reserve is the longitudinal
+    # margin, and the TTC brake keeps its own full safety_margin.
+    swept_clearance_margin: 0.05
+    swept_clearance_max_length: 3.0   # m -- beyond this the path counts as clear
+
+    # --- Arc guard (docs/gap-follow.md#arc-guard) ---
+    # If the steering the gap logic asks for would sweep the body into
+    # something within arc_guard_length (or the stopping distance, if longer),
+    # use the nearest steering angle whose arc is clear. This is what stops
+    # the rear of the car clipping an inner corner. Never acts on open track.
+    enable_arc_guard: true
+    arc_guard_length: 1.0          # m
+    arc_guard_margin: 0.05         # m each side of the body
+    # Authority bound, checked at startup: at most half of max_steering_angle.
+    arc_guard_max_correction: 0.1745
+    arc_guard_candidates: 29       # steering angles tried across the full range
+
+    # --- Corner setup (docs/gap-follow.md#corner-setup) ---
+    # On the approach to a turn in a corridor, move toward the OUTSIDE wall so
+    # the car turns in late (a racing line) instead of hugging the inside from
+    # the moment the bend appears. Off on straights and in open rooms.
+    enable_corner_setup: true
+    # Target position: this fraction of the room between the middle and the
+    # outside wall (room = corridor_half - car_width/2 - wall_margin).
+    corner_setup_fraction: 0.6
+    corner_setup_wall_margin: 0.10
+    corner_setup_gain: 0.6            # rad per m of lateral error
+    # Authority bound, checked at startup: at most half of max_steering_angle.
+    corner_setup_max_steering: 0.10
+    # Turn detection (gap_logic.side_opening_signal): in a forward-diagonal
+    # sector on each side, the fraction of beams that reach more than
+    # excess_threshold past where that side's wall would be if it carried on
+    # -- i.e. that see around the end of the wall. Left fraction minus right.
+    # Setup starts at zero_signal and is fully on at full_signal.
+    corner_setup_zero_signal: 0.03
+    corner_setup_full_signal: 0.12
+    corner_setup_sector_lo_deg: 10.0
+    corner_setup_sector_hi_deg: 80.0
+    corner_setup_excess_threshold: 0.30   # m
+    # Distance the body can drive straight ahead (to the end of the straight):
+    # setup fades in from far_zero to far_full, and back out from near_full to
+    # near_zero, which is the turn-in point -- below it the car must be free
+    # to turn. Must satisfy near_zero < near_full <= far_full < far_zero.
+    corner_setup_far_zero: 4.0
+    corner_setup_far_full: 2.5
+    corner_setup_near_full: 1.6
+    corner_setup_near_zero: 1.1
+    # Both side walls must be within this (corridor, not open room).
+    corner_setup_full_side_distance: 1.5
+    corner_setup_zero_side_distance: 2.5
 
     # --- Time-to-collision automatic emergency braking ---
     enable_ttc: true

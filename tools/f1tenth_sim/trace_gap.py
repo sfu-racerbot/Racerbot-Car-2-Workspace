@@ -6,7 +6,14 @@ measured/commanded speed, steering, every speed cap's value, the chosen gap's
 geometry, side-wall distances, and which cap bound -- so the slow/stuck/tight
 behaviour can be attributed to a specific layer instead of guessed at.
 
+It drives eval_gap.GapController, the same controller eval_gap.py scores, so
+the trace and the pass/fail numbers always describe one pipeline. (An earlier
+version re-implemented the pipeline a third time and had silently dropped
+corridor centering, the creep reserve and the TTC/emergency escape.)
+
     python3 tools/f1tenth_sim/trace_gap.py --track indoor_tight --out /tmp/trace.csv
+    python3 tools/f1tenth_sim/trace_gap.py --track indoor_tight --plot /tmp/trace.png
+    python3 tools/f1tenth_sim/trace_gap.py --track asb_10000 --set enable_corner_setup=false
 """
 from __future__ import annotations
 
@@ -17,190 +24,145 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from sim_fidelity.bootstrap import bootstrap  # noqa: E402
-
-ROOT = bootstrap()
-sys.path.insert(0, str(ROOT / "src" / "racerbot_sim"))
+from eval_gap import (  # noqa: E402
+    CONTROL_DT, GapController, components_half_fov, components_increment,
+    components_range_min, make_plant, parse_set)
 
 import numpy as np  # noqa: E402
 
-from gap_follow import gap_logic  # noqa: E402
-from sim_fidelity.plant import DEFAULT_PROFILE, env_components  # noqa: E402
-from sim_fidelity import CALIBRATION, PROFILES  # noqa: E402
+COLUMNS = (
+    "step", "t", "x", "y", "yaw_deg", "wheel_angle", "speed_meas", "cmd_speed", "steering",
+    "desired_steering", "target_deg", "target_distance", "gap_width_deg",
+    "fallback", "creeping", "centering_bias", "corner_setup_bias",
+    "binding", "stop_reason", "curve_cap", "clearance_cap", "corner_cap",
+    "anticipation_cap", "fwd_clear", "arc_clear", "min_clear", "min_ttc",
+    "side_left", "side_right", "width_factor", "contact",
+)
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from eval_gap import DEFAULTS, make_plant  # noqa: E402
 
-CONTROL_DT = 0.025
+def _fmt(value):
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return "inf" if value > 0 else "-inf"
+        return round(value, 4)
+    return value
 
 
-def trace(track, params, seed, timeout_s, out_path):
+def trace(track, params, seed, timeout_s):
     plant = make_plant(track, seed)
     line = plant.env.unwrapped.track.raceline
     obs, _ = plant.reset(np.array([[line.xs[0], line.ys[0], line.yaws[0]]]))
-    comp = env_components(PROFILES[DEFAULT_PROFILE], CALIBRATION)["lidar_config"]
 
-    class L:
+    class _Lidar:
         pass
-    lid = L()
-    lid.angle_min = float(comp.angle_min)
-    lid.range_min = float(comp.range_min)
-    lid.angle_increment = float((comp.angle_max - comp.angle_min) / (comp.num_beams - 1))
-
-    p = dict(params)
-    previous_target_idx = None
-    steering_basis = 0.0
-    last_commanded_speed = 0.0
-    last_command_time = None
+    lid = _Lidar()
+    lid.angle_min = float(-components_half_fov())
+    lid.angle_increment = float(components_increment())
+    lid.range_min = float(components_range_min())
+    ctrl = GapController(params, lid)
 
     rows = []
-    max_steps = int(math.ceil(timeout_s / CONTROL_DT))
-    for step in range(max_steps):
+    laps = 0.0
+    for step in range(int(math.ceil(timeout_s / CONTROL_DT))):
         ego = obs["agent_0"]
-        st = np.asarray(ego["std_state"], dtype=float)
-        speed_meas = float(st[3])
-        scan = ego["scan"]
-        clean, valid = gap_logic.sanitize_ranges(scan, p["max_range"], lid.range_min)
-        angles = lid.angle_min + np.arange(clean.size) * lid.angle_increment
-        half_span = math.radians(p["centering_side_fov_deg"]) / 2.0
-        side_left = gap_logic.side_wall_distance(clean, valid, angles, math.pi / 2, half_span)
-        side_right = gap_logic.side_wall_distance(clean, valid, angles, -math.pi / 2, half_span)
-
-        half_fov = math.radians(p["forward_fov_deg"]) / 2.0
-        lo = max(0, int((-half_fov - lid.angle_min) / lid.angle_increment))
-        hi = min(clean.size - 1, int((half_fov - lid.angle_min) / lid.angle_increment))
-        window = clean[lo:hi + 1]
-        wv = valid[lo:hi + 1]
-        ba = angles[lo:hi + 1]
-        bnd = gap_logic.vehicle_boundary_distances(
-            ba, p["car_width"], p["car_length"], p["wheelbase"],
-            p["laser_offset_x"], p["laser_offset_y"])
-        min_clear = gap_logic.minimum_footprint_clearance(window, wv, bnd)
-        fwd_clear = gap_logic.minimum_footprint_clearance_in_cone(
-            window, wv, ba, bnd, math.radians(p["forward_stop_fov_deg"]))
-
-        # adaptive width
-        width_factor = gap_logic.corridor_width_factor(
-            side_left, side_right, p["adaptive_width_narrow"], p["adaptive_width_reference"])
-        eff_margin = gap_logic.scale_between(width_factor, p["min_safety_margin"], p["safety_margin"])
-        eff_corner = gap_logic.scale_between(width_factor, p["corner_speed"], p["corner_speed_wide"])
-
-        # TTC
-        cmd_age = math.inf if last_command_time is None else (step - last_command_time) * CONTROL_DT
-        eff_speed = gap_logic.conservative_ttc_speed(
-            speed_meas, last_commanded_speed, cmd_age,
-            p["ttc_command_speed_timeout_sec"], p["ttc_command_fallback_max_odom_speed"])
-        min_ttc = math.inf
-        if eff_speed >= p["ttc_min_brake_speed"]:
-            min_ttc = gap_logic.minimum_ttc(
-                window, wv, ba, eff_speed, bnd, p["ttc_min_closing_speed"],
-                p["car_width"] / 2.0 + p["safety_margin"],
-                math.tan(steering_basis) / p["wheelbase"],
-                p["laser_offset_x"], p["laser_offset_y"])
-
-        # gap selection
-        closest_idx, closest_dist = gap_logic.closest_valid(window, wv)
-        half_width = p["car_width"] / 2.0 + eff_margin
-        processed = gap_logic.disparity_extend(window, lid.angle_increment,
-                                               p["disparity_threshold"], half_width)
-        if closest_idx is not None:
-            processed = gap_logic.safety_bubble(processed, closest_idx, closest_dist,
-                                                lid.angle_increment, half_width)
-        gap_start, gap_end, used_fallback = gap_logic.find_gap_with_fallback(
-            processed, p["min_gap_distance"], p["fallback_min_gap_distance"],
-            lid.angle_increment, p["min_centerline_gap_width"],
-            previous_target_idx=previous_target_idx, switch_margin=p["gap_switch_margin"])
-
-        target_angle = 0.0
-        curve_speed = p["max_speed"]
-        clearance_speed = p["max_speed"]
-        steering = steering_basis
-        cmd_speed = 0.0
-        binding = "stop"
-        gap_w = 0.0
-        if gap_start is not None:
-            target_in_window = gap_logic.aim_within_gap(processed, gap_start, gap_end, ba)
-            previous_target_idx = target_in_window
-            target_angle = float(ba[target_in_window])
-            gap_w = (gap_end - gap_start + 1) * lid.angle_increment
-            desired_steering = float(np.clip(p["steering_gain"] * target_angle,
-                                             -p["max_steering_angle"], p["max_steering_angle"]))
-            dt = p["command_slew_max_dt"] if last_command_time is None else min(
-                p["command_slew_max_dt"], max(0.0, (step - last_command_time) * CONTROL_DT))
-            steering = gap_logic.slew_rate_limit(desired_steering, steering_basis, dt,
-                                                 p["max_steering_rate"])
-            steering_basis = steering
-            curv = math.tan(desired_steering) / p["wheelbase"]
-            curve_speed = gap_logic.curvature_speed_limit(curv, p["max_lateral_accel"], p["max_speed"])
-            normal_speed = max(p["min_speed"], curve_speed)
-            clearance_speed = gap_logic.braking_speed_limit(
-                fwd_clear, p["forward_stop_clearance"], p["max_braking_decel"], p["max_speed"])
-            creeping = fwd_clear <= p["forward_stop_clearance"]
-            if creeping:
-                clearance_speed = min(p["escape_creep_speed"], clearance_speed)
-            desired_speed = min(normal_speed, clearance_speed)
-            binding = "curve" if normal_speed <= clearance_speed else "clearance"
-            if used_fallback and eff_corner < desired_speed:
-                desired_speed = min(desired_speed, eff_corner)
-                binding = "corner"
-            ramp = max(last_commanded_speed, min(abs(speed_meas), p["max_speed"]))
-            accel_ceil = ramp + p["max_acceleration"] * dt
-            cmd_speed = min(desired_speed, accel_ceil)
-            if accel_ceil < desired_speed:
-                binding = "accel"
-            last_commanded_speed = cmd_speed
-            last_command_time = step
-        else:
-            last_commanded_speed = 0.0
-            last_command_time = step
-
+        speed_meas = float(np.asarray(ego["std_state"], dtype=float)[3])
+        steering, cmd_speed = ctrl.command(ego["scan"], speed_meas, step)
         truth = plant.truth(0)
-        rows.append(dict(
-            step=step, t=round(step * CONTROL_DT, 3),
-            x=round(float(truth[0]), 3), y=round(float(truth[1]), 3),
-            yaw=round(math.degrees(float(truth[2])), 2),
-            speed_meas=round(speed_meas, 3), cmd_speed=round(cmd_speed, 3),
-            steering=round(steering, 4), target_angle=round(math.degrees(target_angle), 2),
-            binding=binding, fallback=int(used_fallback),
-            curve_cap=round(curve_speed, 3), clearance_cap=round(clearance_speed, 3),
-            corner_cap=round(eff_corner, 3),
-            fwd_clear=round(fwd_clear, 3) if math.isfinite(fwd_clear) else "inf",
-            min_clear=round(min_clear, 3) if math.isfinite(min_clear) else "inf",
-            min_ttc=round(min_ttc, 3) if math.isfinite(min_ttc) else "inf",
-            eff_speed=round(eff_speed, 3),
-            side_left=round(side_left, 3) if math.isfinite(side_left) else "inf",
-            side_right=round(side_right, 3) if math.isfinite(side_right) else "inf",
-            width_factor=round(width_factor, 3),
-            gap_width_deg=round(math.degrees(gap_w), 1),
-        ))
+        tel = ctrl.telemetry
+        row = dict(
+            step=step, t=step * CONTROL_DT, x=float(truth[0]), y=float(truth[1]),
+            # std_state is [x, y, delta, v, yaw, yaw_rate, beta]: index 2 is the
+            # road-wheel angle, not yaw.
+            yaw_deg=math.degrees(float(truth[4])), wheel_angle=float(truth[2]),
+            speed_meas=speed_meas,
+            cmd_speed=cmd_speed, steering=steering,
+            desired_steering=tel.get("desired_steering", ""),
+            target_deg=(math.degrees(tel["target_angle"])
+                        if "target_angle" in tel else ""),
+            target_distance=tel.get("target_distance", ""),
+            gap_width_deg=(math.degrees(tel["gap_width"])
+                           if "gap_width" in tel else ""),
+            fallback=tel.get("fallback", ""), creeping=tel.get("creeping", ""),
+            centering_bias=tel.get("centering_bias", ""),
+            corner_setup_bias=tel.get("corner_setup_bias", ""),
+            binding=tel.get("binding", ""), stop_reason=tel.get("stop_reason", ""),
+            curve_cap=tel.get("curve_cap", ""),
+            clearance_cap=tel.get("clearance_cap", ""),
+            corner_cap=tel.get("corner_cap", ""),
+            anticipation_cap=tel.get("anticipation_cap", ""),
+            fwd_clear=tel.get("fwd_clear", ""), arc_clear=tel.get("arc_clear", ""),
+            min_clear=tel.get("min_clear", ""), min_ttc=tel.get("min_ttc", ""),
+            side_left=tel.get("side_left", ""), side_right=tel.get("side_right", ""),
+            width_factor=tel.get("width_factor", ""), contact=0,
+        )
+        rows.append({k: _fmt(v) for k, v in row.items()})
         obs, _r, done, _t, info = plant.step([(steering, cmd_speed)])
-        if done or obs["agent_0"]["collision"] or plant.chassis_contact_steps > 0:
-            rows.append(dict(step=step + 1, t=round((step + 1) * CONTROL_DT, 3),
-                             x=0, y=0, yaw=0, speed_meas=0, cmd_speed=0, steering=0,
-                             target_angle=0, binding="CONTACT", fallback=0,
-                             curve_cap=0, clearance_cap=0, corner_cap=0,
-                             fwd_clear=0, min_clear=0, min_ttc=0, eff_speed=0,
-                             side_left=0, side_right=0, width_factor=0, gap_width_deg=0))
+        laps = float(info["lap_counts"][0])
+        if plant.chassis_contact_steps > 0 or obs["agent_0"]["collision"]:
+            rows[-1]["contact"] = 1
             break
-        if info["lap_counts"][0] >= 1:
+        if done or laps >= 1.0:
             break
     plant.close()
+    return rows, laps
 
-    with open(out_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
-    print(f"wrote {len(rows)} rows to {out_path}; laps={info['lap_counts'][0]}")
+
+def plot(rows, track, out_path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from PIL import Image
+    import yaml
+
+    from eval_gap import INDOOR_TRACKS, ROOT
+    fig, ax = plt.subplots(figsize=(10, 8))
+    if track in INDOOR_TRACKS:
+        meta_path = Path(ROOT) / ".sim" / "eval_gap_tracks" / f"{track}_map.yaml"
+        meta = yaml.safe_load(meta_path.read_text())
+        image = np.asarray(Image.open(meta_path.parent / meta["image"]))
+        res = float(meta["resolution"])
+        ox, oy = meta["origin"][:2]
+        h, w = image.shape[:2]
+        ax.imshow(image, cmap="gray", origin="upper",
+                  extent=(ox, ox + w * res, oy, oy + h * res))
+    xs = [r["x"] for r in rows]
+    ys = [r["y"] for r in rows]
+    sc = ax.scatter(xs, ys, c=[r["cmd_speed"] for r in rows], s=6, cmap="viridis")
+    contact = [r for r in rows if r["contact"]]
+    if contact:
+        ax.plot(contact[-1]["x"], contact[-1]["y"], "rx", ms=14, mew=3)
+    fig.colorbar(sc, label="commanded speed (m/s)")
+    ax.set_aspect("equal")
+    ax.set_title(f"gap_follow trace: {track}")
+    fig.savefig(out_path, dpi=110, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--track", default="indoor_tight")
     ap.add_argument("--seed", type=int, default=12345)
     ap.add_argument("--timeout", type=float, default=120.0)
-    ap.add_argument("--out", default="/tmp/opencode/trace.csv")
+    ap.add_argument("--set", action="append", default=[],
+                    help="override a parameter, name=value (repeatable)")
+    ap.add_argument("--out", help="write the per-tick CSV here")
+    ap.add_argument("--plot", help="write a PNG of the driven path here")
     args = ap.parse_args(argv)
-    trace(args.track, DEFAULTS, args.seed, args.timeout, args.out)
+    rows, laps = trace(args.track, parse_set(args.set), args.seed, args.timeout)
+    if args.out:
+        with open(args.out, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(COLUMNS))
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"wrote {len(rows)} rows to {args.out}")
+    if args.plot:
+        plot(rows, args.track, args.plot)
+        print(f"wrote {args.plot}")
+    contact = any(r["contact"] for r in rows)
+    print(f"track={args.track} laps={laps:.2f} ticks={len(rows)} contact={contact}")
 
 
 if __name__ == "__main__":

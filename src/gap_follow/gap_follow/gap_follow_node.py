@@ -198,6 +198,43 @@ class GapFollowNode(Node):
         self.declare_parameter('centering_full_side_distance', 4.0)
         self.declare_parameter('centering_zero_side_distance', 5.0)
 
+        # Swept-path clearance: the braking speed ceiling measures how far the
+        # body can drive along the arc it is actually on, instead of the
+        # minimum range in a +/-30deg cone (which in a narrow hallway is the
+        # side walls). See gap_logic.swept_path_clearance and docs/gap-follow.md.
+        self.declare_parameter('enable_swept_clearance', True)
+        self.declare_parameter('swept_clearance_margin', 0.05)
+        self.declare_parameter('swept_clearance_max_length', 3.0)
+        # Arc guard: if the steering the gap logic asked for sweeps the body
+        # into something within arc_guard_length, use the nearest steering
+        # whose arc is clear. See gap_logic.arc_guard_steering.
+        self.declare_parameter('enable_arc_guard', True)
+        self.declare_parameter('arc_guard_length', 1.0)
+        self.declare_parameter('arc_guard_margin', 0.05)
+        # Half of this file's own max_steering_angle default; the YAML sets
+        # half of the car's real limit.
+        self.declare_parameter('arc_guard_max_correction', 0.13)
+        self.declare_parameter('arc_guard_candidates', 29)
+        # Corner setup: on the approach to a turn in a corridor, move to the
+        # outside wall so the car turns in late instead of hugging the inside.
+        # See gap_logic.corner_setup_bias.
+        self.declare_parameter('enable_corner_setup', True)
+        self.declare_parameter('corner_setup_fraction', 0.6)
+        self.declare_parameter('corner_setup_wall_margin', 0.10)
+        self.declare_parameter('corner_setup_gain', 0.6)
+        self.declare_parameter('corner_setup_max_steering', 0.10)
+        self.declare_parameter('corner_setup_zero_signal', 0.03)
+        self.declare_parameter('corner_setup_full_signal', 0.12)
+        self.declare_parameter('corner_setup_sector_lo_deg', 10.0)
+        self.declare_parameter('corner_setup_sector_hi_deg', 80.0)
+        self.declare_parameter('corner_setup_excess_threshold', 0.30)
+        self.declare_parameter('corner_setup_far_zero', 4.0)
+        self.declare_parameter('corner_setup_far_full', 2.5)
+        self.declare_parameter('corner_setup_near_full', 1.6)
+        self.declare_parameter('corner_setup_near_zero', 1.1)
+        self.declare_parameter('corner_setup_full_side_distance', 1.5)
+        self.declare_parameter('corner_setup_zero_side_distance', 2.5)
+
         # F1TENTH instantaneous TTC, using the safest recent speed estimate.
         self.declare_parameter('enable_ttc', True)
         self.declare_parameter('ttc_threshold_sec', 0.30)
@@ -322,6 +359,51 @@ class GapFollowNode(Node):
             self.get_parameter('centering_full_side_distance').value)
         self.centering_zero_side_distance = float(
             self.get_parameter('centering_zero_side_distance').value)
+        self.enable_swept_clearance = bool(
+            self.get_parameter('enable_swept_clearance').value)
+        self.swept_clearance_margin = float(
+            self.get_parameter('swept_clearance_margin').value)
+        self.swept_clearance_max_length = float(
+            self.get_parameter('swept_clearance_max_length').value)
+        self.enable_arc_guard = bool(self.get_parameter('enable_arc_guard').value)
+        self.arc_guard_length = float(self.get_parameter('arc_guard_length').value)
+        self.arc_guard_margin = float(self.get_parameter('arc_guard_margin').value)
+        self.arc_guard_max_correction = float(
+            self.get_parameter('arc_guard_max_correction').value)
+        self.arc_guard_candidates = int(
+            self.get_parameter('arc_guard_candidates').value)
+        self.enable_corner_setup = bool(
+            self.get_parameter('enable_corner_setup').value)
+        self.corner_setup_fraction = float(
+            self.get_parameter('corner_setup_fraction').value)
+        self.corner_setup_wall_margin = float(
+            self.get_parameter('corner_setup_wall_margin').value)
+        self.corner_setup_gain = float(
+            self.get_parameter('corner_setup_gain').value)
+        self.corner_setup_max_steering = float(
+            self.get_parameter('corner_setup_max_steering').value)
+        self.corner_setup_zero_signal = float(
+            self.get_parameter('corner_setup_zero_signal').value)
+        self.corner_setup_full_signal = float(
+            self.get_parameter('corner_setup_full_signal').value)
+        self.corner_setup_sector_lo = math.radians(float(
+            self.get_parameter('corner_setup_sector_lo_deg').value))
+        self.corner_setup_sector_hi = math.radians(float(
+            self.get_parameter('corner_setup_sector_hi_deg').value))
+        self.corner_setup_excess_threshold = float(
+            self.get_parameter('corner_setup_excess_threshold').value)
+        self.corner_setup_far_zero = float(
+            self.get_parameter('corner_setup_far_zero').value)
+        self.corner_setup_far_full = float(
+            self.get_parameter('corner_setup_far_full').value)
+        self.corner_setup_near_full = float(
+            self.get_parameter('corner_setup_near_full').value)
+        self.corner_setup_near_zero = float(
+            self.get_parameter('corner_setup_near_zero').value)
+        self.corner_setup_full_side_distance = float(
+            self.get_parameter('corner_setup_full_side_distance').value)
+        self.corner_setup_zero_side_distance = float(
+            self.get_parameter('corner_setup_zero_side_distance').value)
         self.enable_ttc = bool(self.get_parameter('enable_ttc').value)
         self.ttc_threshold_sec = float(
             self.get_parameter('ttc_threshold_sec').value)
@@ -409,13 +491,17 @@ class GapFollowNode(Node):
             raise ValueError(
                 'max_steering_angle must be finite and in (0, pi/2) radians')
         # _side_wall_distances (which reads the centering side-window
-        # parameters) runs whenever either feature is on, so validate for
-        # both -- otherwise a bad window with centering off but adaptive
+        # parameters) runs whenever any of these features is on, so validate
+        # for all of them -- otherwise a bad window with centering off but adaptive
         # width on raises inside every scan callback instead of at startup.
-        if self.enable_centering or self.enable_adaptive_width:
+        if (self.enable_centering or self.enable_adaptive_width
+                or self.enable_corner_setup):
             self._validate_centering_parameters()
         if self.enable_adaptive_width:
             self._validate_adaptive_width_parameters()
+        self._validate_swept_path_parameters()
+        if self.enable_corner_setup:
+            self._validate_corner_setup_parameters()
         if not math.isfinite(self.ttc_command_speed_timeout_sec) or (
                 self.ttc_command_speed_timeout_sec < 0.0):
             raise ValueError(
@@ -701,7 +787,8 @@ class GapFollowNode(Node):
         # corridor -- and so a later stop's escape report (which re-runs gap
         # selection) reads the same margin the drive decision did, not a
         # second, possibly different, sample of the wall.
-        if self.enable_centering or self.enable_adaptive_width:
+        if (self.enable_centering or self.enable_adaptive_width
+                or self.enable_corner_setup):
             side_left, side_right = self._side_wall_distances(clean, valid, scan)
         else:
             side_left = side_right = math.inf
@@ -874,6 +961,10 @@ class GapFollowNode(Node):
         # well as it answers the ordinary "which way to drive" question, so
         # a trip does not pay for a second gap search the way the old
         # ttc_brake log detail (_escape_report) used to.
+        # The swept-path checks below need the sensed ranges, not the
+        # inflated/bubbled copy _select_gap hands back in `window` -- they
+        # model the body's own width themselves.
+        raw_window = window
         (window, closest_dist, gap_start, gap_end, used_fallback,
          target_idx_in_window, near_bearing) = self._select_gap(
             window, window_valid, scan.angle_increment, beam_angles)
@@ -962,11 +1053,39 @@ class GapFollowNode(Node):
             (0.0, 0.0) if creeping
             else self._centering_bias(side_left, side_right, target_angle,
                                       target_distance))
-        desired_steering = float(np.clip(
-            self.steering_gain * target_angle + centering_bias,
+        # Corner setup: the same cross-track law aimed at the outside of an
+        # upcoming turn instead of the middle, so the car turns in late
+        # rather than hugging the inside from the moment the bend appears.
+        # Centering is faded out by the same weight so the two never pull
+        # against each other; their sum stays within the larger of the two
+        # authority bounds. Suppressed while creeping, like centering.
+        setup_bias, setup_weight = (
+            (0.0, 0.0) if creeping
+            else self._corner_setup_bias(
+                window_valid, beam_angles, raw_window, side_left, side_right))
+        centering_bias *= (1.0 - setup_weight)
+        centering_weight *= (1.0 - setup_weight)
+        requested_steering = float(np.clip(
+            self.steering_gain * target_angle + centering_bias + setup_bias,
             -self.max_steering_angle,
             self.max_steering_angle,
         ))
+        # Arc guard: check the arc that steering would sweep the body along,
+        # and if it runs into something within arc_guard_length take the
+        # nearest steering whose arc is clear. Not while creeping -- the creep
+        # is already threading a specific way out at a crawl.
+        desired_steering = requested_steering
+        if self.enable_arc_guard and not creeping:
+            desired_steering = gap_logic.arc_guard_steering(
+                raw_window, window_valid, beam_angles, requested_steering,
+                max(self.arc_guard_length,
+                    self._speed_basis() ** 2 / (2.0 * self.max_braking_decel)
+                    + self.forward_stop_clearance),
+                self.car_width / 2.0 + self.arc_guard_margin,
+                self.car_length, self.wheelbase,
+                self.laser_offset_x, self.laser_offset_y,
+                self.max_steering_angle, self.arc_guard_max_correction,
+                self.arc_guard_candidates)
         now, command_dt = self._command_timing()
         steering_basis_before = self.steering_basis
         steering_angle = gap_logic.slew_rate_limit(
@@ -1015,8 +1134,25 @@ class GapFollowNode(Node):
             anticipated_speed = gap_logic.curvature_speed_limit(
                 anticipated_curvature, self.max_lateral_accel, self.max_speed)
 
+        # The braking ceiling's clearance. With swept-path clearance on, it is
+        # how far the body can drive along the arc it is on -- checked for both
+        # the arc just asked for and the one the slew-limited rack will
+        # actually drive this tick, whichever is shorter -- rather than the
+        # minimum range in the forward cone, which in a narrow hallway is the
+        # side walls the car is driving parallel to. The cone still decides
+        # creeping and the escape below, unchanged.
+        braking_clearance = forward_clearance
+        if self.enable_swept_clearance:
+            swept_half_width = self.car_width / 2.0 + self.swept_clearance_margin
+            braking_clearance = min(
+                gap_logic.swept_path_clearance(
+                    raw_window, window_valid, beam_angles,
+                    math.tan(steering) / self.wheelbase, swept_half_width,
+                    self.car_length, self.wheelbase, self.laser_offset_x,
+                    self.laser_offset_y, self.swept_clearance_max_length)
+                for steering in (desired_steering, steering_angle))
         clearance_speed = gap_logic.braking_speed_limit(
-            forward_clearance,
+            braking_clearance,
             self.forward_stop_clearance,
             self.max_braking_decel,
             self.max_speed,
@@ -1092,6 +1228,16 @@ class GapFollowNode(Node):
             f"{centering_weight:.2f} (left {self.centering_left_distance:.2f}m, "
             f"right {self.centering_right_distance:.2f}m)"
             if centering_weight > 0.0 else "")
+        setup_text = (
+            f", corner setup {setup_bias:+.3f}rad at weight {setup_weight:.2f}"
+            if setup_weight > 0.0 else "")
+        guard_text = (
+            f", arc guard {requested_steering:+.3f}->{desired_steering:+.3f}rad "
+            f"(requested arc blocked)"
+            if not math.isclose(desired_steering, requested_steering) else "")
+        swept_text = (
+            f", swept clearance {braking_clearance:.2f}m"
+            if self.enable_swept_clearance and math.isfinite(braking_clearance) else "")
         # Only worth a line when it is actually doing something -- on an
         # open room or mid-corner (width_factor == 1.0, no wall reliably on
         # both sides) this fragment would just repeat the static defaults.
@@ -1137,7 +1283,8 @@ class GapFollowNode(Node):
             f"{target_distance:.2f}m at {math.degrees(target_angle):+.1f}deg, "
             f"curvature={limited_curvature:+.3f}/m, closest={closest_text}, "
             f"odom={self.current_speed:+.2f}m/s; "
-            f"{cap_text}{adaptive_text}{centering_text}{steering_shape_text}{speed_shape_text}")
+            f"{cap_text}{swept_text}{adaptive_text}{centering_text}{setup_text}"
+            f"{guard_text}{steering_shape_text}{speed_shape_text}")
         self._log_decision(gap_mode, decision_detail, steering_angle, speed)
 
         # Every speed ceiling that competed for this tick, so the dashboard
@@ -1216,6 +1363,84 @@ class GapFollowNode(Node):
                 'centering_full_side_distance must be positive and strictly '
                 'below centering_zero_side_distance')
 
+    def _validate_swept_path_parameters(self):
+        """Swept-path clearance and the arc guard share the arc model, so
+        their checks live together. The authority bound on the guard is the
+        one that matters: it may move steering away from an arc that sweeps
+        the body into something, but no further than half the steering
+        range, the same ceiling centering_max_steering has -- a correction
+        that can reverse the gap's choice outright is a second policy."""
+        # Corner setup measures the straight ahead with the same margin, so
+        # check it whenever either reads it.
+        if self.enable_swept_clearance or self.enable_corner_setup:
+            if not (math.isfinite(self.swept_clearance_margin)
+                    and 0.0 <= self.swept_clearance_margin <= self.safety_margin):
+                raise ValueError(
+                    'swept_clearance_margin must be finite, non-negative and '
+                    'no larger than safety_margin')
+            if not (math.isfinite(self.swept_clearance_max_length)
+                    and self.swept_clearance_max_length > 0.0):
+                raise ValueError('swept_clearance_max_length must be finite and positive')
+        if self.enable_arc_guard:
+            if not (math.isfinite(self.arc_guard_length) and self.arc_guard_length > 0.0):
+                raise ValueError('arc_guard_length must be finite and positive')
+            if not (math.isfinite(self.arc_guard_margin)
+                    and 0.0 <= self.arc_guard_margin <= self.safety_margin):
+                raise ValueError(
+                    'arc_guard_margin must be finite, non-negative and no larger '
+                    'than safety_margin')
+            if not (math.isfinite(self.arc_guard_max_correction)
+                    and 0.0 <= self.arc_guard_max_correction
+                    <= self.max_steering_angle / 2.0 + 1e-9):
+                raise ValueError(
+                    'arc_guard_max_correction must be finite, non-negative, and '
+                    'no more than half of max_steering_angle -- a guard that can '
+                    'reverse the chosen gap is a second driving policy')
+            if self.arc_guard_candidates < 2:
+                raise ValueError('arc_guard_candidates must be at least 2')
+
+    def _validate_corner_setup_parameters(self):
+        """Same shape and the same authority bound as centering: corner setup
+        is a bounded lateral nudge, never a steering policy of its own."""
+        if not (math.isfinite(self.corner_setup_max_steering)
+                and 0.0 <= self.corner_setup_max_steering
+                <= self.max_steering_angle / 2.0):
+            raise ValueError(
+                'corner_setup_max_steering must be finite, non-negative, and no '
+                'more than half of max_steering_angle -- a setup bias that can '
+                'outvote the chosen gap is not a bias')
+        if not (math.isfinite(self.corner_setup_gain) and self.corner_setup_gain >= 0.0):
+            raise ValueError('corner_setup_gain must be finite and non-negative')
+        if not (math.isfinite(self.corner_setup_fraction)
+                and 0.0 <= self.corner_setup_fraction <= 1.0):
+            raise ValueError('corner_setup_fraction must be in [0, 1]')
+        if not (math.isfinite(self.corner_setup_wall_margin)
+                and self.corner_setup_wall_margin >= 0.0):
+            raise ValueError('corner_setup_wall_margin must be finite and non-negative')
+        if not (0.0 <= self.corner_setup_zero_signal
+                < self.corner_setup_full_signal <= 1.0):
+            raise ValueError(
+                'corner setup signal thresholds must satisfy '
+                '0 <= corner_setup_zero_signal < corner_setup_full_signal <= 1')
+        if not (0.0 < self.corner_setup_sector_lo < self.corner_setup_sector_hi
+                <= math.pi / 2.0):
+            raise ValueError(
+                'corner setup sector must satisfy 0 < sector_lo_deg < '
+                'sector_hi_deg <= 90')
+        if not (math.isfinite(self.corner_setup_excess_threshold)
+                and self.corner_setup_excess_threshold > 0.0):
+            raise ValueError('corner_setup_excess_threshold must be finite and positive')
+        if not (0.0 < self.corner_setup_near_zero < self.corner_setup_near_full
+                <= self.corner_setup_far_full < self.corner_setup_far_zero):
+            raise ValueError(
+                'corner setup distances must satisfy 0 < near_zero < near_full '
+                '<= far_full < far_zero')
+        if not (0.0 < self.corner_setup_full_side_distance
+                < self.corner_setup_zero_side_distance):
+            raise ValueError(
+                'corner_setup_full_side_distance must be positive and strictly '
+                'below corner_setup_zero_side_distance')
+
     def _validate_adaptive_width_parameters(self):
         """Reject an adaptive-width configuration that could out-loosen the
         margin it is meant to be a *bounded* relaxation of.
@@ -1278,6 +1503,44 @@ class GapFollowNode(Node):
             self.centering_full_forward_depth, self.centering_zero_forward_depth,
             self.centering_full_side_distance, self.centering_zero_side_distance,
         )
+
+    def _corner_setup_bias(self, window_valid, beam_angles, raw_window,
+                           left, right):
+        """Corner-setup bias for the current scan, or (0.0, 0.0)."""
+        if not self.enable_corner_setup:
+            return 0.0, 0.0
+        # Which way the corridor turns: which side's wall ends ahead. Not the
+        # steering aim -- see gap_logic.side_opening_signal for why.
+        turn_signal = gap_logic.side_opening_signal(
+            raw_window, window_valid, beam_angles, left, right,
+            self.corner_setup_sector_lo, self.corner_setup_sector_hi,
+            self.corner_setup_excess_threshold)
+        # How far the body can drive dead straight: the end of the straight
+        # (the outside wall of the coming turn) is what this sees.
+        straight_clearance = gap_logic.swept_path_clearance(
+            raw_window, window_valid, beam_angles, 0.0,
+            self.car_width / 2.0 + self.swept_clearance_margin,
+            self.car_length, self.wheelbase, self.laser_offset_x,
+            self.laser_offset_y, self.corner_setup_far_zero + 0.5)
+        return gap_logic.corner_setup_bias(
+            left, right, turn_signal, straight_clearance,
+            self.car_width, self.corner_setup_wall_margin,
+            self.corner_setup_fraction, self.corner_setup_gain,
+            self.corner_setup_max_steering,
+            self.corner_setup_zero_signal, self.corner_setup_full_signal,
+            self.corner_setup_far_zero, self.corner_setup_far_full,
+            self.corner_setup_near_full, self.corner_setup_near_zero,
+            self.corner_setup_full_side_distance,
+            self.corner_setup_zero_side_distance)
+
+    def _speed_basis(self) -> float:
+        """Best estimate of how fast the car is going: the last command, or
+        fresh odometry if that is faster -- the same basis the acceleration
+        ramp uses."""
+        basis = self.last_commanded_speed
+        if self._odom_fresh():
+            basis = max(basis, min(abs(self.current_speed), self.max_speed))
+        return basis
 
     def _adaptive_width(self, left, right):
         """(width_factor, effective_safety_margin, effective_corner_speed)

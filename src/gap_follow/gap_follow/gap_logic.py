@@ -312,6 +312,167 @@ def minimum_ttc(clean: np.ndarray, valid: np.ndarray,
     return float(np.min(ttc)) if ttc.size else math.inf
 
 
+def swept_path_clearance(clean: np.ndarray, valid: np.ndarray,
+                         angles: np.ndarray, curvature: float,
+                         half_width: float, car_length: float,
+                         wheelbase: float, laser_offset_x: float,
+                         laser_offset_y: float = 0.0,
+                         max_length: float = 3.0) -> float:
+    """How far the car can drive along a constant-curvature arc before its
+    body reaches a scanned obstacle, or ``inf`` if nothing is in the way
+    within ``max_length``.
+
+    This is the question the forward-cone clearance was standing in for, and
+    on a narrow corridor the cone answers it badly. The cone takes the
+    *minimum* range over +/-30deg, and in a 1.5m hallway the beams at +/-30deg
+    land on the side walls ~1.25m away -- so "forward clearance" there is
+    really side-wall distance, which a car driving straight down the hallway
+    will never hit. That number capped the car at ~2.4m/s on straights with
+    nothing ahead of it (docs/gap-follow-improvement-plan.md section 3.2).
+
+    Here only obstacles inside the band the body actually sweeps count, and
+    the distance is measured *along* the arc. ``base_link`` is the rear axle
+    (the bicycle model turns about it), so the arc is the rear axle's path,
+    and the band is the region the rectangular body covers as it follows
+    it: for a turn of radius R the body spans radii ``R - half_width`` (the
+    inner side, alongside the rear axle) out to
+    ``hypot(front, R + half_width)`` (the outer front corner). The inner
+    edge is what models off-tracking -- the rear of the car cuts inside the
+    path the LiDAR traces, which is how a car aimed past an inner corner
+    still clips it with its flank.
+
+    ``half_width`` is half the car's width plus whatever margin the caller
+    wants (the node passes ``car_width/2 + safety_margin``, the same swept
+    width the TTC brake uses). Returns the free distance from the body's
+    front edge, so 0.0 means an obstacle is already inside the band
+    alongside the body.
+
+    Sign convention REP-103: positive curvature turns left. Invalid beams
+    are unknown, not obstacles, as everywhere else in this file.
+    """
+    ranges = np.asarray(clean, dtype=np.float64)
+    validity = np.asarray(valid, dtype=bool)
+    beam_angles = np.asarray(angles, dtype=np.float64)
+    if not (ranges.shape == validity.shape == beam_angles.shape):
+        raise ValueError('ranges, validity, and angles must have matching shapes')
+    for name, value in (('curvature', curvature), ('half_width', half_width),
+                        ('car_length', car_length), ('wheelbase', wheelbase),
+                        ('laser_offset_x', laser_offset_x),
+                        ('laser_offset_y', laser_offset_y),
+                        ('max_length', max_length)):
+        if not math.isfinite(value):
+            raise ValueError(f'{name} must be finite')
+    if half_width <= 0.0 or car_length <= 0.0 or wheelbase <= 0.0 or max_length <= 0.0:
+        raise ValueError('half_width, car_length, wheelbase and max_length must be positive')
+
+    # Body extent along base_link's x axis (same model as
+    # vehicle_boundary_distances: centred halfway along the wheelbase).
+    front = wheelbase / 2.0 + car_length / 2.0
+    rear = wheelbase / 2.0 - car_length / 2.0
+
+    x = ranges * np.cos(beam_angles) + laser_offset_x
+    y = ranges * np.sin(beam_angles) + laser_offset_y
+    usable = validity & (ranges > 0.0)
+
+    if abs(curvature) < 1e-6:
+        in_band = usable & (np.abs(y) <= half_width) & (x >= rear)
+        along = x - front
+    else:
+        radius = 1.0 / curvature
+        abs_radius = abs(radius)
+        if abs_radius <= half_width:
+            raise ValueError('turn radius must exceed half_width')
+        rho = np.hypot(x, y - radius)
+        inner = abs_radius - half_width
+        outer = math.hypot(front, abs_radius + half_width)
+        # Angle swept about the turn centre, in the direction of travel,
+        # starting from the rear axle (which sits at angle -pi/2 from a
+        # left-turn centre, +pi/2 from a right-turn one).
+        start = -math.pi / 2.0 if radius > 0.0 else math.pi / 2.0
+        theta = np.arctan2(y - radius, x)
+        swept = np.mod(math.copysign(1.0, radius) * (theta - start), 2.0 * math.pi)
+        # Points just behind the rear axle wrap to ~2*pi; anything beyond
+        # the horizon is ignored anyway, so cap the sweep below a full turn.
+        max_sweep = min(max_length + front, 1.9 * math.pi * abs_radius) / abs_radius
+        in_band = usable & (rho >= inner) & (rho <= outer) & (swept <= max_sweep)
+        along = swept * abs_radius - front
+
+    along = np.where(in_band, along, np.inf)
+    nearest = float(np.min(along)) if along.size else math.inf
+    if nearest > max_length:
+        return math.inf
+    return max(0.0, nearest)
+
+
+def arc_guard_steering(clean: np.ndarray, valid: np.ndarray,
+                       angles: np.ndarray, desired_steering: float,
+                       required_length: float, half_width: float,
+                       car_length: float, wheelbase: float,
+                       laser_offset_x: float, laser_offset_y: float,
+                       max_steering_angle: float, max_correction: float,
+                       candidates: int = 29) -> float:
+    """Nearest steering angle to ``desired_steering`` whose swept arc is clear.
+
+    Follow-the-gap picks a *direction*, and a direction says nothing about
+    the path the body sweeps on the way there. Approaching a corner the gap
+    opens around the bend, its midpoint leans into the turn, and the car
+    turns in early -- then the rear of the car, which tracks inside the
+    LiDAR, clips the inner corner. That is the indoor_tight wall contact in
+    docs/gap-follow-improvement-plan.md section 3.1, and the disparity
+    extender cannot prevent it: it inflates the corner by half a car width
+    *in angle as seen from the LiDAR*, not along the arc the body follows.
+
+    This checks the arc the car would actually drive (see
+    swept_path_clearance) for the requested steering. If the body can
+    travel ``required_length`` along it, the request is returned unchanged
+    -- on an open track this function never does anything. If not, it tries
+    steering angles in order of distance from the request and returns the
+    first whose arc is clear. Near an inner corner that is a slightly
+    straighter arc: the car holds its line a little longer and turns in
+    later, which is a late apex.
+
+    Bounded so it stays a correction, not a second policy: only angles
+    within ``max_correction`` of the request are considered (and within
+    +/-``max_steering_angle``). If none of those is clear either, the one
+    with the most free length is returned, and the swept-path speed ceiling
+    and the reactive layers deal with what is left.
+    """
+    for name, value in (('desired_steering', desired_steering),
+                        ('required_length', required_length),
+                        ('max_steering_angle', max_steering_angle),
+                        ('max_correction', max_correction)):
+        if not math.isfinite(value):
+            raise ValueError(f'{name} must be finite')
+    if required_length <= 0.0 or max_correction < 0.0:
+        raise ValueError('required_length must be positive and max_correction non-negative')
+    if not 0.0 < max_steering_angle < math.pi / 2.0:
+        raise ValueError('max_steering_angle must be in (0, pi/2)')
+    if candidates < 2:
+        raise ValueError('candidates must be at least 2')
+
+    desired = min(max_steering_angle, max(-max_steering_angle, desired_steering))
+    horizon = required_length * 1.5
+
+    def free_length(steering):
+        return swept_path_clearance(
+            clean, valid, angles, math.tan(steering) / wheelbase, half_width,
+            car_length, wheelbase, laser_offset_x, laser_offset_y, horizon)
+
+    if free_length(desired) >= required_length:
+        return desired
+
+    grid = np.linspace(-max_steering_angle, max_steering_angle, candidates)
+    grid = grid[np.abs(grid - desired) <= max_correction + 1e-12]
+    best, best_free = desired, free_length(desired)
+    for steering in sorted(grid, key=lambda s: (abs(s - desired), abs(s))):
+        free = free_length(float(steering))
+        if free >= required_length:
+            return float(steering)
+        if free > best_free:
+            best, best_free = float(steering), free
+    return best
+
+
 def curvature_speed_limit(curvature: float, max_lateral_accel: float,
                           max_speed: float) -> float:
     """Maximum speed satisfying ``v^2 * abs(curvature) <= a_lat_max``."""
@@ -750,6 +911,152 @@ def corridor_centering_bias(left_distance: float, right_distance: float,
     bias = -gain * offset_from_middle
     bias = float(min(max_bias, max(-max_bias, bias)))
     return weight * bias, weight
+
+
+def side_opening_signal(clean: np.ndarray, valid: np.ndarray,
+                        angles: np.ndarray, left_distance: float,
+                        right_distance: float, sector_lo: float,
+                        sector_hi: float, excess_threshold: float) -> float:
+    """Which side of the corridor opens up ahead: +1 left .. -1 right.
+
+    For every beam in a forward-diagonal sector on each side, compare the
+    range with where that side's wall *would* be if it carried straight on
+    (``side_distance / sin(bearing)``). A beam that reaches more than
+    ``excess_threshold`` further has gone past the end of the wall -- around
+    an inner corner, through the opening of a turn, or past a wall that is
+    curving away. The signal is the fraction of left-sector beams that do so,
+    minus the fraction of right-sector beams.
+
+    Why not something simpler (both were tried, docs/gap-follow.md):
+
+      * the steering aim's bearing wanders a few degrees either side of zero
+        on a straight, and at a square inner corner leans *away* from the
+        turn because the inflated corner clips the gap's inside edge;
+      * the deepest beam's bearing points the wrong way ~2m before a square
+        corner, where the far outer corner of the end wall is the deepest
+        return in view.
+
+    This one is measured against each side's own wall, so a car sitting off
+    centre on a plain straight reads exactly zero, and it can only read a
+    turn on the side whose wall actually ends. On a square 1.5m hallway it
+    starts responding ~3m before the corner and grows steadily to the
+    turn-in point. A doorway reads like a small turn while it is in the
+    sector; corner setup's other gates (an end wall within reach, a wall on
+    both sides) and its authority bound keep that a brief bounded nudge.
+
+    Returns 0.0 if either side has no wall to project (``inf``).
+    """
+    ranges = np.asarray(clean, dtype=np.float64)
+    validity = np.asarray(valid, dtype=bool)
+    beam_angles = np.asarray(angles, dtype=np.float64)
+    if not (ranges.shape == validity.shape == beam_angles.shape):
+        raise ValueError('ranges, validity, and angles must have matching shapes')
+    if not (math.isfinite(sector_lo) and math.isfinite(sector_hi)
+            and 0.0 < sector_lo < sector_hi < math.pi):
+        raise ValueError('sector must satisfy 0 < sector_lo < sector_hi < pi')
+    if not (math.isfinite(excess_threshold) and excess_threshold > 0.0):
+        raise ValueError('excess_threshold must be finite and positive')
+    if not (math.isfinite(left_distance) and math.isfinite(right_distance)):
+        return 0.0
+
+    def opening_fraction(side, wall_distance):
+        bearing = side * beam_angles
+        in_sector = validity & (bearing >= sector_lo) & (bearing <= sector_hi)
+        if not np.any(in_sector):
+            return 0.0
+        expected = wall_distance / np.sin(bearing[in_sector])
+        return float(np.mean(ranges[in_sector] - expected > excess_threshold))
+
+    return opening_fraction(1.0, left_distance) - opening_fraction(-1.0, right_distance)
+
+
+def corner_setup_bias(left_distance: float, right_distance: float,
+                      turn_signal: float, straight_clearance: float,
+                      car_width: float, wall_margin: float,
+                      setup_fraction: float, gain: float, max_bias: float,
+                      signal_zero: float, signal_full: float,
+                      far_zero: float, far_full: float,
+                      near_full: float, near_zero: float,
+                      side_full: float, side_zero: float):
+    """Steering bias that moves the car to the OUTSIDE of an upcoming turn.
+
+    Follow-the-gap starts turning the moment a bend's opening comes into view:
+    the gap's midpoint leans into the turn, so the car drifts to the inside of
+    the corridor long before the corner and arrives at it on the inside line,
+    which is the tightest radius it could have picked. Measured on
+    indoor_tight that line put the inner corner ~0.08m from the body and the
+    TTC brake fired on the way into every corner (docs/gap-follow.md).
+
+    A racing line does the opposite -- outside before the turn, late apex,
+    outside on exit -- and this term supplies the first part. It is the same
+    cross-track law as corridor_centering_bias, aimed at a point offset toward
+    the outside wall instead of the middle:
+
+        target   = setup_fraction * (corridor_half - car_width/2 - wall_margin)
+        position = how far the car already sits toward the outside wall
+        bias     = gain * (target - position), clamped to +/-max_bias,
+                   signed to steer toward the outside
+
+    ``turn_signal`` says which way the corridor turns and how surely: the
+    node passes side_opening_signal() (positive = opening on the left).
+    REP-103: a left turn has its outside on the right, so a car short of the
+    target gets a negative (rightward) bias.
+
+    Faded in by four smooth ramps, all multiplied, so it acts only on the
+    approach to a corner in a corridor:
+
+      * turn confidence -- ``|turn_signal|`` from ``signal_zero`` (0) up to
+        ``signal_full`` (1). On a straight neither side opens and this is
+        off.
+      * the end of the straight is near -- ``straight_clearance`` (how far
+        the body can drive straight ahead, swept_path_clearance at zero
+        curvature) under ``far_zero`` .. ``far_full``.
+      * the corner is not yet here -- the same clearance above
+        ``near_zero`` .. ``near_full``. Below that the car is at the turn-in
+        point and must be free to turn; holding it wide any longer would
+        hold it into the outer wall.
+      * both walls are real -- each side within ``side_zero`` .. ``side_full``
+        (a doorway or an open room is not a corridor to set up in).
+
+    Returns ``(bias_rad, weight)``; the weight lets the caller fade
+    corridor_centering_bias out while this is active, so the two do not
+    fight over the same lateral position.
+    """
+    values = (left_distance, right_distance, turn_signal, car_width,
+              wall_margin, setup_fraction, gain, max_bias)
+    if not all(math.isfinite(v) for v in values[2:]):
+        raise ValueError('corner setup inputs must be finite')
+    if gain < 0.0 or max_bias < 0.0 or wall_margin < 0.0:
+        raise ValueError('gain, max_bias and wall_margin must be non-negative')
+    if not 0.0 <= setup_fraction <= 1.0:
+        raise ValueError('setup_fraction must be in [0, 1]')
+    if not (math.isfinite(left_distance) and math.isfinite(right_distance)):
+        return 0.0, 0.0
+    if math.isnan(straight_clearance):
+        raise ValueError('straight_clearance must not be NaN')
+    # inf means nothing ahead within the horizon: no corner coming.
+    if straight_clearance == math.inf:
+        return 0.0, 0.0
+
+    weight = (
+        _ramp(abs(turn_signal), signal_full, signal_zero)
+        * _ramp(straight_clearance, far_full, far_zero)
+        * _ramp(straight_clearance, near_full, near_zero)
+        * _ramp(left_distance, side_full, side_zero)
+        * _ramp(right_distance, side_full, side_zero)
+    )
+    if weight <= 0.0:
+        return 0.0, 0.0
+
+    turn_sign = 1.0 if turn_signal > 0.0 else -1.0
+    corridor_half = (left_distance + right_distance) / 2.0
+    room = max(0.0, corridor_half - car_width / 2.0 - wall_margin)
+    target = setup_fraction * room
+    # Positive = toward the outside wall. For a left turn the outside is the
+    # right, and a car right of the middle has left_distance > right_distance.
+    position = turn_sign * (left_distance - right_distance) / 2.0
+    magnitude = min(max_bias, max(-max_bias, gain * (target - position)))
+    return -turn_sign * magnitude * weight, weight
 
 
 def corridor_width_factor(left_distance: float, right_distance: float,
