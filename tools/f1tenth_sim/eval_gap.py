@@ -97,8 +97,10 @@ DEFAULTS = dict(
     forward_stop_clearance=0.20,
     forward_stop_fov_deg=60.0,
     escape_creep_speed=0.40,
-    # aim_mode: 'midpoint' (aim_within_gap, the node's current law) or
-    # 'physical_center' (aim_physical_center, clearance-maximising).
+    # aim_mode: kept for harness experiments; only 'midpoint' is wired to a
+    # real law. physical_center measured strictly worse (slower, asb_10000
+    # fails) and was removed from gap_logic -- see git history for the dead
+    # end.
     aim_mode='midpoint',
     enable_adaptive_width=True,
     adaptive_width_narrow=1.4,
@@ -269,13 +271,8 @@ class GapController:
         if emergency_tripped or ttc_tripped:
             creeping = True
 
-        if p["aim_mode"] == "physical_center":
-            target_in_window = gap_logic.aim_physical_center(
-                processed, gap_start, gap_end, self.lidar.angle_increment,
-                free_depths=window)
-        else:
-            target_in_window = gap_logic.aim_within_gap(
-                processed, gap_start, gap_end, beam_angles)
+        target_in_window = gap_logic.aim_within_gap(
+            processed, gap_start, gap_end, beam_angles)
         self.previous_target_idx = target_in_window
         target_angle = float(beam_angles[target_in_window])
         target_distance = float(processed[target_in_window])
