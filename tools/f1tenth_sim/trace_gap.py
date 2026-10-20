@@ -116,10 +116,10 @@ def plot(rows, track, out_path):
     from PIL import Image
     import yaml
 
-    from eval_gap import INDOOR_TRACKS, ROOT
+    from eval_gap import track_map_yaml
     fig, ax = plt.subplots(figsize=(10, 8))
-    if track in INDOOR_TRACKS:
-        meta_path = Path(ROOT) / ".sim" / "eval_gap_tracks" / f"{track}_map.yaml"
+    meta_path = track_map_yaml(track)
+    if meta_path is not None:
         meta = yaml.safe_load(meta_path.read_text())
         image = np.asarray(Image.open(meta_path.parent / meta["image"]))
         res = float(meta["resolution"])

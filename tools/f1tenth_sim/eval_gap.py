@@ -72,7 +72,27 @@ INDOOR_TRACKS = ("indoor_oval", "indoor_tight", "indoor_wide", "asb_10000", "asb
 # rounded, which leaves less room than a square one: conservative.)
 EXTRA_LAYOUTS = {
     "asb_sharp": dict(half_x=7.5, half_y=5.5, radius=0.75, corridor_width=1.5),
+    # As narrow as the loop driven on 2026-10-19 (run 20261019-200703): the
+    # car's side-wall distances summed to 1.24 m at the median and 0.83 m at
+    # the 5th percentile. Every layout above is 1.4 m or wider, which is why
+    # the simulator never showed that run's TTC brakes
+    # (docs/gap-follow-real-run-2026-10-19.md).
+    "narrow_1p2": dict(half_x=4.5, half_y=2.6, radius=1.0, corridor_width=1.2),
+    "narrow_1p0": dict(half_x=4.5, half_y=2.6, radius=1.0, corridor_width=1.0),
 }
+NARROW_TRACKS = ("narrow_1p2", "narrow_1p0")
+
+# Tracks imported from real occupancy maps by track_import.py (SLAM maps,
+# other teams' maps). Each is a gym triplet in tools/f1tenth_sim/maps/.
+MAPS_DIR = Path(__file__).resolve().parent / "maps"
+
+
+def map_tracks() -> tuple:
+    import yaml
+    catalog = MAPS_DIR / "catalog.yaml"
+    if not catalog.exists():
+        return ()
+    return tuple(sorted(yaml.safe_load(catalog.read_text()) or {}))
 
 # Parameters: exactly what the car loads (gap_follow.yaml, via
 # gap_mirror.node_params), every one overridable with --set name=value.
@@ -98,13 +118,28 @@ def build_indoor_track(name: str) -> Path:
     return _BUILT[name]
 
 
+def track_path(track_spec: str) -> str:
+    """The path gym loads for ``track_spec``: an indoor/narrow layout (built
+    on first use), an imported map, or a gym circuit name as-is."""
+    if track_spec in INDOOR_TRACKS or track_spec in NARROW_TRACKS:
+        return str(build_indoor_track(track_spec).with_suffix(""))
+    if track_spec in map_tracks():
+        return str(MAPS_DIR / track_spec)
+    return track_spec
+
+
+def track_map_yaml(track_spec: str):
+    """The map_server yaml behind a track, for plotting; None for gym circuits."""
+    path = track_path(track_spec)
+    if path == track_spec:
+        return None
+    return Path(path).parent / f"{Path(path).name}_map.yaml"
+
+
 def make_plant(track_spec: str, seed: int) -> FidelityPlant:
     """Build a fidelity plant for a gym circuit name or an indoor layout."""
     components = env_components(PROFILES[DEFAULT_PROFILE], CALIBRATION)
-    if track_spec in INDOOR_TRACKS:
-        map_name = str(build_indoor_track(track_spec).with_suffix(""))
-    else:
-        map_name = track_spec
+    map_name = track_path(track_spec)
     config = EnvConfig(
         seed=seed,
         map_name=map_name,
@@ -312,11 +347,17 @@ def cross_track(reference, idx, pos):
 
 
 def select_tracks(spec: str) -> list:
-    """'all', 'indoor', 'gym', or one track name."""
+    """'all', 'indoor', 'narrow', 'maps', 'gym', or comma-separated names."""
     if spec == "all":
-        return list(INDOOR_TRACKS) + list(GYM_TRACKS)
+        return list(INDOOR_TRACKS) + list(NARROW_TRACKS) + list(map_tracks()) + list(GYM_TRACKS)
     if spec == "indoor":
         return list(INDOOR_TRACKS)
+    if spec == "narrow":
+        return list(NARROW_TRACKS)
+    if spec == "maps":
+        return list(map_tracks())
+    if "," in spec:
+        return [name for part in spec.split(",") for name in select_tracks(part)]
     if spec == "gym":
         return list(GYM_TRACKS)
     return [spec]
@@ -345,7 +386,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--track", default="asb_10000",
-                        help="track name, 'indoor', 'gym', or 'all'")
+                        help="track name, 'indoor', 'narrow', 'maps', 'gym', 'all', "
+                             "or a comma-separated list of any of these")
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--timeout", type=float, default=240.0,
                         help="simulated seconds before giving up on a lap")

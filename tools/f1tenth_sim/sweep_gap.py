@@ -44,8 +44,7 @@ def main(argv=None) -> int:
     jobs = [(t, args.first_seed + k, params, args.timeout, args.reverse)
             for t in tracks for k in range(args.seeds)]
     for track in tracks:
-        if track in eval_gap.INDOOR_TRACKS:
-            eval_gap.build_indoor_track(track)
+        eval_gap.track_path(track)  # build layouts once, before forking
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         results = list(pool.map(_one, jobs))
     all_pass = True
