@@ -24,8 +24,8 @@ reproducible; ``car`` is the honest configuration.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -48,7 +48,12 @@ class FidelityProfile:
         grip_envelope: enforce a friction circle.
         sensor_error: degrade pose, speed and scan.
         body_collisions: detect agent contact by real-chassis overlap, all
-            round the car, instead of only where the LiDAR can see.
+            round the car, instead of only where the LiDAR can see -- and
+            switch off gym's own collision *response*, which rotates a car
+            it thinks has collided to heading 0 (see FidelityPlant).
+        speed_loop_model: drive speed with this car's measured, asymmetric
+            speed loop (CarCalibration.speed_loop_*) instead of gym's
+            ``pid_accl``, which brakes four times harder than it accelerates.
     """
 
     name: str
@@ -59,6 +64,7 @@ class FidelityProfile:
     grip_envelope: bool
     sensor_error: bool
     body_collisions: bool
+    speed_loop_model: bool = False
 
 
 PROFILES: dict[str, FidelityProfile] = {
@@ -85,6 +91,7 @@ PROFILES: dict[str, FidelityProfile] = {
         grip_envelope=True,
         sensor_error=False,
         body_collisions=True,
+        speed_loop_model=True,
     ),
     # This car, as closely as the harness can represent it.
     "car": FidelityProfile(
@@ -96,6 +103,7 @@ PROFILES: dict[str, FidelityProfile] = {
         grip_envelope=True,
         sensor_error=True,
         body_collisions=True,
+        speed_loop_model=True,
     ),
 }
 
@@ -200,6 +208,17 @@ class FidelityPlant:
     fires now, and this class does not need the answer: ``_wall_contact`` and
     ``_chassis_contact`` compute the collision themselves, against the real
     chassis, and are what every verdict here comes from.
+
+    It does fire now, and it was not harmless. Gym's response to its own
+    flag is ``state[3:] = 0``: speed, steering, **yaw**, yaw rate and slip
+    all zeroed, so the car is turned in place to heading 0. With two cars it
+    fires when the padded envelopes close on each other (ray cast against the
+    other car's padded box, from inside the ego's own): on 2026-10-20 two
+    gap_follow cars on indoor_wide, 0.48 m apart with no real-chassis contact,
+    were both snapped to heading 0 in one tick and drove the loop backwards
+    from then on. With ``body_collisions`` on, this class makes the verdicts,
+    so gym's response is switched off by setting its TTC threshold to -inf;
+    ``legacy`` keeps it, to keep reproducing the baseline.
     """
 
     def __init__(
@@ -218,6 +237,7 @@ class FidelityPlant:
         self.num_agents = num_agents
         self.control_dt = control_dt
         self.params = env.unwrapped.sim.vehicle_params
+        self._disable_gym_collision_response()
         # Only the car under test gets sensor error. The traffic scenario's
         # opponent is a scripted reference trajectory rather than a vehicle
         # being validated, and noising it would perturb the baseline the ego
@@ -292,7 +312,14 @@ class FidelityPlant:
 
     # -- lifecycle -------------------------------------------------------
 
+    def _disable_gym_collision_response(self) -> None:
+        """Gym zeroes a flagged car's state (yaw included); see the class
+        docstring. -inf: no time-to-collision is ever below it."""
+        if self.profile.body_collisions:
+            self.env.unwrapped.sim.ttc_threshold = -math.inf
+
     def reset(self, poses: np.ndarray):
+        self._disable_gym_collision_response()
         obs, info = self.env.reset(options={"poses": poses})
         self._contacted = set()
         self.chassis_contact_steps = 0
@@ -335,6 +362,9 @@ class FidelityPlant:
                     self.calibration.speed_max,
                 )
 
+            if self.profile.speed_loop_model:
+                speed = self._measured_speed_loop(speed, measured_speed)
+
             if self.profile.grip_envelope:
                 accel = longitudinal_accel(speed, measured_speed, self.params)
                 steering = self.grip[index].apply(steering, measured_speed, accel)
@@ -349,6 +379,30 @@ class FidelityPlant:
 
         obs, reward, done, truncated, info = self.env.step(actions)
         return self._observe(obs), reward, done, truncated, info
+
+    def _measured_speed_loop(self, command: float, measured: float) -> float:
+        """The gym speed command that makes gym's ``pid_accl`` produce this
+        car's measured acceleration for ``command``.
+
+        The real VESC speed loop is asymmetric the other way from gym's:
+        measured on run 20261019-200703 (docs/run-analysis.md), the car
+        accelerated at ~2.9 m/s^2 toward a command 0.5-1 m/s above its speed
+        but braked at only ~1.7 m/s^2 toward one 1-4 m/s below it. A
+        proportional loop with separate gains and limits per direction
+        reproduces that; gym's gains are inverted here so the plant's own
+        integrator and accel limit still apply unchanged.
+        """
+        cal = self.calibration
+        diff = command - measured
+        if measured <= 0.0 and command <= 0.0:
+            return command
+        if diff >= 0.0:
+            accel = min(cal.speed_loop_accel_gain * diff, cal.speed_loop_accel_max)
+            gym_gain = 10.0 * self.params.a_max / self.params.v_max
+        else:
+            accel = max(cal.speed_loop_brake_gain * diff, -cal.speed_loop_brake_max)
+            gym_gain = 10.0 * self.params.a_max / -self.params.v_min
+        return measured + accel / gym_gain
 
     # -- observation -----------------------------------------------------
 

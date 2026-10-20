@@ -19,3 +19,5 @@ frames_*.pdf
 # ~/.ros/odom_calibration/backups/; git history keeps every committed version.
 *.bak
 *.bak.*
+.oc-worktrees/
+.oc-runs/

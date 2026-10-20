@@ -103,6 +103,9 @@ The good news from re-running with working detection: **`gap_solo` and
 | 8 | Pose/odometry/scan error | F7–F9, R5 | controllers no longer see ground truth |
 | 9 | Command transport lag | R7 | one tick, steering *and* speed |
 | 10 | Parameter provenance | F11, R1 | every constant says where it came from |
+| 11 | This car's speed loop, fitted to a run | — | accelerates harder than it brakes, as the real car does; gym's `pid_accl` braked 4× harder than it accelerated (2026-10-20, below) |
+| 12 | Gym's collision response switched off | — | gym rotated a car it judged collided to heading 0; two cars ended up lapping backwards (2026-10-20, below) |
+| 13 | Real maps as tracks | — | `track_import.py`: any occupancy map → gym track, centreline found automatically ([docs/run-analysis.md](../../docs/run-analysis.md#adding-a-map-to-the-simulator)) |
 
 ### 2. A friction circle (`grip.py`)
 
@@ -176,6 +179,42 @@ There is a `freeze_pose()` hook for the stalled-localisation failure that put
 this car into a wall on 2026-07-27. It is not yet wired into a scenario,
 because the harness re-implements the controller and so does not contain the
 `pose_frozen_*` guards being tested — that needs audit R6 first.
+
+### 11. A speed loop fitted to the real car (2026-10-20)
+
+Gym's `pid_accl` drives the car toward the commanded speed with a gain of
+3.4 /s speeding up and 13.7 /s slowing down, both up to the friction limit.
+Run `20261019-200703` showed the real car the other way round: about
+2.9 m/s² of acceleration for a 0.5–1 m/s step up, but a median of only
+~1.7 m/s² of braking with the command 1–4 m/s below its speed.
+
+`FidelityProfile.speed_loop_model` (on in `plant` and `car`) replaces it
+with an asymmetric loop, `speed_loop_*` in `calibration.py`, and converts
+each tick's demand into the speed command gym needs to produce it. Feeding
+gym's own gains through the same path reproduces gym (0.422 vs 0.420 m/s
+RMS against the run), which is how the conversion was checked. The fit
+itself is `tools/run_analysis/fit_sim.py`; speed error against the run fell
+from 0.46 to 0.24 m/s.
+
+### 12. Gym's collision response is switched off (2026-10-20)
+
+The measured LiDAR offset (0.26 m) put the sensor back inside gym's collision
+box, so gym's own TTC flag (see the headline above) can fire again. It fires
+when the *padded* envelope touches a wall, or two cars' padded boxes close
+on each other, and its response is `state[3:] = 0`: speed, steering,
+**yaw**, yaw rate and slip zeroed. The car is turned in place to heading 0.
+
+Two `gap_follow` cars on `indoor_wide`, 0.48 m apart with no real-chassis
+contact, were both snapped to heading 0 in one tick and lapped backwards for
+the rest of the run. With `body_collisions` on, `FidelityPlant` already makes
+every contact verdict itself, so it now sets gym's TTC threshold to `-inf`.
+`legacy` keeps gym's behaviour. `tests/test_gym_collision_response.py` holds
+it: a car closing on a parked one must keep its heading.
+
+Single-car runs were not affected: the full `gap_follow` sweep (11 tracks,
+6 seeds, both directions) gave identical numbers before and after the fix.
+A lone car's padded body only touches a wall when it is already nearly
+stopped, and gym's TTC needs closing speed to fire.
 
 ## Profiles
 
@@ -330,7 +369,8 @@ count to 1081 measured marginally *faster* than 819. See
 `python3 sim_fidelity/calibration.py` prints every constant with where it came
 from, least trustworthy first:
 
-- `MEASURED` — measured on this car. *Currently none.*
+- `MEASURED` — measured on this car: the actuation lags, servo gain, speed
+  loop and surface friction fitted to run `20261019-200703` (2026-10-20)
 - `DERIVED` — computed from this car's committed configs (`vesc.yaml` etc.)
 - `SPEC` — datasheet for a part actually fitted
 - `ESTIMATED` — physics-based estimate, not this car

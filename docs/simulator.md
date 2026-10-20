@@ -380,6 +380,13 @@ the LiDAR at `+0.33m` then sits 0.04m *outside* that rectangle, so
 Measured directly: a car commanded straight into a wall at 1 m/s reports
 `collision=False` for the whole run and drives off the edge of the map.
 
+**Update, 2026-10-20:** the measured 0.26 m LiDAR offset put the sensor back
+inside the rectangle, so gym's flag can fire again, and when it does it zeroes
+the car's speed *and heading*. The `plant` and `car` fidelity profiles now
+switch that response off and judge contact themselves against the real
+chassis; see [tools/f1tenth_sim/README.md](../tools/f1tenth_sim/README.md#12-gyms-collision-response-is-switched-off-2026-10-20).
+The paragraph above still describes the `legacy` profile.
+
 The scenarios above still fail on the criteria that do work -- lap
 completion, cross-track error, stop counts, TTC braking -- and the
 controllers were tuned against those. But "No" in the collision column

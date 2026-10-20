@@ -926,3 +926,106 @@ def test_scale_between_rejects_a_width_factor_outside_zero_one():
         gap_logic.scale_between(-0.01, 0.12, 0.18)
     with pytest.raises(ValueError):
         gap_logic.scale_between(1.01, 0.12, 0.18)
+
+
+# --- Measured-response speed shaping (2026-10-20, docs/gap-follow.md) -------
+
+def test_braking_speed_limit_with_latency_stops_within_the_room():
+    # Oracle: the closed form it solves. Driving at v for `latency` seconds
+    # and then braking at a must use exactly the usable room c - r.
+    a, latency, clearance, reserve = 3.0, 0.25, 2.2, 0.2
+    v = gap_logic.braking_speed_limit(clearance, reserve, a, 10.0, latency=latency)
+    used = v * latency + v * v / (2.0 * a)
+    assert used == pytest.approx(clearance - reserve, abs=1e-9)  # metres
+    # Strictly slower than the no-latency ceiling for the same room.
+    assert v < gap_logic.braking_speed_limit(clearance, reserve, a, 10.0)
+
+
+def test_braking_speed_limit_latency_edges():
+    # Zero latency reproduces the original formula exactly.
+    assert gap_logic.braking_speed_limit(0.75, 0.25, 3.0, 9.0, latency=0.0) == pytest.approx(
+        math.sqrt(3.0), abs=1e-12)  # m/s
+    # No room left: zero, with or without latency.
+    assert gap_logic.braking_speed_limit(0.25, 0.25, 3.0, 9.0, latency=0.3) == 0.0
+    assert gap_logic.braking_speed_limit(0.1, 0.25, 3.0, 9.0, latency=0.3) == 0.0
+    # Nothing in view still means max_speed.
+    assert gap_logic.braking_speed_limit(math.inf, 0.25, 3.0, 2.0, latency=0.3) == 2.0
+    # Capped at max_speed when the room would allow more.
+    assert gap_logic.braking_speed_limit(50.0, 0.25, 3.0, 2.0, latency=0.3) == 2.0
+    for bad in (-0.1, math.nan, math.inf):
+        with pytest.raises(ValueError, match='latency'):
+            gap_logic.braking_speed_limit(1.0, 0.25, 3.0, 2.0, latency=bad)
+
+
+def test_speed_scheduled_gain_holds_crossover_constant_above_reference():
+    # Invariant it exists for: crossover = speed * K * factor / wheelbase is
+    # the same at every speed above the reference.
+    ref = 1.8
+    crossovers = [v * gap_logic.speed_scheduled_gain(v, ref) for v in (1.8, 2.5, 3.5, 4.9)]
+    assert crossovers == pytest.approx([ref] * 4, abs=1e-12)  # m/s
+    # At or below the reference, and when disabled, the full gain.
+    assert gap_logic.speed_scheduled_gain(1.8, ref) == 1.0
+    assert gap_logic.speed_scheduled_gain(0.0, ref) == 1.0
+    assert gap_logic.speed_scheduled_gain(1.81, ref) < 1.0   # one step past the boundary
+    assert gap_logic.speed_scheduled_gain(3.0, 0.0) == 1.0
+    assert gap_logic.speed_scheduled_gain(3.0, -1.0) == 1.0
+    with pytest.raises(ValueError, match='finite'):
+        gap_logic.speed_scheduled_gain(math.nan, ref)
+    with pytest.raises(ValueError, match='finite'):
+        gap_logic.speed_scheduled_gain(2.0, math.inf)
+
+
+def test_speed_hold_returns_the_lowest_desired_speed_of_the_window():
+    hold = gap_logic.SpeedHold(0.25)
+    # Constructed input: a dip to 1.0 at t=0.125 between 3.0s. Times are
+    # multiples of 1/8 so every age is exact in binary floating point and the
+    # boundary below is really tested, not rounded away.
+    seq = [(0.0, 3.0), (0.125, 1.0), (0.25, 3.0), (0.3125, 3.0), (0.375, 3.0), (0.5, 3.0)]
+    out = [hold.update(t, v) for t, v in seq]
+    # The dip is held while it is less than 0.25 s old (t < 0.375), and
+    # released exactly when it reaches 0.25 s old: the window is half-open.
+    assert out == [3.0, 1.0, 1.0, 1.0, 3.0, 3.0]
+
+
+def test_speed_hold_never_raises_and_resets():
+    hold = gap_logic.SpeedHold(0.3)
+    rng = np.random.default_rng(3)
+    for k in range(200):
+        desired = float(rng.uniform(0.0, 4.0))
+        assert hold.update(0.025 * k, desired) <= desired   # invariant: only lowers
+    # Reset must forget a low value that is still inside the window.
+    hold.update(5.0, 0.5)
+    hold.reset()
+    assert hold.update(5.01, 2.5) == 2.5
+    # A zero window passes every value straight through.
+    passthrough = gap_logic.SpeedHold(0.0)
+    assert [passthrough.update(t, v) for t, v in ((0, 2.0), (0.025, 3.0))] == [2.0, 3.0]
+    for bad in (-0.1, math.nan, math.inf):
+        with pytest.raises(ValueError, match='hold_sec'):
+            gap_logic.SpeedHold(bad)
+    with pytest.raises(ValueError, match='now'):
+        gap_logic.SpeedHold(0.3).update(math.nan, 1.0)
+
+
+def test_side_clearance_speed_limit_ramp_and_edges():
+    # Closed form: narrow below the narrow end, max past the open end, a
+    # straight line between (gap_logic.side_clearance_speed_limit docstring).
+    f = lambda c: gap_logic.side_clearance_speed_limit(c, 2.0, 0.05, 0.15, 4.0)
+    assert f(0.05) == 2.0
+    assert f(-0.3) == 2.0                          # already touching: narrow
+    assert f(0.15) == 4.0
+    assert f(0.15 + 1e-9) == 4.0
+    assert f(0.15 - 0.025) == pytest.approx(3.5, abs=1e-9)   # m/s
+    assert f(0.075) == pytest.approx(2.5, abs=1e-9)          # m/s
+    assert f(math.inf) == 4.0                       # no wall seen
+    assert f(math.nan) == 2.0                       # unknown is narrow
+    assert all(f(a) <= f(b) for a, b in zip(np.linspace(0, 0.2, 40), np.linspace(0, 0.2, 40)[1:]))
+
+
+def test_side_clearance_speed_limit_rejects_bad_parameters():
+    with pytest.raises(ValueError, match='narrow_speed must be within'):
+        gap_logic.side_clearance_speed_limit(0.1, 5.0, 0.05, 0.15, 4.0)
+    with pytest.raises(ValueError, match='narrow_clearance must be below'):
+        gap_logic.side_clearance_speed_limit(0.1, 2.0, 0.15, 0.15, 4.0)
+    with pytest.raises(ValueError, match='max_speed must be finite'):
+        gap_logic.side_clearance_speed_limit(0.1, 2.0, 0.05, 0.15, math.inf)

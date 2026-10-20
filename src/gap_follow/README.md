@@ -305,8 +305,9 @@ Both final commands are rate-limited against the previous one
 (`gap_logic.slew_rate_limit`), so a single noisy scan cannot produce a step
 change at the servo or the motor:
 
-- steering slews at most `max_steering_rate` (default `1.0 rad/s`, i.e. the
-  full `±0.26` envelope in about half a second);
+- steering slews at most `max_steering_rate` (`2.0 rad/s` in the shipped
+  YAML since 2026-10-20, i.e. the full `±0.349` envelope in about 0.35 s;
+  the node's own default is `1.0`);
 - speed may only *rise* at `max_acceleration`. Falling is never rate-limited
   — braking is always allowed to be immediate.
 
@@ -443,17 +444,23 @@ apex, only change the car's pace approaching one.
 | `min_centerline_gap_width` | `0.10` m | Minimum center corridor remaining after obstacle inflation |
 | `min_gap_distance` / `fallback_min_gap_distance` | `2.0` / `0.8` m | Preferred depth and tight-corner fallback depth |
 | `gap_switch_margin` | `1.2` | Hysteresis: how much better a new candidate must score than the one containing the previous tick's aim before the car re-aims. `1.0` disables it |
-| `max_speed` / `min_speed` / `corner_speed` | `2.5` / `0.8` / `1.1` m/s | Normal speed range and fallback cap |
+| `max_speed` / `min_speed` / `corner_speed` | `2.5` / `0.8` / `1.1` m/s | Normal speed range and fallback cap. Shipped YAML: `max_speed: 3.5` |
 | `enable_adaptive_width` / `adaptive_width_narrow` / `adaptive_width_reference` | `true` / `1.4` / `2.6` m | Live corridor-width sensing (see below); the sensed-width range the two knobs after it scale between |
 | `min_safety_margin` | `0.18` m (== `safety_margin`, i.e. off) | Floor `safety_margin` may shrink to on a sensed-narrow straight |
 | `corner_speed_wide` | `1.4` m/s | Ceiling `corner_speed` may rise to on a sensed-wide corner |
 | `enable_cornering_anticipation` / `anticipation_near_depth` | `false` / `2.5` m | Extra speed cap from near/far gap-bearing disagreement (see below) — ships off, measured to over-brake in open rooms |
 | `max_steering_angle` | `0.349` rad (20°) | Hard command clamp. Both sides reach ~25° since the 2026-10-16 calibration; 20° leaves margin for gain error |
 | `steering_gain` | `1.0` | Steering per radian of gap bearing, before the `max_steering_angle` clip. `1.0` points the wheels at the gap. Raise only if the car is slow to leave a wall; too high weaves |
-| `max_lateral_accel` | `1.0` m/s² | Cornering speed ceiling: $v \le \sqrt{a_{lat}/\|\kappa\|}$ |
+| `max_lateral_accel` | `1.0` m/s² | Cornering speed ceiling: $v \le \sqrt{a_{lat}/\|\kappa\|}$. Shipped YAML: `2.0` (simulator-validated only) |
 | `max_braking_decel` | `3.0` m/s² | **Safety-critical.** Braking authority the car *assumes it has* when deciding how fast it may drive for the clearance it can see. Set above real capability and it drives faster than it can stop. Not the same knob as `pure_pursuit`'s identically named command slew rate — don't copy that value here |
 | `max_acceleration` | `3.0` m/s² | Cap on how fast a speed *command* may rise; braking is never limited |
-| `max_steering_rate` | `1.0` rad/s | Cap on how fast a steering command may slew |
+| `max_steering_rate` | `1.0` rad/s | Cap on how fast a steering command may slew. Shipped YAML: `2.0` (simulator-validated only) |
+| `ttc_path_margin` | `0.05` m | How far beyond the body's side the TTC brake still counts an obstacle as in the path (was the full `safety_margin`, 0.18 m, before 2026-10-20). Must be between 0 and `safety_margin`. See [docs/gap-follow.md](../../docs/gap-follow.md#the-2026-10-19-run) |
+| `braking_latency_sec` | `0.25` s | Time the car keeps its speed after a slower command; the stopping-distance ceiling subtracts `speed × latency` from the room it sees. `0` = the old formula |
+| `steering_gain_speed_ref` | `0.0` m/s (off) | Above this speed the steering gain falls as `ref / speed`, so fast corrections are smaller. Shipped YAML: `1.8` |
+| `speed_hold_sec` | `0.0` s (off) | Hold the lowest desired speed of this window instead of following every scan's ceiling up and down |
+| `arc_guard_blocked_fallback` | `freest` | What the arc guard does when no arc in reach is clear: `freest` (most free length) or `request` (keep the gap's choice). Shipped YAML: `request` |
+| `narrow_corridor_speed` / `narrow_corridor_clearance` / `open_corridor_clearance` | `2.5` m/s / `0.05` / `0.15` m | Speed ceiling from the body's clearance to the nearer side wall: `max_speed` at `open_corridor_clearance` and above, falling linearly to `narrow_corridor_speed` at `narrow_corridor_clearance`. `narrow_corridor_speed ≥ max_speed` turns it off |
 | `command_slew_max_dt` | `0.10` s | Longest interval one slew step may integrate, so a scan gap isn't cashed in as a jump |
 | `emergency_stop_clearance` | `0.0` m (was `0.02`, cut 2026-08-25) | All-direction final contact floor measured from the padded body |
 | `forward_stop_clearance` / `forward_stop_fov_deg` | `0.20m` (was `0.25m`, cut 2026-08-25) / `60°` | Odom-independent forward-cone braking fallback |

@@ -204,6 +204,12 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
     cap_histogram = {}
     stop_reasons = {}
     min_body_clear = math.inf
+    # Braking, from ground truth: speed shed (sum of every drop in true
+    # speed, m/s) and ticks spent decelerating harder than 2 m/s^2. A lap
+    # that holds its speed scores low on both.
+    speed_shed = 0.0
+    hard_brake_ticks = 0
+    last_true_speed = None
 
     for step in range(max_steps):
         ego = obs["agent_0"]
@@ -218,6 +224,15 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
         speeds.append(cmd_speed)
         if ctrl.binding_cap is not None:
             cap_histogram[ctrl.binding_cap] = cap_histogram.get(ctrl.binding_cap, 0) + 1
+
+        true_speed = float(plant.truth(0)[3])
+        if last_true_speed is not None:
+            drop = last_true_speed - true_speed
+            if drop > 0.0:
+                speed_shed += drop
+            if drop > 2.0 * CONTROL_DT:
+                hard_brake_ticks += 1
+        last_true_speed = true_speed
 
         # stuck detection: commanded to move but not moving
         pos = plant.truth(0)[:2]
@@ -275,6 +290,8 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
         "stop_reasons": stop_reasons,
         "min_body_clearance_m": (round(min_body_clear, 3)
                                  if math.isfinite(min_body_clear) else None),
+        "speed_shed_mps": round(speed_shed, 2),
+        "hard_brake_ticks": hard_brake_ticks,
     }
     result.update(plant_report)
     return result

@@ -46,10 +46,15 @@ NOT_MIRRORED = {
 REQUIRED_PARAMS = frozenset((
     "adaptive_width_narrow",
     "adaptive_width_reference",
+    "arc_guard_blocked_fallback",
+    "narrow_corridor_clearance",
+    "narrow_corridor_speed",
+    "open_corridor_clearance",
     "arc_guard_candidates",
     "arc_guard_length",
     "arc_guard_margin",
     "arc_guard_max_correction",
+    "braking_latency_sec",
     "car_length",
     "car_width",
     "centering_full_bearing_deg",
@@ -107,19 +112,38 @@ REQUIRED_PARAMS = frozenset((
     "min_safety_margin",
     "min_speed",
     "safety_margin",
+    "speed_hold_sec",
     "steering_gain",
+    "steering_gain_speed_ref",
     "swept_clearance_margin",
     "swept_clearance_max_length",
     "ttc_command_fallback_max_odom_speed",
     "ttc_command_speed_timeout_sec",
     "ttc_min_brake_speed",
     "ttc_min_closing_speed",
+    "ttc_path_margin",
     "ttc_threshold_sec",
     "wheelbase",
 ))
 
 
-def node_params(config_path: Path = NODE_CONFIG) -> dict:
+# Parameters added after the first real-car run of the October 2026 rework,
+# with the value that reproduces the behaviour from before they existed. Lets
+# an older YAML (git show <commit>:src/gap_follow/config/gap_follow.yaml) be
+# replayed against the run it drove -- see tools/run_analysis/replay.py.
+LEGACY_VALUES = {
+    "arc_guard_blocked_fallback": "freest",
+    "braking_latency_sec": 0.0,
+    "speed_hold_sec": 0.0,
+    "steering_gain_speed_ref": 0.0,
+    "narrow_corridor_speed": 1e9,  # off
+    "narrow_corridor_clearance": 0.05,
+    "open_corridor_clearance": 0.15,
+    "ttc_path_margin": None,  # None: the old corridor, safety_margin itself
+}
+
+
+def node_params(config_path: Path = NODE_CONFIG, fill_legacy: bool = False) -> dict:
     """gap_follow_node's ros__parameters from the shipped YAML, minus the
     ones the mirror has no use for.
 
@@ -128,6 +152,10 @@ def node_params(config_path: Path = NODE_CONFIG) -> dict:
     """
     data = yaml.safe_load(Path(config_path).read_text())
     params = dict(data["gap_follow_node"]["ros__parameters"])
+    if fill_legacy:
+        for name, value in LEGACY_VALUES.items():
+            if name not in params:
+                params[name] = params["safety_margin"] if value is None else value
     if params.get("enable_cornering_anticipation", False):
         raise ValueError(
             "gap_follow.yaml enables cornering anticipation, which "
@@ -162,6 +190,8 @@ class GapController:
         self.last_command_time = None  # in sim steps
         self.stopped = False
         self.stop_reason = None
+        self.speed_hold = gap_logic.SpeedHold(self.p["speed_hold_sec"])
+        self.speed_hold_clock = 0.0
         # Which speed ceiling won this tick, for the harness's binding-cap
         # histogram: 'curve', 'clearance', 'corner', 'creep', 'accel', 'stop'.
         self.binding_cap = None
@@ -179,7 +209,8 @@ class GapController:
             clean.size, dtype=float) * self.lidar.angle_increment
 
         if (p["enable_centering"] or p["enable_adaptive_width"]
-                or p["enable_corner_setup"]):
+                or p["enable_corner_setup"]
+                or p["narrow_corridor_speed"] < p["max_speed"]):
             half_span = math.radians(p["centering_side_fov_deg"]) / 2.0
             side_left = gap_logic.side_wall_distance(
                 clean, valid, angles_all, math.pi / 2.0, half_span)
@@ -237,7 +268,7 @@ class GapController:
                 min_ttc = gap_logic.minimum_ttc(
                     window, window_valid, beam_angles, effective_speed,
                     boundaries, p["ttc_min_closing_speed"],
-                    p["car_width"] / 2.0 + p["safety_margin"],
+                    p["car_width"] / 2.0 + p["ttc_path_margin"],
                     math.tan(self.steering_basis) / p["wheelbase"],
                     p["laser_offset_x"], p["laser_offset_y"])
                 tel["min_ttc"] = min_ttc
@@ -311,8 +342,13 @@ class GapController:
             tel["corner_setup_bias"] = setup_bias
             tel["straight_clear"] = straight_clear
 
+        bearing_gain = p["steering_gain"]
+        gain_basis = max(self.last_commanded_speed,
+                         min(abs(float(current_speed)), p["max_speed"]))
+        bearing_gain *= gap_logic.speed_scheduled_gain(
+            gain_basis, p["steering_gain_speed_ref"])
         desired_steering = float(np.clip(
-            p["steering_gain"] * target_angle + centering_bias + setup_bias,
+            bearing_gain * target_angle + centering_bias + setup_bias,
             -p["max_steering_angle"], p["max_steering_angle"]))
         if p["enable_arc_guard"] and not creeping:
             speed_basis = max(self.last_commanded_speed,
@@ -325,7 +361,8 @@ class GapController:
                 p["car_width"] / 2.0 + p["arc_guard_margin"],
                 p["car_length"], p["wheelbase"], p["laser_offset_x"],
                 p["laser_offset_y"], p["max_steering_angle"],
-                p["arc_guard_max_correction"], int(p["arc_guard_candidates"]))
+                p["arc_guard_max_correction"], int(p["arc_guard_candidates"]),
+                p["arc_guard_blocked_fallback"])
             tel["arc_guard"] = guarded - desired_steering
             desired_steering = guarded
 
@@ -358,7 +395,8 @@ class GapController:
             tel["arc_clear"] = braking_clearance
         clearance_speed = gap_logic.braking_speed_limit(
             braking_clearance, p["forward_stop_clearance"],
-            p["max_braking_decel"], p["max_speed"])
+            p["max_braking_decel"], p["max_speed"],
+            latency=p["braking_latency_sec"])
         if creeping:
             creep_reserve = max(p["emergency_stop_clearance"],
                                 p["forward_stop_clearance"] / 2.0)
@@ -370,6 +408,15 @@ class GapController:
 
         desired_speed = min(normal_speed, clearance_speed)
         binding = 'curve' if normal_speed <= clearance_speed else 'clearance'
+        if p["narrow_corridor_speed"] < p["max_speed"]:
+            side_cap = gap_logic.side_clearance_speed_limit(
+                min(side_left, side_right) - p["car_width"] / 2.0,
+                p["narrow_corridor_speed"], p["narrow_corridor_clearance"],
+                p["open_corridor_clearance"], p["max_speed"])
+            tel["side_cap"] = side_cap
+            if side_cap < desired_speed:
+                desired_speed = side_cap
+                binding = 'side'
         if creeping:
             binding = 'creep'
         if used_fallback and effective_corner < desired_speed:
@@ -377,6 +424,10 @@ class GapController:
             binding = 'corner'
         else:
             desired_speed = min(desired_speed, effective_corner) if used_fallback else desired_speed
+
+        if p["speed_hold_sec"] > 0.0:
+            self.speed_hold_clock += dt
+            desired_speed = self.speed_hold.update(self.speed_hold_clock, desired_speed)
 
         ramp_basis = max(self.last_commanded_speed,
                          min(abs(float(current_speed)), p["max_speed"]))
@@ -410,6 +461,7 @@ class GapController:
         return width_factor, margin, corner
 
     def _stop(self, step, reason):
+        self.speed_hold.reset()
         self.last_commanded_speed = 0.0
         self.last_command_time = step
         self.stopped = True

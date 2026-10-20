@@ -2,10 +2,12 @@
 
 > **Who this is for:** anyone about to run `gap_follow` (the reactive, no-map autonomy) after 2026-10-19, or tune it.
 > **Read first:** [src/gap_follow/README.md](../src/gap_follow/README.md) — what follow-the-gap is and how the basic pipeline picks a gap.
-> **You'll be able to:** say what the three newer features do, turn any of them off, check them in the simulator, and bring them up on the car in the safe order.
+> **You'll be able to:** say what the three newer features do and what changed after the first real run, turn any of them off, check them in the simulator, and bring them up on the car in the safe order with the recorder on.
 > **Time:** 20 minutes to read; the simulator checks take a few minutes each.
 
-In October 2026 `gap_follow` got three additions that change how it drives through corridors. In simulation the car went from hitting walls in 24 of 60 indoor runs to 0 of 60, and lapped about 20% faster. **None of it has been driven on the real car yet.**
+In October 2026 `gap_follow` got three additions that change how it drives through corridors. In simulation the car went from hitting walls in 24 of 60 indoor runs to 0 of 60, and lapped about 20% faster.
+
+They were first driven on the car on 2026-10-19. That run had no contact, but the car hard-stopped seven times. The [2026-10-19 run](#the-2026-10-19-run) section explains why, and what was changed on 2026-10-20 to stop it. **Those 2026-10-20 changes have only run in the simulator and in a replay of that run's own scans.**
 
 ## Contents
 
@@ -14,13 +16,14 @@ In October 2026 `gap_follow` got three additions that change how it drives throu
 3. [Safety](#safety)
 4. [Validation](#validation) — the order to bring it up on the car
 5. [Turning a feature off](#turning-a-feature-off)
-6. [Checking it in the simulator](#checking-it-in-the-simulator)
-7. [Swept-path clearance](#swept-path-clearance)
-8. [Arc guard](#arc-guard)
-9. [Corner setup](#corner-setup)
-10. [Measured results](#measured-results)
-11. [Ideas that were tried and dropped](#ideas-that-were-tried-and-dropped)
-12. [Keeping the mirror honest](#keeping-the-mirror-honest)
+6. [The 2026-10-19 run](#the-2026-10-19-run) — why the car braked, and what changed
+7. [Checking it in the simulator](#checking-it-in-the-simulator)
+8. [Swept-path clearance](#swept-path-clearance)
+9. [Arc guard](#arc-guard)
+10. [Corner setup](#corner-setup)
+11. [Measured results](#measured-results)
+12. [Ideas that were tried and dropped](#ideas-that-were-tried-and-dropped)
+13. [Keeping the mirror honest](#keeping-the-mirror-honest)
 
 ## Highlights
 
@@ -31,6 +34,10 @@ In October 2026 `gap_follow` got three additions that change how it drives throu
 - **Bounded authority.** Arc guard and corner setup can each move the steering by at most half of `max_steering_angle`. The node refuses to start if they are configured for more.
 - **Cheap.** About 1.4 ms per LiDAR scan ([glossary](glossary.md#scan)) on average on the Jetson, and about 2.2 ms when the arc guard searches.
 - **Tested against the real node.** A test drives the real ROS node (a running program on the ROS graph — [glossary](glossary.md#node)) and the simulator's copy through the same scans, and requires identical commands to 1e-6.
+
+- **No more false hard stops in corridors (2026-10-20).** On the 2026-10-19 run, all 97 stop ticks were the TTC brake reacting to the inside wall of a bend 0.12–0.18 m *beside* the car. Replayed through the final config, the same scans produce none.
+- **Better with other cars on track (2026-10-20), not yet good enough.** Two simulated `gap_follow` cars pass 34 of 40 runs, against 23 for the old config; three cars 15 of 24, against 4. See [Several cars at once](#several-cars-at-once).
+- **More of every track completes (2026-10-20).** Across 11 simulated tracks, 6 seeds each, both directions, 108 of 132 runs pass, against 96 for the 2026-10-19 config. The hall loop `levine_blocked` laps in 23.6 s instead of 34.7 s.
 
 **Limits:** these numbers come from the simulator only. `max_lateral_accel` was raised from 1.0 to 2.0 m/s² for this work, and that value is simulator-only until it has been run on the floor.
 
@@ -50,13 +57,13 @@ A *curve* or *arc* here means the path the car follows if it holds its current s
 
 ## Safety
 
-**Hold LB on the F710 the whole time the car moves. Let go and it stops.** These changes do not touch the deadman, the time-to-collision brake, or the emergency stop.
+**Hold LB on the F710 the whole time the car moves. Let go and it stops.** None of these changes touch the deadman or the emergency stop. The time-to-collision brake is still there and still stops the car. On 2026-10-20 its corridor was narrowed to the body plus 0.05 m, an approved and recorded threshold change ([below](#the-2026-10-19-run)).
 
 If you test this with `enable_deadman: false`, a wrong steering decision has nothing between it and a wall except you catching the car. Never do that; it is workspace policy ([architecture.md](architecture.md#workspace-policy-the-lb-deadman-button-is-mandatory-for-every-node-that-can-move-the-car)).
 
 The rule exists because a driving node with a bug does not know it has a bug. LB is the one stop that doesn't depend on the code being right.
 
-**The new code has only run in the simulator. Bring it up wheels-off first, then at low speed** — the exact order is in [Validation](#validation).
+**The 2026-10-20 changes have only run in the simulator. Bring them up wheels-off first, then at low speed** — the exact order is in [Validation](#validation).
 
 The simulator's car is close to this one, but not identical. In particular, its grip and the 2.0 m/s² cornering limit have not been checked on this floor.
 
@@ -68,12 +75,51 @@ The simulator's car is close to this one, but not identical. In particular, its 
 2. **Wheels off the ground.** Put the car on a stand, start the full stack, hold LB, and move your hand or a box around in front of the LiDAR.
    - **Working when:** the wheels turn away from your hand.
    - The node's decision log (one line a second in the `gap_follow_launch.py` terminal) mentions `swept clearance`, `corner setup` or `arc guard` when they act.
-3. **Floor, low speed, open space.** Lower the speed first: set `max_speed` to about 1.0 m/s and `max_lateral_accel` back to 1.0. Both can be changed live from the dashboard's tuning panel.
+3. **Floor, low speed, open space, with the recorder on.** Lower the speed first: set `max_speed` to about 1.0 m/s and `max_lateral_accel` back to 1.0. Both can be changed live from the dashboard's tuning panel. Record every floor run (commands below), so the next change can be checked against what the car really did.
    - Drive a straight corridor, then a single corner, with someone ready to let go of LB.
 4. **Raise speed in steps.** Raise `max_lateral_accel` toward 2.0 only after the low-speed runs look right.
    - **If the car slides or runs wide in corners:** the floor has less grip than the simulator. Keep `max_lateral_accel` at the highest value that stayed planted.
 
 If anything looks wrong, turn the suspect feature off (next section) and compare. That is what the separate switches are for.
+
+### Recording a floor run
+
+Four terminals, started in this order. Full detail is in [run-diagnostics.md](run-diagnostics.md#tldr).
+
+**Terminal 1 — the recorder. Start it first, so nothing is missed:**
+
+```bash
+source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
+ros2 launch race_diagnostics record_run.py
+```
+
+**Working when:** it prints the run directory it created, `~/.ros/racerbot_runs/<ts>/`.
+
+**Terminal 2 — hardware, plus the mux ([glossary](glossary.md#mux--multiplexer)) that picks which control layer's commands reach the motor:**
+
+```bash
+source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
+ros2 launch f1tenth_stack bringup_launch.py
+```
+
+**Working when:** the VESC (the motor controller, [glossary](glossary.md#vesc)) and the LiDAR come up. This never moves the car by itself.
+
+**Terminal 3 — `gap_follow`, logged into the run directory:**
+
+```bash
+source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
+ros2 launch gap_follow gap_follow_launch.py 2>&1 | tee ~/.ros/racerbot_runs/<ts>/launch.log
+```
+
+**Working when:** it prints a decision line once a second. The car only moves while you hold LB. Do **not** also run `teleop_launch.py`: its `/teleop` always wins the mux, so `gap_follow`'s commands would never reach the car ([architecture.md](architecture.md)).
+
+**Afterwards, any terminal** — the report from [run-analysis.md](run-analysis.md):
+
+```bash
+python3 ~/racerbot-ws/tools/run_analysis/analyze_run.py ~/.ros/racerbot_runs/<ts>
+```
+
+**Working when:** it writes `~/.ros/racerbot_runs/<ts>/analysis/report.md`, explaining every stop.
 
 ## Turning a feature off
 
@@ -84,10 +130,93 @@ Each feature has a switch in `src/gap_follow/config/gap_follow.yaml`:
 | `enable_swept_clearance` | `true` | Speed is limited by the closest reading in the ±30° forward cone again, as before. |
 | `enable_arc_guard` | `true` | The car steers exactly where the gap logic says. |
 | `enable_corner_setup` | `true` | No move to the outside before a turn. Corridor centering works as before. |
+| `narrow_corridor_speed` | `2.5` | Set it to `max_speed` or above to turn the narrow-corridor slowdown off. |
+| `ttc_path_margin` | `0.05` | Set to `0.18` (the old value, `safety_margin`) for the TTC corridor as it was on 2026-10-19. Never above `safety_margin`; the node refuses to start. |
+| `arc_guard_blocked_fallback` | `request` | `freest` brings back the arc guard's old all-blocked behaviour. |
 
 These switches are **not** live-tunable: edit the YAML and restart `gap_follow_launch.py`. The workspace is built with `--symlink-install`, so no rebuild is needed.
 
 `max_lateral_accel` (default 2.0, was 1.0) is live-tunable from the dashboard.
+
+## The 2026-10-19 run
+
+The first floor run of this rework, recorded as `~/.ros/racerbot_runs/20261019-200703` and analysed with the tools in [run-analysis.md](run-analysis.md).
+
+**What happened.** One LB hold of 35.4 s: 78 m at 2.2 m/s on average, peak 3.75 m/s, no contact. The closest the padded body came to anything was 0.12 m. The track was a mostly-left-turning loop, 1.24 m wide at the median and 0.83 m at its narrowest 5%.
+
+It also "went slower than expected at times". The car hard-stopped seven times: 97 control ticks commanded to zero speed, all of them by the time-to-collision (TTC) brake.
+
+**Why.** The TTC brake asks, for each LiDAR beam, "at this speed, how soon would I reach that point?", and stops the car if the answer is under 0.30 s. It only counts points near the car's path. Until 2026-10-20, "near" meant within half the car's width plus `safety_margin`: 0.335 m of the path's centre line, which is 0.18 m beyond the body's side.
+
+On this track that is the inside wall of every left bend. Each of the seven stops was that wall, or a step where the track narrowed to about 0.75 m. Every time, the wall was 0.12–0.18 m beyond the body's side, and the body's own swept path was clear for at least 1.5 m. The car was passing the wall, not approaching it.
+
+**What changed on 2026-10-20.** These are the shipped values in `src/gap_follow/config/gap_follow.yaml`, each marked *simulator-validated only* there:
+
+| Parameter | Was | Now | Why, and the evidence |
+|---|---|---|---|
+| `ttc_path_margin` | (the full `safety_margin`, 0.18 m) | 0.05 m | **A retuned safety threshold, approved on 2026-10-19 on condition of the next row.** The TTC brake now counts a point only within 0.05 m of the body's side. The brake itself, the deadman and the emergency stops are unchanged. Replaying the run's scans: 97 stop ticks become 0. |
+| `narrow_corridor_speed`, `narrow_corridor_clearance`, `open_corridor_clearance` | (new) | 2.5 m/s, 0.05 m, 0.15 m | The condition for the row above. With the body within 0.15 m of a side wall, top speed falls linearly toward 2.5 m/s, reached at 0.05 m. The old corridor stopped the car dead for a side wall; this slows it only as far as the squeeze calls for. On the run's scans it would have dropped as low as 3.1 m/s, above every other limit, so it never bound. In the simulator it never bound either: there the car only gets that close to a wall in corners, where the curvature limit is already lower. |
+| `braking_latency_sec` | (new; 0) | 0.25 s | The car keeps its speed for 0.275 s after a slower command (measured). The stopping-distance limit now allows for that. In the simulator this is what lets the 1.0 m and 1.2 m layouts pass: 18/18 runs, against 12–14 of 18 at 0.15 s or 0. |
+| `max_steering_rate` | 1.0 rad/s | 2.0 rad/s | At 1.0 the steering needs 0.35 s to reach full lock, and square corners were lost to that alone in the simulator. The real servo's rate has not been measured. |
+| `steering_gain_speed_ref` | (new; off) | 1.8 m/s | Above 1.8 m/s the steering response shrinks as 1.8/speed. With the measured 0.15 s steering lag, full gain at speed makes the car weave. |
+| `arc_guard_blocked_fallback` | (new; `freest`) | `request` | When no arc within the arc guard's reach is clear, keep the gap's own choice. The old behaviour picked the straighter arc and, on a tight right-hander of `room_2026_07_27`, unwound a needed turn into the outer wall. |
+| `speed_hold_sec` | (new) | 0 (off) | Holding the lowest speed of a 0.15 s window cut hard brakes by a quarter to two thirds in the simulator, but cost 4–9% of lap time. Left off, available. |
+| `max_speed` | 3.5 m/s | 3.5 m/s (unchanged) | 4.5 m/s was tried. Laps were no faster, because corners and clearance limit the speed on these tracks, and more runs failed. |
+| `max_lateral_accel` | 2.0 m/s² | 2.0 m/s² (unchanged) | Measured grip on that floor: the car achieved 99% of the commanded turn up to 2.0 m/s², 91% at 2.0–2.5, 74% above 3.0. Above 2.0 it starts to slide. |
+
+<details>
+<summary><b>How these were chosen</b> — click to expand. Skip it unless you're changing them.</summary>
+
+First the simulator was fitted to the run (`tools/run_analysis/fit_sim.py`, [run-analysis.md](run-analysis.md#fitting-the-simulator-to-the-real-car)). The fit found the real car accelerates harder than it brakes, the opposite of stock gym. Then each candidate was swept over the indoor, narrow and map tracks, 3–6 seeds, both directions. A setting was kept only if it lost no run the old config passed.
+
+Two things were tried and dropped. Gap hysteresis ("stick to the previous aim") and a turn preview ("slow early for a bend seen far ahead") both made no difference or made things worse.
+
+Narrowing the TTC corridor *alone* made the car wedge against walls in the simulator. The braking latency and the arc guard's fallback are what made it safe there. That is why they ship together.
+
+</details>
+
+### Simulated results, before and after
+
+On the simulator fitted to the run, 6 seeds per track. "Before" is the 2026-10-19 config on the same simulator.
+
+| Track | Width | Before: passed fwd / rev | Before: lap | After: passed fwd / rev | After: lap | Stop ticks, before → after |
+|---|---|---|---|---|---|---|
+| `indoor_oval` | — | 6/6 / 6/6 | 12.5 s | 6/6 / 6/6 | 12.2 s | 12 → 12 |
+| `indoor_tight` | — | 6/6 / 6/6 | 11.3 s | 6/6 / 6/6 | 11.9 s | 27 → 12 |
+| `indoor_wide` | — | 6/6 / 6/6 | 18.2 s | 6/6 / 6/6 | 16.5 s | 12 → 12 |
+| `asb_10000` | — | 6/6 / 6/6 | 20.5 s | 6/6 / 6/6 | 19.7 s | 12 → 12 |
+| `asb_sharp` | — | 6/6 / 6/6 | 21.3 s | 6/6 / 6/6 | 18.9 s | 12 → 12 |
+| `narrow_1p2` | 1.2 m | 6/6 / 6/6 | 11.8 s | 6/6 / 6/6 | 12.7 s | 90 → 21 |
+| `narrow_1p0` | 1.0 m | 3/6 / 2/6 | 14.9 s | 5/6 / 6/6 | 14.0 s | |
+| `levine_blocked` | 1.6 m | 6/6 / 3/6 | 34.7 s | 6/6 / 6/6 | 23.6 s | 43 → 12 |
+| `room_2026_07_27` | 1.4 m | 6/6 / 4/6 | 8.8 s | 6/6 / 5/6 | 8.3 s | 12 → 12 |
+| `circular_obs` | obstacles | 0/6 / 0/6 | — | 2/6 / 0/6 | — | |
+| `levine_obs` | obstacles | 0/6 / 0/6 | — | 0/6 / 0/6 | — | |
+| **Total** | | **96/132** | | **108/132** | | |
+
+Laps and stop ticks are forward-direction means; a standing start is 12 stop ticks. Every indoor run still passes, 60 of 60.
+
+How to read it:
+
+- **Hallways got faster.** `levine_blocked` is 11 s quicker a lap, `asb_sharp` 2.4 s. The old TTC corridor kept braking for walls the car was only passing.
+- **The tightest layouts are a little slower, and much smoother.** `narrow_1p2` loses 0.9 s a lap but has a quarter of the stop ticks and half the hard brakes. That is the braking latency. It is what keeps the car out of the walls on the 1.0 m layout.
+- **Failures that remain.** The two obstacle courses wedge the car against a box or a bar. `gap_follow` never reverses, so once its nose is against something it stays there. One `narrow_1p0` run reaches a 90° bend at 1.5 m/s on the outside line and runs out of steering lock; one `room` reverse run does the same.
+
+### Several cars at once
+
+All cars run `gap_follow` with the shipped config, on their own simulated LiDAR, which sees the other cars as obstacles ([run-analysis.md](run-analysis.md#testing-several-cars-at-once)). The leader is held to 1.8 m/s and the others run at 3.5 m/s, so they catch it. 4 seeds per track, both directions, 2 laps each. A run passes only if no car touches anything and every car finishes.
+
+| Config | 2 cars (5 tracks) | 3 cars (3 tracks) |
+|---|---|---|
+| 2026-10-19 config | 23/40 | 4/24 |
+| **Shipped (2026-10-20)** | **34/40** | **15/24** |
+| Shipped, but the old 0.18 m TTC corridor | 35/40 | 10/24 |
+
+The shipped config is the best of the three overall. The old one mostly failed by stalling behind the slow car: on `levine_blocked` the fast car never finished in 8 of 8 two-car runs.
+
+**It is not solved.** The failures that remain are one pattern. A fast car starts to pass a slower one with 0.15–0.2 m between them, because its own path is clear. Then the slower car turns into a bend across that path, and at 3.3 m/s the fast car cannot stop in the metre left. Follow-the-gap cannot tell a car from a wall, so it has no idea the obstacle beside it might move.
+
+Widening the TTC corridor back to 0.18 m only moves the problem: one more two-car pass, five fewer three-car passes. The real fix is to detect that an obstacle is moving, from successive scans, and refuse to pass close to one. That has not been built. **Until it is, do not run two cars on `gap_follow` at once on the real track.**
 
 ## Checking it in the simulator
 

@@ -2,29 +2,32 @@
 # One entry per track; files live beside this one. Regenerate an
 # entry by re-running the import command recorded in it.
 circular_obs:
-  import_command: python3 tools/f1tenth_sim/track_import.py src/racerbot_a/src/maps/circularTrack.yaml
-    --name circular_obs --source 'racerbot_a src/maps/circularTrack (elliptical ring
-    with obstacles)'
+  import_command: python3 tools/f1tenth_sim/track_import.py tools/f1tenth_sim/maps/sources/circularTrack.yaml
+    --name circular_obs --source 'sfu-racerbot/racerbot_a src/maps/circularTrack.yaml
+    (elliptical ring with obstacles)'
   lap_length_m: 22.46
-  source: racerbot_a src/maps/circularTrack (elliptical ring with obstacles)
+  source: sfu-racerbot/racerbot_a src/maps/circularTrack.yaml (elliptical ring with
+    obstacles)
   width_median_m: 1.17
   width_min_m: 0.63
   width_p10_m: 0.74
 levine_blocked:
-  import_command: python3 tools/f1tenth_sim/track_import.py src/racerbot_a/src/maps/levine_blocked.yaml
-    --name levine_blocked --source 'racerbot_a src/maps/levine_blocked (levine, side
-    corridors closed)'
+  import_command: python3 tools/f1tenth_sim/track_import.py tools/f1tenth_sim/maps/sources/levine_blocked.yaml
+    --name levine_blocked --source 'sfu-racerbot/racerbot_a src/maps/levine_blocked.yaml
+    (levine, side corridors closed)'
   lap_length_m: 63.29
-  source: racerbot_a src/maps/levine_blocked (levine, side corridors closed)
+  source: sfu-racerbot/racerbot_a src/maps/levine_blocked.yaml (levine, side corridors
+    closed)
   width_median_m: 1.6
   width_min_m: 1.5
   width_p10_m: 1.6
 levine_obs:
-  import_command: python3 tools/f1tenth_sim/track_import.py src/racerbot_a/src/maps/levine_obs.yaml
-    --name levine_obs --source 'racerbot_a src/maps/levine_obs (levine + boxes in
-    the corridor)' --centerline-from src/racerbot_a/src/maps/levine.yaml
+  import_command: python3 tools/f1tenth_sim/track_import.py tools/f1tenth_sim/maps/sources/levine_obs.yaml
+    --name levine_obs --source 'sfu-racerbot/racerbot_a src/maps/levine_obs.yaml (levine
+    + boxes in the corridor)' --centerline-from tools/f1tenth_sim/maps/sources/levine.yaml
   lap_length_m: 64.0
-  source: racerbot_a src/maps/levine_obs (levine + boxes in the corridor)
+  source: sfu-racerbot/racerbot_a src/maps/levine_obs.yaml (levine + boxes in the
+    corridor)
   width_median_m: 1.6
   width_min_m: 0.1
   width_p10_m: 0.49

@@ -410,7 +410,8 @@ def arc_guard_steering(clean: np.ndarray, valid: np.ndarray,
                        car_length: float, wheelbase: float,
                        laser_offset_x: float, laser_offset_y: float,
                        max_steering_angle: float, max_correction: float,
-                       candidates: int = 29) -> float:
+                       candidates: int = 29,
+                       blocked_fallback: str = 'freest') -> float:
     """Nearest steering angle to ``desired_steering`` whose swept arc is clear.
 
     Follow-the-gap picks a *direction*, and a direction says nothing about
@@ -433,9 +434,20 @@ def arc_guard_steering(clean: np.ndarray, valid: np.ndarray,
 
     Bounded so it stays a correction, not a second policy: only angles
     within ``max_correction`` of the request are considered (and within
-    +/-``max_steering_angle``). If none of those is clear either, the one
-    with the most free length is returned, and the swept-path speed ceiling
-    and the reactive layers deal with what is left.
+    +/-``max_steering_angle``). If none of those is clear either,
+    ``blocked_fallback`` decides: ``'freest'`` returns the one with the most
+    free length, ``'request'`` returns the (clipped) request unchanged. Either
+    way the swept-path speed ceiling and the reactive layers deal with what
+    is left.
+
+    ``'request'`` exists because "freest" can be the wrong way. Entering a
+    tight right-hander in the recalibrated simulator (room_2026_07_27,
+    reversed, 2026-10-20), full right lock was blocked within the check length
+    by the inner corner and every arc within the bound by the outer wall; the
+    freest arc was simply the straighter one, whose wall was a little further
+    off. The guard unwound the steering from -0.35 to -0.17 rad and the car
+    drove into the outer wall it had been turning away from. When nothing in
+    reach is clear, the gap's own choice is the better bet.
     """
     for name, value in (('desired_steering', desired_steering),
                         ('required_length', required_length),
@@ -449,6 +461,8 @@ def arc_guard_steering(clean: np.ndarray, valid: np.ndarray,
         raise ValueError('max_steering_angle must be in (0, pi/2)')
     if candidates < 2:
         raise ValueError('candidates must be at least 2')
+    if blocked_fallback not in ('freest', 'request'):
+        raise ValueError("blocked_fallback must be 'freest' or 'request'")
 
     desired = min(max_steering_angle, max(-max_steering_angle, desired_steering))
     horizon = required_length * 1.5
@@ -470,7 +484,7 @@ def arc_guard_steering(clean: np.ndarray, valid: np.ndarray,
             return float(steering)
         if free > best_free:
             best, best_free = float(steering), free
-    return best
+    return desired if blocked_fallback == 'request' else best
 
 
 def curvature_speed_limit(curvature: float, max_lateral_accel: float,
@@ -487,8 +501,20 @@ def curvature_speed_limit(curvature: float, max_lateral_accel: float,
 
 
 def braking_speed_limit(clearance: float, reserve_distance: float,
-                        max_braking_decel: float, max_speed: float) -> float:
-    """Clearance speed ceiling from ``v^2 <= 2*a*(clearance-reserve)``.
+                        max_braking_decel: float, max_speed: float,
+                        latency: float = 0.0) -> float:
+    """Clearance speed ceiling: the fastest ``v`` from which the car can stop
+    within ``clearance - reserve``.
+
+    With no latency that is ``v^2 <= 2*a*(c - r)``.
+    ``latency`` is the time the car keeps going at ``v`` before braking
+    starts -- command transport plus the speed loop's response, measured at
+    ~0.3 s on this car (docs/run-analysis.md) -- so the distance it covers,
+    ``v * latency``, comes off the room first:
+
+        v * latency + v^2 / (2a) <= c - r
+
+    whose positive root is ``-a*t + sqrt((a*t)^2 + 2a(c - r))``.
 
     Positive infinity means no obstacle was observed and therefore leaves the
     configured top speed unchanged.
@@ -501,8 +527,105 @@ def braking_speed_limit(clearance: float, reserve_distance: float,
     if reserve_distance < 0.0 or max_braking_decel <= 0.0 or max_speed < 0.0:
         raise ValueError(
             'reserve_distance/max_speed must be non-negative and braking decel positive')
+    if not (math.isfinite(latency) and latency >= 0.0):
+        raise ValueError('latency must be finite and non-negative')
     usable_distance = max(0.0, clearance - reserve_distance)
-    return min(max_speed, math.sqrt(2.0 * max_braking_decel * usable_distance))
+    a_t = max_braking_decel * latency
+    v = -a_t + math.sqrt(a_t * a_t + 2.0 * max_braking_decel * usable_distance)
+    return min(max_speed, v)
+
+
+def side_clearance_speed_limit(side_clearance: float, narrow_speed: float,
+                               narrow_clearance: float, open_clearance: float,
+                               max_speed: float) -> float:
+    """Speed ceiling from how close the body runs to the nearer side wall.
+
+    ``side_clearance`` is the gap between the side of the car's body and the
+    nearer side wall, in metres. At or below ``narrow_clearance`` the ceiling
+    is ``narrow_speed``; at or above ``open_clearance`` it is ``max_speed``;
+    in between it rises linearly.
+
+    This is the narrow-corridor limit that pays for the narrower TTC
+    corridor (ttc_path_margin, 2026-10-20). The old 0.18 m corridor stopped
+    the car dead whenever a side wall came within 0.18 m of its path; the new
+    one ignores walls beside the path, so the speed that used to be removed by
+    a hard stop is now removed smoothly, and only as much as the squeeze
+    calls for. +inf (no wall seen) is open; NaN is treated as narrow.
+    """
+    for name, value in (('narrow_speed', narrow_speed),
+                        ('narrow_clearance', narrow_clearance),
+                        ('open_clearance', open_clearance),
+                        ('max_speed', max_speed)):
+        if not math.isfinite(value):
+            raise ValueError(f'{name} must be finite')
+    if not 0.0 <= narrow_speed <= max_speed:
+        raise ValueError('narrow_speed must be within [0, max_speed]')
+    if not narrow_clearance < open_clearance:
+        raise ValueError('narrow_clearance must be below open_clearance')
+    if math.isnan(side_clearance):
+        return narrow_speed
+    if side_clearance >= open_clearance:
+        return max_speed
+    if side_clearance <= narrow_clearance:
+        return narrow_speed
+    fraction = (side_clearance - narrow_clearance) / (open_clearance - narrow_clearance)
+    return narrow_speed + fraction * (max_speed - narrow_speed)
+
+
+def speed_scheduled_gain(speed: float, reference_speed: float) -> float:
+    """Factor on the bearing-steering gain that keeps the heading loop stable
+    at speed: ``min(1, reference_speed / speed)``.
+
+    Steering at the gap bearing (delta = K * alpha) closes a heading loop
+    whose crossover is ``v * K / wheelbase``: the faster the car, the faster
+    a given steering angle turns it. The loop also has a delay -- servo lag
+    plus a scan period, ~0.175 s measured on this car (docs/run-analysis.md)
+    -- which costs ``crossover * delay`` of phase. At 3 m/s with K = 1 the
+    crossover is 8.3 rad/s and the delay eats 84 deg of the 90 available:
+    the car weaves, about once a second, which the recalibrated simulator
+    reproduced on every straight. Holding the crossover at
+    ``reference_speed / wheelbase`` instead keeps a fixed phase margin at any
+    speed; below ``reference_speed`` the full gain (and with it the full
+    low-speed authority tight corners need) is untouched.
+
+    ``reference_speed`` <= 0 disables the schedule (factor 1).
+    """
+    if not (math.isfinite(speed) and math.isfinite(reference_speed)):
+        raise ValueError('speed and reference_speed must be finite')
+    if reference_speed <= 0.0 or speed <= reference_speed:
+        return 1.0
+    return reference_speed / speed
+
+
+class SpeedHold:
+    """Sliding minimum of the desired speed over the last ``hold_sec``.
+
+    The speed ceilings (curvature, clearance) are recomputed from every scan
+    and wobble with the aim, and the car's speed loop takes ~0.3 s to answer
+    (docs/run-analysis.md). Following every wobble means accelerating into a
+    dip the car then has to brake for: in the simulator that shed two to three
+    times the speed each corner actually needs. Holding the lowest ceiling of
+    the last ``hold_sec`` removes that sawtooth. It can only ever lower the
+    speed, never raise it above the current ceiling, so no stop or cap is
+    weakened.
+    """
+
+    def __init__(self, hold_sec: float):
+        if not math.isfinite(hold_sec) or hold_sec < 0.0:
+            raise ValueError('hold_sec must be finite and non-negative')
+        self.hold_sec = hold_sec
+        self._samples = []
+
+    def reset(self) -> None:
+        self._samples = []
+
+    def update(self, now: float, desired: float) -> float:
+        if not math.isfinite(now):
+            raise ValueError('now must be finite')
+        self._samples = [(t, v) for t, v in self._samples
+                         if now - t < self.hold_sec and t <= now]
+        self._samples.append((now, desired))
+        return min(v for _t, v in self._samples)
 
 
 def slew_rate_limit(target: float, previous: float, dt: float,

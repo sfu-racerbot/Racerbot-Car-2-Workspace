@@ -150,7 +150,7 @@ def explain_ttc(run, tick: Tick, steering_basis: float, params: dict | None = No
     bd = gap_logic.vehicle_boundary_distances(ba, p["car_width"], p["car_length"], p["wheelbase"],
                                               p["laser_offset_x"], p["laser_offset_y"])
     kappa = math.tan(steering_basis) / p["wheelbase"]
-    gate = p["car_width"] / 2.0 + p["safety_margin"]
+    gate = p["car_width"] / 2.0 + p.get("ttc_path_margin", p["safety_margin"])
     ttc = gap_logic.time_to_collision(w, wv, ba, tick.odom_speed, bd, p["ttc_min_closing_speed"],
                                       gate, kappa, p["laser_offset_x"], p["laser_offset_y"])
     j = int(np.argmin(ttc))

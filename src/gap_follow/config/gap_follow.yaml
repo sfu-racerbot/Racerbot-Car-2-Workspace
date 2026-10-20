@@ -94,6 +94,12 @@ gap_follow_node:
     # so it hugged walls instead of leaving them. Raise above 1.0 only if the
     # car is still slow to leave a wall; too high will make it weave.
     steering_gain: 1.0
+    # Above this speed (m/s) the bearing gain falls as 1/speed, which keeps
+    # the steering loop's phase margin roughly constant: with the 0.15 s
+    # steering lag measured on run 20261019-200703 and full gain, the car
+    # weaves at speed (docs/gap-follow.md).
+    # 0 disables. Simulator-validated only.
+    steering_gain_speed_ref: 1.8
     # Raised 1.0 -> 2.0 on 2026-10-19 with the swept-path / corner-setup
     # rework: 1.0 m/s^2 (~0.1 g) held the car near 1.4 m/s through every
     # corner. 2.0 is still below pure_pursuit's 2.5 on the same car and well
@@ -109,9 +115,35 @@ gap_follow_node:
     # In pure_pursuit the same name is only a command slew rate and carries no
     # such risk -- do not copy a value across from there.
     max_braking_decel: 3.0
-    max_steering_rate: 1.0
+    # The car keeps going at full speed for this long after a slower command:
+    # ROS -> VESC transport plus the VESC speed loop. Measured ~0.28 s on run
+    # 20261019-200703 (docs/run-analysis.md); the stopping-distance ceiling
+    # subtracts speed * latency from the room it sees before applying
+    # max_braking_decel. 0 restores the old formula. Simulator-validated only.
+    braking_latency_sec: 0.25
+    # Raised from 1.0 on 2026-10-20: at 1.0 rad/s the rack needs 0.35 s to
+    # reach full lock, and in the recalibrated simulator square corners were
+    # lost to that alone. The servo's real slew rate is not measured; the
+    # simulator models it at 3.2 rad/s (vesc.yaml max_servo_speed, a smoother
+    # bringup does not run). Simulator-validated only.
+    max_steering_rate: 2.0
     # Never let a long scan pause turn into one unbounded command jump.
     command_slew_max_dt: 0.10
+    # Hold the lowest desired speed of this many seconds instead of following
+    # every scan's ceiling up and down: the car's speed loop takes ~0.3 s to
+    # answer, so chasing each wobble means accelerating into a dip and braking
+    # out of it. Only ever lowers speed. 0 disables. Simulator-validated only.
+    speed_hold_sec: 0.0
+    # Narrow-corridor ceiling (2026-10-20), the condition the TTC corridor
+    # change was approved on: the speed falls linearly from max_speed when the
+    # body is open_corridor_clearance (m) from the nearer side wall, to
+    # narrow_corridor_speed at narrow_corridor_clearance and below. Replaces
+    # the hard stops the old 0.18 m TTC corridor made for side walls with a
+    # smooth slowdown. narrow_corridor_speed >= max_speed turns it off.
+    # Simulator-validated only.
+    narrow_corridor_speed: 2.5
+    narrow_corridor_clearance: 0.05
+    open_corridor_clearance: 0.15
     # --- Rectangular vehicle footprint ---
     # Measured on this car with a tape, 2026-08-24, NOT the Traxxas 74276-4
     # published figures the earlier values came from:
@@ -311,7 +343,7 @@ gap_follow_node:
     enable_swept_clearance: true
     # Extra width on each side of the body counted as "in the path". Small on
     # purpose: the 0.20m forward_stop_clearance reserve is the longitudinal
-    # margin, and the TTC brake keeps its own full safety_margin.
+    # margin, and the TTC brake has its own corridor (ttc_path_margin).
     swept_clearance_margin: 0.05
     swept_clearance_max_length: 3.0   # m -- beyond this the path counts as clear
 
@@ -326,6 +358,10 @@ gap_follow_node:
     # Authority bound, checked at startup: at most half of max_steering_angle.
     arc_guard_max_correction: 0.1745
     arc_guard_candidates: 29       # steering angles tried across the full range
+    # When no arc within the bound is clear: 'freest' takes the one with the
+    # most free length, 'request' leaves the gap's own choice. 'freest' can
+    # unwind a needed turn into the outer wall (docs/gap-follow.md).
+    arc_guard_blocked_fallback: request
 
     # --- Corner setup (docs/gap-follow.md#corner-setup) ---
     # On the approach to a turn in a corridor, move toward the OUTSIDE wall so
@@ -375,6 +411,13 @@ gap_follow_node:
     # braking to zero at all, so a trip that still does hard-stop is one
     # that was genuinely boxed in.
     ttc_threshold_sec: 0.30
+    # TTC counts an obstacle only if it lies within car_width/2 + this of the
+    # arc the car is on. It was the full safety_margin (0.18) until
+    # 2026-10-20; on the 2026-10-19 run every one of the 97 TTC stop ticks
+    # was the inside wall of a bend 0.12-0.18 m outside the body, which the
+    # car was passing, not approaching. Approved change; simulator-validated
+    # and checked against that run's scans only -- see docs/gap-follow.md.
+    ttc_path_margin: 0.05
     ttc_min_closing_speed: 0.05
     # TTC uses max(fresh odom speed, latest command when it is positive),
     # so brief odom under-reporting cannot suppress braking. A zero brake

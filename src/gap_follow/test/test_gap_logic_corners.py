@@ -233,6 +233,39 @@ def test_guard_falls_back_to_the_freest_arc_inside_its_bound():
     assert free(out) > free(0.30)
 
 
+def test_guard_request_fallback_keeps_the_request_when_nothing_in_reach_is_clear():
+    # Same scene as the freest test above, where the 'freest' fallback moves
+    # off the request; 'request' must return the request itself (2026-10-20,
+    # docs/gap-follow.md -- the freest arc can be the one into the outer wall).
+    r, a = _post_on_arc(0.30, 0.5)
+    freest = _guard(r, a, 0.30)
+    assert freest != 0.30, 'precondition: freest really moves here'
+    out = gap_logic.arc_guard_steering(
+        np.asarray(r, dtype=float), np.ones(len(r), dtype=bool), np.asarray(a, dtype=float),
+        0.30, 1.0, HW, CAR_LENGTH, WHEELBASE, LASER_X, 0.0, 0.349, 0.1745, 29,
+        blocked_fallback='request')
+    assert out == 0.30
+
+
+def test_guard_request_fallback_still_takes_a_clear_arc():
+    # 'request' only changes the all-blocked case: with a clear arc within the
+    # bound it still steers to the nearest clear one, exactly as 'freest' does.
+    r, a = _post_on_arc(0.30, 0.5)
+    for request in (0.30, 0.25):
+        both = [gap_logic.arc_guard_steering(
+            np.asarray(r, dtype=float), np.ones(len(r), dtype=bool), np.asarray(a, dtype=float),
+            request, 1.0, HW, CAR_LENGTH, WHEELBASE, LASER_X, 0.0, 0.349, 0.30, 29,
+            blocked_fallback=mode) for mode in ('freest', 'request')]
+        free = _swept(r, a, math.tan(both[1]) / WHEELBASE, max_length=1.5)
+        assert both[0] == both[1]
+        assert free >= 1.0, 'with a 0.30 rad bound a clear arc is in reach'
+    with pytest.raises(ValueError, match='blocked_fallback'):
+        gap_logic.arc_guard_steering(
+            np.asarray(r, dtype=float), np.ones(len(r), dtype=bool), np.asarray(a, dtype=float),
+            0.30, 1.0, HW, CAR_LENGTH, WHEELBASE, LASER_X, 0.0, 0.349, 0.1745, 29,
+            blocked_fallback='nearest')
+
+
 def test_guard_respects_its_authority_bound_even_when_nothing_is_clear():
     # A wall all the way across, 0.3 m ahead of the body: no arc is clear.
     angles = np.linspace(-math.pi / 2, math.pi / 2, 361)

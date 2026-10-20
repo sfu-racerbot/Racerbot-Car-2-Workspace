@@ -58,6 +58,8 @@ def main(argv=None) -> int:
               f"vmean {sum(r['mean_speed'] for r in runs)/len(runs):.2f}  "
               f"min_clear {min(clear) if clear else float('nan'):.3f}m  "
               f"stops {sum(r['stop_steps'] for r in runs)}  "
+              f"shed {sum(r['speed_shed_mps'] for r in passed) / max(1, len(passed)):5.1f}  "
+              f"hardbrk {sum(r['hard_brake_ticks'] for r in passed) / max(1, len(passed)):5.1f}  "
               f"contact {sum(1 for r in runs if r['collision'])}", flush=True)
     if args.output:
         Path(args.output).write_text(json.dumps(results, indent=2) + "\n")

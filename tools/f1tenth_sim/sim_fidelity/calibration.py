@@ -113,7 +113,7 @@ class CarCalibration:
     # The friction coefficient between these tyres and the floor the car
     # actually runs on. Drives cornering, acceleration and braking limits
     # together, exactly as a friction circle says it should.
-    surface_friction: float = 0.70
+    surface_friction: float = 0.55
     # Share of the longitudinal demand that competes with cornering for grip.
     # See GripEnvelope.longitudinal_coupling for why this is not simply 1.
     longitudinal_grip_coupling: float = 1.0
@@ -125,11 +125,19 @@ class CarCalibration:
     # Closed-loop proportional gain of the steering servo's own position
     # loop, 1/s. Must stay below 1/control_dt (40 for a 40 Hz loop) or the
     # discrete servo overshoots -- which is the bug this replaces.
-    steering_servo_gain: float = 25.0
+    steering_servo_gain: float = 15.0
     # Whole-loop transport lag, in control ticks, from a command being
     # published to the actuator acting on it: ROS -> USB -> VESC firmware.
-    steering_delay_ticks: int = 1
-    speed_delay_ticks: int = 1
+    steering_delay_ticks: int = 3
+    speed_delay_ticks: int = 2
+    # The VESC speed loop, as a proportional controller per direction with
+    # an acceleration ceiling each way (plant._measured_speed_loop). Fitted
+    # to run 20261019-200703 with tools/run_analysis/fit_sim.py: it brakes
+    # far more gently than gym's stock loop (gain 13.7/s, up to mu*g).
+    speed_loop_accel_gain: float = 5.0
+    speed_loop_accel_max: float = 4.5
+    speed_loop_brake_gain: float = 4.0
+    speed_loop_brake_max: float = 4.0
 
     # --- Speed envelope -------------------------------------------------
     speed_max: float = SPEED_MAX_ERPM / SPEED_TO_ERPM_GAIN
@@ -264,9 +272,11 @@ PROVENANCE: dict[str, tuple[Provenance, str]] = {
         "gym default, original F1TENTH tyres",
     ),
     "surface_friction": (
-        Provenance.ESTIMATED,
-        "rubber RC tyres on smooth sealed concrete. Plausible band 0.5-0.9; "
-        "measure with a straight-line hard-brake run (R1)",
+        Provenance.MEASURED,
+        "fitted to run 20261019-200703 (tools/run_analysis/fit_sim.py): 0.55 "
+        "best matched the real yaw rate of 0.40/0.55/0.70/0.90; the car "
+        "reached 91% of commanded curvature at 2.0-2.5 m/s^2 lateral and 78% "
+        "above 2.5. Floor of that run only",
     ),
     "longitudinal_grip_coupling": (
         Provenance.ESTIMATED,
@@ -287,17 +297,21 @@ PROVENANCE: dict[str, tuple[Provenance, str]] = {
         "vesc.yaml throttle_interpolator max_servo_speed 3.2 rad/s",
     ),
     "steering_servo_gain": (
-        Provenance.ESTIMATED,
-        "40 ms servo position-loop time constant. Bounded above by 1/dt = 40",
+        Provenance.MEASURED,
+        "fitted to run 20261019-200703 (tools/run_analysis/fit_sim.py): recorded /drive replayed open-loop into the plant, scored against LiDAR scan-matched speed and yaw rate. docs/run-analysis.md",
     ),
     "steering_delay_ticks": (
-        Provenance.ESTIMATED,
-        "one 25 ms tick of ROS -> USB -> VESC transport lag",
+        Provenance.MEASURED,
+        "fitted to run 20261019-200703 (tools/run_analysis/fit_sim.py): recorded /drive replayed open-loop into the plant, scored against LiDAR scan-matched speed and yaw rate. docs/run-analysis.md",
     ),
     "speed_delay_ticks": (
-        Provenance.ESTIMATED,
-        "one 25 ms tick; measure from a step-response run (R7)",
+        Provenance.MEASURED,
+        "fitted to run 20261019-200703 (tools/run_analysis/fit_sim.py): recorded /drive replayed open-loop into the plant, scored against LiDAR scan-matched speed and yaw rate. docs/run-analysis.md",
     ),
+    "speed_loop_accel_gain": (Provenance.MEASURED, "fitted to run 20261019-200703 (tools/run_analysis/fit_sim.py): recorded /drive replayed open-loop into the plant, scored against LiDAR scan-matched speed and yaw rate. docs/run-analysis.md"),
+    "speed_loop_accel_max": (Provenance.MEASURED, "fitted to run 20261019-200703 (tools/run_analysis/fit_sim.py): recorded /drive replayed open-loop into the plant, scored against LiDAR scan-matched speed and yaw rate. docs/run-analysis.md"),
+    "speed_loop_brake_gain": (Provenance.MEASURED, "fitted to run 20261019-200703 (tools/run_analysis/fit_sim.py): recorded /drive replayed open-loop into the plant, scored against LiDAR scan-matched speed and yaw rate. docs/run-analysis.md"),
+    "speed_loop_brake_max": (Provenance.MEASURED, "fitted to run 20261019-200703 (tools/run_analysis/fit_sim.py): recorded /drive replayed open-loop into the plant, scored against LiDAR scan-matched speed and yaw rate. docs/run-analysis.md"),
     "speed_max": (
         Provenance.DERIVED,
         "vesc.yaml speed_max 23250 eRPM / speed_to_erpm_gain 4614. Enforced "
