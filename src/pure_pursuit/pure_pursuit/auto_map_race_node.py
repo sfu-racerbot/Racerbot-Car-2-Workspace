@@ -19,7 +19,7 @@ from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid
 import numpy as np
-from pure_pursuit import occupancy_map, racing_math, recorded_path
+from pure_pursuit import occupancy_map, racing_math, recorded_path, run_commands
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
@@ -346,6 +346,16 @@ class AutoMapRaceNode(Node):
         # improvement over committing to that lap's data unconditionally,
         # which is what the fixed mapping_laps count used to do.
         self.declare_parameter('max_mapping_laps', 3)
+        # --- Mapping-only runs (map_course, 2026-10-22) ---
+        # True: drive at least mapping_laps laps under gap_follow, save the
+        # map, pose graph and racing line, write commands.txt (what to run
+        # next) into the run directory, hold the car stopped for
+        # finish_hold_sec, then exit -- no racing handover, no particle
+        # filter, no pure_pursuit. map_course_launch.py shuts the whole launch
+        # down when this node exits. False (the default) is the original
+        # map-then-race behaviour, unchanged.
+        self.declare_parameter('finish_after_mapping', False)
+        self.declare_parameter('finish_hold_sec', 1.0)
         # Well under the documented 106-correction pathological case from
         # 2026-08-19. UNVALIDATED: no run this session closed even once, so
         # tune against real "good" and "bad" lap data before trusting it.
@@ -467,6 +477,16 @@ class AutoMapRaceNode(Node):
         # Never below mapping_laps -- a ceiling under the floor it is meant
         # to sit above would be a contradictory config, not a valid choice.
         self.max_mapping_laps = max(self.mapping_laps, int(value('max_mapping_laps')))
+        self.finish_after_mapping = bool(value('finish_after_mapping'))
+        self.finish_hold_sec = max(0.0, float(value('finish_hold_sec')))
+        self.finish_exit_time = None
+        # Set when a mapping-only run is done; main() then exits cleanly.
+        self.exit_requested = False
+        # Mapping-only runs: SLAM's first pose of the car, taken while it is
+        # held still, saved as start_pose.yaml for the race launch's seed.
+        self.start_pose = None
+        # ...and the one actually saved for racing: where the car stopped.
+        self.race_start_pose = None
         self.mapping_lap_max_reanchors = int(value('mapping_lap_max_reanchors'))
         self.mapping_lap_require_unwidened_closure = bool(
             value('mapping_lap_require_unwidened_closure'))
@@ -1296,6 +1316,18 @@ class AutoMapRaceNode(Node):
         self._update_pf_handover(now_sec, pose)
         deadman_ok, deadman_state, deadman_detail = self._deadman_status(now_sec)
 
+        if (self.finish_after_mapping and self.start_pose is None
+                and self.state == 'mapping' and pose is not None):
+            # The car has not moved yet (see the hold below), so this is the
+            # spot racing will start from. Not the map origin: that is
+            # wherever odometry read zero, which a car carried or pushed
+            # with the drivers up is not.
+            self.start_pose = tuple(float(v) for v in pose)
+            self.get_logger().info(
+                f'Start pose recorded: x={pose[0]:.2f} y={pose[1]:.2f} '
+                f'yaw={math.degrees(pose[2]):.0f}deg (map frame). Racing on '
+                'this map starts from here.')
+
         if self.state == 'mapping' and pose is not None and deadman_ok:
             if self.recorder.update(*pose, now_sec, self._lookup_odom_yaw()):
                 self._mapping_lap_completed()
@@ -1316,12 +1348,19 @@ class AutoMapRaceNode(Node):
             # save FIRST, then hand the profile over; racing cannot begin
             # until both have completed (or timed out).
             self._try_save_map(now_sec)
-            if self._map_save_settled(now_sec):
+            if self.finish_after_mapping:
+                if self._map_save_settled(now_sec):
+                    self._finish_mapping_run(now_sec, pose)
+            elif self._map_save_settled(now_sec):
                 # After the save, so the filter reads the finished, despeckled
                 # map rather than a half-written one -- _map_save_callback
                 # despeckles before it counts the save as complete.
                 self._start_particle_filter(now_sec)
                 self._try_load_profile()
+
+        if (self.state == 'finished' and self.finish_exit_time is not None
+                and now_sec >= self.finish_exit_time):
+            self.exit_requested = True
 
         if self.state == 'transition' and now_sec >= self.race_enable_time:
             self.state = 'racing'
@@ -1330,6 +1369,13 @@ class AutoMapRaceNode(Node):
         if not deadman_ok:
             self._publish_stop()
             self._log_decision(deadman_state, deadman_detail, None)
+        elif (self.state == 'mapping' and self.finish_after_mapping
+              and self.start_pose is None):
+            self._publish_stop()
+            self._log_decision(
+                'waiting_for_start_pose',
+                'holding the car still until SLAM reports its pose, so the '
+                'start pose can be recorded', None)
         elif self.state == 'mapping':
             command, stop_state, source_detail = self._command_status(
                 self.mapping_cmd, self.mapping_cmd_time, now_sec, 'gap_follow')
@@ -1372,7 +1418,17 @@ class AutoMapRaceNode(Node):
             self._publish_stop()
             self._log_decision(
                 'loading_profile',
-                f"generated profile='{self.profile_path}'; waiting for pure pursuit to accept it",
+                (f"generated profile='{self.profile_path}'; saving the map"
+                 if self.finish_after_mapping else
+                 f"generated profile='{self.profile_path}'; waiting for pure pursuit to accept it"),
+                None,
+                level='info',
+            )
+        elif self.state == 'finished':
+            self._publish_stop()
+            self._log_decision(
+                'mapping_finished',
+                f'mapping-only run complete; results in {self.run_directory}',
                 None,
                 level='info',
             )
@@ -1459,13 +1515,25 @@ class AutoMapRaceNode(Node):
                 f'{self.completed_mapping_laps + 1}/{self.mapping_laps}, which should '
                 f'take about {self.measured_lap_distance:.0f}m and '
                 f'{self.measured_lap_duration_sec:.0f}s at the same pace. Keep holding '
-                'LB; racing starts after it closes.')
+                'LB; '
+                + ('the map is saved and the run ends after the last lap.'
+                   if self.finish_after_mapping else 'racing starts after it closes.'))
             # Discard the discovery lap, unconditionally -- never raced,
             # regardless of how mapping_laps/max_mapping_laps are
             # configured (see the comment above their declaration). The
             # next lap is recorded after SLAM has seen the start/finish
             # again and had a chance to close its loop, yielding a cleaner
             # map-frame raceline.
+            self.recorder.reset()
+            return
+
+        if self.finish_after_mapping and self.completed_mapping_laps < self.mapping_laps:
+            # A mapping-only run drives every lap it was asked for: each one
+            # is more scans of the same course for SLAM. Only the last is
+            # judged and kept as the racing line.
+            self.get_logger().info(
+                f'Lap {self.completed_mapping_laps}/{self.mapping_laps} closed; '
+                'keep holding LB.')
             self.recorder.reset()
             return
 
@@ -1482,8 +1550,13 @@ class AutoMapRaceNode(Node):
             try:
                 self.profile_path = self._write_profile()
             except (OSError, ValueError) as exc:
-                self.state = 'error'
                 self.get_logger().error(f'Could not generate the racing profile: {exc}')
+                if self.finish_after_mapping and hasattr(self, 'run_directory'):
+                    # Still worth saving the map: it is what took the laps.
+                    # commands.txt then says the racing line is missing.
+                    self.profile_path = None
+                else:
+                    self.state = 'error'
             return
 
         # A visibly marginal lap no longer silently becomes the raceline --
@@ -1497,6 +1570,41 @@ class AutoMapRaceNode(Node):
             'ceiling has not been reached -- recording one more lap instead of '
             'accepting it. Keep holding LB.')
         self.recorder.reset()
+
+    def _finish_mapping_run(self, now_sec: float, pose=None):
+        """End a mapping-only run: write commands.txt, print it, stop.
+
+        The car is already stopped (loading_profile publishes stop every
+        tick); 'finished' keeps it stopped for finish_hold_sec so the mux sees
+        a few explicit zeros, then main() exits and the launch shuts down.
+
+        The race start pose saved is where the car is *now*: stopped just
+        past the last lap's closure, on the line it just recorded, with SLAM
+        still running. The pose taken before the car first moved is the
+        fallback; it is usually off the racing line (in simulation 0.8 m,
+        which a race starting there spent swerving into a wall).
+        """
+        race_start = tuple(float(v) for v in pose) if pose is not None else self.start_pose
+        self.race_start_pose = race_start
+        try:
+            if race_start is not None:
+                run_commands.write_start_pose(self.run_directory, race_start)
+                self.get_logger().info(
+                    f'Race start pose: x={race_start[0]:.2f} y={race_start[1]:.2f} '
+                    f'yaw={math.degrees(race_start[2]):.0f}deg -- where the car '
+                    'is stopped now.')
+        except OSError as exc:
+            self.get_logger().error(f'Could not write start_pose.yaml: {exc}')
+        text = run_commands.commands_text(
+            self.run_directory, raceline_ok=self.profile_path is not None,
+            map_ok=self.map_saved_ok, start_ok=race_start is not None)
+        try:
+            (self.run_directory / 'commands.txt').write_text(text)
+        except OSError as exc:
+            self.get_logger().error(f'Could not write commands.txt: {exc}')
+        self.get_logger().info('\n' + text)
+        self.state = 'finished'
+        self.finish_exit_time = now_sec + self.finish_hold_sec
 
     def _lap_quality_ok(self):
         """Whether the just-closed lap looks clean enough to accept as-is.
@@ -1541,6 +1649,10 @@ class AutoMapRaceNode(Node):
     def _write_profile(self) -> str:
         run_directory = self.output_directory / strftime('%Y%m%d-%H%M%S')
         run_directory.mkdir(parents=True, exist_ok=False)
+        # Set now, not after the profile succeeds, so a mapping-only run can
+        # still save its map when the racing line is refused below. Only
+        # _try_save_map reads it, and only in the loading_profile state.
+        self.run_directory = run_directory
         # Trimmed to the final revolution: a closure that needed more
         # than one lap would otherwise fit a raceline through two
         # overlapping ones. See LapRecorder.lap_points.
@@ -1857,7 +1969,9 @@ def main(args=None):
     rclpy.init(args=args)
     node = AutoMapRaceNode()
     try:
-        rclpy.spin(node)
+        # Not rclpy.spin(): a mapping-only run ends itself (exit_requested).
+        while rclpy.ok() and not node.exit_requested:
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:

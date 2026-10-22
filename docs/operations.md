@@ -5,6 +5,8 @@
 > **You'll be able to:** drive the car by hand, build a map of a track, and run the autonomous race stack on it.
 > **Time:** 20 minutes for your first manual drive. An afternoon to get through the racing workflow.
 
+**Just need the command?** [launchstart.md](launchstart.md) has every mode as one copy-paste command. This page is the full explanation behind them.
+
 This is the "how do I do X" doc. For *why* things are wired this way, see [architecture.md](architecture.md). For hardware specifics — ports, addresses, exact config values — see [hardware-reference.md](hardware-reference.md).
 
 ## Contents
@@ -178,6 +180,10 @@ Same result as above, except `gap_follow` drives the lap instead of a human — 
    ```bash
    ros2 run nav2_map_server map_saver_cli -f <map_name>
    ```
+
+### Mapping in one command: 3 laps, then stop
+
+`ros2 run racerbot_launch map_course` does the steps above by itself: bringup, SLAM, `gap_follow`, three closed laps, then it saves the map, pose graph and racing line to `~/.ros/racerbot_auto/<timestamp>/`, shuts everything down and prints the commands to race on that map (`race_launch.py run_dir:=...`, which seeds the localizer where the car stopped at the end of mapping, so no RViz is needed). The commands and options are in [launchstart.md](launchstart.md#map-a-course-3-laps-then-stop). Simulator-validated only.
 
 ## Localizing against a saved map
 

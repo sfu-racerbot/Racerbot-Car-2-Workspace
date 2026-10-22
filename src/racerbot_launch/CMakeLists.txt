@@ -4,6 +4,8 @@ project(racerbot_launch)
 find_package(ament_cmake REQUIRED)
 
 install(DIRECTORY launch config DESTINATION share/${PROJECT_NAME})
+# `ros2 run racerbot_launch map_course`: the one-command mapping run.
+install(PROGRAMS scripts/map_course DESTINATION lib/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   # Config checks that need no ROS at all -- runnable directly too:
@@ -13,6 +15,8 @@ if(BUILD_TESTING)
     test/test_web_dashboard_rb2_config.py)
   ament_add_pytest_test(test_steering_limits_fit_servo
     test/test_steering_limits_fit_servo.py)
+  ament_add_pytest_test(test_map_course
+    test/test_map_course.py)
 endif()
 
 ament_package()

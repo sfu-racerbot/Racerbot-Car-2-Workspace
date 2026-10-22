@@ -25,6 +25,12 @@ particle filter's transforms are sent to a dead topic and only its
 *PoseStamped* output is consumed, by auto_map_race_node, which republishes it
 on the topic pure pursuit already reads.
 
+``standalone:=true`` is the other use: racing on a saved map with no SLAM
+running (race_launch.py run_dir:=...). Then the filter's TF is the only
+map -> laser there is, and map_server's /map the only map, so neither is
+remapped and the dashboard and pure_pursuit's map-mode opponent detection
+see them as usual.
+
 Usage (normally spawned by auto_map_race_node, not run by hand):
 
     ros2 launch racerbot_launch localize_run_launch.py \
@@ -36,7 +42,7 @@ import os
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, TimerAction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -83,6 +89,8 @@ def _check_gpu_ray_caster(params):
 def _nodes(context):
     map_yaml = LaunchConfiguration('map_yaml').perform(context)
     config = LaunchConfiguration('localize_config').perform(context)
+    standalone = LaunchConfiguration('standalone').perform(context).lower() in (
+        'true', '1', 'yes')
 
     if not os.path.isfile(map_yaml):
         raise RuntimeError(
@@ -105,7 +113,8 @@ def _nodes(context):
         # one would give every /map subscriber two different maps at random.
         # The particle filter reaches this one through the map service, which
         # is remapped alongside it so the pairing cannot come apart.
-        remappings=[('/map', '/pf/map'), ('/map_updates', '/pf/map_updates')],
+        remappings=([] if standalone else
+                    [('/map', '/pf/map'), ('/map_updates', '/pf/map_updates')]),
     )
     lifecycle = Node(
         package='nav2_lifecycle_manager',
@@ -127,8 +136,18 @@ def _nodes(context):
         # works -- remapping it here is what breaks this launch silently.
         # The filter is a TF broadcaster only, never a listener, so sending
         # its transforms nowhere costs it nothing.
-        remappings=[('/tf', '/pf/tf'), ('/tf_static', '/pf/tf_static')],
+        remappings=([] if standalone else
+                    [('/tf', '/pf/tf'), ('/tf_static', '/pf/tf_static')]),
     )
+    if standalone:
+        # particle_filter asks map_server for the map once, as soon as the
+        # service exists -- which is before the lifecycle manager has made
+        # map_server active. map_server then answers with an empty map and
+        # the filter dies dividing by its zero resolution (seen in
+        # simulation, 1 race start in 8). Mid-run (auto_map_race_node)
+        # the map was saved seconds earlier and this has not been seen, so
+        # only the standalone start waits.
+        return [lifecycle, map_server, TimerAction(period=4.0, actions=[particle_filter])]
     return [lifecycle, map_server, particle_filter]
 
 
@@ -144,5 +163,10 @@ def generate_launch_description():
                 get_package_share_directory('particle_filter'),
                 'config', 'localize.yaml'),
             description='particle_filter parameter file.'),
+        DeclareLaunchArgument(
+            'standalone', default_value='false',
+            description='true when no SLAM is running (racing on a saved '
+                        'map): publish the filter\'s TF and the map on /map. '
+                        'false (default) hides both, for running beside SLAM.'),
         OpaqueFunction(function=_nodes),
     ])

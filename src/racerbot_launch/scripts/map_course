@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Map a course in one command, then print how to race it.
+
+    ros2 run racerbot_launch map_course                       # 3 laps
+    ros2 run racerbot_launch map_course mapping_max_speed:=1.5 # new course
+    ros2 run racerbot_launch map_course include_bringup:=false
+
+Runs ``ros2 launch racerbot_launch map_course_launch.py`` with any
+``name:=value`` arguments passed through, waits for it to finish (it stops
+itself after the laps; Ctrl+C also works), then prints the run directory's
+commands.txt -- the copy-paste race commands -- as the last thing on screen,
+after every node's shutdown messages.
+
+Hold LB the whole time the car should move. See docs/launchstart.md.
+"""
+
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+DEFAULT_OUTPUT = '~/.ros/racerbot_auto'
+
+
+def output_directory(argv):
+    """The output_directory:= argument if given, else the launch default."""
+    for arg in argv:
+        if arg.startswith('output_directory:='):
+            return Path(os.path.expanduser(arg.split(':=', 1)[1]))
+    return Path(os.path.expanduser(DEFAULT_OUTPUT))
+
+
+def new_run(parent: Path, since: float):
+    """The newest run directory under ``parent`` with a commands.txt written
+    at or after ``since`` (epoch seconds), or None."""
+    if not parent.is_dir():
+        return None
+    best = None
+    for child in parent.iterdir():
+        commands = child / 'commands.txt'
+        try:
+            mtime = commands.stat().st_mtime
+        except OSError:
+            continue
+        if child.is_dir() and mtime >= since and (best is None or mtime > best[0]):
+            best = (mtime, child)
+    return None if best is None else best[1]
+
+
+def report(parent: Path, since: float) -> str:
+    run = new_run(parent, since)
+    if run is None:
+        return (
+            '\nNo map was saved by this run: it ended before the laps were '
+            'done (Ctrl+C, LB released for good, or an error above).\n'
+            f'Earlier runs, if any, are in {parent}/ -- each has a commands.txt.\n')
+    return '\n' + (run / 'commands.txt').read_text()
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    bad = [a for a in argv if ':=' not in a]
+    if bad:
+        print(f'map_course: arguments must look like name:=value, got {bad}', file=sys.stderr)
+        return 2
+    started = time.time() - 1.0
+    child = subprocess.Popen(
+        ['ros2', 'launch', 'racerbot_launch', 'map_course_launch.py', *argv])
+    while True:
+        try:
+            code = child.wait()
+            break
+        except KeyboardInterrupt:
+            # The terminal already sent SIGINT to ros2 launch too; let it
+            # finish shutting the nodes down, then report.
+            continue
+    print(report(output_directory(argv), started))
+    return code
+
+
+if __name__ == '__main__':
+    sys.exit(main())

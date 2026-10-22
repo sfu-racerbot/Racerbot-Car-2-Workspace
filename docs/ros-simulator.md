@@ -223,6 +223,19 @@ Runs three scenarios, each end to end, and exits non-zero if any fails:
 | `obstacle` | one parked car on the racing line | the racing controller gets past a static obstacle rather than latching stopped in front of it |
 | `traffic` | two slower cars | mapping with moving traffic, and racing among it without contact |
 
+### The one-command mapping flow (`map_course` → `race_launch.py run_dir:=`)
+
+**Any terminal**, sourced, with no car drivers running (about 10 minutes):
+
+```bash
+tools/racerbot_sim/run_map_course_validation.py --track indoor_oval
+```
+
+It runs the two commands [launchstart.md](launchstart.md#map-a-course-3-laps-then-stop) gives, for real, over the simulator. First `ros2 run racerbot_launch map_course include_bringup:=false`. Then each of the four race commands printed in `commands.txt`, each on a freshly started simulator so the car is back on the start spot. It uses ROS domain 79 unless you have set one.
+
+**Working when:** every JSON line it prints has `"passed": true`. The race lines must also show `raced_m` of 20 or more.
+
+
 **All three scenarios run on `indoor_wide`**, overriding the launch files'
 `indoor_oval` default, because what limits them is the *corridor* rather
 than the controller:

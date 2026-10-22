@@ -11,7 +11,7 @@ import rclpy
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from pure_pursuit.auto_map_race_node import (  # noqa: E402
     angle_difference, AutoMapRaceNode, LapRecorder)
-from pure_pursuit import racing_math  # noqa: E402
+from pure_pursuit import racing_math, run_commands  # noqa: E402
 import pytest  # noqa: E402
 
 
@@ -647,7 +647,7 @@ class _LapQualityStub:
                 max_mapping_laps=3, mapping_lap_max_reanchors=20,
                 mapping_lap_require_unwidened_closure=True,
                 mapping_lap_max_heading_margin_fraction=0.5,
-                mapping_lap_max_revolutions=1.5):
+                mapping_lap_max_revolutions=1.5, finish_after_mapping=False):
         self.recorder = recorder
         self.completed_mapping_laps = completed_mapping_laps
         self.mapping_laps = mapping_laps
@@ -662,12 +662,18 @@ class _LapQualityStub:
         self.profile_path = None
         self.write_profile_calls = 0
         self.logger = _CapturingLogger()
+        self.finish_after_mapping = finish_after_mapping
+        self.write_profile_error = None
 
     def get_logger(self):
         return self.logger
 
     def _write_profile(self):
         self.write_profile_calls += 1
+        if self.write_profile_error is not None:
+            # _write_profile sets run_directory before it can fail.
+            self.run_directory = '/fake/run'
+            raise self.write_profile_error
         return '/fake/profile.csv'
 
     def _lap_quality_ok(self):
@@ -793,6 +799,243 @@ def test_a_marginal_lap_is_accepted_anyway_at_the_ceiling():
     assert stub.write_profile_calls == 1
     assert len(stub.logger.warnings) == 1
     assert 'reanchor_count' in stub.logger.warnings[0]
+
+
+# ---------------------------------------------------------------------------
+# Mapping-only runs (finish_after_mapping, map_course)
+# ---------------------------------------------------------------------------
+
+def test_mapping_only_drives_every_requested_lap_even_when_one_is_clean():
+    """mapping_laps=3: a perfect lap 2 is not accepted -- the run maps all
+    three -- while the same lap is accepted in the map-then-race mode."""
+    stub = _LapQualityStub(_quality_recorder(), completed_mapping_laps=1,
+                           mapping_laps=3, max_mapping_laps=5,
+                           finish_after_mapping=True)
+    AutoMapRaceNode._mapping_lap_completed(stub)
+    assert stub.completed_mapping_laps == 2
+    assert stub.state == 'mapping'
+    assert stub.write_profile_calls == 0
+    assert stub.recorder.points == []
+    race = _LapQualityStub(_quality_recorder(), completed_mapping_laps=1,
+                           mapping_laps=3, max_mapping_laps=5)
+    AutoMapRaceNode._mapping_lap_completed(race)
+    assert race.state == 'loading_profile'
+
+
+def test_mapping_only_accepts_a_clean_last_lap():
+    stub = _LapQualityStub(_quality_recorder(), completed_mapping_laps=2,
+                           mapping_laps=3, max_mapping_laps=5,
+                           finish_after_mapping=True)
+    AutoMapRaceNode._mapping_lap_completed(stub)
+    assert stub.completed_mapping_laps == 3
+    assert stub.state == 'loading_profile'
+    assert stub.write_profile_calls == 1
+
+
+def test_mapping_only_marginal_last_lap_records_more_up_to_the_ceiling():
+    marginal = dict(reanchor_count=999)
+    stub = _LapQualityStub(_quality_recorder(**marginal), completed_mapping_laps=2,
+                           mapping_laps=3, max_mapping_laps=5,
+                           finish_after_mapping=True)
+    AutoMapRaceNode._mapping_lap_completed(stub)
+    assert stub.state == 'mapping' and stub.write_profile_calls == 0
+    stub = _LapQualityStub(_quality_recorder(**marginal), completed_mapping_laps=4,
+                           mapping_laps=3, max_mapping_laps=5,
+                           finish_after_mapping=True)
+    AutoMapRaceNode._mapping_lap_completed(stub)
+    assert stub.completed_mapping_laps == 5
+    assert stub.state == 'loading_profile'
+
+
+def test_refused_racing_line_still_saves_the_map_in_mapping_only_mode():
+    stub = _LapQualityStub(_quality_recorder(), completed_mapping_laps=2,
+                           mapping_laps=3, finish_after_mapping=True)
+    stub.write_profile_error = ValueError('line goes through a wall')
+    AutoMapRaceNode._mapping_lap_completed(stub)
+    assert stub.state == 'loading_profile'
+    assert stub.profile_path is None
+    # The map-then-race mode has nothing to race, so it stops in error.
+    race = _LapQualityStub(_quality_recorder(), completed_mapping_laps=1)
+    race.write_profile_error = ValueError('line goes through a wall')
+    AutoMapRaceNode._mapping_lap_completed(race)
+    assert race.state == 'error'
+
+
+def _mapping_only_supervisor(tmp_path, clock):
+    node = _supervisor()
+    node.finish_after_mapping = True
+    node.finish_hold_sec = 1.0
+    node._now_sec = lambda: clock[0]
+    node._lookup_and_publish_pose = lambda: None
+    node._try_load_profile = lambda: pytest.fail('mapping-only runs never load a profile')
+    node._start_particle_filter = lambda _now: pytest.fail(
+        'mapping-only runs never start the particle filter')
+    node.state = 'loading_profile'
+    node.run_directory = tmp_path
+    node.profile_path = str(tmp_path / 'raceline_profiled.csv')
+    # Recorded at the start of a real run, before the car moved.
+    node.start_pose = (1.5, -2.0, 0.25)
+    node.map_save_started = True
+    node.map_save_deadline = clock[0] + 30.0
+    published = []
+
+    class CapturePublisher:
+        def publish(self, msg):
+            published.append(msg)
+
+    node.drive_pub = CapturePublisher()
+    return node, published
+
+
+def test_mapping_only_waits_for_the_save_then_writes_commands_and_exits(tmp_path):
+    clock = [100.0]
+    node, published = _mapping_only_supervisor(tmp_path, clock)
+    try:
+        node.map_saves_completed = 1          # pose graph still serializing
+        node._control_step()
+        assert node.state == 'loading_profile'
+        assert not (tmp_path / 'commands.txt').exists()
+
+        node.map_saves_completed = 2
+        node.map_saved_ok = True
+        node._control_step()
+        assert node.state == 'finished'
+        text = (tmp_path / 'commands.txt').read_text()
+        assert f'run_dir:={tmp_path}' in text
+        assert '!!' not in text
+        assert run_commands.read_start_pose(tmp_path) == pytest.approx(
+            (1.5, -2.0, 0.25), abs=1e-4)
+        assert not node.exit_requested
+
+        clock[0] += 0.99                       # inside the hold
+        node._control_step()
+        assert not node.exit_requested
+        clock[0] += 0.02                       # past it
+        node._control_step()
+        assert node.exit_requested
+        assert published and all(m.drive.speed == 0.0 for m in published)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_finished_never_forwards_gap_follow_even_with_a_fresh_command(tmp_path):
+    clock = [100.0]
+    node, published = _mapping_only_supervisor(tmp_path, clock)
+    try:
+        node.state = 'finished'
+        node.finish_exit_time = clock[0] + 10.0
+        command = AckermannDriveStamped()
+        command.drive.speed = 1.5
+        command.drive.steering_angle = 0.2
+        node.mapping_cmd = command
+        node.mapping_cmd_time = clock[0]
+        node._control_step()
+        assert published[-1].drive.speed == 0.0
+        assert published[-1].drive.steering_angle == 0.0
+        assert node.last_decision_state == 'mapping_finished'
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_mapping_only_holds_the_car_until_the_start_pose_is_recorded(tmp_path):
+    clock = [100.0]
+    node, published = _mapping_only_supervisor(tmp_path, clock)
+    try:
+        node.state = 'mapping'
+        node.start_pose = None
+        command = AckermannDriveStamped()
+        command.drive.speed = 1.5
+        command.drive.steering_angle = 0.2
+        node.mapping_cmd = command
+        node.mapping_cmd_time = clock[0]
+        # No SLAM pose yet: a fresh gap_follow command is NOT forwarded.
+        node._lookup_and_publish_pose = lambda: None
+        node._control_step()
+        assert published[-1].drive.speed == 0.0
+        assert node.last_decision_state == 'waiting_for_start_pose'
+        assert node.start_pose is None
+        # First pose: recorded exactly, and the same tick forwards gap_follow.
+        node._lookup_and_publish_pose = lambda: (3.25, -1.5, 1.0)
+        node._lookup_odom_yaw = lambda: None
+        node._control_step()
+        assert node.start_pose == (3.25, -1.5, 1.0)
+        assert published[-1].drive.speed == pytest.approx(1.5)
+        # Later poses never overwrite it.
+        node._lookup_and_publish_pose = lambda: (4.0, 0.0, 2.0)
+        node._control_step()
+        assert node.start_pose == (3.25, -1.5, 1.0)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_map_then_race_mode_neither_holds_nor_records_a_start_pose(tmp_path):
+    clock = [100.0]
+    node, published = _mapping_only_supervisor(tmp_path, clock)
+    try:
+        node.finish_after_mapping = False
+        node.state = 'mapping'
+        node.start_pose = None
+        command = AckermannDriveStamped()
+        command.drive.speed = 1.5
+        node.mapping_cmd = command
+        node.mapping_cmd_time = clock[0]
+        node._lookup_and_publish_pose = lambda: None
+        node._control_step()
+        assert published[-1].drive.speed == pytest.approx(1.5)
+        assert node.start_pose is None
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_race_start_is_where_the_car_stopped_not_where_it_began(tmp_path):
+    clock = [100.0]
+    node, _published = _mapping_only_supervisor(tmp_path, clock)
+    try:
+        node._lookup_and_publish_pose = lambda: (7.0, 1.25, -0.5)   # stopped here
+        node.map_saves_completed = 2
+        node.map_saved_ok = True
+        node._control_step()
+        assert run_commands.read_start_pose(tmp_path) == pytest.approx(
+            (7.0, 1.25, -0.5), abs=1e-4)
+        assert node.start_pose == (1.5, -2.0, 0.25)   # unchanged, only the fallback
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_missing_start_pose_is_flagged_and_no_file_is_written(tmp_path):
+    clock = [100.0]
+    node, _published = _mapping_only_supervisor(tmp_path, clock)
+    try:
+        node.start_pose = None
+        node.map_saves_completed = 2
+        node.map_saved_ok = True
+        node._control_step()
+        assert 'start pose was not recorded' in (tmp_path / 'commands.txt').read_text()
+        assert not (tmp_path / run_commands.START_POSE_FILE).exists()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_failed_map_save_is_flagged_in_the_commands(tmp_path):
+    clock = [100.0]
+    node, _published = _mapping_only_supervisor(tmp_path, clock)
+    try:
+        node.map_saves_completed = 2
+        node.map_saved_ok = False
+        node.profile_path = None
+        node._control_step()
+        text = (tmp_path / 'commands.txt').read_text()
+        assert 'The map did NOT save' in text
+        assert 'No racing line was saved' in text
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 # ---------------------------------------------------------------------------

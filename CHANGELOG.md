@@ -6,6 +6,62 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-10-22 — gap_follow opponent awareness; one-command mapping; launch cheat sheet
+
+All of it is **simulator-validated only**. Bring it up wheels-off first, then at
+low speed ([docs/gap-follow.md](docs/gap-follow.md#validation)).
+
+### gap_follow
+
+- **Opponent awareness** (`enable_opponent_awareness`, **off by default**;
+  `gap_follow_launch.py opponent_awareness:=true`). New
+  `gap_follow/opponent_tracking.py`, no ROS needed:
+  - it finds free-standing, car-sized clusters and tracks them against this
+    car's dead-reckoned motion (the steering modelled as the servo follows it);
+  - behind a moving car it caps speed to `(gap − 0.5 m) / 1.0 s`;
+  - it passes only on a straight, and only with 0.15 m of extra room around
+    where the other car will be over the next 0.8 s.
+
+  Safety checks still read the real scan. With it off, the commands are
+  identical. New `opponent_*` parameters are all commented in
+  `config/gap_follow.yaml`.
+- Simulator, leader 1.8 m/s and the others 3.5 m/s, both directions:
+
+  | | Layer on | Layer off |
+  |---|---|---|
+  | Two cars | 40/40 | 34/40 |
+  | Three cars | 24/24 | 15/24 |
+  | One car | 111/132 | 108/132 |
+
+  There was no contact in any run with it on. It follows rather than
+  overtakes on every track tried.
+
+### racerbot_launch / pure_pursuit
+
+- **`ros2 run racerbot_launch map_course`**: `gap_follow` drives 3 laps, then
+  the run saves the map, pose graph, racing line and `start_pose.yaml`, shuts
+  down and prints the race commands. It is `auto_map_race_node` in the new
+  `finish_after_mapping` mode, with `map_course_launch.py`.
+- **`race_launch.py run_dir:=<dir> [steering_law:=...]`**: races a saved run.
+  The new `seed_start_pose` node seeds the particle filter where mapping
+  stopped the car, so no RViz is needed. `pure_pursuit` only starts once the
+  filter has taken that pose.
+- `localize_run_launch.py standalone:=true` publishes the filter's TF and
+  `/map` when no SLAM is running.
+- `tools/racerbot_sim/run_map_course_validation.py` runs the whole flow end to
+  end over the simulator. On `indoor_wide`, mapping passed every run. Pure
+  pursuit, LQR and MPC each raced 128–142 m with no contact. Stanley once
+  swerved around a false "opponent" (a scan/map mismatch) and brushed a wall;
+  that is the existing `pure_pursuit` overtake logic.
+- `localize_run_launch.py standalone:=true` starts the particle filter 4 s
+  after `map_server`. Started together, the filter got an empty map and
+  crashed (1 race start in 8 in simulation).
+
+### docs
+
+- New [docs/launchstart.md](docs/launchstart.md): every mode as one
+  copy-paste command.
+
 ## 2026-10-19 — gap_follow corridor rework; Stanley, LQR and MPC made usable
 
 Both changes are **simulator-validated only**. Bring them up wheels-off first,
