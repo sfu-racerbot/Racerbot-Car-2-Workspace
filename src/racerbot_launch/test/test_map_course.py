@@ -117,6 +117,7 @@ def test_the_launch_file_starts_no_drivers():
 
 def test_main_passes_arguments_through_and_prints_the_commands_last(
         tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(mc, 'LOG_DIRECTORY', str(tmp_path / 'logs'))
     out = tmp_path / 'runs'
     args_file = tmp_path / 'args'
     bin_dir = _fake_ros2(tmp_path, (
@@ -133,10 +134,18 @@ def test_main_passes_arguments_through_and_prints_the_commands_last(
         'launch', 'racerbot_launch', 'map_course_launch.py',
         f'output_directory:={out}', 'laps:=4']
     printed = capsys.readouterr().out
-    assert printed.rstrip().endswith('RACE COMMANDS HERE')
+    # The commands are the last thing that matters on screen; only the log
+    # path follows them.
+    body, _, last = printed.rstrip().rpartition('\n')
+    assert body.rstrip().endswith('RACE COMMANDS HERE')
+    assert last.startswith('Full log of this run: ')
+    log = Path(last.split(': ', 1)[1])
+    saved = log.read_text()
+    assert '[INFO] nodes shutting down' in saved and 'RACE COMMANDS HERE' in saved
 
 
 def test_main_reports_no_map_and_the_launch_exit_code(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(mc, 'LOG_DIRECTORY', str(tmp_path / 'logs'))
     out = tmp_path / 'runs'
     bin_dir = _fake_ros2(tmp_path, 'exit 3\n')
     monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
@@ -148,3 +157,12 @@ def test_main_reports_no_map_and_the_launch_exit_code(tmp_path, monkeypatch, cap
 def test_main_refuses_arguments_that_are_not_launch_arguments(capsys):
     assert mc.main(['--laps', '3']) == 2
     assert 'name:=value' in capsys.readouterr().err
+
+
+def test_the_recorder_gets_its_own_folder_not_the_map_run_folder():
+    # Launch arguments are shared with included files: without an explicit
+    # output_directory the recorder wrote into ~/.ros/racerbot_auto/ (found
+    # on the car, 2026-10-22).
+    for name in ('map_course_launch.py', 'auto_map_race_launch.py'):
+        text = (SCRIPT.parents[1] / 'launch' / name).read_text()
+        assert "'output_directory': '~/.ros/racerbot_runs'" in text, name

@@ -14,6 +14,9 @@ itself after the laps; Ctrl+C also works), then prints the run directory's
 commands.txt -- the copy-paste race commands -- as the last thing on screen,
 after every node's shutdown messages.
 
+Everything the launch prints is also saved to
+~/.ros/racerbot_runs/map_course-<timestamp>.log, lap progress included.
+
 Hold LB the whole time the car should move. See docs/launchstart.md.
 """
 
@@ -66,6 +69,14 @@ def new_run(parent: Path, since: float):
     return None if best is None else best[1]
 
 
+LOG_DIRECTORY = '~/.ros/racerbot_runs'
+
+
+def log_path(now=None) -> Path:
+    stamp = time.strftime('%Y%m%d-%H%M%S', time.localtime(now))
+    return Path(os.path.expanduser(LOG_DIRECTORY)) / f'map_course-{stamp}.log'
+
+
 def report(parent: Path, since: float) -> str:
     run = new_run(parent, since)
     if run is None:
@@ -90,17 +101,28 @@ def main(argv=None):
               'then run map_course again.', file=sys.stderr)
         return 2
     started = time.time() - 1.0
-    child = subprocess.Popen(
-        ['ros2', 'launch', 'racerbot_launch', 'map_course_launch.py', *argv])
-    while True:
-        try:
-            code = child.wait()
-            break
-        except KeyboardInterrupt:
-            # The terminal already sent SIGINT to ros2 launch too; let it
-            # finish shutting the nodes down, then report.
-            continue
-    print(report(output_directory(argv), started))
+    log = log_path()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with open(log, 'w', errors='replace') as handle:
+        child = subprocess.Popen(
+            ['ros2', 'launch', 'racerbot_launch', 'map_course_launch.py', *argv],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            errors='replace', bufsize=1)
+        while True:
+            try:
+                for line in child.stdout:
+                    sys.stdout.write(line)
+                    handle.write(line)
+                code = child.wait()
+                break
+            except KeyboardInterrupt:
+                # The terminal already sent SIGINT to ros2 launch too; keep
+                # copying its shutdown output, then report.
+                continue
+        text = report(output_directory(argv), started)
+        handle.write(text)
+    print(text)
+    print(f'Full log of this run: {log}')
     return code
 
 

@@ -69,7 +69,11 @@ def generate_launch_description():
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory('race_diagnostics'),
             'launch', 'record_run.py')),
-        launch_arguments={'record_bag': LaunchConfiguration('record_bag')}.items(),
+        # Its own folder, given explicitly: launch arguments are shared with
+        # included files, and this launch's output_directory (the map run
+        # folder) would otherwise become the recorder's too.
+        launch_arguments={'record_bag': LaunchConfiguration('record_bag'),
+                          'output_directory': '~/.ros/racerbot_runs'}.items(),
         condition=IfCondition(LaunchConfiguration('diagnostics')),
     )
     slam = IncludeLaunchDescription(
