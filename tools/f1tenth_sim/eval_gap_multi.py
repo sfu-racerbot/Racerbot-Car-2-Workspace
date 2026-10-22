@@ -124,7 +124,8 @@ def run_multi(track: str, params_list: list, seed: int, duration_s: float,
     reference = np.column_stack((line.xs, line.ys))
     progress = [_Progress(reference, poses[k, :2], reverse) for k in range(cars)]
     stats = [dict(stop_ticks=0, ttc_ticks=0, speed_sum=0.0, ticks=0, braking_ticks=0,
-                  wall_contact=False, car_contact=False, laps=0.0, finish_time_s=None)
+                  wall_contact=False, car_contact=False, laps=0.0, finish_time_s=None,
+                  opponent_ticks=0, follow_ticks=0)
              for _ in range(cars)]
     min_gap = math.inf
     last_cmd = [0.0] * cars
@@ -141,6 +142,11 @@ def run_multi(track: str, params_list: list, seed: int, duration_s: float,
             st["stop_ticks"] += int(ctrl.stopped)
             st["ttc_ticks"] += int(ctrl.stopped and ctrl.stop_reason == "ttc_brake")
             st["braking_ticks"] += int(speed < last_cmd[k] - 0.05)
+            # Ticks with a moving car in view (opponent awareness on), and
+            # ticks where the follow cap bound -- with one car on track both
+            # should be ~0, or walls are being taken for cars.
+            st["opponent_ticks"] += int(ctrl.opponent_mode is not None)
+            st["follow_ticks"] += int(ctrl.binding_cap == "follow")
             last_cmd[k] = speed
             commands.append((steer, speed))
         obs, _r, _done, _t, _info = plant.step(commands)

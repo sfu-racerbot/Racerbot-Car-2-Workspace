@@ -11,7 +11,7 @@ from std_msgs.msg import String
 
 from drive_intent import predict, schema
 from drive_intent.throttle import FailureLatch, IntentThrottle
-from gap_follow import gap_logic, live_tuning
+from gap_follow import gap_logic, live_tuning, opponent_tracking
 
 
 class GapFollowNode(Node):
@@ -533,6 +533,32 @@ class GapFollowNode(Node):
             self._validate_adaptive_width_parameters()
         self._validate_swept_path_parameters()
         self._validate_speed_shaping_parameters()
+
+        # Opponent awareness (opponent_tracking.py): other cars on track.
+        # Every opponent_* field is declared whether or not the layer is on,
+        # so the YAML always loads cleanly; the layer itself is constructed
+        # -- and its values validated -- only when enabled. With it off,
+        # nothing in _scan_step changes (test_opponent_awareness_node.py).
+        self.declare_parameter('enable_opponent_awareness', False)
+        defaults = opponent_tracking.OpponentParams()
+        for name in opponent_tracking.OpponentParams.__dataclass_fields__:
+            self.declare_parameter(f'opponent_{name}', getattr(defaults, name))
+        self.enable_opponent_awareness = bool(
+            self.get_parameter('enable_opponent_awareness').value)
+        self.opponents = None
+        if self.enable_opponent_awareness:
+            params = opponent_tracking.OpponentParams.from_mapping({
+                f'opponent_{name}': self.get_parameter(f'opponent_{name}').value
+                for name in opponent_tracking.OpponentParams.__dataclass_fields__})
+            # Raises ValueError naming the bad value, like the validators above.
+            self.opponents = opponent_tracking.OpponentAwareness(
+                params, self.wheelbase, self.laser_offset_x, self.laser_offset_y,
+                self.car_length)
+        # Stamp of the last scan folded into the tracker (seconds), and this
+        # tick's opponent decision: None (no moving car in view), 'clear'
+        # (passing allowed) or 'follow'.
+        self.opponent_last_stamp = None
+        self.opponent_mode = None
         if self.enable_corner_setup:
             self._validate_corner_setup_parameters()
         if not math.isfinite(self.ttc_command_speed_timeout_sec) or (
@@ -819,6 +845,9 @@ class GapFollowNode(Node):
         # they must never trigger the emergency stop, but must stay
         # non-free for gap selection -- see gap_logic.sanitize_ranges.
         clean, valid = gap_logic.sanitize_ranges(scan.ranges, self.max_range, scan.range_min)
+        self.opponent_mode = None
+        if self.opponents is not None:
+            self._observe_opponents(clean, valid, scan)
 
         # Measured once, ahead of gap selection, so _select_gap's inflation
         # and the fallback corner-speed cap both see this tick's sensed
@@ -1012,9 +1041,28 @@ class GapFollowNode(Node):
         # inflated/bubbled copy _select_gap hands back in `window` -- they
         # model the body's own width themselves.
         raw_window = window
-        (window, closest_dist, gap_start, gap_end, used_fallback,
-         target_idx_in_window, near_bearing) = self._select_gap(
-            window, window_valid, scan.angle_increment, beam_angles)
+        follow_cap = math.inf
+        if self.opponents is not None and self.opponents.moving_body():
+            # Another car is moving nearby. Search twice: once with its
+            # predicted footprint inflated (opponent_tracking.inflate_
+            # predicted), once on the real scan. The inflated answer is used
+            # only to pick a side of the same opening, only on a straight;
+            # otherwise follow it -- the plain gap plus the follow cap.
+            avoid = self._select_gap(
+                window, window_valid, scan.angle_increment, beam_angles,
+                search_window=self.opponents.augment(window, beam_angles))
+            plain = self._select_gap(
+                window, window_valid, scan.angle_increment, beam_angles)
+            passing = (self.opponents.may_pass(self.steering_basis)
+                       and opponent_tracking.avoidance_usable(avoid[2:5], plain[2:5]))
+            self.opponent_mode = 'clear' if passing else 'follow'
+            (window, closest_dist, gap_start, gap_end, used_fallback,
+             target_idx_in_window, near_bearing) = avoid if passing else plain
+            follow_cap = self.opponents.follow_cap(passing)
+        else:
+            (window, closest_dist, gap_start, gap_end, used_fallback,
+             target_idx_in_window, near_bearing) = self._select_gap(
+                window, window_valid, scan.angle_increment, beam_angles)
 
         if gap_start is None:
             if emergency_tripped or ttc_tripped:
@@ -1234,7 +1282,8 @@ class GapFollowNode(Node):
                 ),
             )
         desired_speed = min(normal_speed, clearance_speed, anticipated_speed,
-                            self._narrow_corridor_speed(side_left, side_right))
+                            self._narrow_corridor_speed(side_left, side_right),
+                            follow_cap)
         if used_fallback:
             desired_speed = min(desired_speed, self.effective_corner_speed)
         if self.speed_hold_sec > 0.0:
@@ -1321,6 +1370,8 @@ class GapFollowNode(Node):
                f"(near {math.degrees(near_bearing):+.1f}deg vs far "
                f"{math.degrees(target_angle):+.1f}deg)"
                if near_bearing is not None and anticipated_speed < self.max_speed else "")
+            + (f", follow cap={follow_cap:.2f}m/s" if math.isfinite(follow_cap) else "")
+            + (f", opponent mode={self.opponent_mode}" if self.opponent_mode else "")
             + (f", CREEP (forward clearance {forward_clearance:.3f}m inside "
                f"the {self.forward_stop_clearance:.3f}m reserve; crawling out)"
                if creeping else ""))
@@ -1357,6 +1408,8 @@ class GapFollowNode(Node):
         ]
         if used_fallback:
             intent_factors.append(schema.factor('corner cap', self.effective_corner_speed))
+        if math.isfinite(follow_cap):
+            intent_factors.append(schema.factor('follow cap', follow_cap))
         if near_bearing is not None:
             intent_factors.append(schema.factor('anticipation cap', anticipated_speed))
         intent_factors.append(schema.factor('accel ceiling', acceleration_ceiling))
@@ -1663,7 +1716,27 @@ class GapFollowNode(Node):
             width_factor, self.corner_speed, self.corner_speed_wide)
         return width_factor, effective_safety_margin, effective_corner_speed
 
-    def _select_gap(self, window, window_valid, angle_increment, beam_angles):
+    def _observe_opponents(self, clean, valid, scan):
+        """Fold this scan into the opponent tracker.
+
+        The interval is the scan stamps' difference, not the callback clock:
+        the tracker turns displacement into velocity, and the Hokuyo stamps
+        its scans at 40 Hz however late the callback runs. A stamp that is
+        zero, repeated or older than the last makes the interval invalid,
+        which resets the tracker (OpponentAwareness.observe) -- the layer
+        then does nothing until it has rebuilt its history.
+        """
+        stamp = scan.header.stamp.sec + scan.header.stamp.nanosec * 1e-9
+        dt = (math.nan if self.opponent_last_stamp is None or stamp <= 0.0
+              else stamp - self.opponent_last_stamp)
+        self.opponent_last_stamp = stamp
+        speed = self.current_speed if self._odom_fresh() else math.nan
+        angles = scan.angle_min + np.arange(
+            clean.size, dtype=np.float64) * scan.angle_increment
+        self.opponents.observe(clean, valid, angles, speed, self.steering_basis, dt)
+
+    def _select_gap(self, window, window_valid, angle_increment, beam_angles,
+                    search_window=None):
         """Inflate obstacle edges, bubble the closest hit, and pick a gap.
 
         Split out of scan_callback so a *blocking stop* can ask the same
@@ -1679,6 +1752,11 @@ class GapFollowNode(Node):
         read-only against it too), but only scan_callback's real driving
         decision may ever *write* self.previous_target_idx.
 
+        ``search_window``, when given, is what the gap is searched in
+        (opponent awareness passes the scan with other cars' predicted
+        footprints inflated); the safety bubble still anchors on the closest
+        *real* return in ``window``.
+
         Uses ``self.effective_safety_margin``, not ``self.safety_margin``
         directly -- on a sensed-narrow straight the two can differ (see
         _adaptive_width); scan_callback refreshes the former every tick
@@ -1690,7 +1768,8 @@ class GapFollowNode(Node):
         # Remaining ranges represent valid car-center positions.
         half_width = self.car_width / 2.0 + self.effective_safety_margin
         processed = gap_logic.disparity_extend(
-            window, angle_increment, self.disparity_threshold, half_width)
+            window if search_window is None else search_window,
+            angle_increment, self.disparity_threshold, half_width)
         if closest_idx is not None:
             processed = gap_logic.safety_bubble(
                 processed, closest_idx, closest_dist, angle_increment,

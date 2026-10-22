@@ -24,6 +24,7 @@ import numpy as np
 import yaml
 
 from gap_follow import gap_logic
+from gap_follow import opponent_tracking
 
 CONTROL_DT = 0.025
 ROOT = Path(__file__).resolve().parents[2]
@@ -124,6 +125,33 @@ REQUIRED_PARAMS = frozenset((
     "ttc_path_margin",
     "ttc_threshold_sec",
     "wheelbase",
+
+    "enable_opponent_awareness",
+    "opponent_min_width",
+    "opponent_max_width",
+    "opponent_max_range",
+    "opponent_segment_jump",
+    "opponent_min_beams",
+    "opponent_gate",
+    "opponent_alpha",
+    "opponent_beta",
+    "opponent_min_hits",
+    "opponent_max_misses",
+    "opponent_moving_speed",
+    "opponent_radius",
+    "opponent_passing_margin",
+    "opponent_prediction_horizon",
+    "opponent_prediction_step",
+    "opponent_follow_min_gap",
+    "opponent_follow_time_gap",
+    "opponent_follow_lateral",
+    "opponent_relevant_lateral",
+    "opponent_pass_max_steering",
+    "opponent_pass_max_heading_deg",
+    "opponent_max_track_speed",
+    "opponent_steer_delay",
+    "opponent_steer_gain",
+    "opponent_steer_rate_max",
 ))
 
 
@@ -140,6 +168,11 @@ LEGACY_VALUES = {
     "narrow_corridor_clearance": 0.05,
     "open_corridor_clearance": 0.15,
     "ttc_path_margin": None,  # None: the old corridor, safety_margin itself
+    # Opponent awareness (2026-10-22) did not exist: off. Its opponent_*
+    # values are then never read, but the mirror requires them present.
+    "enable_opponent_awareness": False,
+    **{f"opponent_{name}": getattr(opponent_tracking.OpponentParams(), name)
+       for name in opponent_tracking.OpponentParams.__dataclass_fields__},
 }
 
 
@@ -198,6 +231,15 @@ class GapController:
         self.cap_counts = None
         # Everything this tick decided, for trace_gap.py. Rebuilt every call.
         self.telemetry = {}
+        # Moving-obstacle awareness (gap_follow/opponent_tracking.py), only
+        # when the YAML enables it -- otherwise not even constructed.
+        self.opponents = None
+        if self.p.get("enable_opponent_awareness", False):
+            self.opponents = opponent_tracking.OpponentAwareness(
+                opponent_tracking.OpponentParams.from_mapping(self.p),
+                self.p["wheelbase"], self.p["laser_offset_x"],
+                self.p["laser_offset_y"], self.p["car_length"])
+        self.opponent_mode = None
 
     def command(self, scan, current_speed, step):
         p = self.p
@@ -207,6 +249,9 @@ class GapController:
 
         angles_all = self.lidar.angle_min + np.arange(
             clean.size, dtype=float) * self.lidar.angle_increment
+        if self.opponents is not None:
+            self.opponents.observe(clean, valid, angles_all, float(current_speed),
+                                   self.steering_basis, CONTROL_DT)
 
         if (p["enable_centering"] or p["enable_adaptive_width"]
                 or p["enable_corner_setup"]
@@ -280,17 +325,44 @@ class GapController:
         # Gap selection
         closest_idx, closest_dist = gap_logic.closest_valid(window, window_valid)
         half_width = p["car_width"] / 2.0 + effective_margin
-        processed = gap_logic.disparity_extend(
-            window, self.lidar.angle_increment, p["disparity_threshold"], half_width)
-        if closest_idx is not None:
-            processed = gap_logic.safety_bubble(
-                processed, closest_idx, closest_dist,
-                self.lidar.angle_increment, half_width)
-        gap_start, gap_end, used_fallback = gap_logic.find_gap_with_fallback(
-            processed, p["min_gap_distance"], p["fallback_min_gap_distance"],
-            self.lidar.angle_increment, p["min_centerline_gap_width"],
-            previous_target_idx=self.previous_target_idx,
-            switch_margin=p["gap_switch_margin"])
+
+        def select(search_window):
+            processed = gap_logic.disparity_extend(
+                search_window, self.lidar.angle_increment,
+                p["disparity_threshold"], half_width)
+            if closest_idx is not None:
+                processed = gap_logic.safety_bubble(
+                    processed, closest_idx, closest_dist,
+                    self.lidar.angle_increment, half_width)
+            return (processed,) + gap_logic.find_gap_with_fallback(
+                processed, p["min_gap_distance"], p["fallback_min_gap_distance"],
+                self.lidar.angle_increment, p["min_centerline_gap_width"],
+                previous_target_idx=self.previous_target_idx,
+                switch_margin=p["gap_switch_margin"])
+
+        follow_cap = math.inf
+        self.opponent_mode = None
+        if self.opponents is not None and self.opponents.moving_body():
+            avoid = select(self.opponents.augment(window, beam_angles))
+            plain = select(window)
+            # Use the avoiding gap only to pick a side within the opening
+            # the car would take anyway: it must overlap the plain gap and be
+            # no shallower. Anything else -- no gap, a fallback where the
+            # real scan offers a deep one, a different opening altogether --
+            # means follow instead.
+            # And only on a straight (opponent_tracking.pass_allowed).
+            passing = (self.opponents.may_pass(self.steering_basis)
+                       and opponent_tracking.avoidance_usable(avoid[1:], plain[1:]))
+            if passing:
+                processed, gap_start, gap_end, used_fallback = avoid
+                self.opponent_mode = "clear"
+            else:
+                processed, gap_start, gap_end, used_fallback = plain
+                self.opponent_mode = "follow"
+            follow_cap = self.opponents.follow_cap(passing)
+            tel["follow_cap"] = follow_cap
+        else:
+            processed, gap_start, gap_end, used_fallback = select(window)
 
         if gap_start is None:
             return self._stop(step, "no_safe_gap")
@@ -417,6 +489,9 @@ class GapController:
             if side_cap < desired_speed:
                 desired_speed = side_cap
                 binding = 'side'
+        if follow_cap < desired_speed:
+            desired_speed = follow_cap
+            binding = 'follow'
         if creeping:
             binding = 'creep'
         if used_fallback and effective_corner < desired_speed:
@@ -462,6 +537,7 @@ class GapController:
 
     def _stop(self, step, reason):
         self.speed_hold.reset()
+        self.opponent_mode = None
         self.last_commanded_speed = 0.0
         self.last_command_time = step
         self.stopped = True

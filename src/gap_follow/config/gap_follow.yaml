@@ -397,6 +397,51 @@ gap_follow_node:
     corner_setup_full_side_distance: 1.5
     corner_setup_zero_side_distance: 2.5
 
+    # --- Opponent awareness: other cars on track (simulator-validated only) ---
+    # Off by default: with one car on track nothing below runs, and the
+    # node's commands are identical to having no such feature
+    # (test_opponent_awareness_off_is_identical). Turn it on when two or
+    # more cars share the track. What it does: finds free-standing,
+    # car-sized clusters in the scan, tracks them across scans against this
+    # car's dead-reckoned motion, and for those that MOVE (a parked car is
+    # just an obstacle, as before) it (1) makes the gap search treat the
+    # space the car will occupy over the next prediction_horizon as blocked,
+    # widened by passing_margin, so it only passes with real room, and (2)
+    # caps speed to (gap - follow_min_gap) / follow_time_gap behind one
+    # ahead in the path. TTC, contact, swept-path and arc-guard checks keep
+    # reading the real scan. Full write-up and simulator results:
+    # docs/gap-follow.md#several-cars-at-once. Nothing here is car-tested.
+    enable_opponent_awareness: false
+    opponent_min_width: 0.15         # m, smallest cluster chord that can be a car
+    opponent_max_width: 0.70         # m, a 0.30 x 0.58 car seen diagonally
+    opponent_max_range: 6.0          # m
+    opponent_segment_jump: 0.25      # m, range step between two objects
+    opponent_min_beams: 3
+    opponent_gate: 0.5               # m, scan-to-scan association radius (+ v*dt)
+    opponent_alpha: 0.5              # position filter gain
+    opponent_beta: 0.15              # velocity filter gain
+    opponent_min_hits: 8             # scans (0.2 s) before a track may count as moving
+    opponent_max_misses: 6           # scans unseen before a track is dropped
+    opponent_moving_speed: 0.6       # m/s over the ground; odometry error makes walls drift ~0.2-0.4
+    opponent_radius: 0.30            # m, footprint around the cluster centre
+    opponent_passing_margin: 0.15    # m, extra room demanded beside a moving car
+    opponent_prediction_horizon: 0.8 # s of predicted path treated as blocked
+    opponent_prediction_step: 0.1    # s
+    opponent_follow_min_gap: 0.5     # m, bumper gap at which the follow cap reaches 0
+    opponent_follow_time_gap: 1.0    # s: 0.6 stalled 6 of 8 two-car runs on the 1.2 m loop, 1.0 none
+    opponent_follow_lateral: 0.45    # m, |y| within which a car ahead is "in the path"
+    opponent_relevant_lateral: 1.0   # m, |y| beyond which a moving car is ignored
+    opponent_pass_max_steering: 0.10 # rad, no new pass while steering harder (a bend)
+    opponent_pass_max_heading_deg: 15.0  # no new pass while the car ahead turns more
+    opponent_max_track_speed: 8.0    # m/s, clamp on the velocity estimate
+    # The rack the dead reckoning turns with: the command delayed and slewed
+    # like the servo, not the command itself, which made parked clutter 0.9 m
+    # away read as a 1 m/s car. Fitted to run 20261019-200703, same values as
+    # tools/f1tenth_sim/sim_fidelity/calibration.py.
+    opponent_steer_delay: 0.075      # s (steering_delay_ticks 3 at 40 Hz)
+    opponent_steer_gain: 15.0        # 1/s (steering_servo_gain)
+    opponent_steer_rate_max: 3.2     # rad/s (steering_rate_max)
+
     # --- Time-to-collision automatic emergency braking ---
     enable_ttc: true
     # Lowered from 0.5, then again from 0.35 on 2026-08-25. At the 1.6m/s

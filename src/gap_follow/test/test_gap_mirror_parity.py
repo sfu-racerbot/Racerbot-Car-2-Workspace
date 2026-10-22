@@ -163,3 +163,74 @@ def test_mirror_commands_what_the_node_commands(node):
     assert any(abs(p.drive.steering_angle) > 0.05 for p in published)
     assert guard_ticks >= 1 and setup_ticks >= 3, (guard_ticks, setup_ticks)
     assert any(0.0 < p.drive.speed <= node.escape_creep_speed for p in published)
+
+
+def _box_ahead(rear_x, y=0.0, length=0.58, width=0.30):
+    x0, x1, hw = rear_x, rear_x + length, width / 2.0
+    return [((x0, y - hw), (x0, y + hw)), ((x0, y + hw), (x1, y + hw)),
+            ((x1, y + hw), (x1, y - hw)), ((x1, y - hw), (x0, y - hw))]
+
+
+def test_mirror_matches_the_node_with_opponent_awareness_on():
+    """The same comparison with enable_opponent_awareness on and another car
+    in the scene: ahead in a 2 m corridor, closing, drifting sideways, so the
+    tracker confirms it, the follow cap binds and the pass decision is made
+    -- in both, identically, every tick."""
+    rclpy.init(args=['--ros-args', '--params-file', PACKAGED_CONFIG,
+                     '-p', 'enable_opponent_awareness:=true', *TEST_ONLY_DRIVE])
+    node = GapFollowNode()
+    try:
+        assert node.drive_pub.topic_name == '/test_only/drive'
+        published = []
+        node.drive_pub.publish = published.append
+        node.command_slew_max_dt = DT
+        params = gap_mirror.node_params()
+        params['enable_opponent_awareness'] = True
+        params['command_slew_max_dt'] = DT
+        joy = Joy()
+        joy.buttons = [0] * 5
+        joy.buttons[4] = 1
+        speed = 2.5
+        node.last_commanded_speed = speed
+        mirror = None
+        modes = []
+        for step in range(60):
+            # Ego at `speed` along a straight corridor; the other car at
+            # 1.4 m/s, drifting left at 0.6 m/s (heading ~23 deg, so no pass)
+            # from 0.8 m right: it crosses out of the 0.45 m follow band,
+            # where only the widened band of a refused pass still caps.
+            rear_x = 2.4 + (1.4 - speed) * step * DT
+            scan = _raycast(_corridor(1.0, 1.0) + _box_ahead(rear_x, -0.8 + 0.6 * step * DT))
+            t = 50.0 + step * DT
+            scan.header.stamp.sec = int(t)
+            scan.header.stamp.nanosec = int(round((t - int(t)) * 1e9))
+            if mirror is None:
+                mirror = gap_mirror.GapController(params, _Lidar(scan))
+            node.joy_callback(joy)
+            odom = Odometry()
+            odom.twist.twist.linear.x = speed
+            node.odom_callback(odom)
+            # The scene is drawn for a car that does not turn: keep the rack
+            # (and so both dead-reckoned poses) straight, on both sides.
+            node.steering_basis = mirror.steering_basis = 0.0
+            node.last_commanded_speed = mirror.last_commanded_speed = speed
+            mirror.previous_target_idx = node.previous_target_idx
+            mirror.last_command_time = step - 1
+            node.last_command_time = node.get_clock().now() - Duration(seconds=DT)
+            node.scan_callback(scan)
+            expected_steering, expected_speed = mirror.command(
+                np.asarray(scan.ranges), speed, step)
+            drive = published[-1].drive
+            assert node.opponent_mode == mirror.opponent_mode, f'tick {step}: mode'
+            assert drive.steering_angle == pytest.approx(expected_steering, abs=TOLERANCE), (
+                f'tick {step}: steering')
+            assert drive.speed == pytest.approx(expected_speed, abs=TOLERANCE), (
+                f'tick {step}: speed')
+            modes.append((mirror.opponent_mode, mirror.binding_cap))
+        # The layer must actually have been exercised, or this proves nothing:
+        # a confirmed mover for most of the run, and the follow cap binding.
+        assert sum(m is not None for m, _b in modes) >= 30, modes
+        assert sum(b == 'follow' for _m, b in modes) >= 5, modes
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

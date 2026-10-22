@@ -36,7 +36,7 @@ They were first driven on the car on 2026-10-19. That run had no contact, but th
 - **Tested against the real node.** A test drives the real ROS node (a running program on the ROS graph — [glossary](glossary.md#node)) and the simulator's copy through the same scans, and requires identical commands to 1e-6.
 
 - **No more false hard stops in corridors (2026-10-20).** On the 2026-10-19 run, all 97 stop ticks were the TTC brake reacting to the inside wall of a bend 0.12–0.18 m *beside* the car. Replayed through the final config, the same scans produce none.
-- **Better with other cars on track (2026-10-20), not yet good enough.** Two simulated `gap_follow` cars pass 34 of 40 runs, against 23 for the old config; three cars 15 of 24, against 4. See [Several cars at once](#several-cars-at-once).
+- **Safe with other cars on track, when you turn it on (2026-10-22).** With `opponent_awareness:=true`, two simulated cars pass 40 of 40 runs and three cars 24 of 24, with no contact at all. Without it: 34 of 40 and 15 of 24. It follows a slower car rather than overtaking it on every track tried. See [Several cars at once](#several-cars-at-once).
 - **More of every track completes (2026-10-20).** Across 11 simulated tracks, 6 seeds each, both directions, 108 of 132 runs pass, against 96 for the 2026-10-19 config. The hall loop `levine_blocked` laps in 23.6 s instead of 34.7 s.
 
 **Limits:** these numbers come from the simulator only. `max_lateral_accel` was raised from 1.0 to 2.0 m/s² for this work, and that value is simulator-only until it has been run on the floor.
@@ -204,19 +204,77 @@ How to read it:
 
 ### Several cars at once
 
-All cars run `gap_follow` with the shipped config, on their own simulated LiDAR, which sees the other cars as obstacles ([run-analysis.md](run-analysis.md#testing-several-cars-at-once)). The leader is held to 1.8 m/s and the others run at 3.5 m/s, so they catch it. 4 seeds per track, both directions, 2 laps each. A run passes only if no car touches anything and every car finishes.
+All cars run `gap_follow` on their own simulated LiDAR, which sees the other cars as obstacles ([run-analysis.md](run-analysis.md#testing-several-cars-at-once)). The leader is held to 1.8 m/s and the others run at 3.5 m/s, so they catch it. 4 seeds per track, both directions, 2 laps each. A run passes only if no car touches anything and every car finishes.
 
 | Config | 2 cars (5 tracks) | 3 cars (3 tracks) |
 |---|---|---|
 | 2026-10-19 config | 23/40 | 4/24 |
-| **Shipped (2026-10-20)** | **34/40** | **15/24** |
-| Shipped, but the old 0.18 m TTC corridor | 35/40 | 10/24 |
+| 2026-10-20 config (shipped default) | 34/40 | 15/24 |
+| **2026-10-22, `opponent_awareness:=true`** | **40/40, no contact** | **24/24, no contact** |
 
-The shipped config is the best of the three overall. The old one mostly failed by stalling behind the slow car: on `levine_blocked` the fast car never finished in 8 of 8 two-car runs.
+Without the layer, every remaining failure is one pattern. A fast car starts to pass a slower one with 0.15–0.2 m between them, because its own path is clear. The slower car then turns into a bend across that path, and at 3.3 m/s the fast car can't stop in the metre left. Follow-the-gap treats every LiDAR return as a fixed wall, so it doesn't know the obstacle beside it can move.
 
-**It is not solved.** The failures that remain are one pattern. A fast car starts to pass a slower one with 0.15–0.2 m between them, because its own path is clear. Then the slower car turns into a bend across that path, and at 3.3 m/s the fast car cannot stop in the metre left. Follow-the-gap cannot tell a car from a wall, so it has no idea the obstacle beside it might move.
+#### Opponent awareness: what it does
 
-Widening the TTC corridor back to 0.18 m only moves the problem: one more two-car pass, five fewer three-car passes. The real fix is to detect that an obstacle is moving, from successive scans, and refuse to pass close to one. That has not been built. **Until it is, do not run two cars on `gap_follow` at once on the real track.**
+It's a switch, off by default. **With it off nothing below runs**, and the node's commands are exactly what they were before it existed.
+
+Two checks back that up. With the layer off, the benchmark above reproduces the 2026-10-20 numbers exactly. And a node test runs the same scans with the layer on and off, in a world where nothing moves, and requires identical commands.
+
+Leaving it on with only one car costs nothing measurable either. In the single-car sweep (11 tracks, 6 seeds, both directions) it passes 111 of 132 runs, against 108 of 132 with it off, and every track does at least as well.
+
+**Terminal 2**, instead of the usual `gap_follow` launch, on **every** car on the track:
+
+```bash
+ros2 launch gap_follow gap_follow_launch.py opponent_awareness:=true
+```
+
+**Working when:** with another car moving ahead, the decision lines (one a second) include `opponent mode=follow` and `follow cap=...`.
+
+With it on, every scan:
+
+1. **Finds car-shaped things.** It splits the scan into clusters and keeps those 0.15–0.7 m across that stand free of anything behind them. A stub of wall is not free-standing, because the beam just past its end doesn't jump further away.
+2. **Tracks them.** It matches clusters from scan to scan against this car's own motion, dead-reckoned from speed and steering (modelled as the servo actually follows the command, 75 ms late), and filters each into a position and a velocity. Something counts as **moving** only after 8 detections in a row at 0.6 m/s or more over the ground. A parked car is still just an obstacle, handled as before.
+3. **Follows.** Behind a moving car, speed is capped at `(gap − 0.5 m) / 1.0 s`, where gap is from this car's bumper to the other car. At 1.8 m/s that allows a 2.3 m gap. In the benchmark the closest two car centres came was 0.82 m on the 1.2 m loop, and over 2.1 m on every other track.
+4. **Passes only with room, on a straight.** The gap search sees where each moving car will be over the next 0.8 s, widened by 0.15 m, so it can only choose a gap with real room beside the other car. That choice is used only to pick a side of the opening the car would take anyway. It's refused while this car steers more than 0.10 rad, or while the car ahead is turning more than 15°.
+
+The time-to-collision brake, the contact stop, the swept-path speed limit and the arc guard all still read the **real** scan. The layer can lower the speed and pick a side of an opening. It can't switch any safety check off.
+
+**What it doesn't do: overtake on our tracks.** On every simulated track, including the wide gym race tracks, the fast car followed the leader for the whole run.
+
+A pass needs about 2.4 m of width with these margins, and these tracks are narrower than that where the leader drives. The real track is 1.0–1.3 m wide, where two 0.30 m cars can't pass each other safely anyway. Expect following, not racing.
+
+<details>
+<summary><b>How each rule was found, in the simulator</b> — click to expand. Safe to skip.</summary>
+
+Each rule below fixed a failure that was measured first, with the layer on:
+
+| Rule | What went wrong without it |
+|---|---|
+| 8 detections **in a row** | With one car on track, wall fragments flickered in and out of the clusters. Each reappearance was slightly displaced, which the filter read as motion, so a car alone stalled at 0.1 m/s in the 1.2 m loop. With the rule there were no false movers in 16 one-car runs. |
+| Ignore cars more than 1 m to the side, or driving the other way | A car in the other leg of a hairpin, seen through the opening, bent the follower's line into a dead-end corner it could not creep out of. |
+| Only pick a side of the **same** opening, never a shallower gap | Same hairpin: the inflated search switched to a different opening. |
+| No pass while steering > 0.10 rad, or while the car ahead turns > 15° | A third car passing on the inside of a bend, 0.6–0.8 m to the side, was squeezed into contact (3 cars, `indoor_wide`, reversed, seed 12348). |
+| 1.0 s following gap, not 0.6 s | With 0.6 s, two cars stalled in 6 of 8 runs on the 1.2 m loop. With 1.0 s, none did. |
+| Turn the dead reckoning with a modelled servo, not the steering command | Turning with the command, the car thought it had turned 75 ms early. That made parked clutter 0.9 m away in the scanned room map read as a 1 m/s car, and one car alone passed 1 of 6 reversed laps there, against 5 of 6 with the layer off. The servo model (`opponent_steer_*`, the delay and slew fitted to the car's 2026-10-19 run) brought it back to 5 of 6. |
+
+The [odometry](glossary.md#odometry--odom) (wheel-speed position estimate) the dead reckoning uses over-reads speed by 5–11% on the real car, and its turning is computed from the steering *command*. In the simulator the car's own heading estimate drifted up to about 25°/s while the steering changed, because the servo lags the command.
+
+The servo model, the 0.6 m/s "moving" threshold and the consecutive-detection rule are what absorb that. A 1.0 m/s threshold was also tried: it did no better with several cars and worse with one (108 of 132). On the car, a wall that the layer takes for a moving car would show up as `opponent mode=` in a run where no other car is moving. If you see that, turn the layer off and report the run.
+
+Code: `src/gap_follow/gap_follow/opponent_tracking.py` (no ROS; 71 unit tests), wired in `gap_follow_node.py` and mirrored in `tools/f1tenth_sim/gap_mirror.py`. Every `opponent_*` parameter is commented in `config/gap_follow.yaml`.
+
+</details>
+
+**Simulator-validated only.** Bring it up in the [usual order](#validation): two cars wheels-off first, then two cars at low speed (`max_speed` about 1.0) with a person holding LB on each controller.
+
+**Checking it, any terminal** (several minutes on the Jetson):
+
+```bash
+python3 tools/f1tenth_sim/eval_gap_multi.py --track indoor_oval,indoor_wide,asb_10000,levine_blocked,narrow_1p2 \
+    --cars 2 --speeds 1.8,3.5 --seeds 4 --set enable_opponent_awareness=true
+```
+
+**Working when:** every line reads `pass 4/4  wall 0  car-car 0`.
 
 ## Checking it in the simulator
 
