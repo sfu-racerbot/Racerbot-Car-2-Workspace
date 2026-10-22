@@ -77,23 +77,42 @@ def _fake_ros2(tmp_path, body):
     return bin_dir
 
 
-def test_running_drivers_mean_no_second_bringup_unless_asked():
-    assert mc.with_bringup_choice(['laps:=3'], running=True) == [
-        'laps:=3', 'include_bringup:=false']
-    assert mc.with_bringup_choice(['laps:=3'], running=False) == ['laps:=3']
-    assert mc.with_bringup_choice(['include_bringup:=true'], running=True) == [
-        'include_bringup:=true']
+def _drivers(monkeypatch, *running):
+    """Pretend exactly these driver processes are running (pgrep is the
+    process boundary)."""
+    monkeypatch.setattr(mc, '_running', lambda pattern: pattern in running)
 
 
-def test_main_skips_its_own_bringup_when_drivers_are_up(tmp_path, monkeypatch, capsys):
-    out = tmp_path / 'runs'
-    args_file = tmp_path / 'args'
-    bin_dir = _fake_ros2(tmp_path, f'echo "$@" > {args_file}\nexit 0\n')
+def test_hardware_counts_as_up_only_with_every_real_driver_or_the_sim(monkeypatch):
+    _drivers(monkeypatch, 'vesc_driver_node', 'urg_node_driver')
+    assert mc.missing_drivers() == []
+    _drivers(monkeypatch, 'vesc_driver_node')
+    assert mc.missing_drivers() == ['urg_node_driver']
+    _drivers(monkeypatch)
+    assert mc.missing_drivers() == ['vesc_driver_node', 'urg_node_driver']
+    _drivers(monkeypatch, 'gym_bridge_node')
+    assert mc.missing_drivers() == []
+
+
+def test_refuses_without_bringup_and_never_launches_anything(tmp_path, monkeypatch, capsys):
+    called = tmp_path / 'called'
+    bin_dir = _fake_ros2(tmp_path, f'touch {called}\nexit 0\n')
     monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
-    monkeypatch.setattr(mc, 'drivers_running', lambda: True)
-    mc.main([f'output_directory:={out}'])
-    assert args_file.read_text().split()[-1] == 'include_bringup:=false'
-    assert 'already running' in capsys.readouterr().out
+    _drivers(monkeypatch, 'vesc_driver_node')          # LiDAR missing
+    assert mc.main([f'output_directory:={tmp_path / "runs"}']) == 2
+    assert not called.exists()
+    err = capsys.readouterr().err
+    assert 'ros2 launch f1tenth_stack bringup_launch.py' in err
+    assert 'urg_node_driver' in err
+
+
+def test_the_launch_file_starts_no_drivers():
+    # Static oracle: map_course_launch.py must not include bringup in any
+    # form, so a second copy of the drivers can never start beside it.
+    text = (SCRIPT.parents[1] / 'launch' / 'map_course_launch.py').read_text()
+    code = '\n'.join(line.split('#', 1)[0] for line in text.splitlines())
+    for forbidden in ("'bringup_launch.py')", 'include_bringup', 'vesc_driver', 'urg_node'):
+        assert forbidden not in code, forbidden
 
 
 def test_main_passes_arguments_through_and_prints_the_commands_last(
@@ -107,7 +126,7 @@ def test_main_passes_arguments_through_and_prints_the_commands_last(
         'echo "[INFO] nodes shutting down"\n'
         'exit 0\n'))
     monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
-    monkeypatch.setattr(mc, 'drivers_running', lambda: False)
+    _drivers(monkeypatch, 'vesc_driver_node', 'urg_node_driver')
     code = mc.main([f'output_directory:={out}', 'laps:=4'])
     assert code == 0
     assert args_file.read_text().split() == [
@@ -121,7 +140,7 @@ def test_main_reports_no_map_and_the_launch_exit_code(tmp_path, monkeypatch, cap
     out = tmp_path / 'runs'
     bin_dir = _fake_ros2(tmp_path, 'exit 3\n')
     monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
-    monkeypatch.setattr(mc, 'drivers_running', lambda: False)
+    _drivers(monkeypatch, 'vesc_driver_node', 'urg_node_driver')
     assert mc.main([f'output_directory:={out}']) == 3
     assert 'No map was saved' in capsys.readouterr().out
 

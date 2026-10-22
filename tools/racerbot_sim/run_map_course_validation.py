@@ -4,7 +4,8 @@
 The two commands docs/launchstart.md tells people to run, for real, over
 racerbot_sim in place of the hardware:
 
-1. ``ros2 run racerbot_launch map_course include_bringup:=false`` -- must
+1. ``ros2 run racerbot_launch map_course`` (sim_bringup_launch.py as the
+   hardware) -- must
    drive its laps, save map.yaml and raceline_profiled.csv, write
    commands.txt, exit by itself, and print the commands last.
 2. The race command it printed, on the same simulator with the car left
@@ -95,8 +96,7 @@ def _map(args, logs: Path, out: Path, tag: str) -> dict:
     result = {'step': f'map_course ({tag})', 'passed': False}
     try:
         done = subprocess.run(
-            ['ros2', 'run', 'racerbot_launch', 'map_course', 'include_bringup:=false',
-             'diagnostics:=false', f'laps:={args.laps}', f'output_directory:={out}'],
+            ['ros2', 'run', 'racerbot_launch', 'map_course', 'diagnostics:=false', f'laps:={args.laps}', f'output_directory:={out}'],
             capture_output=True, text=True, timeout=args.map_timeout, cwd=str(ROOT),
             env=_env(), start_new_session=True)
     except subprocess.TimeoutExpired as exc:

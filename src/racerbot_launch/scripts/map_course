@@ -3,7 +3,10 @@
 
     ros2 run racerbot_launch map_course                       # 3 laps
     ros2 run racerbot_launch map_course mapping_max_speed:=1.5 # new course
-    ros2 run racerbot_launch map_course include_bringup:=false
+
+bringup_launch.py must already be running in another terminal (the
+simulator's sim_bringup_launch.py also counts). map_course never starts the
+hardware drivers itself, and refuses to start without them.
 
 Runs ``ros2 launch racerbot_launch map_course_launch.py`` with any
 ``name:=value`` arguments passed through, waits for it to finish (it stops
@@ -21,11 +24,14 @@ import time
 from pathlib import Path
 
 DEFAULT_OUTPUT = '~/.ros/racerbot_auto'
-# Hardware drivers bringup_launch.py starts. Only one copy of each may run:
-# two vesc_driver_nodes on one serial port read each other's bytes (the log
-# fills with "Out-of-sync with VESC"), and the Hokuyo takes one connection
-# ("could not open ethernet port").
-DRIVER_PATTERNS = ('vesc_driver_node', 'urg_node_driver')
+# What has to be running before map_course will start: the car's drivers
+# from bringup_launch.py (VESC and LiDAR), or the simulator's bridge.
+REAL_DRIVERS = ('vesc_driver_node', 'urg_node_driver')
+SIM_DRIVER = 'gym_bridge_node'
+
+
+def _running(pattern) -> bool:
+    return subprocess.run(['pgrep', '-f', pattern], capture_output=True).returncode == 0
 
 
 def output_directory(argv):
@@ -36,22 +42,11 @@ def output_directory(argv):
     return Path(os.path.expanduser(DEFAULT_OUTPUT))
 
 
-def drivers_running() -> bool:
-    """Whether the car's hardware drivers are already up (a bringup_launch.py
-    in another terminal)."""
-    for pattern in DRIVER_PATTERNS:
-        found = subprocess.run(['pgrep', '-f', pattern], capture_output=True)
-        if found.returncode == 0:
-            return True
-    return False
-
-
-def with_bringup_choice(argv, running: bool):
-    """``argv`` plus ``include_bringup:=false`` when the drivers are already
-    running and the caller did not choose. An explicit choice is kept."""
-    if running and not any(a.startswith('include_bringup:=') for a in argv):
-        return list(argv) + ['include_bringup:=false']
-    return list(argv)
+def missing_drivers():
+    """[] when the hardware layer is up, else the driver processes missing."""
+    if _running(SIM_DRIVER):
+        return []
+    return [name for name in REAL_DRIVERS if not _running(name)]
 
 
 def new_run(parent: Path, since: float):
@@ -87,19 +82,16 @@ def main(argv=None):
     if bad:
         print(f'map_course: arguments must look like name:=value, got {bad}', file=sys.stderr)
         return 2
-    running = drivers_running()
-    launch_args = with_bringup_choice(argv, running)
-    if running and launch_args != argv:
-        print('map_course: the car\'s drivers are already running (bringup_launch.py '
-              'in another terminal), so using those instead of starting a second '
-              'copy (include_bringup:=false).', flush=True)
-    elif running:
-        print('map_course: WARNING: the car\'s drivers are already running and '
-              'include_bringup was set explicitly; a second copy will fight the '
-              'first for the VESC and the LiDAR.', flush=True)
+    missing = missing_drivers()
+    if missing:
+        print('map_course: the hardware is not running (no ' + ', '.join(missing) +
+              '). Start it first, in its own terminal, and leave it running:\n'
+              '    ros2 launch f1tenth_stack bringup_launch.py\n'
+              'then run map_course again.', file=sys.stderr)
+        return 2
     started = time.time() - 1.0
     child = subprocess.Popen(
-        ['ros2', 'launch', 'racerbot_launch', 'map_course_launch.py', *launch_args])
+        ['ros2', 'launch', 'racerbot_launch', 'map_course_launch.py', *argv])
     while True:
         try:
             code = child.wait()

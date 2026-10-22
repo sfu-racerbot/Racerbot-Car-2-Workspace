@@ -5,8 +5,13 @@ once everything has shut down:
 
     ros2 run racerbot_launch map_course
 
-What runs: the hardware (bringup, unless include_bringup:=false), slam_toolbox
-mapping, gap_follow driving (its commands go to auto_map_race_node, never
+It never starts the hardware: ``bringup_launch.py`` must already be running
+in its own terminal (``sim_bringup_launch.py`` in simulation), the same
+two-layer pattern as every other control layer here (docs/architecture.md).
+Starting a second copy of the drivers beside an existing bringup makes the
+two fight over the VESC serial port and the LiDAR's single connection.
+
+What runs: slam_toolbox mapping, gap_follow driving (its commands go to auto_map_race_node, never
 straight to /drive), the run recorder, and auto_map_race_node in
 finish_after_mapping mode. The supervisor forwards gap_follow's commands
 only while LB is held, counts laps from SLAM's pose, and after ``laps``
@@ -47,10 +52,6 @@ def generate_launch_description():
                         'Up to two more are driven if the last lap fails the '
                         'quality check.'),
         DeclareLaunchArgument(
-            'include_bringup', default_value='true',
-            description='Start VESC, LiDAR, joystick and mux too. false if '
-                        'bringup_launch.py is already running elsewhere.'),
-        DeclareLaunchArgument(
             'mapping_max_speed', default_value='',
             description='Optional speed cap while mapping (m/s). Empty: '
                         'gap_follow.yaml governs. Use 1.5 on a course nobody '
@@ -76,11 +77,6 @@ def generate_launch_description():
                         'profile limits live here).'),
     ]
 
-    bringup = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(
-            get_package_share_directory('f1tenth_stack'), 'launch', 'bringup_launch.py')),
-        condition=IfCondition(LaunchConfiguration('include_bringup')),
-    )
     diagnostics = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(
             get_package_share_directory('race_diagnostics'), 'launch', 'record_run.py')),
@@ -129,4 +125,4 @@ def generate_launch_description():
             on_exit=[EmitEvent(event=Shutdown(reason='mapping run finished'))]))
         return [gap_follow, supervisor, shutdown]
 
-    return LaunchDescription(args + [bringup, diagnostics, slam, OpaqueFunction(function=nodes)])
+    return LaunchDescription(args + [diagnostics, slam, OpaqueFunction(function=nodes)])

@@ -183,7 +183,7 @@ Same result as above, except `gap_follow` drives the lap instead of a human — 
 
 ### Mapping in one command: 3 laps, then stop
 
-`ros2 run racerbot_launch map_course` does the steps above by itself: bringup, SLAM, `gap_follow`, three closed laps, then it saves the map, pose graph and racing line to `~/.ros/racerbot_auto/<timestamp>/`, shuts everything down and prints the commands to race on that map (`race_launch.py run_dir:=...`, which seeds the localizer where the car stopped at the end of mapping, so no RViz is needed). The commands and options are in [launchstart.md](launchstart.md#map-a-course-3-laps-then-stop). Simulator-validated only.
+With `bringup_launch.py` running in terminal 1, `ros2 run racerbot_launch map_course` in terminal 2 does the steps above by itself: SLAM, `gap_follow`, three closed laps, then it saves the map, pose graph and racing line to `~/.ros/racerbot_auto/<timestamp>/`, shuts everything down and prints the commands to race on that map (`race_launch.py run_dir:=...`, which seeds the localizer where the car stopped at the end of mapping, so no RViz is needed). The commands and options are in [launchstart.md](launchstart.md#map-a-course-3-laps-then-stop). Simulator-validated only.
 
 ## Localizing against a saved map
 

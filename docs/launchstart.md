@@ -93,11 +93,17 @@ It follows a slower car instead of squeezing past it, and passes only on a strai
 
 ## Map a course: 3 laps, then stop
 
-`gap_follow` drives 3 laps while [SLAM](glossary.md#slam) builds the map. Then it saves the map and a [racing line](glossary.md#racing-line), stops the car, shuts everything down, and prints the commands to race on that map. It starts the hardware drivers itself. If `bringup_launch.py` is already running in another terminal, it says so and uses that instead: two copies of the drivers fight over the VESC and the LiDAR (`Out-of-sync with VESC`, `could not open ethernet port`). Simulator-validated only; not yet run on the car.
+`gap_follow` drives 3 laps while [SLAM](glossary.md#slam) builds the map. Then it saves the map and a [racing line](glossary.md#racing-line), stops the car, shuts everything down, and prints the commands to race on that map. Like every mode here it needs `bringup_launch.py` running first, and it refuses to start without it. Simulator-validated only; not yet run on the car.
 
 **Before you start:** put the car on the track, pointing the way it should lap.
 
-**Terminal 1:**
+**Terminal 1** (leave it running for mapping *and* racing):
+
+```bash
+ros2 launch f1tenth_stack bringup_launch.py
+```
+
+**Terminal 2:**
 
 ```bash
 ros2 run racerbot_launch map_course
@@ -105,7 +111,7 @@ ros2 run racerbot_launch map_course
 
 **Hold LB for the whole run.** The car stays still for a moment at the start, until SLAM has recorded the start pose (`Start pose recorded: ...`). Releasing LB pauses mapping; holding it again carries on.
 
-**Working when:** you see `Closed mapping lap 1/3`, `2/3` and `3/3`. The car stops just past the line, `Saved occupancy map successfully.` appears, everything shuts down, and the last thing on screen is a block starting `MAPPING FINISHED.` with the race commands in it. Copy them from there.
+**Working when:** you see `Closed mapping lap 1/3`, `2/3` and `3/3`. The car stops just past the line, `Saved occupancy map successfully.` appears, Terminal 2 shuts down (Terminal 1 keeps running), and the last thing on screen is a block starting `MAPPING FINISHED.` with the race commands in it. Copy them from there.
 
 **Then leave the car where it stopped.** That spot is where racing on this map starts. If you'll race this map on another day, mark the spot and the direction (tape on the floor) before moving the car.
 
@@ -115,7 +121,8 @@ Options, added to the end of the command:
 |---|---|
 | `mapping_max_speed:=1.5` | a course nobody has driven yet |
 | `laps:=4` | a different number of laps (at least 2) |
-| `include_bringup:=false` | `bringup_launch.py` is already running in another terminal |
+
+**If it says `the hardware is not running`:** start Terminal 1 first.
 
 **If it doesn't finish:** `Ctrl+C` stops it, and it tells you no map was saved. If the last lap fails the quality check, it drives up to two more by itself. Lap details: [operations.md](operations.md#reading-the-terminal-while-it-maps).
 
@@ -123,7 +130,7 @@ Options, added to the end of the command:
 
 **The car must be where mapping left it:** still there, or put back on the marked spot facing the same way. The localizer is told the car starts there, because there is no RViz on the car to click a start pose, and it only searches about 0.5 m and 20° around that spot. Simulator-validated only.
 
-**Terminal 1:** `ros2 launch f1tenth_stack bringup_launch.py`
+**Terminal 1:** the `bringup_launch.py` from mapping, still running. Start it again if you closed it.
 
 **Terminal 2**, pick one (the end-of-mapping printout has these with your run's folder already filled in):
 

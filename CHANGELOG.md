@@ -38,7 +38,8 @@ low speed ([docs/gap-follow.md](docs/gap-follow.md#validation)).
 
 ### racerbot_launch / pure_pursuit
 
-- **`ros2 run racerbot_launch map_course`**: `gap_follow` drives 3 laps, then
+- **`ros2 run racerbot_launch map_course`** (with `bringup_launch.py` already
+  running; it never starts the drivers and refuses without them): `gap_follow` drives 3 laps, then
   the run saves the map, pose graph, racing line and `start_pose.yaml`, shuts
   down and prints the race commands. It is `auto_map_race_node` in the new
   `finish_after_mapping` mode, with `map_course_launch.py`.
