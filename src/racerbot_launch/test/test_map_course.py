@@ -77,6 +77,25 @@ def _fake_ros2(tmp_path, body):
     return bin_dir
 
 
+def test_running_drivers_mean_no_second_bringup_unless_asked():
+    assert mc.with_bringup_choice(['laps:=3'], running=True) == [
+        'laps:=3', 'include_bringup:=false']
+    assert mc.with_bringup_choice(['laps:=3'], running=False) == ['laps:=3']
+    assert mc.with_bringup_choice(['include_bringup:=true'], running=True) == [
+        'include_bringup:=true']
+
+
+def test_main_skips_its_own_bringup_when_drivers_are_up(tmp_path, monkeypatch, capsys):
+    out = tmp_path / 'runs'
+    args_file = tmp_path / 'args'
+    bin_dir = _fake_ros2(tmp_path, f'echo "$@" > {args_file}\nexit 0\n')
+    monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
+    monkeypatch.setattr(mc, 'drivers_running', lambda: True)
+    mc.main([f'output_directory:={out}'])
+    assert args_file.read_text().split()[-1] == 'include_bringup:=false'
+    assert 'already running' in capsys.readouterr().out
+
+
 def test_main_passes_arguments_through_and_prints_the_commands_last(
         tmp_path, monkeypatch, capsys):
     out = tmp_path / 'runs'
@@ -88,6 +107,7 @@ def test_main_passes_arguments_through_and_prints_the_commands_last(
         'echo "[INFO] nodes shutting down"\n'
         'exit 0\n'))
     monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
+    monkeypatch.setattr(mc, 'drivers_running', lambda: False)
     code = mc.main([f'output_directory:={out}', 'laps:=4'])
     assert code == 0
     assert args_file.read_text().split() == [
@@ -101,6 +121,7 @@ def test_main_reports_no_map_and_the_launch_exit_code(tmp_path, monkeypatch, cap
     out = tmp_path / 'runs'
     bin_dir = _fake_ros2(tmp_path, 'exit 3\n')
     monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
+    monkeypatch.setattr(mc, 'drivers_running', lambda: False)
     assert mc.main([f'output_directory:={out}']) == 3
     assert 'No map was saved' in capsys.readouterr().out
 

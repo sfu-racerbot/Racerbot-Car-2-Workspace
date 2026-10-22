@@ -93,7 +93,7 @@ It follows a slower car instead of squeezing past it, and passes only on a strai
 
 ## Map a course: 3 laps, then stop
 
-`gap_follow` drives 3 laps while [SLAM](glossary.md#slam) builds the map. Then it saves the map and a [racing line](glossary.md#racing-line), stops the car, shuts everything down, and prints the commands to race on that map. This one command starts the hardware too, so **do not** also run `bringup_launch.py`. Simulator-validated only; not yet run on the car.
+`gap_follow` drives 3 laps while [SLAM](glossary.md#slam) builds the map. Then it saves the map and a [racing line](glossary.md#racing-line), stops the car, shuts everything down, and prints the commands to race on that map. It starts the hardware drivers itself. If `bringup_launch.py` is already running in another terminal, it says so and uses that instead: two copies of the drivers fight over the VESC and the LiDAR (`Out-of-sync with VESC`, `could not open ethernet port`). Simulator-validated only; not yet run on the car.
 
 **Before you start:** put the car on the track, pointing the way it should lap.
 
