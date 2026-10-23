@@ -38,6 +38,11 @@ DEFAULT_TOPICS = [
     '/teleop', '/tf', '/tf_static', '/map', '/joy',
     '/auto_map/drive', '/auto_race/drive',
     '/parameter_events',
+    # The VESC's IMU (gyro + accelerometer). Nothing drives on it yet; bagged
+    # so recorded runs can show what it would do for odometry and SLAM
+    # (2026-10-23: odometry's steering-based turn rate was off by 0.44 rad/s
+    # RMS on the 2026-10-19 run).
+    '/sensors/imu/raw',
 ]
 
 
