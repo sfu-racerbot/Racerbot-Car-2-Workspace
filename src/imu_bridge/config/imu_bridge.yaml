@@ -1,0 +1,35 @@
+imu_bridge_node:
+  ros__parameters:
+    # Where the imu-calibration repo (github.com/sfu-racerbot/imu-calibration,
+    # package racer_imu) is cloned. Mount rotations and calibration files are
+    # read from it, and the optional BNO085 driver is imported from it.
+    racer_imu_root: ~/imu-calibration
+    # Path to that repo's car.yaml. Empty = <racer_imu_root>/config/car.yaml.
+    car_yaml: ''
+    # vesc_driver_node's IMU, in the VESC's own units (g, deg/s), ~50 Hz.
+    vesc_topic: /sensors/imu/raw
+    # vesc_to_odom_node's wheel odometry: wheel speed for the startup-bias
+    # stillness check, and republished with a real covariance as wheel_odom.
+    odom_topic: /odom
+    # Frame of every calibrated output. The calibration rotates into car
+    # axes (x forward, y left, z up), i.e. base_link's axes.
+    frame_id: base_link
+    # Serial port of the BNO085's microcontroller, e.g. /dev/ttyACM1.
+    # Empty = no BNO; only the VESC IMU is used.
+    bno_port: ''
+    # Baud rate of that port (firmware/bno085_stream in imu-calibration).
+    bno_baud: 921600
+    # Which IMU /imu/data carries: auto (bno if bno_port is set, else vesc),
+    # vesc, or bno.
+    primary: auto
+    # Gyro noise, 1 sigma per axis [rad/s]. ~0.1 deg/s, the VESC gyro's
+    # measured still noise (vesc_calib.json meta.gyro.noise_deg_s).
+    gyro_sigma: 0.0017
+    # Accelerometer noise, 1 sigma per axis [m/s^2].
+    accel_sigma: 0.03
+    # Wheel-speed noise, 1 sigma [m/s]: the variance put on vx in
+    # /imu_bridge/wheel_odom (imu-calibration's estimator.sigma_wheel).
+    wheel_speed_sigma: 0.08
+    # Seconds of stillness averaged at startup to remove the gyro's
+    # remaining bias. Keep the car still that long after launch. 0 = off.
+    startup_bias_s: 3.0
