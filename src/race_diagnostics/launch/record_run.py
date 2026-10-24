@@ -43,6 +43,14 @@ DEFAULT_TOPICS = [
     # (2026-10-23: odometry's steering-based turn rate was off by 0.44 rad/s
     # RMS on the 2026-10-19 run).
     '/sensors/imu/raw',
+    # With imu_bridge (src/imu_bridge/README.md) each run is also an IMU
+    # dataset: calibrated IMU next to the raw one above, so a calibration can
+    # be redone offline; the VESC state and servo command that explain wheel
+    # speed and yaw; the shadow EKF next to the particle filter's pose it is
+    # judged against. All small next to /scan; unpublished topics record nothing.
+    '/sensors/core', '/sensors/servo_position_command',
+    '/imu/data', '/imu/vesc/data', '/imu/bno/raw', '/imu/bno/data',
+    '/imu_bridge/wheel_odom', '/odometry/filtered', '/pf/viz/inferred_pose',
 ]
 
 

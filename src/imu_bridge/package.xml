@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd"?>
+<package format="3">
+  <name>imu_bridge</name>
+  <version>0.1.0</version>
+  <description>Calibrated, car-axis IMU topics from the VESC IMU and an optional BNO085, plus a shadow-mode robot_localization EKF config. Support code: publishes only sensor_msgs/Imu and a copy of /odom; never /drive, /ackermann_cmd or /commands/*, so it cannot move the car.</description>
+  <maintainer email="bryanmaubc@gmail.com">racerbotcar-2</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>ament_index_python</depend>
+  <depend>python3-numpy</depend>
+  <depend>python3-yaml</depend>
+  <depend>python3-serial</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

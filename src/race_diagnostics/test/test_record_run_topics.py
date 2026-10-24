@@ -31,6 +31,20 @@ def test_parameter_changes_are_bagged():
     assert '/parameter_events' in _default_topics()
 
 
+def test_imu_dataset_topics_are_bagged():
+    """A run must be usable as an IMU dataset (src/imu_bridge/README.md):
+    raw + calibrated IMU, the wheel and command inputs, the shadow EKF, and
+    the pose references it is compared against."""
+    required = {
+        '/sensors/core', '/sensors/imu/raw', '/sensors/servo_position_command',
+        '/imu/data', '/imu/vesc/data', '/imu/bno/raw', '/imu/bno/data',
+        '/imu_bridge/wheel_odom', '/odometry/filtered', '/pf/viz/inferred_pose',
+        '/odom', '/drive', '/ackermann_cmd',
+    }
+    missing = required - set(_default_topics())
+    assert not missing, f'record_run.py does not bag: {sorted(missing)}'
+
+
 def test_the_launch_argument_default_is_built_from_that_list():
     """The bag records LaunchConfiguration('topics'), whose default must be
     DEFAULT_TOPICS -- otherwise editing the list changes nothing."""
