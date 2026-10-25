@@ -129,9 +129,13 @@ def test_every_tunable_node_can_also_be_stopped():
 
 
 def test_the_map_folders_are_the_two_run_folders_and_none_is_refused():
+    # oracle: spec -- the output_directory defaults pinned by
+    # test_run_output_paths.py, and data/README.md. Both sit inside this git
+    # repo; the dashboard must still accept them.
     log = _Log()
     roots = _section('web_dashboard_node')['map_roots']
-    assert roots == ['~/.ros/racerbot_auto', '~/.ros/racerbot_sim/auto']
+    assert roots == ['~/racerbot-ws/data/racerbot_auto',
+                     '~/racerbot-ws/data/racerbot_sim/auto']
     assert len(mapstore.sanitize_roots(roots, log)) == 2
     assert log.lines == []
 

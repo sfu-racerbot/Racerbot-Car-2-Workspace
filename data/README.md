@@ -40,12 +40,12 @@ pushing.
   `ros2 bag play <run>/bag` and the analysis tools read them as one bag.
   The largest non-bag file so far is a 30 MB pose graph. `tools/save_runs.sh`
   checks every file before committing.
-- **The dashboard's saved-runs panel no longer sees new runs.** It refuses to
-  list or delete anything inside a git working tree, on purpose: deleting a
-  tracked file from a browser would leave an unexplained `git status`. It
-  still manages the older runs left in `~/.ros/`. To delete a run here, use
-  `git rm -r data/<folder>/<timestamp>` and commit. Its files stay in git
-  history.
+- **The dashboard's saved-runs panel lists the maps in `racerbot_auto/` and
+  `racerbot_sim/auto/`, and can delete them.** A run deleted there shows in
+  `git status` as a deletion, and the next `tools/save_runs.sh` commits that
+  deletion; the files stay in git history. Recordings in `racerbot_runs/` are
+  not maps and are not in that panel. To delete one, use
+  `git rm -r data/racerbot_runs/<timestamp>` and commit.
 - Every file added here stays in git history for good, and every clone
   downloads it, even if it is later deleted. A simulator run is around 30 MB,
   mostly its pose graph.

@@ -64,11 +64,14 @@ web_dashboard_node:
       - sim_launch.py
 
     # Where this car's tooling writes saved runs: auto_map_race_node's
-    # output_directory, and the simulator's equivalent. The git-tracked demo
-    # maps in src/particle_filter/maps are refused whatever is listed here.
+    # output_directory, and the simulator's equivalent -- inside the repo
+    # since 2026-10-25 (data/README.md), which the dashboard allows. A run
+    # deleted here shows in `git status` as a deletion; tools/save_runs.sh
+    # then commits it. The demo maps in src/particle_filter/maps are refused
+    # whatever is listed here.
     map_roots:
-      - ~/.ros/racerbot_auto
-      - ~/.ros/racerbot_sim/auto
+      - ~/racerbot-ws/data/racerbot_auto
+      - ~/racerbot-ws/data/racerbot_sim/auto
 
     # enable_slam_reset stays at its default (true): its refusal list,
     # proccontrol.DRIVING_CONTROLLERS, names this car's controllers.
