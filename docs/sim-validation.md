@@ -171,7 +171,9 @@ target=4.91m at -0.0deg, ... command: steering=-0.001rad, speed=2.50m/s
 
 **There is nothing to configure.** The dashboard subscribes to topics and publishes to none, and the simulator publishes the same topic names the real hardware does — `/scan`, `/odom`, `/ackermann_cmd`, `/joy`, `/drive_intent`. It cannot tell the difference, and neither of them needs to know about the other.
 
-**Terminal 3** — the dashboard. Leave it running.
+**On car 2 there is no Terminal 3: the dashboard already runs at boot** (`racerbot-dashboard.service`) and shows the simulator like the real car. Check it with `systemctl status racerbot-dashboard` and skip to "Then open" below.
+
+**Terminal 3, on any other computer** — the dashboard. Leave it running.
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -190,9 +192,9 @@ Serving the WebSocket (/ws) on port 8080, every interface, IPv4 + IPv6 -- no pag
 
 **Then open https://dashboard.sfuracerbot.ca** on your laptop or phone, sign in, and pick **Car 2** — the simulator runs on car 2's own graph, so the site shows it as the car. The car serves no pages itself any more ([web-dashboard.md](web-dashboard.md)).
 
-**If it doesn't:** `Address already in use` means a dashboard is already running — you only ever need one, and it can stay up across simulator restarts. If the page loads but every panel is empty, Terminal 1 isn't publishing.
+**If it doesn't:** `Address already in use` means a dashboard is already running (on car 2, the boot service) — you only ever need one, and it can stay up across simulator restarts. If the page loads but every panel is empty, Terminal 1 isn't publishing.
 
-> **Shortcut for the full race stack:** `sim_auto_map_race_launch.py` takes `dashboard:=true` and starts the dashboard for you, so you don't need Terminal 3 at all. See [the full stack](#the-full-auto-map-race-stack).
+> **Shortcut for the full race stack:** off car 2, `sim_auto_map_race_launch.py` takes `dashboard:=true` and starts the dashboard for you, so you don't need Terminal 3 at all. On car 2 leave it off — the boot service already serves one. See [the full stack](#the-full-auto-map-race-stack).
 
 ### What you're looking at
 
@@ -227,7 +229,7 @@ Your node goes in Terminal 2, in place of `gap_follow`. Nothing else changes.
 ```bash
 ros2 launch racerbot_sim sim_bringup_launch.py     # terminal 1
 ros2 launch <your_package> <your_node>_launch.py   # terminal 2
-ros2 launch racerbot_launch dashboard_launch.py   # terminal 3
+ros2 launch racerbot_launch dashboard_launch.py   # terminal 3 -- not on car 2, where it runs at boot
 ```
 
 That works because your node talks to the same topics the real car uses. If it subscribes to `/scan` and publishes to `/drive`, it is already simulator-compatible — see [writing-your-own-node.md](writing-your-own-node.md).

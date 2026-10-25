@@ -2,8 +2,10 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -21,12 +23,17 @@ def generate_launch_description():
     LB-deadman check and no bringup ordering to worry about here, unlike
     the driving-code procedures in docs/operations.md.
 
+    The dashboard itself is NOT started by default: on car 2 it already runs
+    at boot (racerbot-dashboard.service), and a second copy would join the
+    graph and then die on the busy port 8080. Add `dashboard:=true` only on
+    a machine where that service isn't running.
+
     For actual driving/racing, don't use this file -- launch
     bringup_launch.py + a control layer as usual (see docs/operations.md),
-    and dashboard_launch.py on its own if you also want the dashboard
-    up alongside them.
+    and the dashboard service (or dashboard_launch.py, off car 2) alongside.
 
         ros2 launch racerbot_launch dashboard_test_launch.py
+        ros2 launch racerbot_launch dashboard_test_launch.py dashboard:=true   # no boot service
 
     Then open https://dashboard.sfuracerbot.ca and pick car 2 -- the car
     serves no pages itself any more.
@@ -60,10 +67,15 @@ def generate_launch_description():
             os.path.join(
                 get_package_share_directory('racerbot_launch'), 'launch',
                 'dashboard_launch.py')
-        )
+        ),
+        condition=IfCondition(LaunchConfiguration('dashboard')),
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'dashboard', default_value='false',
+            description='Also start dashboard_launch.py. Leave false on car 2: '
+                        'racerbot-dashboard.service already runs it.'),
         urg_node,
         static_tf_node,
         realsense_camera_launch,

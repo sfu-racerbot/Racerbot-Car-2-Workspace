@@ -60,8 +60,8 @@ RealSense), so ROS images and the browser stream start and stop together.
 [web_dashboard](web-dashboard.md)'s bottom-right camera inset auto-connects
 to the MJPEG stream on port `9090` that `realsense_camera_launch.py` now starts
 (through the site: the page asks https://dashboard.sfuracerbot.ca for it, and
-the site reaches the car's port 9090 through the tunnel). Launch the dashboard
-separately with `ros2 launch racerbot_launch dashboard_launch.py`, then click
+the site reaches the car's port 9090 through the tunnel). The dashboard itself
+already runs at boot (`racerbot-dashboard.service`); open it on the site, then click
 its camera inset for the full-window recording view. **Both launch commands,
 step by step, are in [web-dashboard.md](web-dashboard.md#start-it).**
 

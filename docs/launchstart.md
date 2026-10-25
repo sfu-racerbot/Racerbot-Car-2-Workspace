@@ -260,13 +260,13 @@ ros2 launch racerbot_launch auto_map_race_launch.py
 
 ## Dashboard
 
-**Any spare terminal**, alongside any mode:
+**Nothing to start** — it runs at boot (`racerbot-dashboard.service`), alongside any mode. **Any terminal**, to check:
 
 ```bash
-ros2 launch racerbot_launch dashboard_launch.py
+systemctl status racerbot-dashboard
 ```
 
-**Working when:** the car shows up at https://dashboard.sfuracerbot.ca. Details: [web-dashboard.md](web-dashboard.md).
+**Working when:** it says `active (running)` and the car shows up at https://dashboard.sfuracerbot.ca. Don't also launch `dashboard_launch.py` by hand: the second copy fails on the busy port. Details: [web-dashboard.md](web-dashboard.md#the-dashboards-boot-service).
 
 ## Record a run and analyse it
 

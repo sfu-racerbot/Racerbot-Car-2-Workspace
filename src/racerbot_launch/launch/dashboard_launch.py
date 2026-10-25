@@ -9,8 +9,10 @@ car's site, geometry, tunable nodes, stoppable processes and map folders
 live in that YAML. Open it through https://dashboard.sfuracerbot.ca.
 
 Support/tooling, not a control layer: publishes to no topic, so it is safe
-to start alongside anything, at any time. Started by hand; it does not run
-at boot. See docs/web-dashboard.md.
+to start alongside anything, at any time. On car 2 it runs at boot as
+racerbot-dashboard.service (systemd/ in this package), so don't also start it
+by hand there: the second copy dies on the busy port 8080. See
+docs/web-dashboard.md#the-dashboards-boot-service.
 """
 
 import os

@@ -1,0 +1,51 @@
+# Car 2's web dashboard server (dashboard_node, port 8080), at boot:
+#
+#   ros2 launch racerbot_launch dashboard_launch.py
+#
+# i.e. web_dashboard with car 2's settings (config/web_dashboard_rb2.yaml).
+# The Cloudflare Tunnel's rb2-dash-origin.sfuracerbot.ca route points here.
+#
+# A template: systemd/install.sh in this package fills in the user and the
+# workspace and installs the result as
+# /etc/systemd/system/racerbot-dashboard.service.
+#
+# Support/tooling, not a control layer: dashboard_node publishes to no ROS
+# topic, so running it all the time cannot move the car
+# (docs/web-dashboard.md). Its write paths (tuning, stopping a driving
+# process, SLAM reset, deleting a saved run) are reachable only through the
+# site, behind Cloudflare Access.
+#
+# Mirrors the submodule's foxglove-bridge.service, which is known to join the
+# car's graph: same user, ROS_DOMAIN_ID and RMW_IMPLEMENTATION left unset
+# (domain 0, Fast DDS), overrides only in an optional /etc/default file.
+[Unit]
+Description=Car 2 web dashboard server (dashboard_node, port 8080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The same user every other ROS node on the car runs as: Fast DDS discovery
+# and shared memory work as between terminals, and the stop panel's signals
+# reach the driving processes it is allowed to end.
+User=@USER@
+Group=@USER@
+Environment=HOME=/home/@USER@
+# The colcon workspace with racerbot_launch and web_dashboard built into it.
+Environment=RACERBOT_WS=@WORKSPACE@
+# Optional overrides, e.g. ROS_DOMAIN_ID=... if the car's stack ever sets
+# one. The leading '-' means "fine if the file does not exist".
+EnvironmentFile=-/etc/default/racerbot-dashboard
+# A login shell's ROS environment, rebuilt from scratch: systemd starts
+# services with an almost empty one. $$ passes a literal $ to bash.
+ExecStart=/bin/bash -c 'source /opt/ros/jazzy/setup.bash && source "$${RACERBOT_WS}/install/setup.bash" && exec ros2 launch racerbot_launch dashboard_launch.py'
+# SIGINT is what Ctrl+C sends; ros2 launch shuts its node down cleanly on it.
+KillSignal=SIGINT
+TimeoutStopSec=10
+# "Always runs": come back after a crash or a clean exit alike. A
+# `systemctl stop` still stops it.
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
