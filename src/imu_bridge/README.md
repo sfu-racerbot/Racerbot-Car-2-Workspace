@@ -79,7 +79,7 @@ An **EKF** (extended Kalman filter) combines two imperfect sensors into one bett
 
 ## Before you start
 
-- [ ] **The VESC's IMU must be switched on.** It was measured on 2026-08-19 sending all zeros, meaning it was off or not fitted (see [docs/localization.md](../../docs/localization.md)). It was calibrated through the imu-calibration repo in September 2026, which means it works over that repo's own serial driver. This node prints a warning every 5 s if it still sees all zeros.
+- [ ] **The VESC's IMU must be switched on.** It was measured on 2026-08-19 sending all zeros because it was off in VESC Tool; it has been on, and working, since the October 2026 tests (see [docs/localization.md](../../docs/localization.md)). It was calibrated through the imu-calibration repo in September 2026, which means it works over that repo's own serial driver. This node prints a warning every 5 s if it still sees all zeros.
 - [ ] **Car 1: the BNO085 must answer on I2C.** It is wired to the Jetson's 40-pin header (pin 1 3.3 V, pin 3 SDA, pin 5 SCL, pin 6 GND), which is I2C bus 7. Working when `i2cdetect -y -r 7` shows `4a` in its grid. Only the `-r` form works on this Jetson. A `Remote I/O error` on every address means SDA and SCL are swapped. Your user must be in group `i2c` (`id` lists it).
 - [ ] **Clone the imu-calibration repo** where the config expects it:
   ```bash
