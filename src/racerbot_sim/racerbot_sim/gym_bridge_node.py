@@ -4,7 +4,7 @@ Stands in for everything in `bringup_launch.py` that touches physical
 hardware -- `urg_node`, the VESC chain -- so the real driving stack runs
 unchanged above it:
 
-    /ackermann_drive  (ackermann_mux output)  -->  vehicle dynamics
+    /ackermann_cmd    (ackermann_mux output)  -->  vehicle dynamics
     vehicle dynamics  -->  /scan, /odom, TF odom->base_link
 
 Everything else in the graph is the real thing: the real `ackermann_mux`
@@ -52,11 +52,10 @@ class GymBridgeNode(Node):
 
         self.declare_parameter('track', 'indoor_oval')
         self.declare_parameter('track_directory', '~/.ros/racerbot_sim/tracks')
-        # /ackermann_cmd, not /ackermann_drive: ackermann_mux.cpp advertises
-        # "ackermann_cmd" and ackermann_to_vesc.cpp subscribes to it, so
-        # bringup_launch.py's `ackermann_cmd_out -> ackermann_drive` remap
-        # renames a topic that does not exist and quietly does nothing. This
-        # node stands where the VESC does, so it listens where the VESC does.
+        # /ackermann_cmd: ackermann_mux.cpp advertises "ackermann_cmd" and
+        # ackermann_to_vesc.cpp subscribes to it. This node stands where the
+        # VESC does, so it listens where the VESC does
+        # (racerbot_launch/test/test_drive_path_wiring.py).
         self.declare_parameter('drive_topic', '/ackermann_cmd')
         self.declare_parameter('scan_topic', '/scan')
         self.declare_parameter('odom_topic', '/odom')

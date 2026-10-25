@@ -73,7 +73,10 @@ One timestamped directory per run under `~/.ros/racerbot_runs/`:
 | `launch.log` | your `tee` | What every node decided, tick by tick |
 | `events.jsonl` | `race_diag_node` | Machine-readable pipeline state, **pose lag**, watchdog fires |
 | `probe.log` | `race_diag_node` stdout | Same, human-readable |
-| `bag/` | `ros2 bag record` | Everything, replayable offline |
+| `bag/` | `ros2 bag record` | Everything, replayable offline. Includes both odometries (`/odom`, `/odom/imu`), both IMUs, SLAM's `/pose` and pose graph, and every node's log on `/rosout` |
+| `metadata/git/` | `record_run.py` at start | Which code ran: HEAD, branch, `git status` and the full uncommitted diff of `racerbot-ws` and `~/imu-calibration`. Untracked files are listed, not copied |
+| `metadata/files/` | `record_run.py` at start | Copies of imu-calibration's `car.yaml` and calibration JSONs: the IMU mounts and calibration, which no ROS parameter holds |
+| `metadata/params/` | `snapshot_params`, 15 s in | Every node's parameters, one YAML per node, in `ros2 param dump` format (usable as `--params-file`). Later changes are in the bag's `/parameter_events` |
 | `map.pgm` / `map.yaml` | `slam_toolbox` save | The map as SLAM saw it |
 | `raceline_*.csv` | `auto_map_race_node` | The line that was generated and driven. `raceline_raw.csv` is the unmodified recording and is written even when the cleanup *refuses* the run, so a refusal can be plotted against the map |
 

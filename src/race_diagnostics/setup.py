@@ -29,6 +29,7 @@ setup(
             'race_diag_node = race_diagnostics.race_diag_node:main',
             'filter_log = race_diagnostics.filter_log:main',
             'summarize_run = race_diagnostics.summarize_run:main',
+            'snapshot_params = race_diagnostics.snapshot_params:main',
         ],
     },
 )

@@ -521,5 +521,6 @@ gap_follow_node:
     # Set 0.0 for transitions only.
     decision_log_period_sec: 1.0
     # Gap follow is driven by scan callbacks, so a dead scan makes /drive go
-    # quiet. The status timer uses this threshold to explain that mux stop.
+    # quiet. The status timer uses this threshold to report it. Nothing in
+    # ROS publishes a zero then: only the VESC's own command timeout stops it.
     scan_timeout_sec: 0.5

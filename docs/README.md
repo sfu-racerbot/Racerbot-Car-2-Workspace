@@ -47,6 +47,7 @@ After that, follow whichever branch below matches what you're doing.
 | [run-analysis.md](run-analysis.md) | Turning a recorded run into a report: why every stop happened, how the car really responded to its commands, a replay through the simulator, fitting the simulator to the car, and adding a SLAM map as a simulator track. For anyone who has just recorded a run. |
 | [wiimote.md](wiimote.md) | Drive the car with a Nintendo Wiimote: one-time Bluetooth pairing, auto-reconnect, the controls, and building the Jetson kernel driver. For anyone who wants a second manual controller. |
 | [odom-calibration.md](odom-calibration.md) | A browser wizard for tape-measure calibration of wheel odometry and steering. For anyone whose distances read wrong or whose car pulls to one side. |
+| [car1-vs-car2.md](car1-vs-car2.md) | Every way car 2 differs from car 1 (Ethernet LiDAR, RealSense, calibration, dashboard id, no BNO085 yet), and the check to run after porting anything from the car 1 repo. **Read before porting from car 1.** |
 | [git-setup.md](git-setup.md) | Which `src/` packages are real submodules vs. vendored code, and how to update them safely. Read before pulling upstream changes into `f1tenth_system`. |
 
 ## Write code
@@ -79,6 +80,7 @@ After that, follow whichever branch below matches what you're doing.
 |---|---|
 | [hardware-reference.md](hardware-reference.md) | VESC, LiDAR, joystick: exact addresses, ports, config values, and gotchas for this specific car. |
 | [troubleshooting.md](troubleshooting.md) | Real problems hit during bring-up and how they were diagnosed. Check here when something doesn't work. |
+| [known-issues.md](known-issues.md) | Discrepancies, stale docs and loose ends found but not yet fixed, each with its evidence and a suggested fix. For anyone with time to fix things. |
 
 ## Cameras and sensors
 

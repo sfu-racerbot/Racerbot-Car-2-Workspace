@@ -81,7 +81,7 @@ def test_no_live_flag_never_samples():
 
 def test_bringup_down_does_not_sample_and_is_not_a_failure():
     snap = healthy_snap()
-    for exe in car.BRINGUP_EXES + (car.EXE_REALSENSE,):
+    for exe in car.BRINGUP_EXES + (car.EXE_REALSENSE, car.EXE_JOY_TELEOP):
         without(snap, exe)
     snap.tty_holders = {}
     code, text, calls = _run(['--no-color'], snap)
@@ -118,6 +118,15 @@ def test_gather_crash_exits_two():
 def test_gather_is_asked_to_decide_tcp_probe_itself():
     _, _, calls = _run([], healthy_snap(), healthy_live())
     assert calls['gather'] == [{'probe_lidar_tcp': 'auto'}]
+
+
+def test_teleop_alone_still_samples_the_graph():
+    # joy_teleop counts as "something is up": its drive path is the point.
+    snap = healthy_snap()
+    for exe in car.BRINGUP_EXES + (car.EXE_REALSENSE,):
+        without(snap, exe)
+    _, _, calls = _run(['--no-color'], snap, healthy_live())
+    assert calls['sample'] == [3.0]
 
 
 def test_render_no_color_has_no_escape_codes_and_color_does():

@@ -394,9 +394,9 @@ $$v_{corner} = \min\left(v_{max}, \sqrt{\dfrac{a_{lat,max}}{\kappa}}\right)$$
 
 Tighter corners (bigger $\kappa$) get a lower speed limit automatically, with no per-corner tuning.
 
-This is a *simplified* friction circle. Real tires trade off lateral against longitudinal grip on a combined ellipse, and real chassis have weight transfer, suspension behaviour, and so on.
+This cap is lateral-only: one number, `a_lat_max`, stands in for "how hard can this car actually corner." Tune it empirically — see below.
 
-This model ignores all of that and uses one number, `a_lat_max`, as a conservative stand-in for "how hard can this car actually corner." Tune it empirically — see below.
+Real tires share one grip budget between cornering and braking or accelerating. The profile does model that, in Step 3 (the friction ellipse). It still ignores weight transfer, suspension behaviour and tire slip angles.
 
 </details>
 
@@ -417,6 +417,14 @@ That's what makes the profile tell the car to start braking early enough to actu
 A closed-loop track has no clean starting point to seed these sweeps from. Index 0's "previous" waypoint is the *last* waypoint, whose value isn't finalized on the first sweep. So both passes are repeated `smoothing_passes` times (default 5), to let that start/finish seam converge.
 
 Both passes only ever *lower* a speed, never raise one. So extra passes past convergence are harmless no-ops — which is why the same code path handles open paths too, with no special case.
+
+**The passes share grip with cornering (the friction ellipse).** A tire that is already cornering hard has less grip left to brake or accelerate with. So in each pass the car gets only part of `a_brake_max` or `a_accel_max`, depending on how much of `a_lat_max` it is using at the neighbouring point:
+
+$$a_{long,available} = a_{long,max}\sqrt{1 - \left(\dfrac{v^2\kappa}{a_{lat,max}}\right)^2}$$
+
+On a straight that is the full budget. At a corner taken at the cornering limit it is zero. The effect is lower, more cautious speeds into and out of corners.
+
+This is on by default (`friction_ellipse=True` in `racing_math.compute_velocity_profile`), and `generate_velocity_profile`, `optimize_raceline` and `auto_map_race_node` all use it. Pass `--no-friction-ellipse` to either script to compare against the old uncoupled profile.
 
 </details>
 
@@ -1153,7 +1161,7 @@ Being direct about what this *doesn't* do, as a map for where to take it next:
 
 - **The racing line is only as good as the lap you recorded** — *unless* you run [Phase 4b](#phase-4b-optional-optimize-the-line-itself-not-just-its-speed). Phase 4 alone paces your line and never reshapes it; `optimize_raceline` re-derives the geometrically fastest line within the track's actual width.
   - What's still missing is the step beyond minimum curvature. That would be a genuine minimum-*time* optimizer over path and speed jointly, plus a velocity profile that knows which specific corner it's entering rather than only how sharp it is.
-- **The velocity profile is a simplified friction-circle model**, not a full vehicle dynamics simulation. No combined lateral/longitudinal tire ellipse, no weight transfer, no slip-angle model.
+- **The velocity profile is a simplified grip model**, not a full vehicle dynamics simulation. It caps cornering speed by `a_lat_max` and shares grip between cornering and braking through a friction ellipse, but has no weight transfer and no slip-angle model.
 - **Pure Pursuit doesn't reason about the future beyond one lookahead point.** A full MPC could plan the next N steps jointly against an actual dynamics model — a legitimate, harder next project once this baseline is solid and trusted.
 - **Localization is dead-reckoning fused with LiDAR only.** No IMU or wheel-encoder sensor fusion beyond what `particle_filter` and `vesc_to_odom` already do. Better odometry directly means a tighter, more trustworthy `max_cross_track_error`.
 - **Opponent detection is map subtraction plus geometry, not semantic recognition.** Mapped walls are excluded, but an unmapped car-sized object can still qualify, and map/pose misalignment can create residuals. The fallback has only cluster geometry.

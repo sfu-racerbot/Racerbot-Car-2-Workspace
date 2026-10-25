@@ -6,6 +6,70 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
+## 2026-10-24 (latest) — Port from car 1 (to `car1/main` `0265263`); branch cleanup
+
+Everything car 1 ([Racerbot-Car-1-Workspace](https://github.com/sfu-racerbot/Racerbot-Car-1-Workspace))
+built since it took car 2's `38c35a0`, as a patch (`git diff 0cd347f car1/main`,
+`git apply --3way`; the repos share no history), with car 2's hardware kept.
+Car 1's own entries in its `CHANGELOG.md` (2026-10-23 and 2026-10-24) have the
+detail and its measurements. **Nothing below has been driven on car 2.**
+
+### New on car 2
+
+- **`imu_bridge`**: car 1's extension of PR #2's package (merged here the
+  same day, `6dec009`): `/imu/status`, the BNO restart watchdog, and `vehicle_state_node` (`/odom/fused`,
+  `/steering/measured`, gyro odometry `/odom/imu` + optional `odom_imu -> odom`).
+  Support code, publishes no drive topic.
+- **`neural_racer`** (new package, driving code, shadow mode by default) and
+  `tools/neural_racer/` (FIR training stack; its tests need `torch`, which the
+  car doesn't have). `docs/superpowers/specs/2026-10-23-neural-racer-plan.md`.
+- **`gap_follow_launch.py max_speed:=`** (`gap_follow/launch_speed.py`), and
+  `gap_follow` no longer claims the mux stops the car when `/drive` goes quiet.
+- **`map_course`**: `imu:=`, `fused_speed:=`, `gyro_odom:=`; `record_bag:=true`
+  by default. `slam_launch.py slam_odom_frame:=`.
+- **`race_diagnostics`**: more bagged topics (IMU, SLAM pose graph, `/rosout`,
+  `/drive_intent` ...), and `<run>/metadata/` (git state, IMU calibration
+  copies, `snapshot_params`).
+- `tools/run_analysis/imu_report.py`.
+- **Bringup**: the dead `ackermann_cmd_out` remap is gone from all three
+  `*_bringup_launch.py`, guarded by `racerbot_launch/test/test_drive_path_wiring.py`.
+  `racerbot_sim` follows.
+- `optimize_raceline.py --max-steering-angle` defaults to the planner's 0.30.
+- **`racerbot_doctor`**: car 1's generic checks only. The joystick layer now
+  checks `event*` as well as `js*` (`joy_node` reads `event*`; a user outside
+  `input` got a silent `/joy` on car 1), a new *Drive path (teleop)* section
+  follows `/joy` -> `/teleop` -> `/ackermann_cmd` -> `/commands/motor/speed`
+  with LB-held and non-zero-motor counts, and `/odom` silent before the first
+  servo command is `INFO`. Car 2's Ethernet LiDAR and RealSense checks are
+  unchanged. New test `test_lb_button_is_the_teleop_deadman` (car 1's live LB
+  test took the button index from `car.py` itself). 158 tests.
+- Docs: `docs/known-issues.md`, launchstart's two-car first run and IMU A/B,
+  and car 1's doc fixes (architecture, ros-simulator, racing-autonomy,
+  troubleshooting's `input` group entry, ...).
+
+### Kept as car 2's (`docs/car1-vs-car2.md`, new)
+
+- Ethernet LiDAR, RealSense, `rb2` dashboard, calibration, steering limits,
+  odometry gain, VESC udev rule, doctor LiDAR/camera ladders.
+- **IMU off by default**: car 2 has no BNO085 yet and no `~/imu-calibration`
+  (without it `imu_bridge_node` raises). `map_course imu:=false` and
+  `vehicle_state_launch.py bno:=false` here; car 1 ships both `true`.
+  `test_map_course_imu.py`'s default test now asserts `false`, and the tests
+  that turn on `fused_speed`/`gyro_odom` pass `imu:=true` explicitly.
+- **`neural_racer`'s wrapper `max_steering_angle` 0.349** (car 1: 0.33), as its
+  own `test_wrapper_values_match_gap_follow` demands; `test_steering_clipped`
+  now takes its expected cap from the config instead of a literal 0.33.
+- New guard test `racerbot_launch/test/test_car2_hardware_config.py` (12
+  tests, each seen to fail against car 1's version of the file it guards).
+
+### Repo housekeeping
+
+- Remote `car1` added. Every extra branch deleted, local and on GitHub, after
+  checking each one's commits were already in `main`; the five worktrees
+  under `.claude/worktrees/` and `.oc-worktrees/` removed. The one uncommitted
+  change found (`wd-migration`: `docs/sim-validation.md`'s dashboard log line)
+  is in this commit.
+
 ## 2026-10-22 — gap_follow opponent awareness; one-command mapping; launch cheat sheet
 
 All of it is **simulator-validated only**. Bring it up wheels-off first, then at

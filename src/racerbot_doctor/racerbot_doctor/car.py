@@ -1,5 +1,9 @@
 """What car 2's hardware is, and what healthy looks like.
 
+Car 2, not car 1: an Ethernet Hokuyo UST-10LX (car 1: USB-serial UST-30LX)
+and a RealSense D435i (car 1: UVC webcam). A port from the car 1 repo must
+keep this file's LiDAR and camera sections -- see docs/car1-vs-car2.md.
+
 Every number cites where it comes from, so a hardware change has an
 obvious place to update. Keep in step with the files named.
 """
@@ -35,6 +39,7 @@ JOY_XINPUT_PID = 'c21f'
 JOY_DIRECTINPUT_PID = 'c219'
 JOY_KERNEL_DRIVER = 'xpad'
 JOY_MIN_HZ = 5.0                            # autorepeat_rate: 20.0
+JOY_LB_BUTTON = 4                           # human_control deadman_buttons: [4]
 
 # --- Camera: RealSense D435i, racerbot_launch realsense_camera_launch.py
 # (424x240 @ 15 fps). Optional: never fails the run (team, 2026-10-01).
@@ -46,6 +51,11 @@ CAMERA_MIN_HZ = 8.0
 
 # --- Bringup: f1tenth_stack bringup_launch.py
 ODOM_MIN_HZ = 25.0                          # vesc_to_odom publishes per /sensors/core
+# Drive path /joy -> joy_teleop -> /teleop -> ackermann_mux -> /ackermann_cmd
+# -> ackermann_to_vesc -> /commands/*: each hop republishes once per input
+# message (joy_teleop.py joy_callback, ackermann_mux input callback,
+# ackermann_to_vesc.cpp), so every hop must keep up with /joy.
+DRIVE_MIN_HZ = JOY_MIN_HZ
 LASER_TF = (0.26, 0.0, 0.11)                # base_link->laser, docs/hardware-reference.md
 LASER_TF_TOL_M = 0.001
 
@@ -57,6 +67,7 @@ EXE_MUX = 'ackermann_mux'
 EXE_ACK_TO_VESC = 'ackermann_to_vesc_node'
 EXE_VESC_TO_ODOM = 'vesc_to_odom_node'
 EXE_REALSENSE = 'realsense2_camera_node'
+EXE_JOY_TELEOP = 'joy_teleop'                # teleop_launch.py
 BRINGUP_EXES = (EXE_VESC_DRIVER, EXE_URG, EXE_JOY, EXE_MUX,
                 EXE_ACK_TO_VESC, EXE_VESC_TO_ODOM)
 # racerbot_sim forges /joy and publishes a second /scan and /odom.

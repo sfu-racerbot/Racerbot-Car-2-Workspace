@@ -22,6 +22,8 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, Opaqu
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from race_diagnostics.run_metadata import (
+    find_repo_root, imu_calibration_files, write_run_metadata)
 
 # Everything needed to reconstruct a run offline. /scan dominates the size
 # (~10x everything else combined) but is also the only way to answer "what
@@ -51,6 +53,21 @@ DEFAULT_TOPICS = [
     '/sensors/core', '/sensors/servo_position_command',
     '/imu/data', '/imu/vesc/data', '/imu/bno/raw', '/imu/bno/data',
     '/imu_bridge/wheel_odom', '/odometry/filtered', '/pf/viz/inferred_pose',
+    # vehicle_state_node (imu_bridge): IMU-fused speed next to /odom's wheel
+    # speed, and the steering angle the car really turned at next to the
+    # command on /drive -- the two comparisons a fused_speed:=true run is
+    # judged on (map_course_launch.py).
+    '/odom/fused', '/steering/measured',
+    # Gyro odometry (imu_bridge vehicle_state_node), recorded on every run
+    # whether SLAM uses it or not (map_course gyro_odom:=), so each bag can be
+    # replayed through slam_toolbox both ways. SLAM's own outputs are what a
+    # replay is judged against: its pose with covariance, its pose graph
+    # (loop closures show here), and the map's metadata.
+    '/odom/imu', '/pose', '/slam_toolbox/graph_visualization', '/map_metadata',
+    # Every node's log lines, timestamped on the same clock as the data --
+    # "why did it stop" and "what was it doing" in one file -- and the
+    # driving nodes' own account of what they were trying to do.
+    '/rosout', '/diagnostics', '/drive_intent', '/initialpose',
 ]
 
 
@@ -59,6 +76,22 @@ def _setup(context, *args, **kwargs):
         LaunchConfiguration('output_directory').perform(context))
     run_dir = os.path.join(parent, strftime('%Y%m%d-%H%M%S'))
     os.makedirs(run_dir, exist_ok=True)
+
+    # What the run was made with -- code, calibration, parameters -- written
+    # into <run>/metadata/ (race_diagnostics/run_metadata.py). Never fatal.
+    racer_imu_root = os.path.expanduser(
+        LaunchConfiguration('racer_imu_root', default='~/imu-calibration').perform(context))
+    try:
+        meta = write_run_metadata(
+            run_dir,
+            {'racerbot-ws': find_repo_root(os.path.realpath(__file__)),
+             'imu-calibration': racer_imu_root},
+            imu_calibration_files(racer_imu_root))
+    except Exception as e:  # noqa: BLE001 -- a metadata failure must not stop a run
+        meta = os.path.join(run_dir, 'metadata')
+        os.makedirs(meta, exist_ok=True)
+        with open(os.path.join(meta, 'ERROR.txt'), 'w') as handle:
+            handle.write(f'metadata not written: {e!r}\n')
 
     topics = LaunchConfiguration('topics').perform(context).split()
     config = os.path.join(
@@ -84,6 +117,13 @@ def _setup(context, *args, **kwargs):
             name='race_diag_node',
             output='screen',
             parameters=[config, {'output_directory': run_dir}],
+        ),
+        Node(
+            package='race_diagnostics',
+            executable='snapshot_params',
+            name='snapshot_params',
+            output='screen',
+            arguments=['--output', os.path.join(str(meta), 'params')],
         ),
     ]
 

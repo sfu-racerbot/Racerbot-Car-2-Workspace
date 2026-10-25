@@ -216,6 +216,10 @@ It becomes worth installing the moment there is a second, genuinely independent 
 
 ### 1. Get a real rotation measurement, then fuse it — the big one
 
+> **Car 2, 2026-10-24: not yet.** Car 2 has no BNO085 yet (being mounted), so everything below this note is car 1's status; the code is here, off by default ([car1-vs-car2.md](car1-vs-car2.md#imu)).
+>
+> **Status, car 1, 2026-10-24: built, not yet driven on.** Car 1 has a BNO085 gyro on the front axle (option b below) and the VESC's own IMU (option a). Instead of an EKF owning `odom -> base_link`, `imu_bridge`'s `vehicle_state_node` publishes **gyro odometry** in a new frame, `odom_imu`, with `odom_imu -> odom` chosen so `odom_imu -> base_link` is the gyro-headed pose. `slam_toolbox` maps on it with `map_course gyro_odom:=true`. `vesc_to_odom_node` keeps its transform, so nothing in bringup changes and the step is reversible per run. Distance stays the wheels'; only heading changes, as ForzaETH's race stack also does (wheel speed plus IMU yaw rate, no IMU acceleration). Details: [src/imu_bridge/README.md](../src/imu_bridge/README.md#gyro-odometry-for-slam). The first test is the A/B in [launchstart.md](launchstart.md#testing-the-imu-in-mapping-ab).
+
 **The problem:** heading comes from a commanded steering angle, as above. Nothing on this car measures how much it actually rotated.
 
 **The fix, in the order worth trying:**

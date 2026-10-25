@@ -30,7 +30,7 @@ Test any increase wheels-off first, then at low speed in open space.
 | [`gap_follow/gap_follow_node.py`](gap_follow/gap_follow_node.py) | ROS orchestration: deadman, odometry watchdog, TTC brake, diagnostics, and drive publisher. |
 | [`gap_follow/gap_logic.py`](gap_follow/gap_logic.py) | Unit-tested footprint, TTC, disparity extension, safety bubble, and gap-selection math. |
 | [`config/gap_follow.yaml`](config/gap_follow.yaml) | Every tunable parameter, loaded at launch. Change behavior here, not in the code. |
-| [`launch/gap_follow_launch.py`](launch/gap_follow_launch.py) | Starts the node with the YAML above as its parameters. |
+| [`launch/gap_follow_launch.py`](launch/gap_follow_launch.py) | Starts the node with the YAML above as its parameters. Launch arguments: `opponent_awareness:=true` (other cars on track) and `max_speed:=<m/s>`, which only lowers the YAML's top speed for one run (the logic is [`gap_follow/launch_speed.py`](gap_follow/launch_speed.py)). See [docs/launchstart.md](../../docs/launchstart.md#car-1-and-car-2-together-first-run). |
 | `resource/gap_follow` | Empty marker file required by `ament_python` — not code. |
 
 ## Interface

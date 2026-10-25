@@ -189,6 +189,16 @@ def _finite_float(value):
     return value if math.isfinite(value) else None
 
 
+def is_still(gyro, speed, still_speed, still_gyro):
+    """|wheel speed| < still_speed and every |gyro axis| < still_gyro [rad/s].
+    Unknown speed (None/NaN) or a non-finite gyro counts as moving."""
+    speed = _finite_float(speed)
+    if speed is None or not abs(speed) < still_speed:
+        return False
+    gyro = np.asarray(gyro, dtype=float)
+    return bool(np.all(np.isfinite(gyro)) and np.all(np.abs(gyro) < still_gyro))
+
+
 class StartupBias:
     """Measure the gyro's residual bias while the car sits still at startup.
 
@@ -217,10 +227,7 @@ class StartupBias:
         self._n = 0
 
     def _still(self, gyro, speed):
-        speed = _finite_float(speed)
-        if speed is None or not abs(speed) < self.still_speed:
-            return False
-        return bool(np.all(np.isfinite(gyro)) and np.all(np.abs(gyro) < self.still_gyro))
+        return is_still(gyro, speed, self.still_speed, self.still_gyro)
 
     def update(self, t, gyro, speed):
         """Feed one calibrated gyro sample [rad/s] at time t [s]. Returns done."""

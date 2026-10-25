@@ -3,13 +3,17 @@
 <package format="3">
   <name>imu_bridge</name>
   <version>0.1.0</version>
-  <description>Calibrated, car-axis IMU topics from the VESC IMU and an optional BNO085, plus a shadow-mode robot_localization EKF config. Support code: publishes only sensor_msgs/Imu and a copy of /odom; never /drive, /ackermann_cmd or /commands/*, so it cannot move the car.</description>
+  <description>Calibrated, car-axis IMU topics from the VESC IMU and an optional BNO085, a fused forward speed (/odom/fused) and the measured steering angle (/steering/measured), plus a shadow-mode robot_localization EKF config. Support code: publishes only sensor_msgs/Imu, sensor_msgs/JointState and copies of /odom; never /drive, /ackermann_cmd or /commands/*, so it cannot move the car.</description>
   <maintainer email="bryanmaubc@gmail.com">racerbotcar-2</maintainer>
   <license>MIT</license>
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2_msgs</depend>
+  <depend>tf2_ros</depend>
   <depend>ament_index_python</depend>
   <depend>python3-numpy</depend>
   <depend>python3-yaml</depend>

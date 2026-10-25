@@ -611,7 +611,8 @@ class GapFollowNode(Node):
 
         # Runtime diagnostics. The scan watchdog is informational: when a
         # callback-driven controller stops receiving scans it publishes no
-        # new command, and ackermann_mux stops the car when /drive times out.
+        # new command. ackermann_mux publishes nothing when /drive times out,
+        # so only the VESC firmware's own command timeout stops the motor.
         self.last_scan_time = None
         self.last_decision_state = None
         self.last_decision_log_time = None
@@ -1853,8 +1854,7 @@ class GapFollowNode(Node):
         if age_sec >= self.scan_timeout_sec:
             detail = (
                 f"last LaserScan is {age_sec:.2f}s old "
-                f"(limit {self.scan_timeout_sec:.2f}s); /drive has gone quiet "
-                "and the mux will stop the car")
+                f"(limit {self.scan_timeout_sec:.2f}s); /drive has gone quiet")
             self._log_decision(
                 'scan_stale', detail, 0.0, 0.0, command_published=False)
             self._publish_intent(
@@ -2033,7 +2033,8 @@ class GapFollowNode(Node):
         if command_published:
             output = f"command: steering={steering_angle:+.3f}rad, speed={speed:.2f}m/s"
         else:
-            output = "command: none (the mux stops when /drive times out)"
+            output = ("command: none (ackermann_mux publishes no zero; only the "
+                      "VESC's own command timeout stops the motor)")
         message = f"{'STOP' if stopped else 'DRIVE'} [{state}] {detail}; {output}"
         if stopped:
             self.get_logger().warn(message)

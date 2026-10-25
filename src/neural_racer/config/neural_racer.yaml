@@ -1,0 +1,44 @@
+# neural_racer_node -- docs/superpowers/specs/2026-10-23-neural-racer-plan.md (A6, Phase 6).
+#
+# THIS NODE CAN MOVE THE CAR. Shadow mode is the default: it publishes only
+# on shadow_topic until shadow:=false is passed explicitly, and it drives
+# /drive only with a fully approved model (approve_model) and LB held.
+neural_racer_node:
+  ros__parameters:
+    # Workspace policy: never false in shipped config (CLAUDE.md, safety model).
+    enable_deadman: true
+    deadman_button: 4            # LB on the F710 in XInput mode
+    joy_timeout_sec: 0.5
+
+    shadow: true
+    shadow_topic: /neural_racer/shadow_drive
+    drive_topic: /drive
+
+    model_hash: ""               # required: an approved model's hash
+    # max_speed is both the wrapper's cap and the network's v_cap input.
+    # Start at 1.0 m/s; raise by 0.5 m/s per clean run (Phase 10's ladder).
+    max_speed: 1.0
+    mode: reactive               # reactive | map | auto (map once a path arrives)
+    require_imu: true            # stale or faulted /imu/status -> zero command
+    camera_enabled: false        # Phase C; refused until it exists
+
+    scan_timeout_sec: 0.075
+    odom_timeout_sec: 0.1
+    imu_timeout_sec: 0.1
+    pose_timeout_sec: 0.2
+
+    # Safety wrapper -- gap_follow.yaml's values. Each can only lower speed.
+    # Car 2's 0.349 (car 1: 0.33). The policy itself never asks for more than
+    # observation.STEER_LIMIT (0.33, car 1's, what it was trained on).
+    max_steering_angle: 0.349
+    car_width: 0.31
+    car_length: 0.58
+    wheelbase: 0.36
+    laser_offset_x: 0.26
+    reserve_distance: 0.20
+    max_braking_decel: 3.0
+    braking_latency_sec: 0.25
+    max_lateral_accel: 2.0       # the cornering cap; raising it is a Phase 10+ decision
+    max_steering_rate: 2.0
+    command_slew_max_dt: 0.10
+    max_invalid_fraction: 0.30

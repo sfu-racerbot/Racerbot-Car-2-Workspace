@@ -23,11 +23,16 @@ No ROS needed:
     python3 -m pytest src/racerbot_launch/test/ -v
 """
 import os
+import sys
 
 import pytest
 import yaml
 
 _SRC = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# optimize_raceline is pure Python (no rclpy), so its real argument parser is
+# importable here without ROS.
+sys.path.insert(0, os.path.join(_SRC, 'pure_pursuit'))
+from pure_pursuit import optimize_raceline  # noqa: E402
 _STACK = os.path.join(_SRC, 'f1tenth_system', 'f1tenth_stack', 'config')
 
 
@@ -69,6 +74,10 @@ def _limits():
         'auto_map_race.yaml profile_max_steering_angle': _params(
             os.path.join(_SRC, 'pure_pursuit', 'config', 'auto_map_race.yaml'),
             'auto_map_race_node')['profile_max_steering_angle'],
+        # Hand-run optimizations check feasibility against this unless the
+        # flag is passed (docs/racing-autonomy.md).
+        'optimize_raceline --max-steering-angle default':
+            optimize_raceline.build_arg_parser().get_default('max_steering_angle'),
     }
 
 
@@ -84,6 +93,16 @@ def test_planner_plans_below_the_controller_limit():
     limits = _limits()
     assert (limits['auto_map_race.yaml profile_max_steering_angle']
             < limits['pure_pursuit.yaml max_steering_angle'])
+
+
+def test_hand_run_optimizer_checks_against_the_planners_limit():
+    # The optimizer and auto_map_race both decide what "the rack cannot steer
+    # this" means for a racing line; they must agree, or a line accepted by
+    # one is rejected (or worse, accepted too tight) by the other. Until
+    # 2026-10-24 the optimizer still defaulted to the pre-October 0.26 rad.
+    limits = _limits()
+    assert (limits['optimize_raceline --max-steering-angle default']
+            == limits['auto_map_race.yaml profile_max_steering_angle'])
 
 
 # The check itself, on known cases, so it is not only ever seen passing.

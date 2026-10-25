@@ -283,9 +283,10 @@ The checked-in result is [docs/auto-map-sim-results.json](auto-map-sim-results.j
 ## What it does and does not model
 
 **Real:** F1TENTH Gym single-track dynamics with RK4 at 5ms, multi-car
-ray-cast LiDAR and collisions, 1081 beams over 270° matching the Hokuyo
-UST-10LX, the 0.33m LiDAR offset, the padded 0.58 x 0.31m body, 40Hz
-control, and the real ROS graph above the drivers.
+ray-cast LiDAR and collisions, the measured 0.26m LiDAR offset, the padded
+0.58 x 0.31m body, 40Hz control, and the real ROS graph above the drivers.
+The scan is 1081 beams over 270°, the 0.25° spacing that car 1's UST-30LX
+and car 2's UST-10LX share (datasheet values).
 
 **Dead-reckoned odometry, not ground truth.** `/odom` is integrated from
 wheel speed and the *commanded* servo angle exactly as `vesc_to_odom` does
@@ -302,17 +303,26 @@ vehicle model is from this car; all of it applies here.
 
 ### One thing the older harness cannot see
 
-Worth knowing if you rely on `run_validation.py`'s "no collision" result:
-in the pinned Gym revision, wall collision is
-`raw_scan - side_distances <= 0.005`, and with the vehicle parameters this
-workspace uses (`collision_body_center_x = wheelbase/2` against the ST
-model's own `-lr` offset) the LiDAR lands 0.04m *outside* the collision
-rectangle, so `side_distances` comes out all zeros. The test reduces to
-"did a beam return less than 5mm", which it cannot, because `range_min` is
-0.05m. **Wall collisions never fire.** Measured directly: a car driven
-straight into a wall at 1 m/s reports `collision=False` and keeps going,
-right off the edge of the map.
+**Gym's own collision flag is not a verdict here.** In the pinned Gym
+revision, wall collision is `raw_scan - side_distances <= 0.005`.
 
-`racerbot_sim` therefore samples the padded body against the occupancy
-grid itself (`SimBridge.body_contact`) and treats off-map as contact. That
-is what the validation criteria use.
+Under the old 0.33m LiDAR offset the sensor sat 0.04m *outside* gym's
+collision rectangle, `side_distances` came out all zeros, and the flag
+**never fired**: a car driven straight into a wall at 1 m/s reported
+`collision=False` and kept going, right off the edge of the map.
+
+The measured 0.26m offset puts the sensor back inside the box, and the
+flag **does fire now** (measured in the older harness on 2026-10-20). It
+fires on the *padded* envelope rather than the real chassis, and its
+response is `state[3:] = 0`, which zeroes the car's speed, steering and
+**yaw**.
+
+In the older harness that turned two cars round to lap backwards, so
+`FidelityPlant` switches the response off
+([tools/f1tenth_sim/README.md](../tools/f1tenth_sim/README.md) #12).
+`racerbot_sim` does **not** switch it off yet; see
+[known-issues.md](known-issues.md).
+
+Either way, `racerbot_sim` samples the padded body against the occupancy
+grid itself (`SimBridge.body_contact`) and treats off-map as contact. That,
+not gym's flag, is what the validation criteria use.

@@ -45,6 +45,28 @@ def test_imu_dataset_topics_are_bagged():
     assert not missing, f'record_run.py does not bag: {sorted(missing)}'
 
 
+def test_vehicle_state_outputs_are_bagged_beside_what_they_are_judged_against():
+    """A fused_speed:=true run is judged by /odom/fused against /odom, and
+    /steering/measured against the commanded steering on the drive topics
+    (src/racerbot_launch/launch/map_course_launch.py docstring)."""
+    required = {'/odom/fused', '/steering/measured', '/odom',
+                '/auto_map/drive', '/drive', '/sensors/servo_position_command'}
+    missing = required - set(_default_topics())
+    assert not missing, f'record_run.py does not bag: {sorted(missing)}'
+
+
+def test_slam_replay_and_log_topics_are_bagged():
+    """Every run must be replayable through slam_toolbox with either
+    odometry and judged against what SLAM did live (map_course_launch.py
+    gyro_odom docs): both odometries, the full TF stream, the scans, SLAM's
+    pose and pose graph; and every node's log on the same clock."""
+    required = {'/odom', '/odom/imu', '/tf', '/tf_static', '/scan', '/pose',
+                '/slam_toolbox/graph_visualization', '/map_metadata', '/rosout',
+                '/imu/bno/data', '/imu/vesc/data', '/imu/bno/raw', '/sensors/imu/raw'}
+    missing = required - set(_default_topics())
+    assert not missing, f'record_run.py does not bag: {sorted(missing)}'
+
+
 def test_the_launch_argument_default_is_built_from_that_list():
     """The bag records LaunchConfiguration('topics'), whose default must be
     DEFAULT_TOPICS -- otherwise editing the list changes nothing."""

@@ -41,7 +41,7 @@ def main(argv=None, *, gather_fn=None, sample_fn=None, out=None):
         notes = []
         live = None
         drivers_up = any(p.runs(exe) for p in snap.processes
-                         for exe in car.BRINGUP_EXES + (car.EXE_REALSENSE,))
+                         for exe in car.BRINGUP_EXES + (car.EXE_REALSENSE, car.EXE_JOY_TELEOP))
         if args.no_live:
             notes.append('live stage off (--no-live): topic layers skipped')
         elif drivers_up:

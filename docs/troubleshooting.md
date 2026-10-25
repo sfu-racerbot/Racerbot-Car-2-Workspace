@@ -22,6 +22,8 @@ ros2 run racerbot_doctor doctor
 
 **If it doesn't:** each `FAIL` line names the exact broken layer, e.g. "VESC not plugged in" versus "plugged in, but its driver crashed", and has a `fix:` line under it. Start bringup first if you want the ROS side checked too. Full guide: [src/racerbot_doctor/README.md](../src/racerbot_doctor/README.md).
 
+**Car won't move under [teleop](glossary.md) (manual driving with the gamepad)?** Run the doctor with bringup *and* `teleop_launch.py` up, **while holding LB and pushing the left stick**. Its *Drive path (teleop)* section names the first hop where the command stops: `/joy`, `/teleop`, `/ackermann_cmd` or `/commands/motor/speed`.
+
 If the doctor is all `PASS` and the car still misbehaves, the problem is above the hardware layer. Find your symptom below.
 
 ---
@@ -31,6 +33,7 @@ If the doctor is all `PASS` and the car still misbehaves, the problem is above t
 | What you're seeing | Go to |
 |---|---|
 | Holding LB does nothing | [Nothing happens when holding LB](#nothing-happens-when-holding-lb) |
+| `/joy` publishes nothing at all, though `joy_node` is running | [Not in the `input` group](#joy-is-silent-and-lb-does-nothing-not-in-the-input-group) |
 | A stick or trigger controls the wrong thing | [One axis doesn't do what you expect](#one-axis-doesnt-do-what-you-expect) |
 | Topics look right, car doesn't move | [ROS-side commands look right but the car doesn't respond](#ros-side-commands-look-right-but-the-car-doesnt-respond) |
 | Steering servo dead, VESC otherwise fine | [Steering servo does nothing](#steering-servo-does-nothing-vesc-connects-fine-fault_code-0) |
@@ -81,6 +84,28 @@ ros2 topic echo /joy
 > **This is more often the problem than people expect.** Holding a shoulder button while working the stick on the *same* side is easy. Holding **LB** while working the *opposite* stick — the right stick, for steering — is easy to lose grip on without noticing.
 >
 > The [deadman](glossary.md#deadman) is the button you must hold for the car to move at all. It needs a genuinely steady hold, and a momentary release reads as "stop".
+
+---
+
+## `/joy` is silent and LB does nothing: not in the `input` group
+
+**Symptom:** bringup and teleop are both up, `joy_node` is running, the F710 is in XInput mode, and `ros2 topic hz /joy` prints nothing at all. Holding LB does nothing. `/odom` is silent too (that's a side effect: `vesc_to_odom_node` waits for the first steering command, and none is ever sent).
+
+**Cause:** your user isn't in the `input` group. `joy_node` (Jazzy's version uses the SDL2 library) reads the gamepad through `/dev/input/event*`, which on this Jetson is readable only by group `input`.
+
+What makes this one confusing: `/dev/input/js0` is readable by everyone, so a quick `ls -l /dev/input/js0` looks fine. And `joy_node` doesn't print an error. It just finds no controller.
+
+Found on car 1, 2026-10-20. The doctor now reports it as `FAIL input permissions`.
+
+**Fix** (any terminal; needs your password):
+
+```bash
+sudo usermod -aG input $USER
+```
+
+Then **log out and back in** (or reboot). Group changes don't reach terminals that are already open. Then restart bringup and teleop.
+
+**Working when:** `id` lists `input`, and `ros2 topic hz /joy` shows about 20 Hz.
 
 ---
 
@@ -496,8 +521,8 @@ That is what eventually surfaced the real cause. Jumping to "must be a bad servo
 
 Axis numbering is one example. Here's a sharper one:
 
-> `bringup_launch.py` remaps `ackermann_cmd_out` → `ackermann_drive`, which looks like it should change the output topic name.
+> Until October 2026, `bringup_launch.py` remapped `ackermann_cmd_out` → `ackermann_drive`, which looks like it should change the output topic name.
 >
-> Empirically, the [mux](glossary.md#mux--multiplexer) still publishes to `/ackermann_cmd`. The remap doesn't match the [package](glossary.md#package)'s actual internal topic name, so it's a **silent no-op**.
+> Empirically, the [mux](glossary.md#mux--multiplexer) still published to `/ackermann_cmd`. The remap didn't match the [package](glossary.md#package)'s actual internal topic name, so it was a **silent no-op**. It has been deleted, and `src/racerbot_launch/test/test_drive_path_wiring.py` now fails on any remap that renames a name the mux never uses.
 
 Read the launch file, then check `ros2 node info` and `ros2 topic list` against it before trusting what the source implies.

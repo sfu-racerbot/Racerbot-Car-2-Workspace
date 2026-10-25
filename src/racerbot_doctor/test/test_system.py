@@ -86,6 +86,7 @@ def test_collects_drivers_and_device_nodes_across_interfaces(tmp_path):
     assert sorted(cam.videos) == ['video0', 'video1', 'video2', 'video3',
                                   'video4', 'video5']
     assert devs[('046d', 'c21f')].joysticks == ['js0']
+    assert devs[('046d', 'c21f')].events == ['event5']    # what joy_node (SDL2) opens
     assert devs[('046d', 'c21f')].drivers == ['xpad']
     vesc = devs[('0483', '5740')]
     assert vesc.ttys == ['ttyACM0']
@@ -223,13 +224,15 @@ class _Run:
 
 
 def _gather(tmp_path, *, probe_lidar_tcp, connect_ok=True, run=None,
-            vesc_link='ttyACM0', extra_procs=()):
+            vesc_link='ttyACM0', extra_procs=(), input_modes=None):
     sys_root = _car2_tree(tmp_path)
     dev = tmp_path / 'dev'
     (dev / 'sensors').mkdir(parents=True)
     (dev / 'input').mkdir()
     (dev / 'ttyACM0').write_text('')
-    (dev / 'input/js0').write_text('')
+    for node, mode in (input_modes or {'js0': 0o644, 'event5': 0o640}).items():
+        (dev / 'input' / node).write_text('')
+        os.chmod(dev / 'input' / node, mode)
     if vesc_link:
         os.symlink(f'../{vesc_link}', dev / 'sensors/vesc')
     proc = tmp_path / 'proc'
@@ -259,9 +262,25 @@ def test_gather_resolves_vesc_symlink_and_holders(tmp_path):
     assert snap.vesc_symlink == str(dev / 'ttyACM0')
     assert snap.vesc_symlink_rw is True
     assert snap.tty_holders == {str(dev / 'ttyACM0'): [500]}
-    assert snap.js_readable == {'js0': True}
+    assert snap.input_readable == {'js0': True, 'event5': True}
     assert snap.ifaces['enP8p1s0'].ipv4 == ['192.168.0.15/24']
     assert snap.env == {'ROS_DISTRO': 'jazzy'}
+
+
+def test_gather_checks_js_and_event_nodes_separately(tmp_path):
+    # Car 1, 2026-10-20: js0 0664, event5 0660 root:input, user not in
+    # `input`. Here the test owns the files, so owner bits model "can I".
+    snap, _, _ = _gather(tmp_path, probe_lidar_tcp=False,
+                         input_modes={'js0': 0o400, 'event5': 0o000})
+    assert snap.input_readable == {'js0': True, 'event5': False}
+    snap, _, _ = _gather(tmp_path / 'b', probe_lidar_tcp=False,
+                         input_modes={'js0': 0o444, 'event5': 0o444})
+    assert snap.input_readable == {'js0': True, 'event5': True}
+
+
+def test_gather_input_node_absent_from_dev_is_unreadable(tmp_path):
+    snap, _, _ = _gather(tmp_path, probe_lidar_tcp=False, input_modes={'js0': 0o644})
+    assert snap.input_readable == {'js0': True, 'event5': False}
 
 
 def test_gather_missing_vesc_symlink_is_none(tmp_path):

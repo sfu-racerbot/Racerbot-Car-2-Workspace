@@ -40,6 +40,7 @@ The car can record everything it saw and did. These tools turn that recording in
 | `launch.log` | Everything the driving node printed: one decision line a second, plus every state change (`DRIVE [...]` / `STOP [...]`) | you; `summarize_run` |
 | `events.jsonl` | The probe's machine-readable events: first messages, LB pressed/released, periodic status lines | `summarize_run`; `analyze_run.py` counts them |
 | `bag/` | A rosbag (a recording of ROS messages, replayable later): every message on `/scan`, `/odom`, `/drive`, `/joy`, `/ackermann_cmd`, `/tf` and `/parameter_events`, with timestamps | `analyze_run.py` |
+| `metadata/` | What the run was made with: git state and uncommitted diff of `racerbot-ws` and `imu-calibration`, copies of the IMU calibration files, every node's parameters (see [run-diagnostics.md](run-diagnostics.md#what-gets-captured-and-why-each-piece-earns-its-place)) | you, weeks later |
 | `analysis/` | Written by the tools below: `run.npz` (the bag as arrays), motion caches, `report.md`, plots | you |
 
 The 1 Hz lines in `launch.log` are a summary. Between them the node made about 39 more decisions, and only the bag has them. Only the bag also has the scans, so only it can answer "what did the car see when it braked".
@@ -59,6 +60,23 @@ python3 tools/run_analysis/analyze_run.py ~/.ros/racerbot_runs/20261019-200703
 **If it doesn't:** `ModuleNotFoundError: rosbag2_py` means ROS isn't sourced in that terminal. That only matters the first time. After that, `analysis/run.npz` exists and the tool runs without ROS.
 
 The first run of a long recording takes a minute or two, almost all of it scan matching. The result is cached, so later runs take seconds.
+
+## How the car really turned: gyros vs odometry vs LiDAR
+
+For a run recorded with the IMU side up (any `map_course` run since 2026-10-24), one more command compares every measure of turn rate the car has. These are `/odom`'s (computed from the steering *command*), the BNO085's and the VESC's gyros, the gyro odometry `/odom/imu`, and LiDAR scan matching.
+
+**Terminal 1**, ROS sourced as above for the first run:
+
+```bash
+python3 tools/run_analysis/imu_report.py ~/.ros/racerbot_runs/<run>
+```
+
+**Working when:** it prints three sections, also saved as `analysis/imu_report.txt`:
+- **Turn rate vs the bno gyro:** for each other source, the RMS and mean difference and the gain, while the car was moving. The `odom (steering model)` row is how wrong `/odom`'s turning is.
+- **Steering response:** steering lag and turning gain, the same fit as above, measured once by the gyro and once by scan matching. The two should agree; the gyro's is the cleaner.
+- **Heading correction SLAM applied** on top of `/odom` and on top of `/odom/imu`, over the run and per 100 m. Odometry that needs less correction is a better starting point for SLAM.
+
+**If it says `not enough driving`:** the car was parked or below 0.5 m/s. That's expected for a stationary test. The whole report, scan matching included, took 13 s for a one-minute recording on the car (2026-10-24); `--no-icp` skips the scan matching.
 
 ## Reading the report
 

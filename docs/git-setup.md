@@ -40,8 +40,11 @@ This workspace vendors exactly one package, for exactly that reason.
 
 ## Remote
 
-- GitHub, private: `https://github.com/sfu-racerbot/Racerbot-Car-2-Workspace.git`
-- Default and only branch: `main`
+- GitHub (public, checked 2026-10-24): `https://github.com/sfu-racerbot/Racerbot-Car-2-Workspace.git`
+- Default and only branch: `main`. Work branches are deleted once they are in `main` (last cleanup 2026-10-24).
+- Car 1 ([Racerbot-Car-1-Workspace](https://github.com/sfu-racerbot/Racerbot-Car-1-Workspace)) is a sister repo, not an upstream, configured here as the remote `car1` (`git fetch car1`). The two repos have no shared git history: car 1 started as a copy of this one, so changes move between them as patches (`git diff <old> car1/main`, then `git apply --3way`), never as merges. The last port from car 1 took everything up to `car1/main` `0265263` (2026-10-24), see [CHANGELOG.md](../CHANGELOG.md).
+
+**Before any port from car 1, read [car1-vs-car2.md](car1-vs-car2.md)**: the full list of what must stay car 2's, and the test that proves it did.
 
 **Gitignored, never expected in a commit:** `build/`, `install/`, `log/` (colcon artifacts), `__pycache__/` and `*.pyc`, `.sim`, `.venv-f1tenth/`, `.pytest_cache/`.
 
@@ -67,7 +70,7 @@ The workspace-specific integration code and documentation outside those two repo
 
 ---
 
-## The one vendored package, and the three fixes it carries
+## The one vendored package, and the five fixes it carries
 
 `f1tenth_system` used to be a submodule. It was **deliberately disconnected from upstream** and converted to a normal tracked directory.
 
@@ -301,6 +304,8 @@ colcon build --symlink-install --packages-select <package>
 4. **Commit normally:** `git add src/f1tenth_system && git commit`. There's no submodule pointer to bump — the files themselves are the commit.
 
 > **Do step 3 even when you're confident.** All four fixes are silently reverted by a naive overwrite, and the last two fail silently *and* unsafely.
+
+One more difference from upstream is **not** a fix and is safe to lose. Upstream's three bringups remap the [mux](glossary.md#mux--multiplexer)'s `ackermann_cmd_out` → `ackermann_drive`. The mux never uses the name `ackermann_cmd_out`, so the remap did nothing, and it was deleted here in October 2026. If a sync brings it back, `python3 -m pytest src/racerbot_launch/test/` fails in `test_drive_path_wiring.py`; delete the line again.
 
 ---
 

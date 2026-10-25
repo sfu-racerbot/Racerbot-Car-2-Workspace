@@ -65,11 +65,13 @@ Two independent faults, both of which had to be true:
 
    > **Since 2026-08-24 the car has been measured, and the LiDAR is 0.26 m
    > forward, not 0.33 m** ([hardware-reference.md](../../docs/hardware-reference.md#physical-dimensions-used-in-config)).
-   > 0.26 is *inside* ±0.29, so this fault no longer holds as written.
-   > Nobody has re-run the probe to find out whether gym's flag fires now,
-   > and nothing here depends on the answer: `plant.py` computes its own
-   > collision geometry and the harness takes its verdict from that. Do not
-   > reinstate a "no collision" claim that rests on gym's own flag.
+   > 0.26 is *inside* ±0.29, so this fault no longer holds as written, and
+   > gym's flag **does fire now** (measured 2026-10-20). It fires on the
+   > padded envelope, not the real chassis, and its yaw-zeroing response is
+   > switched off in `FidelityPlant` ([#12](#12-gyms-collision-response-is-switched-off-2026-10-20)).
+   > Nothing here depends on the flag: `plant.py` computes its own collision
+   > geometry and the harness takes its verdict from that. Do not reinstate
+   > a "no collision" claim that rests on gym's own flag.
 2. With `side_distances` all zero the test degenerates to "is any beam range
    ≤ 0.005 m", and `ScanSimulator2D.scan()` ends with
    `np.clip(scan, min_range, max_range)` where `min_range` is 0.05 m. No range

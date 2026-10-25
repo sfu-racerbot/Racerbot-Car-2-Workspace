@@ -68,6 +68,13 @@ def generate_launch_description():
     use_lifecycle_manager_arg = DeclareLaunchArgument(
         'use_lifecycle_manager', default_value='false',
         description='Enable the bond connection to an external nav2-style lifecycle manager.')
+    slam_odom_frame_arg = DeclareLaunchArgument(
+        'slam_odom_frame', default_value='odom',
+        description=(
+            "slam_toolbox's odom_frame: the frame whose transform to the LiDAR "
+            'gives it each scan\'s starting guess. odom = vesc_to_odom_node\'s '
+            'wheel-and-steering odometry (as always); odom_imu = the same with '
+            "the gyro's heading (imu_bridge vehicle_state_node, publish_odom_tf)."))
     use_sim_time_arg = DeclareLaunchArgument(
         'use_sim_time', default_value='false',
         description='False on the physical car; only a simulator publishes /clock.')
@@ -90,6 +97,7 @@ def generate_launch_description():
             {
                 'use_lifecycle_manager': use_lifecycle_manager,
                 'use_sim_time': LaunchConfiguration('use_sim_time'),
+                'odom_frame': LaunchConfiguration('slam_odom_frame'),
             },
         ],
     )
@@ -127,6 +135,7 @@ def generate_launch_description():
         autostart_arg,
         use_lifecycle_manager_arg,
         use_sim_time_arg,
+        slam_odom_frame_arg,
         slam_node,
         configure_event,
         activate_event,

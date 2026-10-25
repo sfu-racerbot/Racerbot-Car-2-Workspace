@@ -22,14 +22,18 @@ DEFAULT_TOPICS = {
     'camera': car.CAMERA_TOPIC,
     'tf_static': '/tf_static',
     'teleop': '/teleop',
+    'ackermann_cmd': '/ackermann_cmd',
+    'motor': '/commands/motor/speed',
+    'servo': '/commands/servo/position',
 }
 
 
 def sample(window_s, *, discovery_s=1.0, topics=None):
     """Count messages per topic over window_s seconds (after discovery_s of
     discovery, which is not counted), keep the last message of the topics
-    whose content is checked, read base_link->laser off /tf_static, and
-    count /teleop publishers. Results are keyed by the *default* topic
+    whose content is checked, count /joy messages with LB held and non-zero
+    motor speed commands, read base_link->laser off /tf_static, and count
+    /teleop publishers. Results are keyed by the *default* topic
     name, so checks.py never sees the test's remapped names.
     """
     import rclpy
@@ -37,15 +41,21 @@ def sample(window_s, *, discovery_s=1.0, topics=None):
     from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy,
                            qos_profile_sensor_data)
     from nav_msgs.msg import Odometry
+    from ackermann_msgs.msg import AckermannDriveStamped
     from sensor_msgs.msg import Image, Joy, LaserScan
+    from std_msgs.msg import Float64
     from tf2_msgs.msg import TFMessage
     from vesc_msgs.msg import VescStateStamped
 
     names = dict(DEFAULT_TOPICS, **(topics or {}))
-    # (key, msg type, keep the deserialized last message?)
+    # (key, msg type, keep the deserialized last message?) -- joy and motor
+    # are deserialized too, for the LB and non-zero counts below.
     wanted = [('core', VescStateStamped, True), ('scan', LaserScan, True),
-              ('odom', Odometry, False), ('joy', Joy, False),
-              ('camera', Image, False)]
+              ('odom', Odometry, False), ('joy', Joy, True),
+              ('camera', Image, False),
+              ('teleop', AckermannDriveStamped, False),
+              ('ackermann_cmd', AckermannDriveStamped, False),
+              ('motor', Float64, True), ('servo', Float64, False)]
 
     ctx = rclpy.Context()
     rclpy.init(context=ctx)
@@ -56,12 +66,20 @@ def sample(window_s, *, discovery_s=1.0, topics=None):
         executor.add_node(node)
         stats = {key: TopicStats() for key, _, _ in wanted}
         laser_tf = []
+        flags = {'joy': 0, 'motor': 0}
+        lb = car.JOY_LB_BUTTON
+        is_flagged = {
+            'joy': lambda m: len(m.buttons) > lb and m.buttons[lb] == 1,
+            'motor': lambda m: m.data != 0.0,
+        }
 
         def counter(key, keep):
             def cb(msg):
                 stats[key].count += 1
                 if keep:
                     stats[key].last = msg
+                if key in is_flagged and is_flagged[key](msg):
+                    flags[key] += 1
             return cb
 
         for key, msg_type, keep in wanted:
@@ -89,6 +107,7 @@ def sample(window_s, *, discovery_s=1.0, topics=None):
         spin_until(time.monotonic() + discovery_s)
         for st in stats.values():
             st.count = 0
+        flags.update(joy=0, motor=0)
         start = time.monotonic()
         spin_until(start + window_s)
         elapsed = time.monotonic() - start
@@ -98,7 +117,8 @@ def sample(window_s, *, discovery_s=1.0, topics=None):
         return LiveSample(
             topics={DEFAULT_TOPICS[key]: st for key, st in stats.items()},
             teleop_publishers=node.count_publishers(names['teleop']),
-            laser_tf=laser_tf[0] if laser_tf else None)
+            laser_tf=laser_tf[0] if laser_tf else None,
+            joy_lb_held=flags['joy'], motor_nonzero=flags['motor'])
     finally:
         if node is not None:
             node.destroy_node()

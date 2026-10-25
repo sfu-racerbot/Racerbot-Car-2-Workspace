@@ -88,11 +88,13 @@ That's the entire contract. `ackermann_mux` takes it from there.
 ### The message fields that matter
 
 ```
-drive.steering_angle   # radians, positive = left. Clamped in vesc.yaml to what the physical rack can do (servo_min/max: 0.15-0.85 → roughly ±0.34 rad in the stock config)
+drive.steering_angle   # radians, positive = left. Clipped by servo_min/servo_max in vesc.yaml to what the physical rack can do
 drive.speed            # m/s, positive = forward
 ```
 
-Two things that catch people out. **Steering is in radians, not degrees** — ±0.34 rad is about ±19°, which is all the physical steering rack has. And **speed is in metres per second**, so `1.0` is a brisk walking pace, not a crawl.
+Two things that catch people out. **Steering is in radians, not degrees.** One radian is about 57°, so the rack's whole range is only a few tenths of a radian each way. This car's full lock and the autonomy limit are in [hardware-reference.md](hardware-reference.md#vesc-motor--steering-controller); cap your node at the autonomy limit.
+
+And **speed is in metres per second**, so `1.0` is a brisk walking pace, not a crawl.
 
 ---
 

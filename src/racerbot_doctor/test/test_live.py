@@ -24,16 +24,22 @@ import rclpy
 from geometry_msgs.msg import TransformStamped
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Joy, LaserScan
+from std_msgs.msg import Float64
 from ackermann_msgs.msg import AckermannDriveStamped
 from tf2_msgs.msg import TFMessage
+
+from racerbot_doctor import car
 
 from racerbot_doctor.live import sample
 
 TOPICS = {'core': '/test_only/sensors/core', 'scan': '/test_only/scan',
           'odom': '/test_only/odom', 'joy': '/test_only/joy',
-          'camera': '/test_only/camera', 'tf_static': '/test_only/tf_static',
-          'teleop': '/test_only/teleop'}
+          'camera': '/test_only/camera',
+          'tf_static': '/test_only/tf_static', 'teleop': '/test_only/teleop',
+          'ackermann_cmd': '/test_only/ackermann_cmd',
+          'motor': '/test_only/commands/motor/speed',
+          'servo': '/test_only/commands/servo/position'}
 
 
 def test_runs_on_the_isolated_test_domain():
@@ -101,7 +107,9 @@ def test_results_keyed_by_real_topic_names_whatever_was_sampled(fake_car):
     live = sample(0.3, discovery_s=0.5, topics=TOPICS)
     assert sorted(live.topics) == sorted(
         ['/sensors/core', '/scan', '/odom', '/joy',
-         '/camera/camera/color/image_raw'])
+         '/camera/camera/color/image_raw', '/teleop',
+         '/ackermann_cmd', '/commands/motor/speed',
+         '/commands/servo/position'])
 
 
 def test_counts_teleop_publishers(fake_car):
@@ -114,7 +122,38 @@ def test_counts_teleop_publishers(fake_car):
         node.destroy_publisher(pub)
 
 
+def test_counts_lb_held_and_nonzero_motor_commands(fake_car):
+    # Oracle: the helper publishes a fixed pattern per tick -- LB down on
+    # every other /joy, motor speed non-zero on every third command -- so
+    # the counted fractions must match, whatever the exact tick count.
+    node, _ = fake_car
+    joy_pub = node.create_publisher(Joy, TOPICS['joy'], 10)
+    motor_pub = node.create_publisher(Float64, TOPICS['motor'], 10)
+    n = [0]
+
+    def tick():
+        n[0] += 1
+        buttons = [0] * 11
+        buttons[car.JOY_LB_BUTTON] = n[0] % 2
+        buttons[car.JOY_LB_BUTTON + 1] = 1     # RB always: must not count
+        joy_pub.publish(Joy(buttons=buttons))
+        motor_pub.publish(Float64(data=1200.0 if n[0] % 3 == 0 else 0.0))
+    timer = node.create_timer(0.02, tick)
+    try:
+        live = sample(2.0, discovery_s=1.5, topics=TOPICS)
+    finally:
+        node.destroy_timer(timer)
+        node.destroy_publisher(joy_pub)
+        node.destroy_publisher(motor_pub)
+    joys = live.topics['/joy'].count
+    motors = live.topics['/commands/motor/speed'].count
+    assert joys >= 50 and motors >= 50          # 50 Hz for 2 s, lossy-ish
+    assert abs(live.joy_lb_held - joys / 2) <= 2
+    assert abs(live.motor_nonzero - motors / 3) <= 2
+
+
 def test_nothing_on_the_graph_is_empty_not_an_error():
     live = sample(0.3, discovery_s=0.3, topics=TOPICS)
     assert all(st.count == 0 for st in live.topics.values())
     assert live.laser_tf is None
+    assert live.joy_lb_held == 0 and live.motor_nonzero == 0

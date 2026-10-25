@@ -1,0 +1,12 @@
+# Training dependencies for FIR, installed with `pip install --no-index` from the
+# Alliance wheelhouse inside each job (see slurm/fir_env.sh). Keep this list to
+# packages the wheelhouse carries; anything else goes in $NR_WHEELS (README).
+# The CPU referee (tools/f1tenth_sim) does NOT use this list -- it runs from its
+# own .sim/python, built once on a login node by tools/f1tenth_sim/setup.sh.
+torch
+numpy==1.26.4   # must equal tools/f1tenth_sim/requirements.txt: the eval worker loads torch from this
+                # venv and the referee's numba from .sim/python into one process
+scipy
+PyYAML
+tensorboard
+Pillow          # held-out map images (neural_racer_train/heldout.py)

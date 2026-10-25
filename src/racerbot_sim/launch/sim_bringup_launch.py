@@ -90,11 +90,6 @@ def generate_launch_description():
         executable='ackermann_mux',
         name='ackermann_mux',
         parameters=[mux_config],
-        # Copied verbatim from bringup_launch.py, dead remap included: the
-        # mux advertises "ackermann_cmd", never "ackermann_cmd_out", so this
-        # renames nothing. Kept identical anyway -- the value of this launch
-        # file is that the arbitration here is bit-for-bit the car's.
-        remappings=[('ackermann_cmd_out', 'ackermann_drive')],
     )
     static_tf = Node(
         package='tf2_ros',

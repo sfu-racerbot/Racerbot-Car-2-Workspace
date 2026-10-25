@@ -65,8 +65,9 @@ def read_usb_devices(sys_root):
             dev.ttys += _listdir(os.path.join(idir, 'tty'))
             dev.videos += _listdir(os.path.join(idir, 'video4linux'))
             for inp in _listdir(os.path.join(idir, 'input')):
-                dev.joysticks += [n for n in _listdir(
-                    os.path.join(idir, 'input', inp)) if n.startswith('js')]
+                nodes = _listdir(os.path.join(idir, 'input', inp))
+                dev.joysticks += [n for n in nodes if n.startswith('js')]
+                dev.events += [n for n in nodes if n.startswith('event')]
         devices.append(dev)
     return devices
 
@@ -163,9 +164,9 @@ def gather(*, sys_root='/sys', dev_root='/dev', proc_root='/proc',
     snap.tty_holders = tty_holders(proc_root, ttys)
 
     for d in snap.usb:
-        for js in d.joysticks:
-            snap.js_readable[js] = os.access(
-                os.path.join(dev_root, 'input', js), os.R_OK)
+        for node in d.joysticks + d.events:
+            snap.input_readable[node] = os.access(
+                os.path.join(dev_root, 'input', node), os.R_OK)
 
     ping = _run_quiet(run, ['ping', '-c', '1', '-W', '1', car.LIDAR_IP], 3.0)
     snap.lidar_ping = None if ping is None else ping.returncode == 0

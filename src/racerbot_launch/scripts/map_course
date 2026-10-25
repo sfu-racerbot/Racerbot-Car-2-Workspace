@@ -37,6 +37,15 @@ def _running(pattern) -> bool:
     return subprocess.run(['pgrep', '-f', pattern], capture_output=True).returncode == 0
 
 
+def launch_arguments(argv, simulated):
+    """argv as given, plus imu:=false in the simulator unless imu was set:
+    there is no IMU there, and the BNO bridge would read the real sensor on
+    a car that is not moving."""
+    if simulated and not any(a.startswith('imu:=') for a in argv):
+        return [*argv, 'imu:=false']
+    return list(argv)
+
+
 def output_directory(argv):
     """The output_directory:= argument if given, else the launch default."""
     for arg in argv:
@@ -105,7 +114,8 @@ def main(argv=None):
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, 'w', errors='replace') as handle:
         child = subprocess.Popen(
-            ['ros2', 'launch', 'racerbot_launch', 'map_course_launch.py', *argv],
+            ['ros2', 'launch', 'racerbot_launch', 'map_course_launch.py',
+             *launch_arguments(argv, _running(SIM_DRIVER))],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             errors='replace', bufsize=1)
         while True:

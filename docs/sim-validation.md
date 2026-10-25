@@ -185,7 +185,7 @@ ros2 launch racerbot_launch dashboard_launch.py
 web_dashboard_node ready: map=/map scan=/scan pose=/pf/viz/inferred_pose|/slam_pose
 drive=/ackermann_cmd odom=/odom joy=/joy (LB index 4).
 live tuning enabled for pure_pursuit_node, gap_follow_node.
-Serving on port 8080, every interface, IPv4 + IPv6
+Serving the WebSocket (/ws) on port 8080, every interface, IPv4 + IPv6 -- no pages here; open the dashboard from the site
 ```
 
 **Then open https://dashboard.sfuracerbot.ca** on your laptop or phone, sign in, and pick **Car 2** — the simulator runs on car 2's own graph, so the site shows it as the car. The car serves no pages itself any more ([web-dashboard.md](web-dashboard.md)).

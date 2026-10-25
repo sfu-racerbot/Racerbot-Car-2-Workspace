@@ -1,0 +1,99 @@
+# vehicle_state_node: fused speed (/odom/fused) and measured steering angle
+# (/steering/measured). Support code, cannot move the car. Every value here
+# must equal EstimatorConfig's default in imu_bridge/vehicle_state.py
+# (test_vehicle_state_config.py checks it). Write floats with a decimal
+# point: ROS refuses an integer for a parameter declared as a double.
+vehicle_state_node:
+  ros__parameters:
+    # ---- topics
+    # Wheel odometry in (vesc_to_odom_node). Its speed comes from motor ERPM.
+    odom_topic: /odom
+    # Out: a copy of /odom with twist.linear.x replaced by the fused speed.
+    # Never /odom itself (the node refuses): SLAM and the odom -> base_link
+    # transform stay on the wheel odometry.
+    fused_odom_topic: /odom/fused
+    # Out: sensor_msgs/JointState, one joint "steering", radians, positive left.
+    steering_topic: /steering/measured
+    # In: imu_bridge_node's calibrated, car-axis IMUs.
+    bno_topic: /imu/bno/data
+    vesc_topic: /imu/vesc/data
+    # How often /steering/measured is published [Hz].
+    steering_rate_hz: 50.0
+    # Out: gyro odometry, nav_msgs/Odometry in imu_odom_frame (always published).
+    imu_odom_topic: /odom/imu
+    # The frame it is in. With publish_odom_tf the node also publishes
+    # imu_odom_frame -> odom so that imu_odom_frame -> base_link is the gyro
+    # pose; then point slam_toolbox's odom_frame here (map_course gyro_odom:=true).
+    imu_odom_frame: odom_imu
+    # Publish that transform. Off by default: it is only correct when nothing
+    # else gives `odom` a parent -- slam_toolbox must be on imu_odom_frame.
+    # The node stops publishing it, for good, the moment it sees another
+    # parent of `odom` on /tf.
+    publish_odom_tf: false
+    # vesc_to_odom_node's frames: its odom -> base_link transform on /tf is
+    # what gyro odometry re-integrates.
+    odom_frame: odom
+    base_frame: base_link
+
+    # ---- geometry (car 1; docs/hardware-reference.md)
+    # Rear axle to front axle [m]. Same as vesc.yaml's wheelbase.
+    wheelbase: 0.36
+    # How far ahead of base_link (the rear axle) each IMU sits [m]. The BNO
+    # is on the front axle, one wheelbase ahead; the VESC near the centre of
+    # gravity (not measured -- it only matters with accel_source: vesc).
+    bno_x_offset: 0.36
+    vesc_x_offset: 0.18
+
+    # ---- speed filter
+    # Whose accelerometer predicts the speed: bno, vesc, or none (= publish
+    # the wheel speed unchanged). bno: car 1's VESC mount rotation in
+    # imu-calibration's car.yaml is still car 2's, so the VESC's x axis is
+    # not trusted yet (its z gyro is: both lie flat).
+    accel_source: bno
+    # Speed random walk from accelerometer error [m/s per sqrt(s)].
+    sigma_accel: 0.15
+    # Accelerometer bias creep [m/s^2 per sqrt(s)].
+    sigma_bias_rw: 0.02
+    # Wheel-speed noise, 1 sigma [m/s] (imu-calibration's estimator.sigma_wheel).
+    sigma_wheel: 0.08
+    # Prior on the accelerometer's forward bias, 1 sigma [m/s^2].
+    sigma_bias0: 0.3
+    # The published speed never differs from the wheel speed by more [m/s].
+    # This is the whole of what /odom/fused can change for a consumer.
+    max_divergence: 0.3
+    # Filter more than this far from the wheels restarts from them [m/s].
+    reset_divergence: 1.0
+    # Wheel speed this many sigmas from the prediction is slip [-] ...
+    slip_gate: 4.0
+    # ... for at most this long; then the wheels are believed again [s].
+    max_slip_time: 0.5
+    # IMU samples older than this are stale [s].
+    imu_timeout: 0.1
+    # Wheel speeds older than this are stale [s] (steering goes NaN).
+    wheel_timeout: 0.2
+    # Accelerometer samples further apart are not integrated [s].
+    max_accel_dt: 0.05
+
+    # ---- steering
+    # |speed| below this gives NaN [m/s]: the angle is atan(L * yaw / v).
+    min_steering_speed: 0.3
+    # Weight of each gyro in the yaw-rate average; 0.0 leaves one out.
+    bno_gyro_weight: 1.0
+    vesc_gyro_weight: 1.0
+    # Steady (bno - vesc) yaw-rate gap that means one gyro is wrong [rad/s],
+    # and the time constant it is averaged over [s]. Steering is NaN then.
+    gyro_disagree_threshold: 0.15
+    gyro_disagree_tau: 0.5
+
+    # ---- gyro odometry
+    # Gyros that may supply heading, in order of preference. ['none'] =
+    # always vesc_to_odom's own heading (ROS can't load an empty list).
+    # bno first: 250 Hz, stamped by its own clock; the VESC's is 50 Hz and
+    # stamped on arrival, and its mount on car 1 is still car 2's.
+    heading_sources: ['bno', 'vesc']
+    # Samples of one gyro further apart than this are a gap; a step across
+    # one uses the next source or the steering model [s].
+    max_gyro_gap: 0.05
+    # How far a gyro's heading may be extrapolated past its newest sample to
+    # reach an odometry stamp [s]; corrected on the next step.
+    max_heading_extrapolation: 0.05

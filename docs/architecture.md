@@ -47,7 +47,7 @@ Boxes are nodes (running programs). Arrows are topics (named channels carrying m
 
 Read it top to bottom: a human input at the top, a spinning wheel at the bottom. Every stage in between is a separate program that could be swapped out without the others noticing.
 
-Two arrows are labelled `tf:` rather than with a topic name. [TF](glossary.md#tf--transform--frame) is ROS2's bookkeeping for "where things are relative to each other" — it's how the system knows the LiDAR sits 33 cm in front of the car's centre. There's more on frames [at the end of this page](#frame-conventions).
+Two arrows are labelled `tf:` rather than with a topic name. [TF](glossary.md#tf--transform--frame) is ROS2's bookkeeping for "where things are relative to each other" — it's how the system knows how far the LiDAR sits ahead of the rear axle, which is the car's origin (`base_link`). The measured numbers are in [hardware-reference.md](hardware-reference.md#physical-dimensions-used-in-config). There's more on frames [at the end of this page](#frame-conventions).
 
 ```
                                     ┌─────────────┐
@@ -101,7 +101,7 @@ Two arrows are labelled `tf:` rather than with a topic name. [TF](glossary.md#tf
   └──────────────┘                                    │ urg_node │──► /scan (sensor_msgs/LaserScan)   (bringup_launch.py)
                                                         └──────────┘
 
-  static_transform_publisher ──► tf: base_link → laser (estimated offset: 0.33m fwd, 0.11m up)   (bringup_launch.py)
+  static_transform_publisher ──► tf: base_link → laser (measured offset, see hardware-reference.md)   (bringup_launch.py)
 ```
 
 **The chain in words:**
@@ -283,12 +283,12 @@ Comparing the last three is how you diagnose "why isn't the car doing what my co
 
 | Package | Where it comes from | Role |
 |---|---|---|
-| `f1tenth_stack` (in `f1tenth_system`) | git submodule, `humble-devel` | Owns the launch files and all the YAML configs (`vesc.yaml`, `sensors.yaml`, `mux.yaml`, `joy_teleop.yaml`) that wire everything below together |
-| `vesc_driver`, `vesc_ackermann`, `vesc_msgs` (in `vesc`) | git submodule (nested inside `f1tenth_system`), `humble` | Talks to the VESC over serial; converts between Ackermann drive commands and raw VESC motor/servo commands |
+| `f1tenth_stack` (in `f1tenth_system`) | vendored in `f1tenth_system` (plain tracked files, not a submodule; see [git-setup.md](git-setup.md)), was `humble-devel` | Owns the launch files and all the YAML configs (`vesc.yaml`, `sensors.yaml`, `mux.yaml`, `joy_teleop.yaml`) that wire everything below together |
+| `vesc_driver`, `vesc_ackermann`, `vesc_msgs` (in `vesc`) | vendored in `f1tenth_system` (plain tracked files, not a submodule; see [git-setup.md](git-setup.md)) | Talks to the VESC over serial; converts between Ackermann drive commands and raw VESC motor/servo commands |
 | `serial_driver`, `io_context` (in `transport_drivers`) | git submodule, `humble` | Low-level serial port library the VESC driver is built on |
 | `urg_node` | apt (`ros-jazzy-urg-node`) | Hokuyo LiDAR driver |
-| `joy`, `joy_teleop`, `teleop_tools` | apt / submodule | Gamepad input and teleop mapping |
-| `ackermann_mux` (in `f1tenth_system`) | git submodule, `humble-devel` | Arbitrates between teleop and autonomy commands — see safety model below |
+| `joy`, `joy_teleop`, `teleop_tools` | apt (`joy`) / vendored in `f1tenth_system` (`joy_teleop`, `teleop_tools`) | Gamepad input and teleop mapping |
+| `ackermann_mux` (in `f1tenth_system`) | vendored in `f1tenth_system` (plain tracked files, not a submodule; see [git-setup.md](git-setup.md)) | Arbitrates between teleop and autonomy commands — see safety model below |
 | `particle_filter`, `range_libc` | git submodules, `humble-devel` | Monte Carlo localization against a saved map |
 | `slam_toolbox` | apt (`ros-jazzy-slam-toolbox`) | Builds a map during manual or autonomous course discovery; remains online for the automatic race |
 | `gap_follow` | local, `src/gap_follow` | Baseline reactive autonomy (follow-the-gap) — see [writing-your-own-node.md](writing-your-own-node.md), this package *is* the worked example |
@@ -352,7 +352,7 @@ This is *on top of* the `ackermann_mux` arbitration above, not instead of it. Ma
 
 **Why a second layer at all?** Because mux arbitration only protects you when teleop is running. Run autonomy the correct way — without `teleop_launch.py` — and there is nothing on `/teleop` to override with. The deadman is what covers that gap. Without it, "the car is driving itself and I can't stop it" is a real state the system can reach.
 
-**How it's enforced.** All three moving/command-selecting nodes implement the check in code: `gap_follow_node`, `pure_pursuit_node`, and `auto_map_race_node`.
+**How it's enforced.** Every moving or command-selecting node implements the check in code: `gap_follow_node`, `pure_pursuit_node`, `auto_map_race_node` and `neural_racer_node`.
 
 Each one subscribes to `/joy` directly and refuses to publish a non-zero drive command unless:
 
@@ -365,7 +365,7 @@ Note the dependency this creates: **`joy_node` must always be up** for any auton
 
 **The two rules that follow from this:**
 
-1. **Never set `enable_deadman` to `false`.** It's exposed as a parameter (default `true` in all three configs), but changing it is a unilateral decision to bypass a standing team policy — not a tuning change. If you think it should be relaxed, that's a conversation with the team, not an edit.
+1. **Never set `enable_deadman` to `false`.** It's exposed as a parameter (default `true` in every shipped config), but changing it is a unilateral decision to bypass a standing team policy — not a tuning change. If you think it should be relaxed, that's a conversation with the team, not an edit.
 
 2. **Any new node that can move the car must implement the same check.** This applies to anything publishing to `/drive`, `/ackermann_cmd`, or `/commands/motor|servo/*`. The required pattern is in [writing-your-own-node.md](writing-your-own-node.md#the-interface-contract), and `gap_follow_node` is the reference implementation to copy from.
 
@@ -375,16 +375,19 @@ Note the dependency this creates: **`joy_node` must always be up** for any auton
 
 A **frame** is a named coordinate system — an agreed answer to "position relative to what?". The LiDAR reports distances from where the LiDAR is; odometry reports position from where the car started. Those are different origins, so ROS2 tracks the relationships between them (the "TF tree") and converts between them for you.
 
-The four frames on this car:
+The five frames on this car:
 
 | Frame | Where it is | Notes |
 |---|---|---|
 | `base_link` | Origin of the car, at the rear axle | Pairs with the measured `wheelbase: 0.36m` in `vesc.yaml`, which `vesc_to_odom_node` uses for odometry |
 | `laser` | The Hokuyo's position | **Measured** at `+0.26m` forward and `+0.11m` up from `base_link`, fixed via `static_transform_publisher`. The 0.26m is the 0.36m wheelbase less the 0.10m the sensor sits behind the front axle — see [hardware-reference.md](hardware-reference.md#physical-dimensions-used-in-config) |
 | `odom` | Where the car started | Continuous but **drifting**, published by `vesc_to_odom_node` from wheel-speed and servo-angle integration |
+| `odom_imu` | Where the car started, by gyro heading | Optional. `imu_bridge`'s `vehicle_state_node` publishes `/odom/imu` in this frame: `vesc_to_odom`'s distance with the gyro's heading. With `gyro_odom:=true` it also publishes `odom_imu → odom`, and `slam_toolbox` maps on `odom_imu` — see [src/imu_bridge/README.md](../src/imu_bridge/README.md) |
 | `map` | A fixed point in the mapped world | Only exists once `slam_toolbox` or `particle_filter`'s `map_server` is running |
 
 **Why `odom` drifts, and why it matters.** It's computed from how fast the wheels turned and where the steering was pointed — dead reckoning, with no encoders and no IMU fusion. Wheelspin, tyre slip and small angle errors accumulate and never get corrected. Over a lap it can be metres off.
+
+`odom_imu` swaps in the gyro's heading for the steering-angle estimate, but it is still dead reckoning and still drifts.
 
 That's the whole reason localization exists: `particle_filter` corrects the drifting `odom` estimate against a known map, which is why racing on a saved map needs it and reactive `gap_follow` doesn't.
 

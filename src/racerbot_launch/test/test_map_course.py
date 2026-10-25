@@ -166,3 +166,24 @@ def test_the_recorder_gets_its_own_folder_not_the_map_run_folder():
     for name in ('map_course_launch.py', 'auto_map_race_launch.py'):
         text = (SCRIPT.parents[1] / 'launch' / name).read_text()
         assert "'output_directory': '~/.ros/racerbot_runs'" in text, name
+
+
+def test_simulator_runs_get_imu_false_unless_imu_was_given():
+    # oracle: spec -- map_course_launch.py docstring: no IMU in the simulator.
+    assert mc.launch_arguments(['laps:=4'], simulated=True) == ['laps:=4', 'imu:=false']
+    assert mc.launch_arguments(['imu:=true'], simulated=True) == ['imu:=true']
+    assert mc.launch_arguments(['laps:=4'], simulated=False) == ['laps:=4']
+    assert mc.launch_arguments([], simulated=False) == []
+
+
+def test_main_in_the_simulator_launches_without_the_imu(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(mc, 'LOG_DIRECTORY', str(tmp_path / 'logs'))
+    out = tmp_path / 'runs'
+    args_file = tmp_path / 'args'
+    bin_dir = _fake_ros2(tmp_path, f'echo "$@" > {args_file}\nexit 0\n')
+    monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
+    _drivers(monkeypatch, 'gym_bridge_node')
+    assert mc.main([f'output_directory:={out}']) == 0
+    assert args_file.read_text().split() == [
+        'launch', 'racerbot_launch', 'map_course_launch.py',
+        f'output_directory:={out}', 'imu:=false']

@@ -33,3 +33,17 @@ imu_bridge_node:
     # Seconds of stillness averaged at startup to remove the gyro's
     # remaining bias. Keep the car still that long after launch. 0 = off.
     startup_bias_s: 3.0
+    # --- /imu/status: whether /imu/data can be trusted (imu_health.py) ---
+    # neural_racer requires "ok" (require_imu: true) and commands zero
+    # otherwise; other consumers can ignore it.
+    # No primary-IMU sample for longer than this -> fault [s]. neural_racer's
+    # own imu_timeout_sec is 0.1; the VESC IMU runs ~50 Hz, the BNO ~250 Hz.
+    status_stale_timeout_s: 0.1
+    # Seconds of stillness (same test as startup_bias_s) over which the mean
+    # acceleration must be gravity pointing up. A failure latches until restart.
+    gravity_window_s: 1.0
+    # |mean acceleration| must be 9.80665 +/- this [m/s^2] ...
+    gravity_tolerance: 0.5
+    # ... and within this many degrees of +z. Wrong units or a wrong mount
+    # rotation in car.yaml fail it.
+    gravity_max_tilt_deg: 10.0

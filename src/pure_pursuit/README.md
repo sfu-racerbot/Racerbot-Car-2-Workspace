@@ -93,6 +93,10 @@ $$\text{backward (brake):}\quad v_i \leftarrow \min\big(v_i,\ \sqrt{v_{i+1}^2 + 
 
 The **backward pass is what actually creates real braking zones** — it propagates a corner's low speed limit backward into the straight leading up to it, so the car starts slowing down early instead of "discovering" the corner's limit only at the apex. A closed loop has no single seed point for these sweeps (index 0's "previous" is the *last* index, not yet finalized on the first pass), so both are repeated `smoothing_passes` times (default `5`) to let the start/finish seam converge — harmless to over-run since both passes only ever lower a value, never raise one.
 
+**Shared grip (friction ellipse, on by default).** In both sweeps the longitudinal budget shrinks while the car is also cornering.
+
+$a_{long,available} = a_{long,max}\sqrt{1 - (v^2\kappa / a_{lat,max})^2}$ is evaluated at the neighbour whose speed is already known. The full budget is available on a straight, and none at a corner taken at the cornering limit. `generate_velocity_profile`, `optimize_raceline` and `auto_map_race_node` all use it; `--no-friction-ellipse` turns it off for comparison.
+
 This is **not** a time-optimal racing line (that needs a full path+speed nonlinear optimizer, e.g. TUM's `global_racetrajectory_optimization`) — it's a fast, dependency-light approximation using the same cornering-speed-plus-smoothing technique, without also re-optimizing the path geometry itself. See [docs/racing-autonomy.md](../../docs/racing-autonomy.md#limitations-and-how-to-go-further) for what a further iteration could add.
 
 ### 5. CSV I/O

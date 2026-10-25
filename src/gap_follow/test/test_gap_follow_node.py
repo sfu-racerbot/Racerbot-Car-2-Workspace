@@ -384,6 +384,38 @@ def test_stops_when_odometry_goes_stale_while_ttc_is_enabled(node):
     assert node.last_decision_state == 'odometry_stale'
 
 
+class _RecordingLogger:
+    def __init__(self):
+        self.lines = []
+
+    def _record(self, message, *args, **kwargs):
+        self.lines.append(message)
+
+    debug = info = warn = warning = error = _record
+
+
+@pytest.mark.parametrize('scan_age_sec', [None, 1.0])
+def test_a_silent_scan_stream_logs_who_really_stops_the_car(node, scan_age_sec):
+    # ackermann_mux only republishes what it receives (topic_handle.hpp's
+    # callback -> publishAckermann) and publishes nothing when /drive times
+    # out, so the log must not promise the mux stops the car: only the VESC
+    # firmware's own command timeout does (set in VESC Tool, not from ROS).
+    published = _capture(node)
+    logger = _RecordingLogger()
+    node.get_logger = lambda: logger
+    _ready(node, speed=1.0)
+    if scan_age_sec is not None:
+        node.last_scan_time = node.get_clock().now() - Duration(seconds=scan_age_sec)
+    node._sensor_status_callback()
+    assert published == []
+    assert node.last_decision_state == (
+        'waiting_for_scan' if scan_age_sec is None else 'scan_stale')
+    assert len(logger.lines) == 1
+    line = logger.lines[0]
+    assert 'mux will stop' not in line and 'mux stops' not in line, line
+    assert 'VESC' in line and 'command timeout' in line, line
+
+
 def _wall_ahead(distance, half_angle_deg=10.0, n=541, span=math.pi):
     """A slab at `distance` straight ahead, open space either side of it."""
     increment = span / (n - 1)

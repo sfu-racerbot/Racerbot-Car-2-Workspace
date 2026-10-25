@@ -114,10 +114,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               'paint (default: %(default)s).')
     vehicle.add_argument('--wheelbase', type=float, default=0.36,
                          help='Wheelbase, m (default: %(default)s).')
-    vehicle.add_argument('--max-steering-angle', type=float, default=0.26,
+    vehicle.add_argument('--max-steering-angle', type=float, default=0.30,
                          help='Steering limit, rad. With the wheelbase this sets the tightest '
                               'curvature the car can physically drive, which the finished line '
-                              'is checked against (default: %(default)s).')
+                              'is checked against. Matches auto_map_race.yaml\'s '
+                              'profile_max_steering_angle (default: %(default)s).')
     vehicle.add_argument('--allow-infeasible', action='store_true',
                          help='Write the file even if the curvature or clearance check fails. '
                               'For inspection only.')
