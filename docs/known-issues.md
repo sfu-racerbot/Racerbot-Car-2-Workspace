@@ -81,12 +81,6 @@ On car 2 `import osqp` works (2026-10-24). `python3 -c "import osqp"` fails on c
 
 **Fix:** on each car, read **VESC Tool → App Settings → General → Timeout** and record it in `docs/hardware-reference.md`.
 
-### The VESC IMU: two docs disagree about which car reads zeros
-
-`docs/hardware-reference.md` says `/sensors/imu/raw` on "this car" publishes at 50 Hz with every field `0.0` (measured on car 2, 2026-08-19, and copied into car 1's copy). Since then `imu_bridge`'s README describes car 2's VESC IMU as working and mounted about 85° from the car, so car 2's doc may be stale too (not re-checked: bringup was not running on 2026-10-24). The removed `racerbot_imu` README said all-zero fields happen "as on car 2" and treated car 1's VESC IMU as working. `imu_bridge`'s `/imu/status` now reports `fault: all zero` for a disabled IMU, which answers it for whichever IMU is primary.
-
-**Fix:** on each car, with bringup running, `ros2 topic echo /sensors/imu/raw --field angular_velocity` and rotate the car by hand. Correct whichever doc is wrong. If it is zero, check **VESC Tool → App Settings → IMU** (a sample rate of 0 means off).
-
 ## Documentation
 
 ## Cross-car drift

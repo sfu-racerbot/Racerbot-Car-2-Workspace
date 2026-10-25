@@ -188,11 +188,11 @@ So the car's heading is an open-loop integration of what it *asked* the steering
 
 `vesc_to_odom.cpp` is honest about this: it publishes a yaw covariance of `0.4`, which is large.
 
-**There is no working gyro on this car.** A directly measured yaw rate would beat one inferred from a commanded steering angle by a wide margin, and the VESC publishes `/sensors/imu/raw` at a steady 50 Hz, so it looks like the obvious fix.
+**The VESC's gyro works, once it is switched on.** A directly measured yaw rate beats one inferred from a commanded steering angle by a wide margin, and the VESC publishes `/sensors/imu/raw` at a steady 50 Hz.
 
-Measured on 2026-08-19, **every field of that message is exactly zero.** All three gyro axes, all three accelerometer axes, and no gravity vector anywhere — the VESC is answering the poll with an empty packet.
+Measured on 2026-08-19, every field of that message was exactly zero: the IMU was disabled in firmware (**VESC Tool → App Settings → IMU**, sample rate 0 means off). It has since been turned on, and the team's October 2026 tests show it working.
 
-That is either a board with no IMU fitted, or an IMU disabled in firmware (**VESC Tool → App Settings → IMU**, sample rate 0 means off). It can only be checked in VESC Tool, not from ROS — see [hardware-reference.md](hardware-reference.md#vesc-motor--steering-controller) for the exact re-check procedure.
+If it reads all zeros again, it has been switched off again. It can only be checked in VESC Tool, not from ROS — see [hardware-reference.md](hardware-reference.md#vesc-motor--steering-controller) for the exact re-check procedure.
 
 **Check that before designing anything around an IMU**, because it decides which of the options below is even available.
 

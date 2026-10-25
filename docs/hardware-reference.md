@@ -56,11 +56,9 @@ The offset had already been raised from 0.5304 to 0.5904 to fix a left pull, whi
 
 **Servo output must be enabled in the VESC's own firmware config** — this is separate from anything in this repo and isn't visible to `ros2`/`colcon` at all. If a freshly-flashed or reset VESC has steering that does nothing despite `fault_code: 0` and a clean serial connection, check this first. Requires **VESC Tool** (official app, vesc-project.com) connected over USB — which means stopping the ROS bringup first, since only one process can hold the serial port. Full story in [troubleshooting.md](troubleshooting.md).
 
-**The onboard IMU reports all zeros.** Measured 2026-08-19: `/sensors/imu/raw` publishes steadily at **50 Hz**, and every field — all three gyro axes, all three accelerometer axes — is exactly `0.0`. There is no gravity vector on any accelerometer axis, which is the giveaway: a working IMU lying still still reads about 9.81 m/s² somewhere.
+**The onboard IMU works, once it is switched on.** Measured 2026-08-19, `/sensors/imu/raw` published at 50 Hz with every field exactly `0.0` and no gravity on any axis: the IMU was disabled in the VESC's firmware. It was turned on in **VESC Tool → App Settings → IMU** (a sample rate of 0 means off), and the team's October 2026 tests show it working on both cars. The same check applies to the servo-output flag above: it can only be read in VESC Tool, not from ROS.
 
-So the VESC is answering the driver's IMU poll with an empty packet. That is either a board without the IMU fitted, or an IMU left disabled in the firmware — **VESC Tool → App Settings → IMU**, where a sample rate of 0 means off. Same caveat as the servo-output flag above: it can only be checked in VESC Tool, not from ROS.
-
-This matters more than it looks. The car's heading in `/odom` is integrated from the *commanded* steering angle through a bicycle model, with nothing measuring the actual rotation. A working gyro is the single biggest available improvement to that. See [localization.md](localization.md).
+If it ever reads all zeros again, it has been switched off: `imu_bridge`'s `/imu/status` then reports `fault` with an all-zero reason.
 
 To re-check after changing anything in VESC Tool:
 
