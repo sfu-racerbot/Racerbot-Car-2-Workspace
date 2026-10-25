@@ -118,7 +118,7 @@ auto_map_race_node:
     # anyway with a logged error -- the racing line is already on disk, and
     # pure_pursuit's pose_frozen watchdog is the backstop.
     map_save_timeout_sec: 20.0
-    output_directory: ~/.ros/racerbot_auto
+    output_directory: ~/racerbot-ws/data/racerbot_auto
 
     # The speed profile for a course the car has just discovered at
     # mapping_max_speed, on a line recorded from a live SLAM pose, in a room

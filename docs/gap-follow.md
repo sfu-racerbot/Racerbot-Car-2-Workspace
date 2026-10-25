@@ -93,7 +93,7 @@ source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
 ros2 launch race_diagnostics record_run.py
 ```
 
-**Working when:** it prints the run directory it created, `~/.ros/racerbot_runs/<ts>/`.
+**Working when:** it prints the run directory it created, `~/racerbot-ws/data/racerbot_runs/<ts>/`.
 
 **Terminal 2 — hardware, plus the mux ([glossary](glossary.md#mux--multiplexer)) that picks which control layer's commands reach the motor:**
 
@@ -108,7 +108,7 @@ ros2 launch f1tenth_stack bringup_launch.py
 
 ```bash
 source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
-ros2 launch gap_follow gap_follow_launch.py 2>&1 | tee ~/.ros/racerbot_runs/<ts>/launch.log
+ros2 launch gap_follow gap_follow_launch.py 2>&1 | tee ~/racerbot-ws/data/racerbot_runs/<ts>/launch.log
 ```
 
 **Working when:** it prints a decision line once a second. The car only moves while you hold LB. Do **not** also run `teleop_launch.py`: its `/teleop` always wins the mux, so `gap_follow`'s commands would never reach the car ([architecture.md](architecture.md)).
@@ -116,10 +116,10 @@ ros2 launch gap_follow gap_follow_launch.py 2>&1 | tee ~/.ros/racerbot_runs/<ts>
 **Afterwards, any terminal** — the report from [run-analysis.md](run-analysis.md):
 
 ```bash
-python3 ~/racerbot-ws/tools/run_analysis/analyze_run.py ~/.ros/racerbot_runs/<ts>
+python3 ~/racerbot-ws/tools/run_analysis/analyze_run.py ~/racerbot-ws/data/racerbot_runs/<ts>
 ```
 
-**Working when:** it writes `~/.ros/racerbot_runs/<ts>/analysis/report.md`, explaining every stop.
+**Working when:** it writes `~/racerbot-ws/data/racerbot_runs/<ts>/analysis/report.md`, explaining every stop.
 
 ## Turning a feature off
 

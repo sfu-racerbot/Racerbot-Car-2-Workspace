@@ -9,7 +9,7 @@ logging their decision every second at a 40Hz control rate. Perhaps a
 dozen lines in a whole run change what you would do next. This keeps
 those, throttles the recognized-but-repetitive ones, and drops the rest.
 
-    ros2 run race_diagnostics filter_log ~/.ros/racerbot_runs/latest/launch.log
+    ros2 run race_diagnostics filter_log ~/racerbot-ws/data/racerbot_runs/latest/launch.log
 
 Add --from-start to re-classify a finished log instead of following a
 live one, which is the usual way to review a run afterwards.

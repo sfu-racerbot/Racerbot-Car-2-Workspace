@@ -15,7 +15,7 @@ commands.txt -- the copy-paste race commands -- as the last thing on screen,
 after every node's shutdown messages.
 
 Everything the launch prints is also saved to
-~/.ros/racerbot_runs/map_course-<timestamp>.log, lap progress included.
+~/racerbot-ws/data/racerbot_runs/map_course-<timestamp>.log, lap progress included.
 
 Hold LB the whole time the car should move. See docs/launchstart.md.
 """
@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_OUTPUT = '~/.ros/racerbot_auto'
+DEFAULT_OUTPUT = '~/racerbot-ws/data/racerbot_auto'
 # What has to be running before map_course will start: the car's drivers
 # from bringup_launch.py (VESC and LiDAR), or the simulator's bridge.
 REAL_DRIVERS = ('vesc_driver_node', 'urg_node_driver')
@@ -78,7 +78,7 @@ def new_run(parent: Path, since: float):
     return None if best is None else best[1]
 
 
-LOG_DIRECTORY = '~/.ros/racerbot_runs'
+LOG_DIRECTORY = '~/racerbot-ws/data/racerbot_runs'
 
 
 def log_path(now=None) -> Path:

@@ -33,7 +33,7 @@ The car can record everything it saw and did. These tools turn that recording in
 
 ## What gets logged
 
-[run-diagnostics.md](run-diagnostics.md#tldr) has the recording commands. A recorded run is one directory under `~/.ros/racerbot_runs/`, named for when it started:
+[run-diagnostics.md](run-diagnostics.md#tldr) has the recording commands. A recorded run is one directory under `~/racerbot-ws/data/racerbot_runs/`, named for when it started:
 
 | File | What's in it | Read by |
 |---|---|---|
@@ -52,10 +52,10 @@ The 1 Hz lines in `launch.log` are a summary. Between them the node made about 3
 ```bash
 source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
 cd ~/racerbot-ws
-python3 tools/run_analysis/analyze_run.py ~/.ros/racerbot_runs/20261019-200703
+python3 tools/run_analysis/analyze_run.py ~/racerbot-ws/data/racerbot_runs/20261019-200703
 ```
 
-**Working when:** it prints a report starting `# Run analysis: 20261019-200703`, with one `## LB hold` section per time LB was held. The same text is saved as `~/.ros/racerbot_runs/<run>/analysis/report.md`, beside a `hold1.png` plot.
+**Working when:** it prints a report starting `# Run analysis: 20261019-200703`, with one `## LB hold` section per time LB was held. The same text is saved as `~/racerbot-ws/data/racerbot_runs/<run>/analysis/report.md`, beside a `hold1.png` plot.
 
 **If it doesn't:** `ModuleNotFoundError: rosbag2_py` means ROS isn't sourced in that terminal. That only matters the first time. After that, `analysis/run.npz` exists and the tool runs without ROS.
 
@@ -68,7 +68,7 @@ For a run recorded with the IMU side up (any `map_course` run since 2026-10-24),
 **Terminal 1**, ROS sourced as above for the first run:
 
 ```bash
-python3 tools/run_analysis/imu_report.py ~/.ros/racerbot_runs/<run>
+python3 tools/run_analysis/imu_report.py ~/racerbot-ws/data/racerbot_runs/<run>
 ```
 
 **Working when:** it prints three sections, also saved as `analysis/imu_report.txt`:
@@ -108,7 +108,7 @@ Add `--set name=value` to replay the same scans with a `gap_follow` parameter ch
 
 ```bash
 git show eec6405:src/gap_follow/config/gap_follow.yaml > /tmp/gap_follow_20261019.yaml
-python3 tools/run_analysis/analyze_run.py ~/.ros/racerbot_runs/20261019-200703 \
+python3 tools/run_analysis/analyze_run.py ~/racerbot-ws/data/racerbot_runs/20261019-200703 \
   --yaml /tmp/gap_follow_20261019.yaml --set ttc_path_margin=0.05
 ```
 
@@ -130,7 +130,7 @@ The simulator's car model is `tools/f1tenth_sim/sim_fidelity/calibration.py`. Ev
 
 ```bash
 cd ~/racerbot-ws
-python3 tools/run_analysis/fit_sim.py ~/.ros/racerbot_runs/20261019-200703 \
+python3 tools/run_analysis/fit_sim.py ~/racerbot-ws/data/racerbot_runs/20261019-200703 \
   --grid speed_delay_ticks=1,2,4 --grid speed_loop_brake_gain=2,4,8 --grid steering_delay_ticks=1,3,5
 ```
 
@@ -171,8 +171,8 @@ Any ROS occupancy map ([glossary](glossary.md#occupancy-grid)) can be a simulato
 
 ```bash
 cd ~/racerbot-ws
-cp ~/.ros/racerbot_auto/<ts>/map.pgm  tools/f1tenth_sim/maps/sources/hall_<date>.pgm
-sed 's/image: map.pgm/image: hall_<date>.pgm/' ~/.ros/racerbot_auto/<ts>/map.yaml > tools/f1tenth_sim/maps/sources/hall_<date>.yaml
+cp ~/racerbot-ws/data/racerbot_auto/<ts>/map.pgm  tools/f1tenth_sim/maps/sources/hall_<date>.pgm
+sed 's/image: map.pgm/image: hall_<date>.pgm/' ~/racerbot-ws/data/racerbot_auto/<ts>/map.yaml > tools/f1tenth_sim/maps/sources/hall_<date>.yaml
 python3 tools/f1tenth_sim/track_import.py tools/f1tenth_sim/maps/sources/hall_<date>.yaml \
   --name hall_<date> --source "slam_toolbox map, run <ts>" --plot /tmp/hall.png
 ```

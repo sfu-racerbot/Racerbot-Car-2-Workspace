@@ -34,7 +34,7 @@ def generate_launch_description():
         'mapping_laps', default_value='2',
         description='Default 2: discover/close SLAM loop, then record one settled raceline lap.')
     output_directory_arg = DeclareLaunchArgument(
-        'output_directory', default_value='~/.ros/racerbot_auto',
+        'output_directory', default_value='~/racerbot-ws/data/racerbot_auto',
         description='Parent directory for generated map, pose graph, and raceline files.')
     diagnostics_arg = DeclareLaunchArgument(
         'diagnostics', default_value='true',
@@ -73,7 +73,7 @@ def generate_launch_description():
         # included files, and this launch's output_directory (the map run
         # folder) would otherwise become the recorder's too.
         launch_arguments={'record_bag': LaunchConfiguration('record_bag'),
-                          'output_directory': '~/.ros/racerbot_runs'}.items(),
+                          'output_directory': '~/racerbot-ws/data/racerbot_runs'}.items(),
         condition=IfCondition(LaunchConfiguration('diagnostics')),
     )
     slam = IncludeLaunchDescription(

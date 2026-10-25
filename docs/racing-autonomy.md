@@ -96,7 +96,7 @@ It also republishes the SLAM transform as `/slam_pose`, so SLAM keeps localizing
 
 **The supervisor, `gap_follow` and `pure_pursuit` each keep their own LB deadman gate**, independently. Only the supervisor publishes to the real `/drive`.
 
-The generated map, pose graph, raw path and profiled path are all saved under `~/.ros/racerbot_auto/<timestamp>/`. See [operations.md](operations.md#automatic-map--raceline--race-recommended-for-a-new-course) for usage and overrides.
+The generated map, pose graph, raw path and profiled path are all saved under `~/racerbot-ws/data/racerbot_auto/<timestamp>/`. See [operations.md](operations.md#automatic-map--raceline--race-recommended-for-a-new-course) for usage and overrides.
 
 ### What a recorded lap actually looks like
 

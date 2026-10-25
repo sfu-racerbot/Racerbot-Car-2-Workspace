@@ -14,7 +14,7 @@ turning gain against the gyro (actuation.analyze, the same fit the LiDAR
 gets), and shows how much heading correction SLAM had to apply on top of
 /odom and on top of the gyro odometry /odom/imu over the run.
 
-    python3 tools/run_analysis/imu_report.py ~/.ros/racerbot_runs/<ts>
+    python3 tools/run_analysis/imu_report.py ~/racerbot-ws/data/racerbot_runs/<ts>
     python3 tools/run_analysis/imu_report.py <run> --no-icp     # skip scan matching (faster)
 
 The first run needs ROS sourced to read the bag; the arrays are cached in

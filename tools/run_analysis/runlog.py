@@ -1,4 +1,4 @@
-"""Load a recorded run (~/.ros/racerbot_runs/<ts>/) into plain numpy arrays.
+"""Load a recorded run (~/racerbot-ws/data/racerbot_runs/<ts>/) into plain numpy arrays.
 
 ``race_diagnostics``' ``record_run.py`` leaves a directory holding
 ``launch.log``, ``events.jsonl`` and ``bag/`` (rosbag2, mcap). The bag is the
@@ -8,7 +8,7 @@ in ``<run>/analysis/run.npz``, and every other tool in this directory reads
 the cache and runs unsourced.
 
     from run_analysis.runlog import load_run
-    run = load_run("~/.ros/racerbot_runs/20261019-200703")
+    run = load_run("~/racerbot-ws/data/racerbot_runs/20261019-200703")
     run.scan            # (N, beams) float32, NaN/inf as recorded
     run.drive           # (M, 4): receive time, header stamp, steering, speed
     run.lb_windows()    # [(t_press, t_release), ...] from /joy button 4

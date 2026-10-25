@@ -183,7 +183,7 @@ Same result as above, except `gap_follow` drives the lap instead of a human — 
 
 ### Mapping in one command: 3 laps, then stop
 
-With `bringup_launch.py` running in terminal 1, `ros2 run racerbot_launch map_course` in terminal 2 does the steps above by itself: SLAM, `gap_follow`, three closed laps, then it saves the map, pose graph and racing line to `~/.ros/racerbot_auto/<timestamp>/`, shuts everything down and prints the commands to race on that map (`race_launch.py run_dir:=...`, which seeds the localizer where the car stopped at the end of mapping, so no RViz is needed). The commands and options are in [launchstart.md](launchstart.md#map-a-course-3-laps-then-stop). Simulator-validated only.
+With `bringup_launch.py` running in terminal 1, `ros2 run racerbot_launch map_course` in terminal 2 does the steps above by itself: SLAM, `gap_follow`, three closed laps, then it saves the map, pose graph and racing line to `~/racerbot-ws/data/racerbot_auto/<timestamp>/`, shuts everything down and prints the commands to race on that map (`race_launch.py run_dir:=...`, which seeds the localizer where the car stopped at the end of mapping, so no RViz is needed). The commands and options are in [launchstart.md](launchstart.md#map-a-course-3-laps-then-stop). Simulator-validated only.
 
 ## Localizing against a saved map
 
@@ -295,7 +295,7 @@ SLAM stays online as the localization source, so there's no RViz pose seed to gi
 
 **Working when:** you see the lap counter advancing in the terminal (see [Reading the terminal while it maps](#reading-the-terminal-while-it-maps) below), then a handover summary, then the car starts racing the line it just recorded.
 
-Generated artifacts are written to `~/.ros/racerbot_auto/<YYYYMMDD-HHMMSS>/`:
+Generated artifacts are written to `~/racerbot-ws/data/racerbot_auto/<YYYYMMDD-HHMMSS>/`:
 
 - `raceline_raw.csv` and `raceline_profiled.csv`
 - `map.yaml` and `map.pgm`

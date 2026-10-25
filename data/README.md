@@ -1,42 +1,52 @@
-# data/ — archived run recordings
+# data/ — recorded runs
 
-A copy of car 2's recorded runs, kept in git so they survive the Jetson's disk
-and can be looked at from any clone. **Nothing on the car writes here.** The
-nodes still write to `~/.ros/`, and this folder is a snapshot you refresh by hand.
+Car 2's recorded runs, kept in git so they survive the Jetson's disk and can
+be looked at from any clone. **The car writes new runs straight into this
+folder.** Each tool below defaults to a folder here (since 2026-10-25; before
+that they wrote to `~/.ros/`, which git never sees).
 
-| Folder | Copied from | What's in it |
+| Folder | Written by | What's in it |
 |---|---|---|
-| `racerbot_runs/<timestamp>/` | `~/.ros/racerbot_runs/` | `race_diagnostics` recordings: rosbag (`bag/`), `launch.log`, `metadata/` (git state, node parameters). See `docs/run-diagnostics.md` |
-| `racerbot_auto/<timestamp>/` | `~/.ros/racerbot_auto/` | maps, pose graphs and racing lines from `auto_map_race` / `map_course` on the real car |
-| `racerbot_sim/auto/<timestamp>/` | `~/.ros/racerbot_sim/` | the same output from simulator runs (`racerbot_sim`) |
+| `racerbot_runs/<timestamp>/` | `ros2 launch race_diagnostics record_run.py`, and `map_course` / `auto_map_race_launch.py` with diagnostics on | rosbag (`bag/`), `launch.log`, `metadata/` (git state, node parameters). See `docs/run-diagnostics.md` |
+| `racerbot_runs/map_course-<timestamp>.log` | `ros2 run racerbot_launch map_course` | that session's terminal output |
+| `racerbot_auto/<timestamp>/` | `auto_map_race_node` (via `map_course` or `auto_map_race_launch.py`) on the real car | map, pose graph, racing lines, `commands.txt` |
+| `racerbot_sim/auto/<timestamp>/` | `sim_auto_map_race_launch.py` | the same output from simulator runs |
 
-Folder names are the run's start time, `YYYYMMDD-HHMMSS`.
+Folder names are the run's start time, `YYYYMMDD-HHMMSS`. Any tool still takes
+`output_directory:=<somewhere else>` if you want a run kept out of git.
 
-## Adding new runs
+## Saving runs to GitHub
 
-After a session on the car, copy the new runs in and commit them:
+After a session on the car, with every recorder stopped:
 
 ```bash
+# any terminal, on the car
 cd ~/racerbot-ws
-for d in racerbot_runs racerbot_auto racerbot_sim; do
-  rsync -a ~/.ros/$d/ data/$d/
-done
-git add data && git commit -m "data: add runs from <date>"
-git push
+tools/save_runs.sh            # commits data/ only, then pushes
 ```
 
-`rsync -a` only adds and updates files; it never deletes anything here, so a
-run deleted from `~/.ros/` (for example with the dashboard's delete panel)
-stays archived in this folder.
+It worked if it prints a commit like `data: runs saved 2026-10-25` followed by
+git's push summary. It commits nothing, and says why, if a recorder is still
+running or a file is too big for GitHub (below). `--no-push` commits without
+pushing.
 
 ## Things to know
 
 - **The repo is public.** Everything here is visible to anyone. Run metadata
   includes the full uncommitted `git diff` of the workspace at run time, so
   don't record a run while a secret is sitting in an uncommitted file.
-- **GitHub rejects any single file over 100 MB.** Today's largest file is a
-  39 MB bag. A long run's `bag_0.mcap` can pass 100 MB; if `git push` refuses
-  one, leave that bag out of the commit (or set up Git LFS) rather than forcing it.
+- **GitHub rejects any single file over 100 MB.** `record_run.py` therefore
+  splits each bag into 50 MB files (`bag_0.mcap`, `bag_1.mcap`, ...);
+  `ros2 bag play <run>/bag` and the analysis tools read them as one bag.
+  The largest non-bag file so far is a 30 MB pose graph. `tools/save_runs.sh`
+  checks every file before committing.
+- **The dashboard's saved-runs panel no longer sees new runs.** It refuses to
+  list or delete anything inside a git working tree, on purpose: deleting a
+  tracked file from a browser would leave an unexplained `git status`. It
+  still manages the older runs left in `~/.ros/`. To delete a run here, use
+  `git rm -r data/<folder>/<timestamp>` and commit. Its files stay in git
+  history.
 - Every file added here stays in git history for good, and every clone
-  downloads it, even if it is later deleted.
+  downloads it, even if it is later deleted. A simulator run is around 30 MB,
+  mostly its pose graph.
 - `COLCON_IGNORE` stops `colcon build` from searching this folder for packages.

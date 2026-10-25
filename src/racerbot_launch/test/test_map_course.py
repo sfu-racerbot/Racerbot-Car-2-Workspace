@@ -50,7 +50,7 @@ def test_new_run_picks_the_newest_commands_written_since_start(tmp_path):
 
 def test_output_directory_argument_is_honoured():
     assert mc.output_directory(['laps:=4', 'output_directory:=/x/y']) == Path('/x/y')
-    assert mc.output_directory(['laps:=4']) == Path(os.path.expanduser('~/.ros/racerbot_auto'))
+    assert mc.output_directory(['laps:=4']) == Path(os.path.expanduser('~/racerbot-ws/data/racerbot_auto'))
 
 
 def test_new_run_is_the_newest_whatever_order_the_directory_lists(tmp_path):
@@ -165,7 +165,7 @@ def test_the_recorder_gets_its_own_folder_not_the_map_run_folder():
     # on the car, 2026-10-22).
     for name in ('map_course_launch.py', 'auto_map_race_launch.py'):
         text = (SCRIPT.parents[1] / 'launch' / name).read_text()
-        assert "'output_directory': '~/.ros/racerbot_runs'" in text, name
+        assert "'output_directory': '~/racerbot-ws/data/racerbot_runs'" in text, name
 
 
 def test_simulator_runs_get_imu_false_unless_imu_was_given():

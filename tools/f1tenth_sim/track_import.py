@@ -24,7 +24,7 @@ an obstacle inside the corridor bends the line round it, which is what a car
 would do. The island is the largest wall region that does not touch the
 image border.
 
-    python3 tools/f1tenth_sim/track_import.py ~/.ros/racerbot_auto/<ts>/map.yaml \\
+    python3 tools/f1tenth_sim/track_import.py ~/racerbot-ws/data/racerbot_auto/<ts>/map.yaml \\
         --name hallway_2026_10_20 --source "SLAM map, run <ts>"
 
 writes the triplet into tools/f1tenth_sim/maps/ and adds the track to

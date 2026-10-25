@@ -2,7 +2,7 @@
 """Analyse a recorded gap_follow run, end to end, in one command.
 
     source /opt/ros/jazzy/setup.bash          # first time only: reads the bag
-    python3 tools/run_analysis/analyze_run.py ~/.ros/racerbot_runs/<ts>
+    python3 tools/run_analysis/analyze_run.py ~/racerbot-ws/data/racerbot_runs/<ts>
 
 Writes ``<run>/analysis/report.md`` and plots beside it, and prints the
 report. For every LB hold in the run:

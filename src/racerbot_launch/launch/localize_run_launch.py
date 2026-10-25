@@ -34,7 +34,7 @@ see them as usual.
 Usage (normally spawned by auto_map_race_node, not run by hand):
 
     ros2 launch racerbot_launch localize_run_launch.py \
-        map_yaml:=/home/user/.ros/racerbot_auto/<run>/map.yaml
+        map_yaml:=/home/user/racerbot-ws/data/racerbot_auto/<run>/map.yaml
 """
 import math
 import os

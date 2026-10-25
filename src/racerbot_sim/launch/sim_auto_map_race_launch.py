@@ -39,7 +39,7 @@ def generate_launch_description():
         DeclareLaunchArgument('mapping_min_speed', default_value=''),
         DeclareLaunchArgument('mapping_laps', default_value='2'),
         DeclareLaunchArgument(
-            'output_directory', default_value='~/.ros/racerbot_sim/auto'),
+            'output_directory', default_value='~/racerbot-ws/data/racerbot_sim/auto'),
         DeclareLaunchArgument(
             'supervisor_config', default_value=os.path.join(
                 get_package_share_directory('pure_pursuit'),

@@ -402,7 +402,7 @@ class AutoMapRaceNode(Node):
         # different part of that window.
         self.declare_parameter('map_save_retries', 3)
         self.declare_parameter('map_save_retry_delay_sec', 2.5)
-        self.declare_parameter('output_directory', '~/.ros/racerbot_auto')
+        self.declare_parameter('output_directory', '~/racerbot-ws/data/racerbot_auto')
         self.declare_parameter('profile_max_speed', 4.0)
         self.declare_parameter('profile_min_speed', 0.5)
         self.declare_parameter('profile_max_lateral_accel', 2.5)

@@ -70,6 +70,16 @@ DEFAULT_TOPICS = [
     '/rosout', '/diagnostics', '/drive_intent', '/initialpose',
 ]
 
+# Runs are committed to git (data/README.md), and GitHub refuses any single
+# file over 100 MB. The 2026-10-19 bag was 39 MB for one session, so a longer
+# one would cross it. rosbag2 only checks the size after writing a buffered
+# batch, so files overshoot: measured 2026-10-25, a 1 MB split at ~4 MB/s
+# gave 1.6 MB files. Half the limit leaves 50 MB for that, more than ten
+# seconds of the car's whole bag even at that rate. A split bag is still
+# one bag -- `ros2 bag play` and rosbag2_py.SequentialReader open the
+# directory, not bag_0.mcap (checked: 17 files read back as one, 258/258).
+MAX_BAG_FILE_BYTES = 50 * 1000 * 1000
+
 
 def _setup(context, *args, **kwargs):
     parent = os.path.expanduser(
@@ -129,7 +139,8 @@ def _setup(context, *args, **kwargs):
 
     if LaunchConfiguration('record_bag').perform(context).lower() in ('true', '1'):
         actions.append(ExecuteProcess(
-            cmd=['ros2', 'bag', 'record', '-o', os.path.join(run_dir, 'bag')] + topics,
+            cmd=['ros2', 'bag', 'record', '-o', os.path.join(run_dir, 'bag'),
+                 '--max-bag-size', str(MAX_BAG_FILE_BYTES)] + topics,
             output='screen',
         ))
     return actions
@@ -138,7 +149,7 @@ def _setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
-            'output_directory', default_value='~/.ros/racerbot_runs',
+            'output_directory', default_value='~/racerbot-ws/data/racerbot_runs',
             description='Parent directory; one timestamped subdirectory per run.'),
         DeclareLaunchArgument(
             'record_bag', default_value='true',

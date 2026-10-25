@@ -16,7 +16,7 @@ straight to /drive), the run recorder, and auto_map_race_node in
 finish_after_mapping mode. The supervisor forwards gap_follow's commands
 only while LB is held, counts laps from SLAM's pose, and after ``laps``
 (default 3) closed laps saves the map, pose graph and racing line to
-``~/.ros/racerbot_auto/<timestamp>/``, writes commands.txt there, stops the
+``~/racerbot-ws/data/racerbot_auto/<timestamp>/``, writes commands.txt there, stops the
 car, and exits. Its exit shuts this whole launch down.
 
 Differences from auto_map_race_launch.py: no pure_pursuit, no particle
@@ -136,7 +136,7 @@ def generate_launch_description():
             'mapping_min_speed', default_value='',
             description='Optional speed floor. Empty: gap_follow.yaml governs.'),
         DeclareLaunchArgument(
-            'output_directory', default_value='~/.ros/racerbot_auto',
+            'output_directory', default_value='~/racerbot-ws/data/racerbot_auto',
             description='Parent directory of the run directory.'),
         DeclareLaunchArgument(
             'diagnostics', default_value='true',
@@ -177,7 +177,7 @@ def generate_launch_description():
         # included files, and this launch's output_directory (the map run
         # folder) would otherwise become the recorder's too.
         launch_arguments={'record_bag': LaunchConfiguration('record_bag'),
-                          'output_directory': '~/.ros/racerbot_runs'}.items(),
+                          'output_directory': '~/racerbot-ws/data/racerbot_runs'}.items(),
         condition=IfCondition(LaunchConfiguration('diagnostics')),
     )
     slam = IncludeLaunchDescription(

@@ -5,7 +5,7 @@ Turn a recorded run directory into one page of structured findings --
 the thing you paste to a colleague, or hand to an agent, instead of
 50,000 characters of terminal scrollback.
 
-    ros2 run race_diagnostics summarize_run ~/.ros/racerbot_runs/20260727-202458
+    ros2 run race_diagnostics summarize_run ~/racerbot-ws/data/racerbot_runs/20260727-202458
     ros2 run race_diagnostics summarize_run <dir> --json     # machine-readable
 
 It reads whatever is present and says so when something is missing --

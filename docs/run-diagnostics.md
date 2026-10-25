@@ -27,10 +27,10 @@ ros2 launch race_diagnostics record_run.py
 # --- Terminal 2: the driving stack. Note the `| tee` (optional, see below). ---
 source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
 ros2 launch racerbot_launch auto_map_race_launch.py \
-  2>&1 | tee ~/.ros/racerbot_runs/<the-dir-it-printed>/launch.log
+  2>&1 | tee ~/racerbot-ws/data/racerbot_runs/<the-dir-it-printed>/launch.log
 
 # --- Terminal 3 (optional): live high-signal view of terminal 2 ---
-ros2 run race_diagnostics filter_log ~/.ros/racerbot_runs/<dir>/launch.log
+ros2 run race_diagnostics filter_log ~/racerbot-ws/data/racerbot_runs/<dir>/launch.log
 ```
 
 > **`auto_map_race_launch.py` already starts this for you.** It runs the probe by default (`diagnostics:=true`), so a one-command map-and-race run leaves a machine-readable record without a second terminal. The rosbag stays off there unless you pass `record_bag:=true`. Everything below still applies to any other workflow.
@@ -38,7 +38,7 @@ ros2 run race_diagnostics filter_log ~/.ros/racerbot_runs/<dir>/launch.log
 Afterwards:
 
 ```bash
-ros2 run race_diagnostics summarize_run ~/.ros/racerbot_runs/<dir>
+ros2 run race_diagnostics summarize_run ~/racerbot-ws/data/racerbot_runs/<dir>
 ```
 
 **`| tee` is no longer strictly required, but is still the simplest option.**
@@ -66,7 +66,9 @@ months, and nothing prunes them.)*
 
 ## What gets captured, and why each piece earns its place
 
-One timestamped directory per run under `~/.ros/racerbot_runs/`:
+One timestamped directory per run under `~/racerbot-ws/data/racerbot_runs/`. That folder is inside the git repo on purpose, so runs can be committed and pushed. After a session, run `tools/save_runs.sh` to do both ([data/README.md](../data/README.md)).
+
+The bag is split into 50 MB files (`bag/bag_0.mcap`, `bag_1.mcap`, ...) because GitHub refuses any file over 100 MB. You never open those files one at a time: `ros2 bag play <run>/bag` and the analysis tools read the whole `bag/` folder as one recording.
 
 | Artifact | Produced by | Answers |
 |---|---|---|
@@ -124,7 +126,7 @@ Because "what did the car actually see at the moment it hit the wall" is
 not answerable from log text. The bag makes a run replayable:
 
 ```bash
-ros2 bag play ~/.ros/racerbot_runs/<dir>/bag --clock
+ros2 bag play ~/racerbot-ws/data/racerbot_runs/<dir>/bag --clock
 ```
 
 `/scan` is ~90% of the size. Drop it for a 10× smaller bag if you only
@@ -140,7 +142,7 @@ ros2 launch race_diagnostics record_run.py \
 To read them back:
 
 ```bash
-ros2 bag play ~/.ros/racerbot_runs/<dir>/bag --clock &
+ros2 bag play ~/racerbot-ws/data/racerbot_runs/<dir>/bag --clock &
 ros2 topic echo /parameter_events
 ```
 
@@ -151,8 +153,8 @@ Keep `/parameter_events` in the list if you pass your own `topics:=`, as above.
 ## Reading the results
 
 ```bash
-ros2 run race_diagnostics summarize_run ~/.ros/racerbot_runs/<dir>
-ros2 run race_diagnostics summarize_run ~/.ros/racerbot_runs/<dir> --json   # for an agent
+ros2 run race_diagnostics summarize_run ~/racerbot-ws/data/racerbot_runs/<dir>
+ros2 run race_diagnostics summarize_run ~/racerbot-ws/data/racerbot_runs/<dir> --json   # for an agent
 ```
 
 It reports, in the order that matters:
@@ -253,7 +255,7 @@ then automatic handover to pure pursuit]
 [e.g. handover completed, car accelerated, then hit a wall on the left]
 
 ## Recorded evidence
-Run directory: ~/.ros/racerbot_runs/<dir>
+Run directory: ~/racerbot-ws/data/racerbot_runs/<dir>
 - launch.log       full terminal output of every node
 - events.jsonl     probe stream: pipeline state + pose lag
 - bag/             replayable with `ros2 bag play <dir>/bag --clock`

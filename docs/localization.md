@@ -152,7 +152,7 @@ ros2 launch racerbot_launch auto_map_race_launch.py
 **Terminal 2** — after the run, read the result.
 
 ```bash
-ros2 run race_diagnostics summarize_run ~/.ros/racerbot_runs/<timestamp>
+ros2 run race_diagnostics summarize_run ~/racerbot-ws/data/racerbot_runs/<timestamp>
 ```
 
 **Working when:** it prints a pose section with `lag_max_sec`. Under 0.15 s is healthy; that threshold is `race_diagnostics`' own.
