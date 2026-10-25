@@ -1,0 +1,20 @@
+{"t": 1792799650.4614232, "category": "armed", "message": "probe armed (subscribe-only); waiting for the stack"}
+{"t": 1792799650.4631534, "category": "first_message", "message": "first scan: 1081 beams, frame_id=laser", "topic": "scan"}
+{"t": 1792799650.5753906, "category": "first_message", "message": "first drive: speed=0.00m/s", "topic": "drive"}
+{"t": 1792799650.6237028, "category": "first_message", "message": "first odom: linear.x=+0.00m/s", "topic": "odom"}
+{"t": 1792799650.6933684, "category": "first_message", "message": "first joy: 11 buttons", "topic": "joy"}
+{"t": 1792799651.463268, "category": "status", "message": "scan=ok | map=NEVER | map->base_link=MISSING | pose=NEVER | odom=ok +0.00m/s | drive=ok cmd=0.00m/s | LB=released", "pose_lag_sec": null, "pose_lag_max_sec": 0.0, "tf_ok": false, "speed": 0.0, "cmd_speed": 0.0, "pose_frozen": false, "occupied_cells": null}
+{"t": 1792799653.6485252, "category": "first_message", "message": "first pose: map-frame (+0.00, +0.00)", "topic": "pose"}
+{"t": 1792799654.4633045, "category": "tf_up", "message": "map->base_link available; SLAM is localizing"}
+{"t": 1792799654.5685067, "category": "first_message", "message": "first map: 161x71 @ 0.050m/cell, 242 occupied cells", "topic": "map"}
+{"t": 1792799657.4449053, "category": "deadman", "message": "LB held", "held": true}
+{"t": 1792799672.462227, "category": "status", "message": "scan=ok | map=266x179@0.050 23%known 1295occ | map->base_link=OK | pose=ok lag=0.01s(max 0.03) | odom=ok +0.84m/s | drive=ok cmd=0.80m/s | LB=held", "pose_lag_sec": 0.008, "pose_lag_max_sec": 0.033, "tf_ok": true, "speed": 0.84, "cmd_speed": 0.8, "pose_frozen": false, "occupied_cells": 1295}
+{"t": 1792799692.4626706, "category": "status", "message": "scan=ok | map=295x176@0.050 36%known 3515occ | map->base_link=OK | pose=ok lag=0.01s(max 0.03) | odom=ok +0.83m/s | drive=ok cmd=0.80m/s | LB=held", "pose_lag_sec": 0.007, "pose_lag_max_sec": 0.033, "tf_ok": true, "speed": 0.83, "cmd_speed": 0.8, "pose_frozen": false, "occupied_cells": 3515}
+{"t": 1792799713.4628909, "category": "status", "message": "scan=ok | map=307x202@0.050 39%known 4716occ | map->base_link=OK | pose=ok lag=0.03s(max 0.03) | odom=ok +0.83m/s | drive=ok cmd=0.80m/s | LB=held", "pose_lag_sec": 0.029, "pose_lag_max_sec": 0.033, "tf_ok": true, "speed": 0.83, "cmd_speed": 0.8, "pose_frozen": false, "occupied_cells": 4716}
+{"t": 1792799734.4635153, "category": "status", "message": "scan=ok | map=311x211@0.050 50%known 5322occ | map->base_link=OK | pose=ok lag=0.01s(max 0.03) | odom=ok +0.82m/s | drive=ok cmd=0.80m/s | LB=held", "pose_lag_sec": 0.008, "pose_lag_max_sec": 0.033, "tf_ok": true, "speed": 0.82, "cmd_speed": 0.8, "pose_frozen": false, "occupied_cells": 5322}
+{"t": 1792799755.4629204, "category": "status", "message": "scan=ok | map=325x245@0.050 43%known 5725occ | map->base_link=OK | pose=ok lag=0.01s(max 0.03) | odom=ok +0.84m/s | drive=ok cmd=0.80m/s | LB=held", "pose_lag_sec": 0.012, "pose_lag_max_sec": 0.034, "tf_ok": true, "speed": 0.84, "cmd_speed": 0.8, "pose_frozen": false, "occupied_cells": 5725}
+{"t": 1792799775.463105, "category": "status", "message": "scan=ok | map=324x240@0.050 42%known 6028occ | map->base_link=OK | pose=ok lag=0.01s(max 0.04) | odom=ok +0.84m/s | drive=ok cmd=0.80m/s | LB=held", "pose_lag_sec": 0.007, "pose_lag_max_sec": 0.039, "tf_ok": true, "speed": 0.84, "cmd_speed": 0.8, "pose_frozen": false, "occupied_cells": 6028}
+{"t": 1792799782.438593, "category": "deadman", "message": "LB released", "held": false}
+{"t": 1792799789.2898371, "category": "deadman", "message": "LB held", "held": true}
+{"t": 1792799796.4631066, "category": "status", "message": "scan=ok | map=324x240@0.050 42%known 6076occ | map->base_link=OK | pose=ok lag=0.01s(max 0.04) | odom=ok +0.82m/s | drive=ok cmd=0.80m/s | LB=held", "pose_lag_sec": 0.012, "pose_lag_max_sec": 0.039, "tf_ok": true, "speed": 0.82, "cmd_speed": 0.8, "pose_frozen": false, "occupied_cells": 6076}
+{"t": 1792799810.9549377, "category": "closing", "message": "worst pose lag this run: 0.04s"}

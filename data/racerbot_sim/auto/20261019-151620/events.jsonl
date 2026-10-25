@@ -1,0 +1,13 @@
+{"t": 1792448182.267328, "category": "armed", "message": "probe armed (subscribe-only); waiting for the stack"}
+{"t": 1792448182.4016147, "category": "deadman", "message": "LB held", "held": true}
+{"t": 1792448182.4018216, "category": "first_message", "message": "first joy: 11 buttons", "topic": "joy"}
+{"t": 1792448182.5154037, "category": "first_message", "message": "first drive: speed=0.00m/s", "topic": "drive"}
+{"t": 1792448183.268717, "category": "status", "message": "scan=NEVER | map=NEVER | map->base_link=MISSING | pose=NEVER | odom=NEVER +0.00m/s | drive=ok cmd=0.00m/s | LB=held", "pose_lag_sec": null, "pose_lag_max_sec": 0.0, "tf_ok": false, "speed": 0.0, "cmd_speed": 0.0, "pose_frozen": false, "occupied_cells": null}
+{"t": 1792448184.9731705, "category": "first_message", "message": "first scan: 1081 beams, frame_id=laser", "topic": "scan"}
+{"t": 1792448184.9754503, "category": "first_message", "message": "first odom: linear.x=-0.01m/s", "topic": "odom"}
+{"t": 1792448186.017971, "category": "first_message", "message": "first pose: map-frame (+1.03, -3.21)", "topic": "pose"}
+{"t": 1792448186.2684362, "category": "tf_up", "message": "map->base_link available; SLAM is localizing"}
+{"t": 1792448186.484782, "category": "first_message", "message": "first map: 132x79 @ 0.050m/cell, 459 occupied cells", "topic": "map"}
+{"t": 1792448204.2677994, "category": "status", "message": "scan=ok | map=244x187@0.050 56%known 3353occ | map->base_link=OK | pose=ok lag=0.03s(max 0.04) | odom=ok +1.92m/s | drive=ok cmd=2.32m/s | LB=held", "pose_lag_sec": 0.029, "pose_lag_max_sec": 0.036, "tf_ok": true, "speed": 1.92, "cmd_speed": 2.32, "pose_frozen": false, "occupied_cells": 3353}
+{"t": 1792448224.26788, "category": "status", "message": "scan=ok | map=240x175@0.050 58%known 3974occ | map->base_link=OK | pose=ok lag=0.03s(max 0.05) | odom=ok +3.45m/s | drive=ok cmd=3.50m/s | LB=held", "pose_lag_sec": 0.029, "pose_lag_max_sec": 0.048, "tf_ok": true, "speed": 3.45, "cmd_speed": 3.5, "pose_frozen": false, "occupied_cells": 3974}
+{"t": 1792448241.940932, "category": "closing", "message": "worst pose lag this run: 0.05s"}
