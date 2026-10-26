@@ -260,10 +260,11 @@ class VehicleStateNode(Node):
         now = time.monotonic()
         speeds = ', '.join(f'{m} {n}' for m, n in self.modes.items() if n)
         headings = ', '.join(f'{m} {n}' for m, n in self.heading_sources.items() if n)
+        biases = ', '.join(f'{m} {b:+.3f}' for m, b in self.est.accel_biases().items())
         log.info(
             f'rates: bno {self.imu_count["bno"] / LOG_PERIOD_S:.0f} Hz, vesc '
             f'{self.imu_count["vesc"] / LOG_PERIOD_S:.0f} Hz | speed: {speeds or "no /odom"}'
-            f' | accel bias {self.est.filter.b:+.3f} m/s^2 | steering valid '
+            f' | accel bias {biases or "none"} m/s^2 | steering valid '
             f'{self.steering_valid}/{self.steering_total} | heading: '
             f'{headings or "no odom -> base_link transform"}')
 

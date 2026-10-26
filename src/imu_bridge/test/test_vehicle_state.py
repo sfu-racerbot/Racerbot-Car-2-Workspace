@@ -18,6 +18,7 @@ import os
 import random
 import sys
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -399,6 +400,276 @@ def test_variance_is_the_speeds_not_the_bias():
     assert f.predict(0.0, dt)
     assert f.variance == pytest.approx(
         0.08 ** 2 + dt * dt * 0.3 ** 2 + 0.5 ** 2 * dt, abs=1e-15)  # (m/s)^2
+
+
+# ---------------------------------------------------------------- four-state filter
+# DualImuSpeedFilter, accel_source: both. x = [v, a, b_vesc, b_bno].
+
+@pytest.mark.parametrize('dt', [0.004, 0.02, 0.1])
+def test_four_state_q_is_the_integral_of_the_continuous_noise(dt):
+    # oracle: closed form, computed a second way -- Q = integral_0^dt of
+    # F(s) Qc F(s)^T ds for v' = a, a' = jerk noise, b' = bias noise,
+    # integrated numerically here (trapezoid, 20001 points) instead of in
+    # closed form as jerk_process_noise does.
+    sj, sb = 6.0, 0.02
+    s = np.linspace(0.0, dt, 20001)
+    Qc = np.diag([0.0, sj ** 2, sb ** 2, sb ** 2])
+    integrand = np.empty((len(s), 4, 4))
+    for i, si in enumerate(s):
+        F = np.eye(4)
+        F[0, 1] = si
+        integrand[i] = F @ Qc @ F.T
+    # Trapezoid rule by hand: numpy renamed trapz to trapezoid in 2.0, and
+    # Ubuntu 24.04's (the Jetson's) is 1.26.
+    Q_num = ((integrand[1:] + integrand[:-1]) / 2 * np.diff(s)[:, None, None]).sum(axis=0)
+    Q = vs.jerk_process_noise(dt, sj, sb)
+    assert np.allclose(Q, Q_num, rtol=1e-6, atol=1e-15)  # relative, all entries
+    assert Q[0, 1] > 0.0   # jerk pushes v and a the same way
+
+
+@pytest.mark.parametrize('source,col', [('bno', vs.B_BNO), ('vesc', vs.B_VESC)])
+def test_four_state_one_accel_update_matches_the_kalman_equations(source, col):
+    # oracle: closed form -- seeded at v = 1, P = diag(sw^2, sa0^2, sb0^2,
+    # sb0^2) is diagonal, so for H = [0, 1, (vesc), (bno)] the update is
+    # scalar algebra: S = sa0^2 + sb0^2 + R, K = [0, sa0^2/S, .., sb0^2/S].
+    # The two accelerometers get different noise so a swapped R shows.
+    sw, sa0, sb0 = 0.08, 3.0, 0.3
+    R = {'bno': 1.0, 'vesc': 2.0}[source] ** 2
+    cfg = EstimatorConfig(sigma_wheel=sw, sigma_accel0=sa0, sigma_bias0=sb0,
+                          sigma_accel_bno=1.0, sigma_accel_vesc=2.0)
+    f = vs.DualImuSpeedFilter(cfg)
+    f.advance(0.0)
+    f.update(1.0)
+    assert f.update_accel(source, 0.5)
+    S = sa0 ** 2 + sb0 ** 2 + R
+    y = 0.5
+    other = vs.B_VESC if col == vs.B_BNO else vs.B_BNO
+    x = [f.v, f.a, f.b_vesc, f.b_bno]
+    assert x[vs.V] == 1.0                                       # m/s: K_v = 0
+    assert x[vs.A] == pytest.approx(sa0 ** 2 / S * y, abs=1e-12)  # m/s^2
+    assert x[col] == pytest.approx(sb0 ** 2 / S * y, abs=1e-12)   # m/s^2
+    assert x[other] == 0.0                                      # the other bias untouched
+    P = f.P
+    assert P[vs.A][vs.A] == pytest.approx(sa0 ** 2 - sa0 ** 4 / S, abs=1e-12)
+    assert P[vs.A][col] == pytest.approx(-sa0 ** 2 * sb0 ** 2 / S, abs=1e-12)
+    assert P[other][other] == sb0 ** 2
+
+
+def test_four_state_predict_is_v_plus_a_dt():
+    # oracle: closed form -- after one accel update P[v, a] = 0, so
+    # F P F^T + Q gives P_vv = sw^2 + dt^2 P_aa + qj dt^3/3 and
+    # P_va = dt P_aa + qj dt^2/2; the mean moves by v += a dt only.
+    sj = 6.0
+    cfg = EstimatorConfig(sigma_jerk=sj)
+    f = vs.DualImuSpeedFilter(cfg)
+    f.advance(0.0)
+    f.update(1.0)
+    f.update_accel('bno', 2.0)
+    v0, a0, p_aa = f.v, f.a, f.P[vs.A][vs.A]
+    assert f.P[vs.V][vs.A] == 0.0
+    dt = 0.02
+    f.advance(dt)
+    assert f.v == pytest.approx(v0 + a0 * dt, abs=SPEED_TOL)  # m/s
+    assert f.a == a0
+    assert f.P[vs.V][vs.V] == pytest.approx(
+        cfg.sigma_wheel ** 2 + dt * dt * p_aa + sj ** 2 * dt ** 3 / 3, abs=1e-15)
+    assert f.P[vs.V][vs.A] == pytest.approx(dt * p_aa + sj ** 2 * dt ** 2 / 2, abs=1e-15)
+    # variance (the slip gate's and /odom/fused's) is the speed's, P_vv.
+    assert f.variance == pytest.approx(
+        cfg.sigma_wheel ** 2 + dt * dt * p_aa + sj ** 2 * dt ** 3 / 3, abs=1e-15)  # (m/s)^2
+
+
+def _stopped(f, t_end, *, bno=None, vesc=None):
+    """Wheels at 0 (50 Hz); each given accelerometer reads its constant."""
+    f.advance(0.0)
+    f.update(0.0)
+    for k in range(1, int(round(t_end / BNO_DT)) + 1):
+        t = k * BNO_DT
+        f.advance(t)
+        if bno is not None:
+            f.update_accel('bno', bno)
+        if k % SLOW_EVERY == 0:
+            if vesc is not None:
+                f.update_accel('vesc', vesc)
+            f.update(0.0)
+
+
+def test_four_state_learns_each_bias_separately_while_stopped():
+    # oracle: invariant -- wheels at 0 for good mean v = 0 and a = 0, so the
+    # only explanation of a steady reading is that sensor's own bias:
+    # b_bno = +0.2, b_vesc = -0.1. Opposite signs: an averaged bias fails.
+    f = vs.DualImuSpeedFilter(EstimatorConfig())
+    _stopped(f, 20.0, bno=0.2, vesc=-0.1)
+    assert f.b_bno == pytest.approx(0.2, abs=0.01)    # m/s^2
+    assert f.b_vesc == pytest.approx(-0.1, abs=0.01)  # m/s^2
+    assert f.a == pytest.approx(0.0, abs=0.01)        # m/s^2
+    assert f.v == pytest.approx(0.0, abs=0.01)        # m/s
+
+
+def test_four_state_an_absent_imu_leaves_its_bias_at_the_prior():
+    # oracle: invariant -- nothing measures b_bno without the BNO, and F and
+    # Q never couple it to anything, so it stays exactly 0 and uncorrelated.
+    cfg = EstimatorConfig()
+    f = vs.DualImuSpeedFilter(cfg)
+    _stopped(f, 10.0, vesc=-0.1)
+    assert f.b_vesc == pytest.approx(-0.1, abs=0.01)  # m/s^2
+    assert f.b_bno == 0.0
+    P = f.P
+    assert all(P[vs.B_BNO][j] == 0.0 for j in range(4) if j != vs.B_BNO)
+    assert P[vs.B_BNO][vs.B_BNO] == pytest.approx(
+        cfg.sigma_bias0 ** 2 + cfg.sigma_bias_rw ** 2 * 10.0, abs=1e-12)
+
+
+def test_four_state_reset_forgets_v_and_a_but_keeps_both_biases():
+    f = vs.DualImuSpeedFilter(EstimatorConfig())
+    _stopped(f, 10.0, bno=0.2, vesc=-0.1)
+    b_vesc, b_bno = f.b_vesc, f.b_bno
+    p_biases = [row[vs.B_VESC:] for row in f.P[vs.B_VESC:]]
+    f.reset()
+    assert not f.update_accel('bno', 5.0)    # ignored until re-seeded
+    f.advance(11.0)
+    f.update(2.5)
+    assert f.v == 2.5 and f.a == 0.0
+    assert (f.b_vesc, f.b_bno) == (b_vesc, b_bno)
+    assert [row[vs.B_VESC:] for row in f.P[vs.B_VESC:]] == p_biases
+    assert f.P[vs.A][vs.A] == EstimatorConfig().sigma_accel0 ** 2
+    assert f.P[vs.V][vs.B_BNO] == 0.0
+
+
+D_VESC = 0.18     # EstimatorConfig's default VESC x_offset [m]
+
+
+def drive_both(est, t_end, speed, *, rng, yaw=0.0, bno_bias=0.0, vesc_bias=0.0,
+               accel_noise=0.0, wheel_noise=0.0, wheel=None, bno_z=G, vesc_z=G, t0=0.0):
+    """Like drive(), but both IMUs read the true forward acceleration at their
+    own mount (dv/dt - yaw^2 d, as in drive()) plus their own bias and noise;
+    yaw is a constant rate [rad/s]. Returns [(t, truth, wheel, estimate)]."""
+    out = []
+    h = 1e-6
+    for k in range(int(round((t_end - t0) / BNO_DT)) + 1):
+        t = t0 + k * BNO_DT
+        dv = (speed(t + h) - speed(t - h)) / (2 * h)
+        bno_ax = dv - yaw * yaw * D_BNO + bno_bias + rng.gauss(0.0, accel_noise)
+        est.on_imu('bno', t, t, bno_ax, bno_z, yaw)
+        if k % SLOW_EVERY == 0:
+            vesc_ax = dv - yaw * yaw * D_VESC + vesc_bias + rng.gauss(0.0, accel_noise)
+            est.on_imu('vesc', t, t, vesc_ax, vesc_z, yaw)
+            z = wheel(t) if wheel else speed(t) + rng.gauss(0.0, wheel_noise)
+            out.append((t, speed(t), z, est.on_wheel(t, z)))
+    return out
+
+
+def test_both_beats_noisy_wheels_with_two_differently_biased_imus():
+    # oracle: invariant -- truth known by construction; the same margin as
+    # test_fused_speed_beats_noisy_wheels, now with a +0.15 and a -0.1 m/s^2
+    # bias the filter has to learn apart.
+    rng = random.Random(5)
+
+    def speed(t):
+        return 1.0 + 0.8 * math.sin(0.7 * t)
+
+    est = VehicleStateEstimator(EstimatorConfig(accel_source='both'))
+    out = drive_both(est, 30.0, speed, rng=rng, bno_bias=0.15, vesc_bias=-0.1,
+                     accel_noise=1.0, wheel_noise=0.08)
+    later = [(t, truth, z, e) for t, truth, z, e in out if t >= 10.0]
+    assert all(e.mode in (MODE_FUSED, MODE_CLAMPED) for *_, e in later)
+    fused = math.sqrt(sum((e.speed - truth) ** 2 for _, truth, _, e in later) / len(later))
+    raw = math.sqrt(sum((z - truth) ** 2 for _, truth, z, _ in later) / len(later))
+    assert fused < 0.5 * raw
+    biases = est.accel_biases()
+    assert biases['bno'] == pytest.approx(0.15, abs=0.05)   # m/s^2
+    assert biases['vesc'] == pytest.approx(-0.1, abs=0.05)  # m/s^2
+
+
+def test_both_corner_does_not_read_as_braking():
+    # oracle: invariant -- a steady circle at constant speed has no forward
+    # acceleration at base_link. Each IMU reads -yaw^2 d at its own mount
+    # (-0.36 and -0.18 m/s^2 at 1 rad/s); each must be corrected with its
+    # own offset, or it is learned as a bias of that size.
+    rng = random.Random(9)
+    est = VehicleStateEstimator(EstimatorConfig(accel_source='both'))
+    out = drive_both(est, 20.0, const(1.5), rng=rng, yaw=1.0)
+    assert est.filter.b_bno == pytest.approx(0.0, abs=0.02)   # m/s^2
+    assert est.filter.b_vesc == pytest.approx(0.0, abs=0.02)  # m/s^2
+    assert out[-1][3].speed == pytest.approx(1.5, abs=0.01)   # m/s
+
+
+def test_both_predicts_to_the_wheel_time_between_imu_samples():
+    # oracle: closed form -- the wheel speed is compared with the speed
+    # predicted to the wheel's own time, v + a dt. A wheel reading exactly
+    # that is no surprise (y = 0), so v and a must not move. Compared with
+    # the speed at the last IMU sample instead, the same reading would be
+    # a * dt = 0.02 m/s high and pull v up. VESC only, as on car 2 today.
+    est = VehicleStateEstimator(EstimatorConfig(accel_source='both'))
+    for k in range(50):                   # 1 s at 50 Hz, wheels in step
+        t = k * 0.02
+        est.on_imu('vesc', t, t, 2.0, G, 0.0)
+        est.on_wheel(t, 0.5 + 2.0 * t)
+    f = est.filter
+    t = 50 * 0.02
+    est.on_imu('vesc', t, t, 2.0, G, 0.0)
+    v0, a0 = f.v, f.a
+    dt = 0.01
+    e = est.on_wheel(t + dt, v0 + a0 * dt)
+    assert e.mode == MODE_FUSED
+    assert f.v == pytest.approx(v0 + a0 * dt, abs=1e-12)  # m/s
+    assert f.a == pytest.approx(a0, abs=1e-12)            # m/s^2
+
+
+def test_both_with_no_imu_is_exactly_the_wheel_speed():
+    # oracle: invariant -- the fallback contract holds for 'both' too.
+    est = VehicleStateEstimator(EstimatorConfig(accel_source='both'))
+    for k, z in enumerate((0.0, 0.4, 1.7, -0.6)):
+        e = est.on_wheel(k * 0.02, z)
+        assert e.speed == z and e.mode == MODE_WHEEL_ONLY
+
+
+def test_both_upside_down_imu_is_not_used():
+    # oracle: invariant -- a VESC reading -1 g on z (mounted wrong) must not
+    # touch the filter, however wrong its x reads: b_vesc stays exactly 0.
+    rng = random.Random(3)
+    est = VehicleStateEstimator(EstimatorConfig(accel_source='both'))
+    drive_both(est, 5.0, const(1.0), rng=rng, vesc_bias=5.0, vesc_z=-G)
+    assert est.filter.b_vesc == 0.0
+    assert est.filter.v == pytest.approx(1.0, abs=0.02)  # m/s
+
+
+def test_both_published_speed_never_leaves_max_divergence_of_the_wheels():
+    # oracle: invariant -- the clamp, over a hostile run: the BNO's bias
+    # jumps by 3 m/s^2 mid-drive, vibration, and wheelspin bursts.
+    rng = random.Random(13)
+    est = VehicleStateEstimator(EstimatorConfig(accel_source='both', max_divergence=0.3))
+
+    def wheel(t):
+        spin = 0.7 if 3.0 < t % 4.0 < 3.4 else 0.0
+        return 1.0 + 0.5 * math.sin(t) + spin + rng.gauss(0.0, 0.08)
+
+    first = drive_both(est, 6.0, lambda t: 1.0 + 0.5 * math.sin(t), rng=rng,
+                       accel_noise=1.0, wheel=wheel)
+    second = drive_both(est, 12.0, lambda t: 1.0 + 0.5 * math.sin(t), rng=rng,
+                        bno_bias=3.0, accel_noise=1.0, wheel=wheel, t0=6.0 + BNO_DT)
+    out = first + second
+    assert len(out) > 500
+    for _, _, z, e in out:
+        assert abs(e.speed - z) <= 0.3 + 1e-12
+    assert sum(e.mode in (MODE_CLAMPED, MODE_SLIP) for *_, e in out) > 10
+
+
+@pytest.mark.parametrize('field', ['sigma_jerk', 'sigma_accel_bno', 'sigma_accel_vesc',
+                                   'sigma_accel0'])
+@pytest.mark.parametrize('bad', [0.0, -1.0, math.nan, math.inf])
+def test_config_rejects_bad_four_state_noise(field, bad):
+    with pytest.raises(ValueError, match=field):
+        EstimatorConfig(**{field: bad})
+
+
+def test_accel_biases_name_the_imus_in_use():
+    # oracle: spec -- EstimatorConfig.accel_source: one bias per accelerometer used.
+    assert set(VehicleStateEstimator(EstimatorConfig(accel_source='both'))
+               .accel_biases()) == {'bno', 'vesc'}
+    assert set(VehicleStateEstimator(EstimatorConfig(accel_source='vesc'))
+               .accel_biases()) == {'vesc'}
+    assert VehicleStateEstimator(EstimatorConfig(accel_source='none')).accel_biases() == {}
 
 
 # ---------------------------------------------------------------- estimator: speed

@@ -129,7 +129,9 @@ class EstimatorConfig:
     # Car 1's wheelbase [m] (vesc.yaml; docs/hardware-reference.md).
     wheelbase: float = 0.36
     # Which IMU's accelerometer drives the speed prediction: 'bno', 'vesc' or
-    # 'none' (= wheel speed only, the filter off).
+    # 'none' (= wheel speed only, the filter off). 'both' switches to
+    # DualImuSpeedFilter: x = [v, a, b_vesc, b_bno], both accelerometers
+    # measured, each with its own bias.
     accel_source: str = 'bno'
     # How far ahead of base_link (the rear axle) each IMU sits, along x [m].
     # Only the accel_source's matters, for the centripetal correction.
@@ -148,6 +150,18 @@ class EstimatorConfig:
     sigma_wheel: float = 0.08
     # Prior on the accelerometer's forward bias, 1 sigma [m/s^2].
     sigma_bias0: float = 0.3
+    # accel_source 'both' only (DualImuSpeedFilter). None of these four are
+    # measured yet; see config/vehicle_state.yaml for how to measure each.
+    # How fast the car's true acceleration can change: white jerk density
+    # [m/s^3 per sqrt(Hz)]. 6 lets a move ~2 m/s^2 in 0.1 s at 1 sigma
+    # (2 / sqrt(0.1)), about a throttle step.
+    sigma_jerk: float = 6.0
+    # Each accelerometer's per-sample noise while driving, 1 sigma [m/s^2].
+    # Vibration dominates; 1.0 is the "1 m/s^2 rms" assumed above for sigma_accel.
+    sigma_accel_bno: float = 1.0
+    sigma_accel_vesc: float = 1.0
+    # Prior on the acceleration when the filter (re)starts, 1 sigma [m/s^2].
+    sigma_accel0: float = 3.0
     # The published speed never differs from the wheel speed by more [m/s].
     max_divergence: float = 0.3
     # Past this gap between filter and wheels the filter restarts from the
@@ -186,7 +200,8 @@ class EstimatorConfig:
 
     def __post_init__(self):
         for name in ('wheelbase', 'sigma_accel', 'sigma_bias_rw', 'sigma_wheel',
-                     'sigma_bias0', 'max_divergence', 'reset_divergence',
+                     'sigma_bias0', 'sigma_jerk', 'sigma_accel_bno', 'sigma_accel_vesc',
+                     'sigma_accel0', 'max_divergence', 'reset_divergence',
                      'slip_gate', 'max_slip_time', 'imu_timeout', 'wheel_timeout', 'max_accel_dt',
                      'min_steering_speed', 'gyro_disagree_threshold',
                      'gyro_disagree_tau', 'max_gyro_gap', 'max_heading_extrapolation'):
@@ -196,8 +211,9 @@ class EstimatorConfig:
         _require(self.reset_divergence > self.max_divergence,
                  f'reset_divergence ({self.reset_divergence}) must exceed '
                  f'max_divergence ({self.max_divergence})')
-        _require(self.accel_source in ('bno', 'vesc', 'none'),
-                 f"accel_source must be 'bno', 'vesc' or 'none', got {self.accel_source!r}")
+        _require(self.accel_source in ('bno', 'vesc', 'both', 'none'),
+                 "accel_source must be 'bno', 'vesc', 'both' or 'none', "
+                 f"got {self.accel_source!r}")
         for name in ('x_offset', 'gyro_weight'):
             table = dict(getattr(self, name))
             _require(set(table) == {'bno', 'vesc'},
@@ -242,6 +258,49 @@ def steering_from_yaw_rate(yaw_rate, speed, wheelbase, min_speed):
 def bounded(value, centre, half_width):
     """value clamped to [centre - half_width, centre + half_width]."""
     return min(max(value, centre - half_width), centre + half_width)
+
+
+def kalman_update(x, P, z, H, R):
+    """One scalar measurement z = H x + noise (variance R): the new (x, P).
+
+    y = z - H x     innovation: how far the reading is from the prediction
+    S = H P H^T + R its variance
+    K = P H^T / S   gain: how much of y each state takes
+    """
+    y = z - (H @ x).item()
+    S = (H @ P @ H.T).item() + R
+    K = (P @ H.T).ravel() / S
+    return x + K * y, (np.eye(len(x)) - np.outer(K, H)) @ P
+
+
+def jerk_process_noise(dt, sigma_jerk, sigma_bias_rw):
+    """Q over dt for x = [v, a, b_vesc, b_bno] (DualImuSpeedFilter).
+
+    Q is what the model cannot predict, as a covariance. It comes from the
+    continuous model the filter assumes between samples:
+
+        v' = a      a' = w_jerk      b_vesc' = w_vesc      b_bno' = w_bno
+
+    with white noises of density sigma_jerk^2 [(m/s^3)^2 / Hz] and
+    sigma_bias_rw^2. Over dt the noise adds
+    Q = integral_0^dt F(s) Qc F(s)^T ds, with F(s) = [[1, s], [0, 1]] on
+    [v, a] and Qc = diag(0, sigma_jerk^2, sigma_bias_rw^2, sigma_bias_rw^2):
+
+        on [v, a]:       sigma_jerk^2 * [[dt^3/3, dt^2/2],
+                                         [dt^2/2, dt    ]]
+        on each bias:    sigma_bias_rw^2 * dt
+
+    The v-a terms are the jerk integrated once (into a) and twice (into v).
+    test_four_state_q_is_the_integral_of_the_continuous_noise checks this
+    against a numerical integral.
+    """
+    qj, qb = sigma_jerk ** 2, sigma_bias_rw ** 2
+    Q = np.zeros((4, 4))
+    Q[0, 0] = qj * dt ** 3 / 3.0
+    Q[0, 1] = Q[1, 0] = qj * dt ** 2 / 2.0
+    Q[1, 1] = qj * dt
+    Q[2, 2] = Q[3, 3] = qb * dt
+    return Q
 
 
 class SpeedFilter:
@@ -314,12 +373,117 @@ class SpeedFilter:
             self._P = np.diag([cfg.sigma_wheel ** 2, self.p_bb])
             self.initialized = True
             return
-        H, R = self.H, cfg.sigma_wheel ** 2
-        y = z - (H @ self.x).item()
-        S = (H @ self._P @ H.T).item() + R
-        K = (self._P @ H.T).ravel() / S
-        self.x = self.x + K * y
-        self._P = (np.eye(len(self.x)) - np.outer(K, H)) @ self._P
+        self.x, self._P = kalman_update(self.x, self._P, z, self.H, cfg.sigma_wheel ** 2)
+
+
+# Indices into DualImuSpeedFilter.x.
+V, A, B_VESC, B_BNO = range(4)
+
+
+class DualImuSpeedFilter:
+    """Kalman filter on x = [v, a, b_vesc, b_bno] (accel_source: both).
+
+    Forward speed, forward acceleration, and each accelerometer's own bias.
+    Unlike SpeedFilter, no accelerometer is integrated open-loop: both are
+    measurements of a, each through its own bias, so a gap in one IMU only
+    means fewer updates, and the two biases are learned separately.
+
+    predict:  x = F x                F = I with F[v, a] = dt (v' = a)
+              P = F P F^T + Q        Q = jerk_process_noise(dt, ...)
+    update:   wheel       z = v           H = [1, 0, 0, 0]  R = sigma_wheel^2
+              VESC accel  z = a + b_vesc  H = [0, 1, 1, 0]  R = sigma_accel_vesc^2
+              BNO accel   z = a + b_bno   H = [0, 1, 0, 1]  R = sigma_accel_bno^2
+              each through kalman_update.
+
+    Time is the caller's receipt clock: advance(t) predicts up to t, and
+    the estimator calls it before every update. An IMU that never reports
+    leaves its bias exactly at its prior: nothing observes it.
+    """
+
+    H_WHEEL = np.array([[1.0, 0.0, 0.0, 0.0]])
+    H_ACCEL = {'vesc': np.array([[0.0, 1.0, 1.0, 0.0]]),
+               'bno': np.array([[0.0, 1.0, 0.0, 1.0]])}
+
+    def __init__(self, cfg: EstimatorConfig):
+        self.cfg = cfg
+        self.initialized = False
+        self.t = None
+        self.x = np.zeros(4)
+        self._P = np.diag([0.0, 0.0, cfg.sigma_bias0 ** 2, cfg.sigma_bias0 ** 2])
+
+    @property
+    def v(self):
+        return float(self.x[V])
+
+    @property
+    def a(self):
+        return float(self.x[A])
+
+    @property
+    def b_vesc(self):
+        return float(self.x[B_VESC])
+
+    @property
+    def b_bno(self):
+        return float(self.x[B_BNO])
+
+    @property
+    def P(self):
+        """The covariance of [v, a, b_vesc, b_bno], as a copy in nested lists."""
+        return self._P.tolist()
+
+    @property
+    def variance(self):
+        return float(self._P[V, V])
+
+    def reset(self):
+        """Forget v and a; keep both learned biases. The next update re-seeds."""
+        self.initialized = False
+
+    def advance(self, t):
+        """Predict from the last time to t. Before the first seed, only note t."""
+        if not _finite(t):
+            return
+        if not self.initialized or self.t is None:
+            self.t = t
+            return
+        dt = t - self.t
+        if dt <= 0.0:
+            return
+        self.t = t
+        F = np.eye(4)
+        F[V, A] = dt
+        self.x = F @ self.x
+        P = F @ self._P @ F.T + jerk_process_noise(dt, self.cfg.sigma_jerk,
+                                                   self.cfg.sigma_bias_rw)
+        self._P = 0.5 * (P + P.T)     # symmetric, whatever the rounding
+
+    def update(self, z):
+        """A wheel speed [m/s]."""
+        cfg = self.cfg
+        if not _finite(z):
+            return
+        if not self.initialized or abs(z - self.v) > cfg.reset_divergence:
+            # Seed v from the wheels and a at 0 (uncertain), keeping the
+            # biases and what is known about them.
+            biases = self._P[B_VESC:, B_VESC:].copy()
+            self.x[V], self.x[A] = z, 0.0
+            self._P = np.zeros((4, 4))
+            self._P[V, V] = cfg.sigma_wheel ** 2
+            self._P[A, A] = cfg.sigma_accel0 ** 2
+            self._P[B_VESC:, B_VESC:] = biases
+            self.initialized = True
+            return
+        self.x, self._P = kalman_update(self.x, self._P, z, self.H_WHEEL,
+                                        cfg.sigma_wheel ** 2)
+
+    def update_accel(self, source, z):
+        """One forward acceleration [m/s^2] at base_link from 'vesc' or 'bno'."""
+        if not self.initialized or not _finite(z):
+            return False
+        sigma = self.cfg.sigma_accel_vesc if source == 'vesc' else self.cfg.sigma_accel_bno
+        self.x, self._P = kalman_update(self.x, self._P, z, self.H_ACCEL[source], sigma ** 2)
+        return True
 
 
 @dataclass
@@ -413,7 +577,8 @@ class VehicleStateEstimator:
 
     def __init__(self, cfg: EstimatorConfig):
         self.cfg = cfg
-        self.filter = SpeedFilter(cfg)
+        self._dual = cfg.accel_source == 'both'
+        self.filter = DualImuSpeedFilter(cfg) if self._dual else SpeedFilter(cfg)
         self.src = {name: _Source() for name in self.SOURCES}
         self._weights = dict(cfg.gyro_weight)
         self._offsets = dict(cfg.x_offset)
@@ -441,6 +606,15 @@ class VehicleStateEstimator:
         s.track.add(stamp, yaw_rate, self.cfg.max_gyro_gap)
         self._update_gyro_agreement(t_recv)
 
+        if self._dual:
+            # Every right-way-up IMU is a measurement of a; no gap to guard,
+            # since nothing is integrated open-loop.
+            if s.mount_ok:
+                self.filter.advance(t_recv)
+                a = accel_at_base_link(accel_x, yaw_rate, self._offsets[source])
+                if self.filter.update_accel(source, a):
+                    self._accel_t = t_recv
+            return
         if source != self.cfg.accel_source or not s.mount_ok or previous_stamp is None:
             return
         dt = stamp - previous_stamp
@@ -465,6 +639,8 @@ class VehicleStateEstimator:
             return SpeedEstimate(wheel_speed, cfg.sigma_wheel ** 2, MODE_INVALID)
         self._wheel_t = t_recv
         f = self.filter
+        if self._dual:
+            f.advance(t_recv)    # the slip gate compares against the speed at t_recv
         if not self.accel_fresh(t_recv):
             self._slip_since = None
             f.reset()
@@ -484,6 +660,14 @@ class VehicleStateEstimator:
         return SpeedEstimate(speed, f.variance, mode)
 
     # ------------------------------------------------------------ outputs
+
+    def accel_biases(self):
+        """{IMU: learned forward accel bias [m/s^2]} for the accelerometers in use."""
+        if self._dual:
+            return {'vesc': self.filter.b_vesc, 'bno': self.filter.b_bno}
+        if self.cfg.accel_source == 'none':
+            return {}
+        return {self.cfg.accel_source: self.filter.b}
 
     def accel_fresh(self, t):
         return self.cfg.accel_source != 'none' and t - self._accel_t <= self.cfg.imu_timeout
