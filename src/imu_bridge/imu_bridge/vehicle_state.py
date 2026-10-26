@@ -49,6 +49,8 @@ from collections import deque
 from dataclasses import dataclass
 import math
 
+import numpy as np
+
 # Below this many m/s^2 of averaged +z acceleration a source is taken to be
 # mounted wrong (upside down, or a wrong rpy_deg in car.yaml): at rest a
 # correctly mounted IMU reads about +9.8 on z. 0.7 g leaves room for bumps and
@@ -245,36 +247,62 @@ def bounded(value, centre, half_width):
 class SpeedFilter:
     """Kalman filter on x = [v, b]: forward speed and accelerometer bias.
 
-    predict:  v += (a - b) dt;   F = [[1, -dt], [0, 1]]
-              Q = diag(sigma_accel^2 dt, sigma_bias_rw^2 dt)
-    update:   z = v + noise(sigma_wheel)
+    predict:  x = F x + B a          F = [[1, -dt], [0, 1]],  B = [dt, 0]
+              P = F P F^T + Q        Q = diag(sigma_accel^2 dt, sigma_bias_rw^2 dt)
+    update:   z = H x + noise        H = [1, 0] (the wheels measure v only),
+                                     R = sigma_wheel^2
+              y = z - H x            innovation
+              S = H P H^T + R        its variance
+              K = P H^T / S          gain
+              x = x + K y
+              P = (I - K H) P
+
+    To add a state, grow x, P, F, B, Q and H together; predict and update
+    stay as they are. v, b and P are read-only views for callers and tests.
     """
+
+    H = np.array([[1.0, 0.0]])
 
     def __init__(self, cfg: EstimatorConfig):
         self.cfg = cfg
         self.initialized = False
-        self.v = 0.0
-        self.b = 0.0
+        self.x = np.zeros(2)
         self.p_bb = cfg.sigma_bias0 ** 2
-        self.P = [[0.0, 0.0], [0.0, self.p_bb]]
+        self._P = np.diag([0.0, self.p_bb])
+
+    @property
+    def v(self):
+        return float(self.x[0])
+
+    @property
+    def b(self):
+        return float(self.x[1])
+
+    @property
+    def P(self):
+        """The covariance of [v, b], as a copy in nested lists."""
+        return self._P.tolist()
+
+    @property
+    def variance(self):
+        return float(self._P[0, 0])
 
     def reset(self):
         """Forget the speed; keep the learned bias. The next update re-seeds v."""
         if self.initialized:
-            self.p_bb = self.P[1][1]
+            self.p_bb = float(self._P[1, 1])
         self.initialized = False
 
     def predict(self, accel, dt):
         if not self.initialized or not _finite(accel, dt) or dt <= 0.0:
             return False
         cfg = self.cfg
-        self.v += (accel - self.b) * dt
-        (p00, p01), (p10, p11) = self.P
-        # F P F^T + Q, written out for F = [[1, -dt], [0, 1]].
-        n00 = p00 - dt * (p01 + p10) + dt * dt * p11 + cfg.sigma_accel ** 2 * dt
-        n01 = p01 - dt * p11
-        n11 = p11 + cfg.sigma_bias_rw ** 2 * dt
-        self.P = [[n00, n01], [n01, n11]]
+        F = np.array([[1.0, -dt], [0.0, 1.0]])
+        B = np.array([dt, 0.0])
+        Q = np.diag([cfg.sigma_accel ** 2 * dt, cfg.sigma_bias_rw ** 2 * dt])
+        self.x = F @ self.x + B * accel
+        P = F @ self._P @ F.T + Q
+        self._P = 0.5 * (P + P.T)     # symmetric, whatever the rounding
         return True
 
     def update(self, z):
@@ -282,22 +310,16 @@ class SpeedFilter:
         if not _finite(z):
             return
         if not self.initialized or abs(z - self.v) > cfg.reset_divergence:
-            self.v = z
-            self.P = [[cfg.sigma_wheel ** 2, 0.0], [0.0, self.p_bb]]
+            self.x[0] = z
+            self._P = np.diag([cfg.sigma_wheel ** 2, self.p_bb])
             self.initialized = True
             return
-        (p00, p01), (p10, p11) = self.P
-        s = p00 + cfg.sigma_wheel ** 2
-        k0, k1 = p00 / s, p10 / s
-        y = z - self.v
-        self.v += k0 * y
-        self.b += k1 * y
-        self.P = [[p00 - k0 * p00, p01 - k0 * p01],
-                  [p10 - k1 * p00, p11 - k1 * p01]]
-
-    @property
-    def variance(self):
-        return self.P[0][0]
+        H, R = self.H, cfg.sigma_wheel ** 2
+        y = z - (H @ self.x).item()
+        S = (H @ self._P @ H.T).item() + R
+        K = (self._P @ H.T).ravel() / S
+        self.x = self.x + K * y
+        self._P = (np.eye(len(self.x)) - np.outer(K, H)) @ self._P
 
 
 @dataclass

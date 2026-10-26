@@ -386,6 +386,21 @@ def test_filter_does_nothing_before_the_first_wheel_speed():
     assert not f.initialized
 
 
+def test_variance_is_the_speeds_not_the_bias():
+    # oracle: closed form -- seeded from a wheel speed, var(v) is sigma_wheel^2
+    # and var(b) the prior sigma_bias0^2 (picked unequal); one predict adds
+    # dt^2 var(b) + sigma_accel^2 dt to var(v). The slip gate and /odom/fused's
+    # covariance read this, so the bias variance in its place would be wrong.
+    cfg = EstimatorConfig(sigma_accel=0.5, sigma_wheel=0.08, sigma_bias0=0.3)
+    f = SpeedFilter(cfg)
+    f.update(1.0)
+    assert f.variance == pytest.approx(0.08 ** 2, abs=1e-15)  # (m/s)^2
+    dt = 0.02
+    assert f.predict(0.0, dt)
+    assert f.variance == pytest.approx(
+        0.08 ** 2 + dt * dt * 0.3 ** 2 + 0.5 ** 2 * dt, abs=1e-15)  # (m/s)^2
+
+
 # ---------------------------------------------------------------- estimator: speed
 
 def test_no_imu_means_exactly_the_wheel_speed():
