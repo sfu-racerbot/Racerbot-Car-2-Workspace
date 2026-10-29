@@ -103,6 +103,8 @@ def test_non_numeric_cap_is_refused(text):
 # ---------------------------------------------------------------- the node
 
 import rclpy  # noqa: E402  (ROS sourced: see docstring)
+from nav_msgs.msg import Odometry  # noqa: E402
+from rclpy.duration import Duration  # noqa: E402
 from sensor_msgs.msg import Joy  # noqa: E402
 
 from gap_follow.gap_follow_node import GapFollowNode  # noqa: E402
@@ -214,3 +216,39 @@ def test_raised_node_still_stops_when_lb_is_released(raised):
     raised.drive_pub.publish = original
     assert published, 'node published nothing'
     assert all(msg.drive.speed == 0.0 for msg in published)
+
+
+def _published_on_one_scan(node):
+    published = []
+    original = node.drive_pub.publish
+    node.drive_pub.publish = lambda msg: (published.append(msg), original(msg))
+    node.scan_callback(OPEN)
+    node.drive_pub.publish = original
+    assert published, 'node published nothing'
+    return published
+
+
+def test_raised_node_commands_zero_when_joy_was_never_received(raised):
+    # oracle: CLAUDE.md LB deadman policy -- no /joy at all means no motion,
+    # with the top speed raised to the 5.0 m/s ceiling. The car is already
+    # moving fast (odometry and the last command at FAST), so a zero here is
+    # the deadman, not a slow ramp.
+    odom = Odometry()
+    odom.twist.twist.linear.x = FAST
+    raised.odom_callback(odom)
+    raised.last_commanded_speed = FAST
+    assert raised.last_joy_time is None
+    published = _published_on_one_scan(raised)
+    assert all(msg.drive.speed == 0.0 for msg in published)
+    assert raised.last_decision_state == 'waiting_for_joy'
+
+
+def test_raised_node_commands_zero_when_joy_goes_stale(raised):
+    # oracle: CLAUDE.md LB deadman policy -- LB was held, but the last /joy is
+    # older than joy_timeout_sec, so the raised node must command zero.
+    _drive(raised, OPEN, FAST)
+    raised.last_joy_time = raised.get_clock().now() - Duration(
+        seconds=raised.joy_timeout_sec + 0.1)
+    published = _published_on_one_scan(raised)
+    assert all(msg.drive.speed == 0.0 for msg in published)
+    assert raised.last_decision_state == 'joy_stale'
