@@ -1,0 +1,26 @@
+/vesc_to_odom_node:
+  ros__parameters:
+    base_frame: base_link
+    odom_frame: odom
+    publish_tf: true
+    qos_overrides:
+      /parameter_events:
+        publisher:
+          depth: 1000
+          durability: volatile
+          history: keep_last
+          reliability: reliable
+      /tf:
+        publisher:
+          depth: 100
+          durability: volatile
+          history: keep_last
+          reliability: reliable
+    speed_to_erpm_gain: -4447.983786
+    speed_to_erpm_offset: 0.0
+    start_type_description_service: true
+    steering_angle_to_servo_gain: -0.78
+    steering_angle_to_servo_offset: 0.5904
+    use_servo_cmd_to_calc_angular_velocity: true
+    use_sim_time: false
+    wheelbase: 0.36

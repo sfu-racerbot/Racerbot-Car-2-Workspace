@@ -1,0 +1,15 @@
+/ackermann_to_vesc_node:
+  ros__parameters:
+    qos_overrides:
+      /parameter_events:
+        publisher:
+          depth: 1000
+          durability: volatile
+          history: keep_last
+          reliability: reliable
+    speed_to_erpm_gain: 4614.0
+    speed_to_erpm_offset: 0.0
+    start_type_description_service: true
+    steering_angle_to_servo_gain: -0.78
+    steering_angle_to_servo_offset: 0.5904
+    use_sim_time: false

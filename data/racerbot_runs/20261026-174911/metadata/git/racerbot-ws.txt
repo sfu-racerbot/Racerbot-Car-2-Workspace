@@ -1,0 +1,17 @@
+repository: /home/racerbotcar-2/racerbot-ws
+HEAD: 39de5c2daf15451362ee6d9596262fc1da9c7915
+branch: main
+
+# git status --porcelain (?? = untracked: NOT in the .diff)
+ M src/racerbot_a
+ D src/racerbot_b
+?? data/racerbot_runs/map_course-20261026-174910.log
+
+# git submodule status
+ ec599a1c4f3d4edc5f7d356e2f2990839e56bb7d src/particle_filter (heads/foxy-devel)
++4551541eb16e1554bad4e211402fbbb73ca5935f src/racerbot_a (heads/main)
+-31ae4ef071401045bb0beb6d0bb63befa87293df src/racerbot_b
+ f55480a7044367c219745480b436b8b7117f8282 src/range_libc (heads/humble-devel)
+ 775b167c0dbcfe00a012e248c66a7c8379ef9fbb src/realsense-ros (4.58.2-41-g775b167c)
+ d3f510ce1b4be12967064d8251ebcac530921a04 src/transport_drivers (1.2.0)
+ f5b711d7cee309aeb7946ad5af0e4470259a178f src/web_dashboards (remotes/origin/HEAD)

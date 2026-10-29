@@ -1,0 +1,56 @@
+/foxglove_bridge:
+  ros__parameters:
+    address: 127.0.0.1
+    asset_uri_allowlist:
+    - ^package://(?:[-\w%]+/)*[-\w%.]+\.(?:dae|fbx|glb|gltf|jpeg|jpg|mtl|obj|png|stl|tif|tiff|urdf|webp|xacro)$
+    best_effort_qos_topic_whitelist:
+    - (?!)
+    capabilities:
+    - parameters
+    - parametersSubscribe
+    - services
+    - connectionGraph
+    - assets
+    certfile: ''
+    client_topic_whitelist:
+    - ^/initialpose$
+    debug: false
+    device_token: ''
+    disable_load_message: true
+    foxglove_api_url: ''
+    ignore_unresponsive_param_nodes: true
+    include_hidden: false
+    keyfile: ''
+    max_data_track_message_size: 102400
+    max_qos_depth: 10
+    message_backlog_size: 1024
+    min_qos_depth: 1
+    param_whitelist:
+    - .*
+    point_cloud_compression_quantization_bits: 12
+    point_cloud_compression_topic_denylist: []
+    port: 8765
+    publish_client_count: false
+    qos_overrides:
+      /parameter_events:
+        publisher:
+          depth: 1000
+          durability: volatile
+          history: keep_last
+          reliability: reliable
+    remote_access: false
+    send_buffer_limit: 10000000
+    service_whitelist:
+    - .*
+    start_type_description_service: true
+    sysinfo: true
+    sysinfo_refresh_interval: 500
+    sysinfo_topic: /foxglove_bridge/sysinfo
+    tls: false
+    topic_whitelist:
+    - ^(?!.*/(image|image_raw|image_rect|image_rect_raw|image_mono|image_color|image_rect_color|theora|zstd)$).*$
+    use_compression: false
+    use_sim_time: false
+    video_encoder: auto
+    video_transcode_topic_denylist:
+    - .*/compressedDepth

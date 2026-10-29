@@ -1,0 +1,18 @@
+/race_diag_node:
+  ros__parameters:
+    base_frame: base_link
+    drive_topic: /drive
+    idle_period_sec: 600.0
+    joy_topic: /joy
+    map_frame: map
+    map_topic: /map
+    odom_topic: /odom
+    output_directory: /home/racerbotcar-2/racerbot-ws/data/racerbot_runs/20261026-174911
+    pose_lag_alert_sec: 0.3
+    pose_still_travel_m: 0.02
+    pose_topic: /slam_pose
+    scan_topic: /scan
+    stale_sec: 3.0
+    start_type_description_service: true
+    summary_period_sec: 20.0
+    use_sim_time: false

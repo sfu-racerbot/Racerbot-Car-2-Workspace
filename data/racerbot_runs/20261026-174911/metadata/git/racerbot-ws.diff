@@ -1,0 +1,14 @@
+diff --git a/src/racerbot_a b/src/racerbot_a
+index 37238d6..4551541 160000
+--- a/src/racerbot_a
++++ b/src/racerbot_a
+@@ -1 +1 @@
+-Subproject commit 37238d628d4e7763c03bcf57bb70a8b5dabe5320
++Subproject commit 4551541eb16e1554bad4e211402fbbb73ca5935f-dirty
+diff --git a/src/racerbot_b b/src/racerbot_b
+deleted file mode 160000
+index 31ae4ef..0000000
+--- a/src/racerbot_b
++++ /dev/null
+@@ -1 +0,0 @@
+-Subproject commit 31ae4ef071401045bb0beb6d0bb63befa87293df
