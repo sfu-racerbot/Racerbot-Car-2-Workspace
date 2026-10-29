@@ -186,14 +186,14 @@ def score(res: ReplayResult, motion, window_s: float = HEADING_WINDOW_S) -> dict
     return out
 
 
-def streams_from_axes(axes: dict, run_dir=None):
+def streams_from_axes(axes: dict, run_dir=None, car_yaml=None):
     """({'bno'|'vesc': (stamp, ax, az, gz)}, notes). The VESC comes through
     imu_spectrum.vesc_stream, so a run without /imu/vesc/data falls back to
-    the raw topic rotated with the run's car.yaml -- and is left out, with a
-    note, if its axes cannot be known."""
+    the raw topic rotated with the run's car.yaml (or car_yaml, when the run
+    has no copy) -- and is left out, with a note, if its axes cannot be known."""
     from run_analysis.imu_spectrum import bno_stream, vesc_stream
     streams, notes = {}, []
-    for s in (bno_stream(axes), vesc_stream(axes, run_dir)):
+    for s in (bno_stream(axes), vesc_stream(axes, run_dir, car_yaml)):
         if s is None:
             continue
         if not s.axes_known:
@@ -206,8 +206,8 @@ def streams_from_axes(axes: dict, run_dir=None):
     return streams, notes
 
 
-def report(axes: dict, motion, overrides: dict, run_dir=None) -> list:
-    streams, notes = streams_from_axes(axes, run_dir)
+def report(axes: dict, motion, overrides: dict, run_dir=None, car_yaml=None) -> list:
+    streams, notes = streams_from_axes(axes, run_dir, car_yaml)
     odom = axes.get("odom", np.zeros((0, 7)))
     lines = ["# Estimator replay (vehicle_state, open loop) scored against LiDAR", ""]
     lines += [f"  {n}" for n in notes]
@@ -246,6 +246,8 @@ def main(argv=None) -> int:
                     help="vehicle_state.yaml parameter to change (repeatable)")
     ap.add_argument("--no-icp", action="store_true", help="skip LiDAR scan matching (no scores)")
     ap.add_argument("--refresh", action="store_true", help="re-read the bag")
+    ap.add_argument("--car-yaml", help="imu-calibration car.yaml for a run that has no copy in "
+                                       "its metadata (e.g. ~/imu-calibration/config/car.yaml)")
     args = ap.parse_args(argv)
     overrides = {}
     for item in args.set:
@@ -262,7 +264,8 @@ def main(argv=None) -> int:
     if not args.no_icp:
         run = load_run(args.run_dir, refresh=args.refresh)
         motion = scan_motion(run, float(run.scan_t[0]), float(run.scan_t[-1]))
-    text = "\n".join(report(axes, motion, overrides, Path(args.run_dir).expanduser())) + "\n"
+    text = "\n".join(report(axes, motion, overrides, Path(args.run_dir).expanduser(),
+                            args.car_yaml)) + "\n"
     (analysis_dir(args.run_dir) / "estimator_replay.txt").write_text(text)
     print(text, end="")
     return 0

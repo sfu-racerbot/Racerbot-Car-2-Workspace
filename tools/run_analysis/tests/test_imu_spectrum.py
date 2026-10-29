@@ -140,6 +140,27 @@ def test_raw_fallback_is_rotated_with_the_runs_car_yaml(tmp_path):
     assert s.gyro[0] == pytest.approx([0.0, 0.0, math.radians(10.0)], abs=1e-12)  # rad/s
 
 
+def test_given_car_yaml_is_used_only_when_the_run_has_no_copy(tmp_path):
+    # oracle: closed form -- a checkout whose car.yaml mounts the VESC at
+    # yaw +90 deg maps raw x onto car +y; the run's own copy (-90 deg, car
+    # -y) wins whenever it exists, since it is what the car actually had.
+    checkout = tmp_path / 'imu-calibration'
+    (checkout / 'config').mkdir(parents=True)
+    given = checkout / 'config' / 'car.yaml'
+    given.write_text("imus:\n  vesc:\n    rpy_deg: [0.0, 0.0, 90.0]\n")
+    t = np.arange(0, 2, 1 / FS)
+    axes = _axes(vesc_raw=_raw(t, [0.1, 0.0, 1.0], [0.0, 0.0, 0.0]))
+    run = tmp_path / 'run'
+    run.mkdir()
+    s = ims.vesc_stream(axes, run, car_yaml=given)
+    assert 'given, not the run' in s.label
+    assert s.acc[0] == pytest.approx([0.0, 0.1 * G, G], abs=1e-9)                 # m/s^2
+    _metadata(run)
+    s = ims.vesc_stream(axes, run, car_yaml=given)
+    assert "the run's car.yaml" in s.label
+    assert s.acc[0] == pytest.approx([0.0, -0.1 * G, G], abs=1e-9)
+
+
 def test_raw_fallback_uses_the_runs_calibration_copy(tmp_path):
     # oracle: closed form -- a calibration whose accel bias is exactly the
     # 0.1 g on x removes it: the car's y reads 0.
@@ -147,7 +168,7 @@ def test_raw_fallback_uses_the_runs_calibration_copy(tmp_path):
                                'gyro_bias': [0.0, 0.0, 0.0]})
     t = np.arange(0, 2, 1 / FS)
     s = ims.vesc_stream(_axes(vesc_raw=_raw(t, [0.1, 0.0, 1.0], [0.0, 0.0, 0.0])), tmp_path)
-    assert "calibrated with the run's vesc_calib.json" in s.label
+    assert "rotated with the run's car.yaml" in s.label and 'calibrated with vesc_calib.json' in s.label
     assert s.acc[0] == pytest.approx([0.0, 0.0, G], abs=1e-9)
 
 

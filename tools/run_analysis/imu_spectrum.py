@@ -27,7 +27,8 @@ steering_frf.csv and PNGs into <run>/analysis/.
 The VESC IMU is used as /imu/vesc/data (calibrated, car axes) when the run
 has it. Otherwise /sensors/imu/raw is converted (imu_bridge.convert) and
 rotated with the copy of imu-calibration's car.yaml the recorder saved in
-<run>/metadata/files/; without that copy, only gyro z is reported. The
+<run>/metadata/files/, or with --car-yaml when the run has none; without
+either, only gyro z is reported. The
 BNO085's sections say "not in this run" when /imu/bno/data is absent.
 """
 
@@ -125,8 +126,12 @@ def apply_rows(cal, acc, gyro):
     return acc_cal @ cal.R.T, gyro_cal @ cal.R.T
 
 
-def vesc_stream(axes: dict, run_dir=None):
-    """The VESC IMU, best available form, or None. See the module docstring."""
+def vesc_stream(axes: dict, run_dir=None, car_yaml=None):
+    """The VESC IMU, best available form, or None. See the module docstring.
+
+    car_yaml: an imu-calibration config/car.yaml to fall back on when the run
+    has no copy of its own (a run recorded before ~/imu-calibration was
+    cloned). The run's copy wins when it exists: it is what the car had."""
     cal_rows = axes.get("vesc", np.zeros((0, 8)))
     if len(cal_rows) >= 2:
         return Stream("vesc", "/imu/vesc/data (imu_bridge: calibrated, car axes)",
@@ -135,19 +140,25 @@ def vesc_stream(axes: dict, run_dir=None):
     if len(raw) < 2:
         return None
     acc, gyro = convert.vesc_raw_to_si(raw[:, 2:5], raw[:, 5:8])
-    car_yaml = Path(run_dir).expanduser() / "metadata" / "files" / "car.yaml" if run_dir else None
-    if car_yaml is None or not car_yaml.is_file():
+    own = Path(run_dir).expanduser() / "metadata" / "files" / "car.yaml" if run_dir else None
+    given = Path(car_yaml).expanduser() if car_yaml else None
+    if own is not None and own.is_file():
+        rpy, calib = convert.load_mount(own, "vesc")
+        # The metadata copies sit side by side, so the calibration is found by name.
+        calib = own.parent / calib.name if calib is not None else None
+        whose = "the run's car.yaml"
+    elif given is not None and given.is_file():
+        rpy, calib = convert.load_mount(given, "vesc")      # calib resolved in that checkout
+        whose = f"{given} (given, not the run's own copy)"
+    else:
         return Stream("vesc", "/sensors/imu/raw, board axes (no car.yaml in the run's "
-                      "metadata): gyro z only, accelerometer axes unknown",
+                      "metadata; --car-yaml supplies one): gyro z only, accelerometer axes unknown",
                       raw[:, 0], raw[:, 1], None, gyro)
-    rpy, calib = convert.load_mount(car_yaml, "vesc")
-    copy = car_yaml.parent / calib.name if calib is not None else None
-    cal = convert.load_calibration(copy if copy is not None and copy.is_file() else None, rpy)
+    cal = convert.load_calibration(calib if calib is not None and calib.is_file() else None, rpy)
     acc, gyro = apply_rows(cal, acc, gyro)
-    how = ("calibrated with the run's " + copy.name) if cal.source != convert.IDENTITY_SOURCE \
-        else "uncalibrated"
-    return Stream("vesc", f"/sensors/imu/raw rotated with the run's car.yaml (rpy_deg {rpy}), "
-                  f"{how}", raw[:, 0], raw[:, 1], acc, gyro)
+    how = f"calibrated with {calib.name}" if cal.source != convert.IDENTITY_SOURCE else "uncalibrated"
+    return Stream("vesc", f"/sensors/imu/raw rotated with {whose} (rpy_deg {rpy}), {how}",
+                  raw[:, 0], raw[:, 1], acc, gyro)
 
 
 def bno_stream(axes: dict):
@@ -514,12 +525,12 @@ def stream_lines(axes: dict) -> list:
 
 
 def build_report(run_dir, axes: dict, motion=None, filt=None,
-                 racer_imu_root="~/imu-calibration", root: Path = ROOT):
+                 racer_imu_root="~/imu-calibration", root: Path = ROOT, car_yaml=None):
     """(lines, plots, csv rows) for one run. motion: scan_motion.Motion or None."""
     lines = [f"# IMU spectrum: {Path(run_dir).name if run_dir else 'run'}", ""]
     lines += stream_lines(axes) + [""]
     plots, csv = [], []
-    streams = [s for s in (vesc_stream(axes, run_dir), bno_stream(axes)) if s is not None]
+    streams = [s for s in (vesc_stream(axes, run_dir, car_yaml), bno_stream(axes)) if s is not None]
     if not streams:
         return lines + ["no IMU in this run (/imu/vesc/data, /sensors/imu/raw, /imu/bno/data)"], [], []
     if bno_stream(axes) is None:
@@ -586,6 +597,8 @@ def main(argv=None) -> int:
     ap.add_argument("--accel-hz", type=float, nargs="+", help="VESC accel low-pass X [Y Z] [Hz], 0 = off")
     ap.add_argument("--gyro-hz", type=float, help="VESC gyro low-pass [Hz], 0 = off")
     ap.add_argument("--racer-imu-root", default="~/imu-calibration")
+    ap.add_argument("--car-yaml", help="imu-calibration car.yaml for a run that has no copy in "
+                                       "its metadata (e.g. ~/imu-calibration/config/car.yaml)")
     args = ap.parse_args(argv)
     filt = None
     if args.vesc_rate is not None and args.accel_hz is not None and args.gyro_hz is not None:
@@ -604,7 +617,7 @@ def main(argv=None) -> int:
         except (ValueError, IndexError) as exc:
             print(f"(LiDAR skipped: {exc})")
     lines, plots, csv = build_report(Path(args.run_dir).expanduser(), axes, motion, filt,
-                                     args.racer_imu_root)
+                                     args.racer_imu_root, car_yaml=args.car_yaml)
     out = analysis_dir(args.run_dir)
     if csv:
         (out / "steering_frf.csv").write_text(
