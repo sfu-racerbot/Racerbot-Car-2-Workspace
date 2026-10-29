@@ -16,6 +16,7 @@
   <depend>rcl_interfaces</depend>
   <depend>python3-yaml</depend>
   <depend>ros2bag</depend>
+  <exec_depend>ros2launch</exec_depend>
   <depend>rosbag2_storage_default_plugins</depend>
 
   <test_depend>python3-pytest</test_depend>

@@ -12,9 +12,11 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', [
             'launch/record_run.py',
+            'launch/auto_record_launch.py',
         ]),
         ('share/' + package_name + '/config', [
             'config/race_diagnostics.yaml',
+            'config/auto_record.yaml',
         ]),
     ],
     install_requires=['setuptools'],
@@ -30,6 +32,7 @@ setup(
             'filter_log = race_diagnostics.filter_log:main',
             'summarize_run = race_diagnostics.summarize_run:main',
             'snapshot_params = race_diagnostics.snapshot_params:main',
+            'auto_record = race_diagnostics.auto_record_node:main',
         ],
     },
 )

@@ -1,0 +1,55 @@
+# Bringup's automatic run recorder (race_diagnostics auto_record_node).
+# Started by every f1tenth_stack bringup unless `record:=false` is passed.
+# It records only while an algorithm is running, into the same
+# ~/racerbot-ws/data/racerbot_runs/<ts>/ layout record_run.py writes, so analyze_run.py
+# and summarize_run work on its runs unchanged. It subscribes to nothing
+# and publishes nothing itself: it only reads the ROS graph.
+# docs/run-diagnostics.md#automatic-recording
+auto_record:
+  ros__parameters:
+    output_directory: ~/racerbot-ws/data/racerbot_runs
+
+    # A node publishing on any of these is an algorithm. /drive is what
+    # every control layer publishes, ours and team A's (ftg, disparity_
+    # extender, reactive); the auto_map_race sources, neural_racer's shadow
+    # output, and the downstream command topics catch an algorithm that
+    # bypasses ackermann_mux. /teleop is deliberately absent: manual
+    # driving is not recorded.
+    trigger_topics:
+      - /drive
+      - /auto_map/drive
+      - /auto_race/drive
+      - /neural_racer/shadow_drive
+      - /ackermann_cmd
+      - /commands/motor/speed
+      - /commands/servo/position
+    # Publishers that are not an algorithm: bringup's own mux and VESC
+    # bridge publish the downstream command topics all the time, and a bag
+    # being played back republishes /drive. fnmatch patterns on the node name.
+    ignore_publishers:
+      - ackermann_mux
+      - ackermann_to_vesc_node
+      - rosbag2_player*
+    # Someone else's recorder: record_run.py (and map_course and
+    # auto_map_race_launch.py, which start it) runs race_diag_node, and
+    # `ros2 bag record` is rosbag2_recorder. While one is on the graph this
+    # recorder does not record, and it stops if one appears.
+    other_recorders:
+      - race_diag_node
+      - rosbag2_recorder*
+
+    # An algorithm must be up this long before recording starts, so a
+    # launch that brings its own recorder gets it onto the graph first.
+    start_delay_sec: 3.0
+    # Recording stops once no algorithm has published for this long.
+    stop_delay_sec: 3.0
+    poll_period_sec: 0.5
+
+    record_bag: true
+    # Space-separated topics to bag. Empty: record_run.py's DEFAULT_TOPICS.
+    topics: ''
+    # Below this much free space under output_directory, do not start.
+    min_free_gb: 2.0
+    # How long a stopping recording may take to close its bag before it is
+    # killed.
+    stop_timeout_sec: 15.0

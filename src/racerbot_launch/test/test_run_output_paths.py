@@ -38,6 +38,19 @@ EXPECTED = [
      "LOG_DIRECTORY = '~/racerbot-ws/data/racerbot_runs'"),
     ('src/racerbot_sim/launch/sim_auto_map_race_launch.py',
      "'~/racerbot-ws/data/racerbot_sim/auto'"),
+    # bringup's automatic recorder (race_diagnostics auto_record, from car 1)
+    ('src/race_diagnostics/race_diagnostics/auto_record_node.py',
+     "'output_directory', '~/racerbot-ws/data/racerbot_runs'"),
+    ('src/race_diagnostics/config/auto_record.yaml',
+     'output_directory: ~/racerbot-ws/data/racerbot_runs'),
+    ('src/race_diagnostics/launch/auto_record_launch.py',
+     "'record_output_directory', default_value='~/racerbot-ws/data/racerbot_runs'"),
+    ('src/f1tenth_system/f1tenth_stack/launch/bringup_launch.py',
+     "'~/racerbot-ws/data/racerbot_runs/<time>/"),
+    ('src/f1tenth_system/f1tenth_stack/launch/no_lidar_bringup_launch.py',
+     "'~/racerbot-ws/data/racerbot_runs/<time>/"),
+    ('src/f1tenth_system/f1tenth_stack/launch/sick_bringup_launch.py',
+     "'~/racerbot-ws/data/racerbot_runs/<time>/"),
 ]
 
 OLD_PATH = re.compile(r'\.ros/racerbot_(runs|auto|sim/auto)\b')

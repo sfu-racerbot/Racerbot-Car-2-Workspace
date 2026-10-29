@@ -22,9 +22,11 @@
 
 import os
 
-from ament_index_python.packages import get_package_share_directory
+from ament_index_python.packages import get_package_share_directory, PackageNotFoundError
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -37,7 +39,9 @@ def generate_launch_description():
     input -- needed by manual teleop *and* every autonomy node's own LB
     deadman check), the VESC driver stack,
     the LiDAR, and ackermann_mux (which arbitrates between whichever
-    control layer(s) are publishing to /teleop or /drive). It deliberately
+    control layer(s) are publishing to /teleop or /drive). It also starts
+    race_diagnostics' auto_record, which records every run of an algorithm
+    and only reads the ROS graph (off with record:=false). It deliberately
     does NOT start joy_teleop -- that's its own control layer now, see
     teleop_launch.py -- so this alone will never make the car move; it
     just brings the hardware up and waits for something to plug into it.
@@ -146,5 +150,28 @@ def generate_launch_description():
     ld.add_action(urg_node)
     ld.add_action(ackermann_mux_node)
     ld.add_action(static_tf_node)
+
+    # Local addition, from car 1 (docs/git-setup.md, "Addition 6"): record every
+    # run of an algorithm automatically. race_diagnostics' auto_record reads
+    # the ROS graph only -- no publisher, no subscription -- and records
+    # while some node publishes /drive, never beside another recorder
+    # (docs/run-diagnostics.md#automatic-recording). Off: record:=false.
+    ld.add_action(DeclareLaunchArgument(
+        'record', default_value='true',
+        description='Record every run of an algorithm into '
+                    '~/racerbot-ws/data/racerbot_runs/<time>/ (race_diagnostics '
+                    'auto_record). false: do not.'))
+    try:
+        auto_record_launch = os.path.join(
+            get_package_share_directory('race_diagnostics'),
+            'launch', 'auto_record_launch.py')
+    except PackageNotFoundError:
+        # A missing recorder must never stop the car's bringup.
+        ld.add_action(LogInfo(msg='race_diagnostics is not built: runs '
+                                  'will NOT be recorded automatically'))
+    else:
+        ld.add_action(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(auto_record_launch),
+            condition=IfCondition(LaunchConfiguration('record'))))
 
     return ld

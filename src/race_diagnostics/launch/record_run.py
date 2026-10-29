@@ -22,8 +22,10 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, Opaqu
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from race_diagnostics.auto_record import recorder_node_names
 from race_diagnostics.run_metadata import (
-    find_repo_root, imu_calibration_files, write_run_metadata)
+    find_repo_root, imu_calibration_files, team_repos, write_run_metadata)
+import yaml
 
 # Everything needed to reconstruct a run offline. /scan dominates the size
 # (~10x everything else combined) but is also the only way to answer "what
@@ -39,6 +41,13 @@ DEFAULT_TOPICS = [
     '/scan', '/odom', '/slam_pose', '/drive', '/ackermann_cmd',
     '/teleop', '/tf', '/tf_static', '/map', '/joy',
     '/auto_map/drive', '/auto_race/drive',
+    # Every topic that starts bringup's automatic recording
+    # (config/auto_record.yaml trigger_topics), so a run always holds the
+    # commands that started it: neural_racer's shadow output and the
+    # VESC commands downstream of the mux. /safety/brake is team A's
+    # safety node, which their ftg brakes on.
+    '/neural_racer/shadow_drive', '/commands/motor/speed',
+    '/commands/servo/position', '/safety/brake',
     '/parameter_events',
     # The VESC's IMU (gyro + accelerometer). Nothing drives on it yet; bagged
     # so recorded runs can show what it would do for odometry and SLAM
@@ -82,21 +91,32 @@ MAX_BAG_FILE_BYTES = 50 * 1000 * 1000
 
 
 def _setup(context, *args, **kwargs):
-    parent = os.path.expanduser(
-        LaunchConfiguration('output_directory').perform(context))
-    run_dir = os.path.join(parent, strftime('%Y%m%d-%H%M%S'))
+    run_dir = LaunchConfiguration('run_directory').perform(context).strip()
+    if run_dir:
+        run_dir = os.path.expanduser(run_dir)
+    else:
+        parent = os.path.expanduser(
+            LaunchConfiguration('output_directory').perform(context))
+        run_dir = os.path.join(parent, strftime('%Y%m%d-%H%M%S'))
     os.makedirs(run_dir, exist_ok=True)
+    # Bringup's auto_record passes a prefix so it can tell the nodes of its
+    # own recording from someone else's recorder (race_diagnostics/
+    # auto_record.py). Empty for a recording started by hand.
+    diag_name, snapshot_name, bag_name = recorder_node_names(
+        LaunchConfiguration('name_prefix').perform(context).strip())
 
     # What the run was made with -- code, calibration, parameters -- written
     # into <run>/metadata/ (race_diagnostics/run_metadata.py). Never fatal.
     racer_imu_root = os.path.expanduser(
         LaunchConfiguration('racer_imu_root', default='~/imu-calibration').perform(context))
     try:
+        repos = {'racerbot-ws': find_repo_root(os.path.realpath(__file__)),
+                 'imu-calibration': racer_imu_root}
+        # Team A's (and B's) checked-out code, so a run of their algorithm
+        # records exactly which commit and edits ran.
+        repos.update(team_repos(repos['racerbot-ws']))
         meta = write_run_metadata(
-            run_dir,
-            {'racerbot-ws': find_repo_root(os.path.realpath(__file__)),
-             'imu-calibration': racer_imu_root},
-            imu_calibration_files(racer_imu_root))
+            run_dir, repos, imu_calibration_files(racer_imu_root))
     except Exception as e:  # noqa: BLE001 -- a metadata failure must not stop a run
         meta = os.path.join(run_dir, 'metadata')
         os.makedirs(meta, exist_ok=True)
@@ -107,31 +127,40 @@ def _setup(context, *args, **kwargs):
     config = os.path.join(
         get_package_share_directory('race_diagnostics'),
         'config', 'race_diagnostics.yaml')
+    # Passed as values rather than as the file: the file is keyed by the
+    # name race_diag_node, and would not reach a prefixed node.
+    with open(config) as handle:
+        diag_params = yaml.safe_load(handle)['race_diag_node']['ros__parameters']
+
+    if LaunchConfiguration('run_directory').perform(context).strip():
+        banner = LogInfo(msg=f'Recording run to: {run_dir}')
+    else:
+        banner = LogInfo(msg=f'\n{"=" * 72}\nRecording run to: {run_dir}\n'
+            f'Start the driving stack in another terminal, ideally WITH tee\n'
+            f'so its terminal output is captured directly:\n\n'
+            f'  ros2 launch racerbot_launch auto_map_race_launch.py \\\n'
+            f'    2>&1 | tee {run_dir}/launch.log\n\n'
+            f'`| tee` is optional, not required: if you forget it, '
+            f'summarize_run\n'
+            f'reconstructs an equivalent log from each node\'s own '
+            f'~/.ros/log/\n'
+            f'file instead -- see docs/run-diagnostics.md.\n\n'
+            f'Afterwards:\n'
+            f'  ros2 run race_diagnostics summarize_run {run_dir}\n{"=" * 72}')
 
     actions = [
-        LogInfo(msg=f'\n{"=" * 72}\nRecording run to: {run_dir}\n'
-                    f'Start the driving stack in another terminal, ideally WITH tee\n'
-                    f'so its terminal output is captured directly:\n\n'
-                    f'  ros2 launch racerbot_launch auto_map_race_launch.py \\\n'
-                    f'    2>&1 | tee {run_dir}/launch.log\n\n'
-                    f'`| tee` is optional, not required: if you forget it, '
-                    f'summarize_run\n'
-                    f'reconstructs an equivalent log from each node\'s own '
-                    f'~/.ros/log/\n'
-                    f'file instead -- see docs/run-diagnostics.md.\n\n'
-                    f'Afterwards:\n'
-                    f'  ros2 run race_diagnostics summarize_run {run_dir}\n{"=" * 72}'),
+        banner,
         Node(
             package='race_diagnostics',
             executable='race_diag_node',
-            name='race_diag_node',
+            name=diag_name,
             output='screen',
-            parameters=[config, {'output_directory': run_dir}],
+            parameters=[diag_params, {'output_directory': run_dir}],
         ),
         Node(
             package='race_diagnostics',
             executable='snapshot_params',
-            name='snapshot_params',
+            name=snapshot_name,
             output='screen',
             arguments=['--output', os.path.join(str(meta), 'params')],
         ),
@@ -139,7 +168,8 @@ def _setup(context, *args, **kwargs):
 
     if LaunchConfiguration('record_bag').perform(context).lower() in ('true', '1'):
         actions.append(ExecuteProcess(
-            cmd=['ros2', 'bag', 'record', '-o', os.path.join(run_dir, 'bag'),
+            cmd=['ros2', 'bag', 'record', '--node-name', bag_name,
+                 '-o', os.path.join(run_dir, 'bag'),
                  '--max-bag-size', str(MAX_BAG_FILE_BYTES)] + topics,
             output='screen',
         ))
@@ -151,6 +181,16 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'output_directory', default_value='~/racerbot-ws/data/racerbot_runs',
             description='Parent directory; one timestamped subdirectory per run.'),
+        DeclareLaunchArgument(
+            'run_directory', default_value='',
+            description='Record into exactly this directory (bringup\'s '
+                        'auto_record uses it). Empty: a new timestamped '
+                        'subdirectory of output_directory.'),
+        DeclareLaunchArgument(
+            'name_prefix', default_value='',
+            description='Prefix for this recording\'s node names. auto_record '
+                        'passes one to tell its own recording from anyone '
+                        'else\'s. Leave empty.'),
         DeclareLaunchArgument(
             'record_bag', default_value='true',
             description='Record a rosbag. Set false to capture only the probe stream.'),

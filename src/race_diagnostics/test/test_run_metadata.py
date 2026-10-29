@@ -162,3 +162,33 @@ def test_staged_edits_are_in_the_diff_too(repo, tmp_path):
     _git(repo, 'add', 'tracked.yaml')
     _, diff = rm.write_git_state(repo, tmp_path / 'out', 'ws')
     assert '+gain: 3650.0' in diff.read_text()
+
+
+def test_team_repos_lists_checked_out_team_submodules_only(tmp_path):
+    # racerbot_a checked out as a submodule (its .git is a gitlink *file*),
+    # racerbot_b registered but never checked out (an empty directory), as
+    # on car 1 (`git submodule status`: '-' for racerbot_b).
+    ws = tmp_path / 'ws'
+    (ws / 'src' / 'racerbot_a').mkdir(parents=True)
+    (ws / 'src' / 'racerbot_a' / '.git').write_text('gitdir: ../../.git/modules/a\n')
+    (ws / 'src' / 'racerbot_b').mkdir()
+    assert rm.team_repos(ws) == {'racerbot_a': ws / 'src' / 'racerbot_a'}
+    (ws / 'src' / 'racerbot_b' / '.git').mkdir()
+    assert rm.team_repos(ws) == {'racerbot_a': ws / 'src' / 'racerbot_a',
+                                 'racerbot_b': ws / 'src' / 'racerbot_b'}
+
+
+def test_team_repos_outside_any_workspace_is_empty(tmp_path):
+    assert rm.team_repos(None) == {}
+    assert rm.team_repos(tmp_path) == {}
+
+
+def test_record_run_records_team_code_and_names_its_nodes_by_prefix():
+    # Static: team A's git state joins the metadata, and every node the
+    # recorder starts takes its name from recorder_node_names(name_prefix),
+    # which is what auto_record matches its own recording against.
+    code = LAUNCH.read_text()
+    assert "repos.update(team_repos(repos['racerbot-ws']))" in code
+    assert 'recorder_node_names(\n' in code
+    assert 'name=diag_name' in code and 'name=snapshot_name' in code
+    assert "'--node-name', bag_name" in code

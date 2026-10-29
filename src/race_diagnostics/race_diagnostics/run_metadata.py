@@ -87,6 +87,20 @@ def copy_files(paths, out_dir):
     return result
 
 
+TEAM_REPOS = ('racerbot_a', 'racerbot_b')
+
+
+def team_repos(workspace_root):
+    """{name: path} for the other teams' submodules checked out under
+    <workspace>/src, so a run of their code records which commit of it ran.
+    The superproject's own git state names only the submodule's commit, not
+    the edits inside it. A submodule that is not checked out is left out."""
+    if workspace_root is None:
+        return {}
+    src = Path(workspace_root) / 'src'
+    return {name: src / name for name in TEAM_REPOS if (src / name / '.git').exists()}
+
+
 def imu_calibration_files(racer_imu_root):
     """car.yaml and every calibration JSON under racer_imu_root/calib."""
     root = Path(racer_imu_root).expanduser()
