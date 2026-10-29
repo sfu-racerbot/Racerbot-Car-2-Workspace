@@ -256,7 +256,7 @@ def review(
 
 GAP_FOLLOW_TUNABLES = (
     # --- Speed envelope ---
-    Tunable('max_speed', 'Speed', 0.3, 4.0, unit='m/s', step=0.1,
+    Tunable('max_speed', 'Speed', 0.3, 5.0, unit='m/s', step=0.1,
             description='Ceiling on commanded speed on a clear straight.'),
     Tunable('min_speed', 'Speed', 0.0, 3.0, unit='m/s', step=0.1,
             description='Floor for ordinary driving, so the car keeps '

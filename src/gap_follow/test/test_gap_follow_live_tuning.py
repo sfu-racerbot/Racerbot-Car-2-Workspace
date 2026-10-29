@@ -101,6 +101,15 @@ def test_out_of_range_is_refused(value):
     assert 'between' in error
 
 
+def test_max_speed_goes_live_up_to_five_and_no_further():
+    # Cited spec: the same 5.0 m/s ceiling as gap_follow_launch.py's
+    # max_speed:= (gap_follow/launch_speed.py, requested 2026-10-26).
+    assert review({'max_speed': 5.0}) == ({'max_speed': 5.0}, None)
+    accepted, error = review({'max_speed': 5.1})
+    assert accepted == {}
+    assert 'between' in error
+
+
 def test_an_unknown_parameter_is_refused_rather_than_ignored():
     """The whole reason this module exists -- a silently accepted change
     the control loop never reads is worse than a loud refusal."""

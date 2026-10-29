@@ -24,10 +24,12 @@ def generate_launch_description():
                     'validated only.')
     max_speed_arg = DeclareLaunchArgument(
         'max_speed', default_value='',
-        description='Lower top speed for this run (m/s), e.g. 1.0 for a '
-                    'first floor test. Empty: gap_follow.yaml\'s max_speed. '
-                    'Refused above the YAML value; min_speed, corner_speed '
-                    'and corner_speed_wide are lowered with it.')
+        description='Top speed for this run (m/s), up to 5.0: e.g. 1.0 for '
+                    'a first floor test, 5.0 for a fast straight. Empty: '
+                    'gap_follow.yaml\'s max_speed. Refused above 5.0. Below '
+                    'the YAML value, min_speed, corner_speed and '
+                    'corner_speed_wide are lowered with it; above it, only '
+                    'max_speed rises.')
 
     def node(context):
         enabled = LaunchConfiguration('opponent_awareness').perform(context).lower()

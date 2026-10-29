@@ -1,11 +1,13 @@
 """
 gap_follow_launch.py's ``max_speed:=`` argument (gap_follow/launch_speed.py).
 
-Spec: the argument's description in launch/gap_follow_launch.py and the
-module docstring -- it may only lower the speed, refuses anything else, and
-lowers min_speed / corner_speed / corner_speed_wide with it because the node
-refuses to start otherwise (gap_follow_node.py's speed checks). Oracles: those
-invariants, recomputed here, and the node's own published command.
+Spec: the argument's description in launch/gap_follow_launch.py, the
+module docstring and docs/launchstart.md -- it sets the top speed anywhere up
+to MAX_SPEED_CEILING (5.0 m/s, requested 2026-10-26), refuses anything else,
+and lowers min_speed / corner_speed / corner_speed_wide with it because the
+node refuses to start otherwise (gap_follow_node.py's speed checks); above
+the YAML it raises max_speed alone. Oracles: those invariants, recomputed
+here, and the node's own published command.
 
 The first half needs no ROS. The node tests need ROS sourced:
 
@@ -19,7 +21,7 @@ import os
 import pytest
 
 from gap_follow.launch_speed import (
-    CAPPED_WITH_MAX, speed_cap_overrides, yaml_parameters)
+    CAPPED_WITH_MAX, MAX_SPEED_CEILING, speed_cap_overrides, yaml_parameters)
 
 PACKAGED_CONFIG = os.path.join(
     os.path.dirname(__file__), '..', 'config', 'gap_follow.yaml')
@@ -52,7 +54,7 @@ def test_cap_below_every_speed_lowers_them_all():
         'corner_speed_wide': 0.5}
 
 
-@pytest.mark.parametrize('cap', [0.3, 0.8, 1.0, 1.45, 2.0, 3.0])
+@pytest.mark.parametrize('cap', [0.3, 0.8, 1.0, 1.45, 2.0, 3.0, 3.5, 4.2, 5.0])
 def test_shipped_yaml_with_any_cap_satisfies_the_nodes_speed_checks(cap):
     # Invariant oracle: the node starts only if 0 <= min <= max and
     # corner <= corner_wide <= max (gap_follow_node.py).
@@ -64,10 +66,21 @@ def test_shipped_yaml_with_any_cap_satisfies_the_nodes_speed_checks(cap):
         assert merged[key] == min(SHIPPED[key], cap), key
 
 
-def test_cap_equal_to_the_yaml_is_allowed_and_one_step_above_is_refused():
-    assert speed_cap_overrides(PARAMS, '3.5')['max_speed'] == 3.5
-    with pytest.raises(ValueError, match='only lowers the speed'):
-        speed_cap_overrides(PARAMS, '3.5001')
+def test_raising_above_the_yaml_changes_max_speed_alone():
+    # 4.2 > every speed in PARAMS, so nothing else is above it to lower.
+    assert speed_cap_overrides(PARAMS, '4.2') == {'max_speed': 4.2}
+
+
+def test_ceiling_is_the_requested_five_metres_per_second():
+    # Cited spec: the 2026-10-26 request, docs/launchstart.md.
+    assert MAX_SPEED_CEILING == 5.0  # m/s
+
+
+def test_cap_at_the_ceiling_is_allowed_and_one_step_above_is_refused():
+    assert speed_cap_overrides(PARAMS, '5.0') == {'max_speed': 5.0}
+    for text in ('5.0001', '5.5', '10'):
+        with pytest.raises(ValueError, match='above the 5.0 m/s ceiling'):
+            speed_cap_overrides(PARAMS, text)
 
 
 @pytest.mark.parametrize('text', ['0', '0.0', '-1.0', 'nan', 'inf', '-inf'])
@@ -115,6 +128,14 @@ def capped():
 
 
 @pytest.fixture
+def raised():
+    node = _node(speed_cap_overrides(SHIPPED, str(MAX_SPEED_CEILING)))
+    yield node
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+@pytest.fixture
 def uncapped():
     node = _node({})
     yield node
@@ -147,5 +168,36 @@ def test_capped_node_still_stops_when_lb_is_released(capped):
     capped.drive_pub.publish = lambda msg: (published.append(msg), original(msg))
     capped.scan_callback(OPEN)
     capped.drive_pub.publish = original
+    assert published, 'node published nothing'
+    assert all(msg.drive.speed == 0.0 for msg in published)
+
+
+# Already moving faster than the YAML's top speed, so the acceleration ramp
+# is not what holds the command down -- only max_speed can.
+FAST = 4.5  # m/s
+
+
+def test_yaml_top_speed_holds_the_command_at_the_yaml_value(uncapped):
+    # Precondition for the next test: without the flag, this tick is capped.
+    assert _drive(uncapped, OPEN, FAST).speed == pytest.approx(
+        SHIPPED['max_speed'], abs=1e-6)  # m/s
+
+
+def test_raised_node_commands_above_the_yaml_top_speed(raised):
+    assert raised.max_speed == MAX_SPEED_CEILING
+    speed = _drive(raised, OPEN, FAST).speed
+    assert SHIPPED['max_speed'] + 0.5 < speed <= MAX_SPEED_CEILING  # m/s
+
+
+def test_raised_node_still_stops_when_lb_is_released(raised):
+    _drive(raised, OPEN, FAST)
+    released = Joy()
+    released.buttons = [0] * 5
+    raised.joy_callback(released)
+    published = []
+    original = raised.drive_pub.publish
+    raised.drive_pub.publish = lambda msg: (published.append(msg), original(msg))
+    raised.scan_callback(OPEN)
+    raised.drive_pub.publish = original
     assert published, 'node published nothing'
     assert all(msg.drive.speed == 0.0 for msg in published)
