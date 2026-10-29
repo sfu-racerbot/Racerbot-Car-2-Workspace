@@ -287,6 +287,37 @@ def ros_context():
     rclpy.shutdown()
 
 
+def _shipped_interlock_sec(name):
+    """The largest default of interlock parameter ``name`` declared by the two
+    simulator nodes that publish (read from their source, no rclpy)."""
+    import re
+    root = os.path.join(os.path.dirname(__file__), '..', 'racerbot_sim')
+    values = []
+    for module in ('sim_joy_node.py', 'gym_bridge_node.py'):
+        source = open(os.path.join(root, module), encoding='utf-8').read()
+        found = re.search(rf"declare_parameter\('{name}', ([0-9.]+)\)", source)
+        # A renamed parameter must fail here, not shrink the windows below.
+        assert found, (module, name)
+        values.append(float(found.group(1)))
+    return max(values)
+
+
+# The earliest the shipped interlock can open: discovery hold, then a full
+# clean-graph confirmation window. The leak window below must outlast it, or
+# the "no output beside hardware" check passes without checking anything.
+INTERLOCK_OPENS_SEC = (_shipped_interlock_sec('interlock_discovery_hold_sec')
+                       + _shipped_interlock_sec('interlock_clear_confirm_sec'))
+LEAK_WINDOW_SEC = INTERLOCK_OPENS_SEC + 4.0      # 10 s on the shipped 3 s + 3 s
+RESUME_WINDOW_SEC = _shipped_interlock_sec('interlock_clear_confirm_sec') + 12.0   # 15 s
+
+
+def test_the_leak_window_outlasts_the_shipped_interlock():
+    # oracle: invariant -- the window is derived from the nodes' own defaults and
+    # leaves a margin past the earliest moment the interlock could open.
+    assert INTERLOCK_OPENS_SEC > 0.0
+    assert LEAK_WINDOW_SEC >= INTERLOCK_OPENS_SEC + 4.0
+
+
 def test_interlock_suppresses_both_cars_and_namespaced_joy(ros_context):
     node, start = ros_context
     hardware = rclpy.create_node('urg_node')
@@ -308,15 +339,15 @@ def test_interlock_suppresses_both_cars_and_namespaced_joy(ros_context):
         # oracle: test the running publishers, not merely slow process startup.
         assert _spin_until(node, lambda: all(node.count_publishers(topic) > 0
                                              for topic in received), 20.0)
-        # oracle: active hardware suppresses all synthetic sensor and joy output.
-        # The window outlasts the shipped discovery hold plus clean-graph
-        # confirmation (3 s + 3 s), so a leak after either is caught.
-        assert not _spin_until(node, lambda: any(received.values()), 10.0), received
+        # oracle: active hardware suppresses all synthetic sensor and joy output,
+        # watched past the earliest moment the shipped interlock could open.
+        assert not _spin_until(node, lambda: any(received.values()), LEAK_WINDOW_SEC), received
     finally:
         hardware.destroy_node()
     # oracle: after the hardware disappears both scans resume (after a full
     # clean-graph confirmation window).
-    assert _spin_until(node, lambda: received['/scan'] > 0 and received['/car2/scan'] > 0, 15.0)
+    assert _spin_until(node, lambda: received['/scan'] > 0 and received['/car2/scan'] > 0,
+                       RESUME_WINDOW_SEC)
 
 
 def test_silent_car_stops_while_other_car_drives(ros_context):
