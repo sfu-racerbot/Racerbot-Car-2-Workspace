@@ -34,7 +34,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from run_analysis import actuation, replay  # noqa: E402
-from run_analysis.runlog import analysis_dir, load_run, read_events  # noqa: E402
+from run_analysis.runlog import NO_DRIVE, analysis_dir, load_run, read_events  # noqa: E402
 from run_analysis.scan_motion import scan_motion  # noqa: E402
 
 
@@ -131,6 +131,14 @@ def analyze(run_dir, overrides=None, refresh=False, yaml_path=None) -> str:
     if events:
         cats = Counter(e.get("category") for e in events)
         lines += [f"events.jsonl: {dict(cats)}", ""]
+    if len(run.drive) == 0:
+        # Every section below compares a driving node's /drive with the car;
+        # LB holds in /joy here were a person driving, not the node.
+        lines += [f"{NO_DRIVE}.", "",
+                  "For a manual run use tools/run_analysis/imu_report.py or imu_spectrum.py."]
+        text = "\n".join(lines) + "\n"
+        (out_dir / "report.md").write_text(text)
+        return text
     windows = run.lb_windows()
     if not windows:
         lines.append("No LB hold in /joy: the car was never driving autonomously.")

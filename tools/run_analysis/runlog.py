@@ -11,21 +11,30 @@ the cache and runs unsourced.
     run = load_run("~/racerbot-ws/data/racerbot_runs/20261019-200703")
     run.scan            # (N, beams) float32, NaN/inf as recorded
     run.drive           # (M, 4): receive time, header stamp, steering, speed
+    run.ackermann       # same columns, from /ackermann_cmd (what reached the VESC)
     run.lb_windows()    # [(t_press, t_release), ...] from /joy button 4
 
 Times are receive times in seconds since the epoch, from the bag.
+
+A manually driven run has no /drive: joy_teleop publishes /teleop, and
+ackermann_mux forwards whichever wins onto /ackermann_cmd. Such a run loads
+with an empty ``drive``; tools that need a node's own commands refuse it
+(NO_DRIVE), and tools that only need what the car was told use
+``run.commands()``.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
 CACHE_NAME = "run.npz"
 DEADMAN_BUTTON = 4  # LB on the F710 in XInput mode -- gap_follow.yaml deadman_button
+NO_DRIVE = ("no /drive in this run: it was driven manually (joy_teleop publishes /teleop), "
+            "so there are no driving-node commands to replay")
 
 
 @dataclass
@@ -41,6 +50,18 @@ class Run:
     odom: np.ndarray          # (K, 7): t, v_x, w_z, x, y, qz, qw
     drive: np.ndarray         # (M, 4): t, stamp, steering, speed
     joy: np.ndarray           # (J, 2): t, deadman button state
+    ackermann: np.ndarray = field(default_factory=lambda: np.zeros((0, 4)))  # /ackermann_cmd
+
+    def commands(self):
+        """(rows, topic): the commands the car was given. /drive when the run
+        has it (a driving node's own output, as before), else /ackermann_cmd
+        (manual runs). Raises ValueError when the bag has neither."""
+        if len(self.drive):
+            return self.drive, "/drive"
+        if len(self.ackermann):
+            return self.ackermann, "/ackermann_cmd"
+        raise ValueError("no /drive or /ackermann_cmd in this run: nothing says what the car "
+                         "was told to do")
 
     def beam_angles(self) -> np.ndarray:
         return self.angle_min + np.arange(self.scan.shape[1]) * self.angle_increment
@@ -80,11 +101,11 @@ def read_bag(bag_dir: Path) -> dict:
     reader.open(rosbag2_py.StorageOptions(uri=str(bag_dir), storage_id=storage),
                 rosbag2_py.ConverterOptions("cdr", "cdr"))
     types = {t.name: t.type for t in reader.get_all_topics_and_types()}
-    wanted = [t for t in ("/scan", "/odom", "/drive", "/joy") if t in types]
-    if "/scan" not in wanted or "/drive" not in wanted:
-        raise ValueError(f"{bag_dir}: bag needs /scan and /drive, has {sorted(types)}")
+    wanted = [t for t in ("/scan", "/odom", "/drive", "/joy", "/ackermann_cmd") if t in types]
+    if "/scan" not in wanted:
+        raise ValueError(f"{bag_dir}: bag needs /scan, has {sorted(types)}")
     reader.set_filter(rosbag2_py.StorageFilter(topics=wanted))
-    scans, odom, drive, joy = [], [], [], []
+    scans, odom, drive, joy, ackermann = [], [], [], [], []
     meta = None
     while reader.has_next():
         topic, raw, t_ns = reader.read_next()
@@ -98,9 +119,10 @@ def read_bag(bag_dir: Path) -> dict:
             p, q = msg.pose.pose.position, msg.pose.pose.orientation
             odom.append((t, msg.twist.twist.linear.x, msg.twist.twist.angular.z,
                          p.x, p.y, q.z, q.w))
-        elif topic == "/drive":
+        elif topic in ("/drive", "/ackermann_cmd"):
             stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
-            drive.append((t, stamp, msg.drive.steering_angle, msg.drive.speed))
+            (drive if topic == "/drive" else ackermann).append(
+                (t, stamp, msg.drive.steering_angle, msg.drive.speed))
         elif topic == "/joy":
             button = msg.buttons[DEADMAN_BUTTON] if len(msg.buttons) > DEADMAN_BUTTON else 0
             joy.append((t, button))
@@ -117,6 +139,7 @@ def read_bag(bag_dir: Path) -> dict:
         odom=np.array(odom, dtype=np.float64).reshape(-1, 7),
         drive=np.array(drive, dtype=np.float64).reshape(-1, 4),
         joy=np.array(joy, dtype=np.float64).reshape(-1, 2),
+        ackermann=np.array(ackermann, dtype=np.float64).reshape(-1, 4),
     )
 
 
@@ -135,8 +158,11 @@ def load_run(run_dir, refresh: bool = False) -> Run:
         np.savez_compressed(analysis_dir(run_dir) / CACHE_NAME, **data)
     z = np.load(cache)
     meta = z["scan_meta"]
+    # Caches written before /ackermann_cmd was read have no such array.
+    ackermann = z["ackermann"] if "ackermann" in z.files else np.zeros((0, 4))
     return Run(run_dir, z["scan_t"], z["scan_stamp"], z["scan"], float(meta[0]),
-               float(meta[1]), float(meta[2]), float(meta[3]), z["odom"], z["drive"], z["joy"])
+               float(meta[1]), float(meta[2]), float(meta[3]), z["odom"], z["drive"], z["joy"],
+               ackermann)
 
 
 def read_events(run_dir) -> list:

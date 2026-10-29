@@ -109,7 +109,10 @@ def fit(run, motion, t0: float, t1: float, grid: dict, base=None) -> list:
     from sim_fidelity import CALIBRATION
 
     base = base or CALIBRATION
-    ticks, commands = resample_commands(run.drive, t0, t1)
+    # /drive for an autonomous run, /ackermann_cmd for a manual one: either
+    # way the commands the car was given (runlog.Run.commands).
+    recorded, _ = run.commands()
+    ticks, commands = resample_commands(recorded, t0, t1)
     results = []
     names = sorted(grid)
     for values in itertools.product(*(grid[n] for n in names)):

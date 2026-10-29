@@ -87,6 +87,81 @@ def read_imu_bag(bag_dir: Path) -> dict:
     return out
 
 
+AXES_CACHE = "imu_axes.npz"
+# Every IMU stream, all axes, with both clocks: rows (t_recv, stamp, ax, ay,
+# az, gx, gy, gz). /sensors/imu/raw is in g and deg/s, board axes; the rest
+# are imu_bridge's SI car axes (/imu/bno/raw: SI, the BNO's own axes).
+AXES_TOPICS = {"/imu/vesc/data": "vesc", "/imu/bno/data": "bno",
+               "/imu/bno/raw": "bno_raw", "/sensors/imu/raw": "vesc_raw"}
+# Width of each extra array, for empty ones.
+AXES_WIDTH = {"core": 8, "odom": 7, "ackermann": 4, "drive": 4}
+
+
+def read_imu_axes(bag_dir: Path) -> dict:
+    """The arrays imu_spectrum.py and estimator_replay.py need, read once:
+
+    vesc, bno, bno_raw, vesc_raw  (t_recv, stamp, ax, ay, az, gx, gy, gz)
+    core       (t_recv, stamp, erpm, duty, current_motor, voltage, temp_fet, temp_motor)
+                from /sensors/core (VescStateStamped; erpm = electrical rpm)
+    odom       (t_recv, stamp, vx, wz, x, y, yaw)
+    ackermann, drive  (t_recv, stamp, steering, speed)
+
+    read_imu_bag's arrays and imu.npz are left exactly as they were.
+    """
+    import rosbag2_py
+    from rclpy.serialization import deserialize_message
+    from rosidl_runtime_py.utilities import get_message
+
+    bag_dir = Path(bag_dir)
+    storage = "mcap" if any(bag_dir.glob("*.mcap")) else "sqlite3"
+    reader = rosbag2_py.SequentialReader()
+    reader.open(rosbag2_py.StorageOptions(uri=str(bag_dir), storage_id=storage),
+                rosbag2_py.ConverterOptions("cdr", "cdr"))
+    types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+    extra = {"/sensors/core": "core", "/odom": "odom", "/ackermann_cmd": "ackermann",
+             "/drive": "drive"}
+    wanted = [t for t in (*AXES_TOPICS, *extra) if t in types]
+    rows = {name: [] for name in (*AXES_TOPICS.values(), *extra.values())}
+    if wanted:
+        reader.set_filter(rosbag2_py.StorageFilter(topics=wanted))
+    while wanted and reader.has_next():
+        topic, raw, t_ns = reader.read_next()
+        msg = deserialize_message(raw, get_message(types[topic]))
+        t = t_ns / 1e9
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+        if topic in AXES_TOPICS:
+            a, g = msg.linear_acceleration, msg.angular_velocity
+            rows[AXES_TOPICS[topic]].append((t, stamp, a.x, a.y, a.z, g.x, g.y, g.z))
+        elif topic == "/sensors/core":
+            s = msg.state
+            rows["core"].append((t, stamp, s.speed, s.duty_cycle, s.current_motor,
+                                 s.voltage_input, s.temp_fet, s.temp_motor))
+        elif topic == "/odom":
+            p, q = msg.pose.pose.position, msg.pose.pose.orientation
+            rows["odom"].append((t, stamp, msg.twist.twist.linear.x, msg.twist.twist.angular.z,
+                                 p.x, p.y, yaw_of(q)))
+        else:
+            rows[extra[topic]].append((t, stamp, msg.drive.steering_angle, msg.drive.speed))
+    out = {name: np.array(rows[name], dtype=np.float64).reshape(-1, 8)
+           for name in AXES_TOPICS.values()}
+    for name, width in AXES_WIDTH.items():
+        out[name] = np.array(rows[name], dtype=np.float64).reshape(-1, width)
+    return out
+
+
+def load_imu_axes(run_dir, refresh: bool = False) -> dict:
+    """read_imu_axes, cached in <run>/analysis/imu_axes.npz (needs ROS only
+    the first time)."""
+    from run_analysis.runlog import analysis_dir
+
+    run_dir = Path(run_dir).expanduser()
+    cache = run_dir / "analysis" / AXES_CACHE
+    if refresh or not cache.exists():
+        np.savez_compressed(analysis_dir(run_dir) / AXES_CACHE, **read_imu_axes(run_dir / "bag"))
+    z = np.load(cache)
+    return {k: z[k] for k in z.files}
+
+
 def load_imu(run_dir, refresh: bool = False) -> dict:
     from run_analysis.runlog import analysis_dir
 
@@ -180,6 +255,17 @@ def _fmt_rate_rows(rows) -> list:
     return out
 
 
+def recorded_commands(run):
+    """(rows, topic) of the commands the car was given: /drive if the run has
+    it, else /ackermann_cmd (a manual run), else (empty, None). Reads the
+    arrays directly, so any object with ``drive`` (and ``ackermann``) works."""
+    for topic, name in (("/drive", "drive"), ("/ackermann_cmd", "ackermann")):
+        rows = getattr(run, name, None)
+        if rows is not None and len(rows):
+            return rows, topic
+    return np.zeros((0, 4)), None
+
+
 def build_report(run, imu: dict, motion=None) -> list:
     """The report's lines. run: runlog.Run; imu: load_imu(); motion: an
     optional scan_motion.Motion (LiDAR) for the whole run."""
@@ -206,17 +292,18 @@ def build_report(run, imu: dict, motion=None) -> list:
 
     gm = gyro_motion(ref[:, 0], ref[:, 1], run.odom) if len(run.odom) >= 2 else None
     moving = int(np.sum(gm.v > FIT_MIN_SPEED)) if gm is not None else 0
-    if len(run.drive) < 20:
-        lines.append("Steering response: no /drive commands in this bag")
+    cmds, cmd_topic = recorded_commands(run)
+    if len(cmds) < 20:
+        lines.append("Steering response: no /drive or /ackermann_cmd commands in this bag")
     elif moving < FIT_MIN_SAMPLES:
         lines.append(f"Steering response: only {moving} gyro samples above {FIT_MIN_SPEED} m/s "
                      "-- not enough driving to fit lag and gain")
     else:
         try:
-            rep = actuation.analyze(gm, run.drive, run.odom, ref[0, 0], ref[-1, 0],
+            rep = actuation.analyze(gm, cmds, run.odom, ref[0, 0], ref[-1, 0],
                                     min_speed=FIT_MIN_SPEED)
             lines.append(f"Steering response measured by the {ref_name} gyro "
-                         f"(above {FIT_MIN_SPEED} m/s):")
+                         f"(above {FIT_MIN_SPEED} m/s; commands from {cmd_topic}):")
             # [1:3]: steering and lateral acceleration. Line 0 is speed lag,
             # which here would be /odom's own wheel speed, not the gyro.
             lines += ["  " + line for line in rep.lines()[1:3]]
@@ -224,7 +311,7 @@ def build_report(run, imu: dict, motion=None) -> list:
             lines.append(f"Steering response: not enough driving ({e})")
         if motion is not None and int(np.sum(motion.v > FIT_MIN_SPEED)) >= FIT_MIN_SAMPLES:
             try:
-                rep = actuation.analyze(motion, run.drive, run.odom, motion.t[0], motion.t[-1],
+                rep = actuation.analyze(motion, cmds, run.odom, motion.t[0], motion.t[-1],
                                         min_speed=FIT_MIN_SPEED)
                 lines.append("Steering response measured by LiDAR scan matching:")
                 lines += ["  " + line for line in rep.lines()[:3]]
