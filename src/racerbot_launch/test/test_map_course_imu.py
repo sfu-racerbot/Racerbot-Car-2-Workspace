@@ -21,6 +21,7 @@ from launch import LaunchContext
 from launch.actions import (DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription,
                             OpaqueFunction)
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterFile
 import pytest
 import yaml
 
@@ -264,3 +265,52 @@ def test_vehicle_state_launch_hands_publish_odom_tf_to_the_node(publish, expecte
     node = [a for a in actions if isinstance(a, Node) and a.node_executable == 'vehicle_state_node']
     assert len(node) == 1
     assert _node_params(node[0], ctx)['publish_odom_tf'] is expected
+
+
+# ------------------------------------------------------------ SLAM profile
+
+SLAM_GYRO = SRC / 'racerbot_launch' / 'config' / 'slam_gyro.yaml'
+
+
+def test_gyro_odom_loads_the_gyro_slam_profile():
+    # oracle: spec -- A1: the profile is loaded with gyro_odom:=true, from the
+    # installed package, where slam_launch.py will read it.
+    _, ctx = _wired_context(gyro_odom='true')
+    profile = ctx.launch_configurations['slam_profile_file']
+    assert profile.endswith('/slam_gyro.yaml')
+    assert Path(profile).is_file()
+
+
+def test_without_gyro_odom_no_profile_is_set():
+    # oracle: spec -- A1: runs without the gyro keep slam_tracking.yaml's search.
+    _, ctx = _wired_context(gyro_odom='false')
+    assert 'slam_profile_file' not in ctx.launch_configurations
+
+
+def test_slam_launch_layers_the_profile_last():
+    # oracle: spec -- ROS 2 parameter files: later files win (slam_launch.py,
+    # "Order matters"). So: tracking file, then profile, then the dict.
+    spec = importlib.util.spec_from_file_location(
+        'slam_launch', LAUNCH.parent / 'slam_launch.py')
+    sl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sl)
+    ld = sl.generate_launch_description()
+    ctx = _context(ld, slam_profile_file='/profile/under/test.yaml')
+    slam = [e for e in ld.entities if isinstance(e, Node)]
+    assert len(slam) == 1
+    entries = slam[0]._Node__parameters
+    files = [''.join(s.perform(ctx) for s in e.param_file)
+             for e in entries if isinstance(e, ParameterFile)]
+    assert files == [ctx.launch_configurations['slam_params_file'],
+                     ctx.launch_configurations['slam_tracking_file'],
+                     '/profile/under/test.yaml']
+    assert isinstance(entries[-1], dict)
+
+
+def test_gyro_profile_window_cannot_reach_the_neighbouring_track():
+    # oracle: measured docs/superpowers/specs/2026-10-26-slam-and-gap-follow-plan.md
+    # (A1): on runs 20261026-194714 and -194913 the false loop-closure jumps were
+    # at least 2.2 m. The correlation window is +/- loop_search_space_dimension / 2
+    # (A1: the 8.0 m search is +/-4 m), so it must stay short of 2.2 m.
+    profile = yaml.safe_load(SLAM_GYRO.read_text())['slam_toolbox']['ros__parameters']
+    assert profile['loop_search_space_dimension'] / 2 < 2.2

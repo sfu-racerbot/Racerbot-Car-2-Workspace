@@ -1,0 +1,34 @@
+slam_toolbox:
+  ros__parameters:
+    # Layered over slam_tracking.yaml, and loaded only by map_course with
+    # gyro_odom:=true (slam_launch.py's slam_profile_file). Runs without the
+    # gyro keep slam_tracking.yaml's 8.0 m loop-closure search.
+    #
+    # Why. With gyro odometry the car's pose is about 1 m off after a lap. The
+    # neighbouring stretch of the course is 2.2-2.6 m away. With the 8.0 m
+    # search (a +/-4 m correlation window), SLAM closed onto that stretch: on
+    # runs 20261026-194714 and -194913 the largest correction moved the car
+    # 2.45 m and 2.75 m (docs/superpowers/specs/2026-10-26-slam-and-gap-follow-plan.md,
+    # A1). The 8.0 m search was set for steering-only odometry, which drifts
+    # about 4 m a lap and needs it.
+    #
+    # The window. 3.0 m is a +/-1.5 m correlation window, which cannot reach a
+    # stretch 2.2 m away. loop_search_maximum_distance is back at slam_toolbox's
+    # 3.0 m default: the radius in which SLAM looks for an earlier scan to
+    # close against.
+    #
+    # Replays, 2026-10-27: tools/run_analysis/slam_replay.py with --odom
+    # odom_imu, corrections measured at the car by slam_metrics. Each cell is
+    # largest correction / jumps over 1.5 m / loop closures (one per Ceres
+    # solve, slam_metrics' proxy for a loop closure).
+    #
+    #   run               speed     slam_tracking.yaml   this profile
+    #   20261026-194514   3.5 m/s   0.59 m / 0 / 6       0.71 m / 0 / 3
+    #   20261026-194714   1.5 m/s   2.45 m / 2 / 4       0.47 m / 0 / 12
+    #   20261026-194913   2.5 m/s   2.75 m / 4 / 9       0.47 m / 0 / 6
+    #
+    # Not used: 0.5 m node spacing (P2), and stricter loop-match responses on
+    # top of it (P3). Both switched loop closure off: no Ceres solve on any of
+    # the three runs.
+    loop_search_maximum_distance: 3.0
+    loop_search_space_dimension: 3.0

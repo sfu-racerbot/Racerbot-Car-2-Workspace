@@ -51,8 +51,11 @@ odom_frame becomes odom_imu, and vehicle_state publishes odom_imu -> odom
 so that odom_imu -> base_link is vesc_to_odom's odometry with the gyro's
 heading. vesc_to_odom keeps odom -> base_link, so nothing else changes:
 gap_follow drives on /scan as before, the lap counter still counts turning
-in `odom`. Only the map and the map-frame pose differ. /odom/imu is
-recorded either way, so every run can be replayed through SLAM both ways.
+in `odom`. Only the map and the map-frame pose differ. SLAM also loads
+slam_gyro.yaml, a tighter loop-closure search: the wider one in
+slam_tracking.yaml let a loop closure land on a neighbouring stretch of
+track. /odom/imu is recorded either way, so every run can be replayed
+through SLAM both ways.
 """
 
 import os
@@ -71,6 +74,7 @@ from launch_ros.actions import Node
 
 FUSED_ODOM = '/odom/fused'   # vehicle_state.yaml's fused_odom_topic
 IMU_ODOM_FRAME = 'odom_imu'  # vehicle_state.yaml's imu_odom_frame
+SLAM_GYRO_PROFILE = 'slam_gyro.yaml'  # racerbot_launch/config, layered over slam_tracking.yaml
 
 
 def _flag(name, value):
@@ -109,14 +113,33 @@ def gyro_odom_settings(imu, gyro_odom):
     return IMU_ODOM_FRAME, 'true'
 
 
+def slam_profile_for(gyro_odom):
+    """The slam_toolbox profile this run layers over slam_tracking.yaml, or None.
+
+    Only gyro odometry gets one. slam_tracking.yaml's 8 m loop-closure search
+    was set for steering odometry, which drifts about 4 m a lap and needs it;
+    with the gyro, that same search can close onto a neighbouring stretch of
+    track.
+    """
+    if not _flag('gyro_odom', gyro_odom):
+        return None
+    return os.path.join(
+        get_package_share_directory('racerbot_launch'), 'config', SLAM_GYRO_PROFILE)
+
+
 def _wiring(context):
+    gyro_odom = LaunchConfiguration('gyro_odom').perform(context)
     frame, publish_tf = gyro_odom_settings(
-        LaunchConfiguration('imu').perform(context),
-        LaunchConfiguration('gyro_odom').perform(context))
+        LaunchConfiguration('imu').perform(context), gyro_odom)
+    actions = [SetLaunchConfiguration('slam_odom_frame', frame),
+               SetLaunchConfiguration('publish_odom_tf', publish_tf)]
+    profile = slam_profile_for(gyro_odom)
+    if profile is not None:
+        actions.append(SetLaunchConfiguration('slam_profile_file', profile))
     # Launch configurations are shared with included files: slam_launch.py
-    # reads slam_odom_frame, vehicle_state_launch.py publish_odom_tf.
-    return [SetLaunchConfiguration('slam_odom_frame', frame),
-            SetLaunchConfiguration('publish_odom_tf', publish_tf)]
+    # reads slam_odom_frame and slam_profile_file, vehicle_state_launch.py
+    # publish_odom_tf.
+    return actions
 
 
 def generate_launch_description():
@@ -156,7 +179,8 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'gyro_odom', default_value='false',
             description='true: slam_toolbox maps on gyro odometry (odom_imu) instead of '
-                        "vesc_to_odom's steering-model odometry. Needs imu:=true."),
+                        "vesc_to_odom's steering-model odometry, and loads slam_gyro.yaml. "
+                        'Needs imu:=true.'),
         DeclareLaunchArgument(
             'fused_speed', default_value='false',
             description='true: gap_follow reads /odom/fused (IMU-fused speed) '

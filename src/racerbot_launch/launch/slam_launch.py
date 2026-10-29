@@ -59,6 +59,16 @@ def generate_launch_description():
             'slam_params_file. Point it at a copy to try a different tracking '
             'rate without editing the packaged one, or at slam_params_file '
             "itself to run the vendored defaults unmodified."))
+    # Its default is the tracking file. The fallback names the same file, so the
+    # default resolves even where slam_tracking_file has not been declared yet.
+    slam_profile_file_arg = DeclareLaunchArgument(
+        'slam_profile_file',
+        default_value=LaunchConfiguration('slam_tracking_file',
+                                          default=default_tracking_config),
+        description=(
+            'A further slam_toolbox profile, applied after slam_tracking_file (later '
+            'files win). map_course sets it to slam_gyro.yaml with gyro_odom:=true. '
+            'Left alone it is slam_tracking_file again, which changes nothing.'))
     autostart_arg = DeclareLaunchArgument(
         'autostart', default_value='true',
         description=(
@@ -93,6 +103,9 @@ def generate_launch_description():
             # Order matters: later files win, so this is where the
             # workspace's tracking-rate tuning lands.
             ParameterFile(LaunchConfiguration('slam_tracking_file'),
+                          allow_substs=True),
+            # Last of the files, so a profile here overrides the tracking file.
+            ParameterFile(LaunchConfiguration('slam_profile_file'),
                           allow_substs=True),
             {
                 'use_lifecycle_manager': use_lifecycle_manager,
@@ -132,6 +145,7 @@ def generate_launch_description():
     return LaunchDescription([
         slam_params_file_arg,
         slam_tracking_file_arg,
+        slam_profile_file_arg,
         autostart_arg,
         use_lifecycle_manager_arg,
         use_sim_time_arg,

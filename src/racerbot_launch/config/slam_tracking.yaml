@@ -40,6 +40,7 @@ slam_toolbox:
     throttle_scans: 2
 
     # --- Loop closure, and why the map was not closing ---
+    # With gyro_odom:=true, slam_gyro.yaml narrows this search to 3.0 m (see it for why).
     # The course is a hallway loop around a building block: 126m round, with
     # the far side 38.8m from the start (measured off the 2026-08-19 run's
     # own lap recorder). Upstream's loop_search_maximum_distance of 3.0m is
