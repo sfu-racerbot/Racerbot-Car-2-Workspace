@@ -45,7 +45,7 @@ They were first driven on the car on 2026-10-19. That run had no contact, but th
 
 **Limits:** these numbers come from the simulator only. `max_lateral_accel` was raised from 1.0 to 2.0 m/s² for this work, then to 2.5 m/s² on 2026-10-26.
 
-**Car 2 stays at 2.0 m/s².** Car 1 made the 2.5 step; car 2's own floor run (2026-10-19) started to slide above 2.0, so its YAML keeps 2.0.
+**Car 2 took the same 2.5 on 2026-10-29** (team decision), although its own floor run (2026-10-19) read 0.91 of the commanded turn at 2.0–2.5. Bring it up in the order in [Validation](#validation).
 
 On car 1, the 2.5 step rests on a map run's grip reading (`20261026-194514`). That run was driven at a 2.0 ceiling, so no run has yet used 2.5 on the floor. The 2026-10-19 floor run and that map run disagree on grip above 2.0 m/s². [The 2026-10-19 run](#the-2026-10-19-run) has both readings.
 
@@ -58,10 +58,9 @@ On car 1, the 2.5 step rests on a map run's grip reading (`20261026-194514`). Th
 
 The team asked for a faster `gap_follow` with less weave, one that can win races. The shipped setup changed to the one that was fastest in the simulator with no wall contact. **Nothing has been driven on the car at these values yet.**
 
-> **On car 2** (ported from car 1 on 2026-10-29): the speeds, the speed ramp and corner setup off are the same as car 1's. Three things differ:
+> **On car 2** (ported from car 1 on 2026-10-29): the speeds, the speed ramp, `max_lateral_accel` 2.5 and corner setup off are the same as car 1's. Two things differ:
 >
 > - **Steering damping is off** (`enable_steering_damping: false`, `steering_damping:=` defaults to `false`). Car 2 has no BNO085 or `~/imu-calibration` yet, and the IMU stack refuses to start without them. Turn it on together with the other IMU defaults once the BNO085 is mounted and calibrated: see [car1-vs-car2.md](car1-vs-car2.md#imu).
-> - **`max_lateral_accel` is 2.0 m/s²**, not 2.5: car 2's own floor run started to slide above 2.0.
 > - **`max_steering_angle` is 0.349 rad**, car 2's limit from its 2026-10-16 circles.
 >
 > The table below was measured with car 1's values, so car 2's laps will differ.
@@ -74,7 +73,7 @@ The team asked for a faster `gap_follow` with less weave, one that can win races
 - **Corner setup off** (`enable_corner_setup: false`). Its values are kept.
 - **Speed ramp 3.0 → 5.0 m/s²** (`max_acceleration`). It limits how fast a speed command may rise. It never limits braking.
 
-Left alone on purpose: the LB hold ([deadman](glossary.md#deadman)), the time-to-collision brake, and the emergency and forward clearance stops. Also unchanged are `max_braking_decel` (3.0 m/s²), `max_lateral_accel` (2.5 m/s² on car 1, 2.0 on car 2) and `max_steering_angle` (0.33 rad on car 1, 0.349 on car 2). Adaptive grip still ships off.
+Left alone on purpose: the LB hold ([deadman](glossary.md#deadman)), the time-to-collision brake, and the emergency and forward clearance stops. Also unchanged are `max_braking_decel` (3.0 m/s²), `max_lateral_accel` (2.5 m/s²) and `max_steering_angle` (0.33 rad on car 1, 0.349 on car 2). Adaptive grip still ships off.
 
 ### The evidence
 
@@ -142,7 +141,7 @@ The rule exists because a driving node with a bug does not know it has a bug. LB
 
 **The 2026-10-20 changes have only run in the simulator. Bring them up wheels-off first, then at low speed** — the exact order is in [Validation](#validation).
 
-The simulator's car is close to this one, but not identical. Its grip has been read on the cars in two runs, but no run has yet used car 1's 2.5 m/s² cornering limit on the floor (car 2 ships 2.0). Bring that limit up in the order in [Validation](#validation).
+The simulator's car is close to this one, but not identical. Its grip has been read on the cars in two runs, but no run has yet used the 2.5 m/s² cornering limit on the floor. Bring that limit up in the order in [Validation](#validation).
 
 **The other-car layer is on by default, and it has never run on the floor.** It can only slow the car or choose a side of an opening. Its first-run order is in [Several cars at once](#several-cars-at-once). If it reads a wall as a car, the decision lines show `opponent mode=` with no other car moving. Let go of LB at that point.
 
@@ -157,7 +156,7 @@ The simulator's car is close to this one, but not identical. Its grip has been r
 3. **Floor, low speed, open space, with the recorder on.** Lower the speed first: set `max_speed` to about 1.0 m/s and `max_lateral_accel` back to 1.0. Both can be changed live from the dashboard's tuning panel. Record every floor run (commands below), so the next change can be checked against what the car really did.
    - Since 2026-10-27 the top speed is 5.0 m/s unless a launch says otherwise, so this step is not optional ([race defaults](#race-defaults-2026-10-27)).
    - Drive a straight corridor, then a single corner, with someone ready to let go of LB.
-4. **Raise speed in steps.** Raise `max_lateral_accel` back toward the shipped value (2.0 on car 2, 2.5 on car 1) only after the low-speed runs look right. No run has used 2.5 on the floor yet, so its first run follows the same order as any speed increase: wheels off, then low speed.
+4. **Raise speed in steps.** Raise `max_lateral_accel` back toward the shipped 2.5 only after the low-speed runs look right. No run has used 2.5 on the floor yet, so its first run follows the same order as any speed increase: wheels off, then low speed.
    - **If the car slides or runs wide in corners:** the floor has less grip than the simulator. Keep `max_lateral_accel` at the highest value that stayed planted.
 
 If anything looks wrong, turn the suspect feature off (next section) and compare. That is what the separate switches are for.
@@ -224,7 +223,7 @@ Each feature has a switch in `src/gap_follow/config/gap_follow.yaml`:
 
 These switches are **not** live-tunable: edit the YAML and restart `gap_follow_launch.py`. The workspace is built with `--symlink-install`, so no rebuild is needed.
 
-`max_lateral_accel` (shipped 2.0 on car 2, 2.5 on car 1 since 2026-10-26; 1.0 before 2026-10-19) is live-tunable from the dashboard.
+`max_lateral_accel` (shipped 2.5: car 1 since 2026-10-26, car 2 since 2026-10-29; 1.0 before 2026-10-19, then 2.0) is live-tunable from the dashboard.
 
 ## The 2026-10-19 run
 
@@ -792,7 +791,7 @@ Adaptive grip is **off by default**. It lets the car take corners a little faste
 
 ### What it does, in plain words
 
-Every corner has a sideways limit: how hard the tires can push the car before it slides. The node uses a number for that limit, `max_lateral_accel`, which is 2.0 m/s² (metres per second squared) in car 2's shipped config (2.5 on car 1). The speed cap for a corner comes from that number.
+Every corner has a sideways limit: how hard the tires can push the car before it slides. The node uses a number for that limit, `max_lateral_accel`, which is 2.5 m/s² (metres per second squared) in the shipped config. The speed cap for a corner comes from that number.
 
 The gyro measures the car's *yaw rate*, how fast the car is turning. The node compares that with the turn the steering asks for. The result is the **grip ratio**. A ratio of 1.0 means the tires are making the turn the steering asks for. A ratio below 1.0 means the car is turning less than asked, which is what sliding looks like.
 
@@ -858,14 +857,14 @@ One more case gives no reason, because it is not a gyro fault. If the wheel spee
 
 Do these in order, as in [Validation](#validation). Each step needs the one before it.
 
-1. **Fallback check, wheels off the ground.** Start the launch with the car on a stand, and keep it still. The decision lines should say `adaptive_grip_off: imu waiting` for about 3 seconds, and then `adaptive grip limit 2.00m/s^2` on car 2 (`2.50` on car 1). That is the base, unchanged.
-2. **Low speed does nothing, on purpose.** The node judges only when the sideways push the steering asks for reaches 80% of the limit. That push grows with speed squared, so with car 2's shipped 2.0 m/s² (car 1, 2.5 m/s² at 0.33 rad: about 1.45 m/s):
-   - at car 2's 0.349 rad steering limit, judging starts at about 1.26 m/s;
-   - at 0.2 rad, it starts at about 1.69 m/s;
+1. **Fallback check, wheels off the ground.** Start the launch with the car on a stand, and keep it still. The decision lines should say `adaptive_grip_off: imu waiting` for about 3 seconds, and then `adaptive grip limit 2.50m/s^2`. That is the base, unchanged.
+2. **Low speed does nothing, on purpose.** The node judges only when the sideways push the steering asks for reaches 80% of the limit. That push grows with speed squared, so with the shipped 2.5 m/s² (car 1, at its 0.33 rad limit: about 1.45 m/s):
+   - at car 2's 0.349 rad steering limit, judging starts at about 1.41 m/s;
+   - at 0.2 rad, it starts at about 1.89 m/s;
    - at 1 m/s, the limit never moves.
 
    A low-speed run therefore shows nothing. That is correct.
-3. **Floor, about 2 m/s, open space.** Start with `max_speed:=2.0` added to the launch command, and drive one corner with LB held and someone ready to let go. The limit should stay near the base (2.0 on car 2) while the car grips. It should drop if the car slides. If the car feels loose, or the limit keeps falling, let go of LB and restart with `adaptive_grip:=false`.
+3. **Floor, about 2 m/s, open space.** Start with `max_speed:=2.0` added to the launch command, and drive one corner with LB held and someone ready to let go. The limit should stay near 2.5 while the car grips. It should drop if the car slides. If the car feels loose, or the limit keeps falling, let go of LB and restart with `adaptive_grip:=false`.
 
 ### What the simulator says
 

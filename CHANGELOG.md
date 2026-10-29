@@ -17,14 +17,13 @@ differences are in `docs/car1-vs-car2.md`; `test_car2_hardware_config.py` gained
   Gyro **steering damping** and **adaptive grip** (`gap_logic.py`, the `steering_damping:=` and
   `adaptive_grip:=` launch arguments). **Race defaults** (car 1, 2026-10-27): `max_speed`
   3.5 -> **5.0**, `min_speed` 1.429, `corner_speed` 2.143, `corner_speed_wide` 2.714,
-  `narrow_corridor_speed` 3.571, `max_acceleration` 3.0 -> 5.0, `steering_damping_gain` 0.10,
+  `narrow_corridor_speed` 3.571, `max_acceleration` 3.0 -> 5.0, `max_lateral_accel` 2.0 -> 2.5, `steering_damping_gain` 0.10,
   `enable_corner_setup` false. **Opponent awareness on by default** (`opponent_awareness:='true'`):
   follow hold, `FollowCapMemory` (`opponent_follow_memory_sec` 1.0), the 0.31 x 0.58 m outline,
   the narrow-section pass refusal and the alongside abort. **Never driven on car 2.**
-- **Car 2 keeps:** `max_steering_angle` 0.349 and `arc_guard_max_correction` 0.1745;
-  `max_lateral_accel` **2.0** (car 1: 2.5); steering damping **off**
+- **Car 2 keeps:** `max_steering_angle` 0.349 and `arc_guard_max_correction` 0.1745; steering damping **off**
   (`enable_steering_damping: false`, `steering_damping:=false`) until the BNO085 is mounted
-  and calibrated; `neural_racer`'s 0.349 wrapper and its exact `max_lateral_accel` pairing test.
+  and calibrated; `neural_racer`'s 0.349 wrapper (its `max_lateral_accel` stays 2.0, no longer paired).
 - **`racerbot_launch`**: `opponent_awareness` argument, default `false`, in `map_course`,
   `auto_map_race_launch.py` and `autonomous_mapping_launch.py`. `slam_gyro.yaml` (3 m loop
   search with `gyro_odom:=true`). `map_course` keeps `imu:=false`.

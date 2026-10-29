@@ -60,7 +60,6 @@ Everything else in `imu_bridge` is the same code as car 1's.
 | Web dashboard id | **`rb2`** | `rb1` | `racerbot_launch/config/web_dashboard_rb2.yaml`, loaded by `dashboard_launch.py` |
 | Self-check | `racerbot_doctor` checks the Ethernet link, host IP, ping and TCP port of the LiDAR, and the RealSense (USB 3 speed, `/camera/camera/color/image_raw` rate) | checks the USB Hokuyo ladder and a UVC webcam. The joystick `input`-permission check and the *Drive path* section are the same on both cars | `racerbot_doctor/car.py` and the LiDAR/camera ladders in `checks.py`, plus their tests |
 | `neural_racer` safety wrapper | `max_steering_angle` **0.349**, matching `gap_follow.yaml` (its own test checks they agree). The learned policy itself was trained on car 1 and never asks for more than 0.33 (`observation.STEER_LIMIT`) | 0.33 | `neural_racer/config/neural_racer.yaml`, `WrapperConfig` in `neural_racer/safety_wrapper.py` |
-| `gap_follow` cornering limit `max_lateral_accel` | **2.0 m/s²**: car 2's 2026-10-19 floor run started to slide above 2.0 | 2.5, from car 1's run `20261026-194514` (2026-10-26) | `gap_follow/config/gap_follow.yaml`. `neural_racer`'s `test_config.py` still pairs it exactly with neural_racer's 2.0 here |
 | Where runs are saved | inside the repo, `~/racerbot-ws/data/` ([data/README.md](../data/README.md)): `auto_record` and `record_run.py` into `data/racerbot_runs/`, the simulator's race referee into `data/racerbot_sim/races/` | `~/.ros/racerbot_runs/`, `~/.ros/racerbot_sim/races/` | every default is pinned by `racerbot_launch/test/test_run_output_paths.py` |
 | [Odometry](glossary.md) calibration label | car 2's | `vehicle_model: "... (car 1)"` | `odom_calibration/config/odom_calibration.yaml` |
 | Simulator vehicle model | **car 2's** servo map and limits | the same (car 2's) model, a known gap on car 1 | `racerbot_sim/sim_bridge.py`, `tools/f1tenth_sim/sim_fidelity/calibration.py` |
@@ -80,7 +79,7 @@ cd ~/racerbot-ws
 python3 -m pytest src/racerbot_launch/test/test_car2_hardware_config.py -v
 ```
 
-**Working when:** all 14 tests pass. They fail if any of car 1's values come back: USB LiDAR settings, webcam launch, `rb1` dashboard config, calibration, steering limits, odometry gain or cornering limit. They also fail if the doctor loses its Ethernet LiDAR or RealSense checks. And they fail if the IMU side, including gap_follow's steering damping, is switched on by default before car 2 has a BNO085.
+**Working when:** all 13 tests pass. They fail if any of car 1's values come back: USB LiDAR settings, webcam launch, `rb1` dashboard config, calibration, steering limits, odometry gain. They also fail if the doctor loses its Ethernet LiDAR or RealSense checks. And they fail if the IMU side, including gap_follow's steering damping, is switched on by default before car 2 has a BNO085.
 
 **If it doesn't:** the failing test's name says which row of the tables above was clobbered.
 

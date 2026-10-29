@@ -200,11 +200,3 @@ def test_gap_follow_steering_damping_is_off_by_default():
     launch = _read(_SRC, 'gap_follow', 'launch', 'gap_follow_launch.py')
     defaults = re.findall(r"'steering_damping', default_value='(\w+)'", launch)
     assert defaults == ['false']
-
-
-def test_gap_follow_cornering_limit_is_car_2s():
-    # oracle: recorded measurement -- car 2's run 20261019-200703 started to
-    # slide above 2.0 m/s^2 (docs/gap-follow.md#the-2026-10-19-run). Car 1's
-    # 2.5 came from car 1's own run 20261026-194514.
-    params = _yaml(os.path.join(_SRC, 'gap_follow', 'config', 'gap_follow.yaml'))
-    assert params['gap_follow_node']['ros__parameters']['max_lateral_accel'] == 2.0
