@@ -6,7 +6,44 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
-## 2026-10-24 (latest) — Port from car 1 (to `car1/main` `0265263`); branch cleanup
+## 2026-10-29 (latest) — Port from car 1 (to `car1/main` `4bea6f2`): racing, Part A and B-1
+
+Car 1's PRs #3 to #7 ([Racerbot-Car-1-Workspace](https://github.com/sfu-racerbot/Racerbot-Car-1-Workspace)),
+ported feature by feature on branch `port-car1-part-b1` (`git diff 0265263 car1/main`,
+applied in date order with `git apply --3way`, then merged by hand). Car 2's
+differences are in `docs/car1-vs-car2.md`; `test_car2_hardware_config.py` gained two checks.
+
+- **`gap_follow`**: the `max_speed:=` launch flag can raise the top speed up to 5.0 m/s.
+  Gyro **steering damping** and **adaptive grip** (`gap_logic.py`, the `steering_damping:=` and
+  `adaptive_grip:=` launch arguments). **Race defaults** (car 1, 2026-10-27): `max_speed`
+  3.5 -> **5.0**, `min_speed` 1.429, `corner_speed` 2.143, `corner_speed_wide` 2.714,
+  `narrow_corridor_speed` 3.571, `max_acceleration` 3.0 -> 5.0, `steering_damping_gain` 0.10,
+  `enable_corner_setup` false. **Opponent awareness on by default** (`opponent_awareness:='true'`):
+  follow hold, `FollowCapMemory` (`opponent_follow_memory_sec` 1.0), the 0.31 x 0.58 m outline,
+  the narrow-section pass refusal and the alongside abort. **Never driven on car 2.**
+- **Car 2 keeps:** `max_steering_angle` 0.349 and `arc_guard_max_correction` 0.1745;
+  `max_lateral_accel` **2.0** (car 1: 2.5); steering damping **off**
+  (`enable_steering_damping: false`, `steering_damping:=false`) until the BNO085 is mounted
+  and calibrated; `neural_racer`'s 0.349 wrapper and its exact `max_lateral_accel` pairing test.
+- **`racerbot_launch`**: `opponent_awareness` argument, default `false`, in `map_course`,
+  `auto_map_race_launch.py` and `autonomous_mapping_launch.py`. `slam_gyro.yaml` (3 m loop
+  search with `gyro_odom:=true`). `map_course` keeps `imu:=false`.
+- **`race_diagnostics`**: `auto_record`, started by every bringup (`record:=false` turns it off),
+  records each algorithm run into `data/racerbot_runs/` (car 1: `~/.ros/racerbot_runs/`).
+- **`pure_pursuit`**: `auto_map_race` closes a lap at its closest approach to the start
+  (`close_at_closest_approach`); four LB deadman deny-path tests for `auto_map_race_node`.
+- **`racerbot_sim`**: two controlled cars (`/car2`), `sim_race_launch.py` and the race referee
+  (results in `data/racerbot_sim/races/`), team A as car 2, the interlock's 3 s discovery hold
+  plus `interlock_clear_confirm_sec` 3 s starting blocked, `/test_only` drive chains and the
+  conftest isolation guard, gym's yaw-zeroing response disabled.
+- **`tools/`**: `eval_gap_multi.py` head-to-head score, `recognition.py`, gap_mirror parity,
+  car 1's course as a track; `run_analysis` `slam_replay`, `slam_metrics`, `slam_bag`,
+  `odom_tf_relay`, `weave.py`.
+- **Docs**: gap-follow.md (race defaults, steering damping, adaptive grip, "Several cars at
+  once"), ros-simulator.md, launchstart.md, run-diagnostics.md, glossary, git-setup.md
+  Addition 6, car 1's plans under `docs/superpowers/`.
+
+## 2026-10-24 — Port from car 1 (to `car1/main` `0265263`); branch cleanup
 
 Everything car 1 ([Racerbot-Car-1-Workspace](https://github.com/sfu-racerbot/Racerbot-Car-1-Workspace))
 built since it took car 2's `38c35a0`, as a patch (`git diff 0cd347f car1/main`,

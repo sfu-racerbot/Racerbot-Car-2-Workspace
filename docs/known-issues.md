@@ -4,7 +4,7 @@
 > **Read first:** nothing.
 > **What's in it:** one entry per problem: what is wrong, the evidence, and the suggested fix.
 
-This list was written on car 1 ([Racerbot-Car-1-Workspace](https://github.com/sfu-racerbot/Racerbot-Car-1-Workspace), checked at `881c409`) and ported to car 2 on 2026-10-24 with the rest of car 1's changes. Entries were re-checked on car 2 where they could be without the car running, and say so; the rest still describe car 1. When you fix one, delete its entry in the same commit.
+This list was written on car 1 ([Racerbot-Car-1-Workspace](https://github.com/sfu-racerbot/Racerbot-Car-1-Workspace), checked at `881c409`) and ported to car 2 on 2026-10-24 with the rest of car 1's changes. Entries were re-checked on car 2 where they could be without the car running, and say so; the rest still describe car 1. When you fix one, delete its entry in the same commit. The 2026-10-29 port of car 1's Part B-1 racing work brought car 1's resolved simulator entry below.
 
 ## Contents
 
@@ -12,6 +12,7 @@ This list was written on car 1 ([Racerbot-Car-1-Workspace](https://github.com/sf
 - [Setup on the car](#setup-on-the-car)
 - [Documentation](#documentation)
 - [Cross-car drift](#cross-car-drift)
+- [Resolved](#resolved)
 
 ## Code and config
 
@@ -32,12 +33,6 @@ This list was written on car 1 ([Racerbot-Car-1-Workspace](https://github.com/sf
 `src/particle_filter/particle_filter/particle_filter.py` broadcasts a transform with `header.frame_id = '/map'` and `child_frame_id = '/laser'`, with leading slashes. tf2 in ROS 2 does not accept frame IDs that start with `/`, and `laser` already has `base_link` as its parent from the static transform. Nothing in the workspace reads this transform (`pure_pursuit` uses `/pf/viz/inferred_pose`), so the race path is unaffected, but it may be spamming errors or giving `laser` two parents.
 
 **Fix:** run the filter and check `ros2 run tf2_ros tf2_monitor`. If the broadcast is rejected or harmful, disable it in the filter's config or patch it upstream; `particle_filter` is a submodule.
-
-### `racerbot_sim` still lets gym zero a car's yaw on contact
-
-Since the measured 0.26 m LiDAR offset, gym's own collision flag fires when a *padded* envelope touches a wall or another car, and its response is `state[3:] = 0`: speed, steering and yaw zeroed, which turned two cars round in the older harness. `FidelityPlant` switches that off (`tools/f1tenth_sim/sim_fidelity/plant.py`, `ttc_threshold = -inf`). `racerbot_sim/sim_bridge.py` does not, and its comment above `body_contact` still says the flag never fires. `CLAUDE.md` already records `racerbot_sim` as unchecked.
-
-**Fix:** reproduce it in `racerbot_sim` (two cars, or one brushing a wall with its padded box), then set the same threshold in `SimBridge`, with a test that fails while gym can still zero the yaw. Update the comment.
 
 ### Wiimote steering is not the F710's full stick
 
@@ -88,3 +83,15 @@ On car 2 `import osqp` works (2026-10-24). `python3 -c "import osqp"` fails on c
 Differences between the two repos that are not hardware differences, so one of the two is behind. They are not in `docs/car1-vs-car2.md` because no hardware requires them.
 
 Car 2 took every row of car 1's list (`max_speed:=`, the `map_course` IMU options, `record_bag:=true`, `imu_bridge`) in the 2026-10-24 port, so none are left. The one remaining difference in that area, `map_course imu:=false` by default on car 2, exists because car 2 has no BNO085 yet, so it is in `docs/car1-vs-car2.md` instead.
+
+## Resolved
+
+### `racerbot_sim` let gym zero a car's yaw on contact
+
+**Resolved 2026-10-28:** `SimBridge` sets `ttc_threshold = -inf` at construction and before every reset. Its comment was corrected, and the two-run test in `src/racerbot_sim/test/test_controlled_cars.py` checks the response with and without the change.
+
+**Original issue and proposed fix (historical; superseded by the resolution above):**
+
+Since the measured 0.26 m LiDAR offset, gym's own collision flag fires when a *padded* envelope touches a wall or another car, and its response is `state[3:] = 0`: speed, steering and yaw zeroed, which turned two cars round in the older harness. `FidelityPlant` switches that off (`tools/f1tenth_sim/sim_fidelity/plant.py`, `ttc_threshold = -inf`). `racerbot_sim/sim_bridge.py` does not, and its comment above `body_contact` still says the flag never fires. `CLAUDE.md` already records `racerbot_sim` as unchecked.
+
+**Fix:** reproduce it in `racerbot_sim` (two cars, or one brushing a wall with its padded box), then set the same threshold in `SimBridge`, with a test that fails while gym can still zero the yaw. Update the comment.

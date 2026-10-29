@@ -38,6 +38,8 @@ So on car 2 the IMU side is **off by default**:
 |---|---|---|---|
 | `map_course` `imu:=` | `false` | `true` | `racerbot_launch/launch/map_course_launch.py` |
 | `vehicle_state_launch.py` `bno:=` | `false` | `true` | `imu_bridge/launch/vehicle_state_launch.py` |
+| `gap_follow_launch.py` `steering_damping:=` (starts the IMU stack) | `false` | `true` | `gap_follow/launch/gap_follow_launch.py` |
+| `enable_steering_damping` (the gyro term) | `false` | `true` | `gap_follow/config/gap_follow.yaml` |
 
 Everything else in `imu_bridge` is the same code as car 1's.
 
@@ -47,7 +49,7 @@ Everything else in `imu_bridge` is the same code as car 1's.
 2. Clone [imu-calibration](https://github.com/sfu-racerbot/imu-calibration) to `~/imu-calibration`. Set car 2's numbers in its `config/car.yaml` (wheelbase, odometry gain, the BNO's position and mount), then run its calibration steps.
 3. Set `bno_x_offset` in `imu_bridge/config/vehicle_state.yaml` to the BNO's distance ahead of the rear axle. The current `0.36` is car 1's front-axle mount.
 4. Do the forward-push check and the A/B mapping test in [launchstart.md](launchstart.md#testing-the-imu-in-mapping-ab), with `imu:=true`.
-5. Only then flip the two defaults above to `true`, and change `test_car2_hardware_config.py`'s two IMU tests in the same commit.
+5. Only then flip the four defaults above to `true`, and change `test_car2_hardware_config.py`'s three IMU tests (`map_course`, `vehicle_state_launch`, steering damping) in the same commit. Steering damping's own tests also pin car 2's off value: `test_race_defaults.py` and two tests in `test_gap_follow_launch_steering_damping.py`; flip them with it.
 
 `robot_localization` (only needed for `imu_ekf_shadow_launch.py`) is also not installed on car 2 yet.
 
@@ -58,12 +60,14 @@ Everything else in `imu_bridge` is the same code as car 1's.
 | Web dashboard id | **`rb2`** | `rb1` | `racerbot_launch/config/web_dashboard_rb2.yaml`, loaded by `dashboard_launch.py` |
 | Self-check | `racerbot_doctor` checks the Ethernet link, host IP, ping and TCP port of the LiDAR, and the RealSense (USB 3 speed, `/camera/camera/color/image_raw` rate) | checks the USB Hokuyo ladder and a UVC webcam. The joystick `input`-permission check and the *Drive path* section are the same on both cars | `racerbot_doctor/car.py` and the LiDAR/camera ladders in `checks.py`, plus their tests |
 | `neural_racer` safety wrapper | `max_steering_angle` **0.349**, matching `gap_follow.yaml` (its own test checks they agree). The learned policy itself was trained on car 1 and never asks for more than 0.33 (`observation.STEER_LIMIT`) | 0.33 | `neural_racer/config/neural_racer.yaml`, `WrapperConfig` in `neural_racer/safety_wrapper.py` |
+| `gap_follow` cornering limit `max_lateral_accel` | **2.0 m/s²**: car 2's 2026-10-19 floor run started to slide above 2.0 | 2.5, from car 1's run `20261026-194514` (2026-10-26) | `gap_follow/config/gap_follow.yaml`. `neural_racer`'s `test_config.py` still pairs it exactly with neural_racer's 2.0 here |
+| Where runs are saved | inside the repo, `~/racerbot-ws/data/` ([data/README.md](../data/README.md)): `auto_record` and `record_run.py` into `data/racerbot_runs/`, the simulator's race referee into `data/racerbot_sim/races/` | `~/.ros/racerbot_runs/`, `~/.ros/racerbot_sim/races/` | every default is pinned by `racerbot_launch/test/test_run_output_paths.py` |
 | [Odometry](glossary.md) calibration label | car 2's | `vehicle_model: "... (car 1)"` | `odom_calibration/config/odom_calibration.yaml` |
 | Simulator vehicle model | **car 2's** servo map and limits | the same (car 2's) model, a known gap on car 1 | `racerbot_sim/sim_bridge.py`, `tools/f1tenth_sim/sim_fidelity/calibration.py` |
 
 ## Porting from car 1, step by step
 
-1. **Port only what was asked for.** Car 1 is not upstream. The repos share no git history, so a port is a patch: `git fetch car1`, `git diff <last ported car 1 commit> car1/main`, then `git apply --3way`. The last port took `car1/main` up to `0265263` ([CHANGELOG.md](../CHANGELOG.md)).
+1. **Port only what was asked for.** Car 1 is not upstream. The repos share no git history, so a port is a patch: `git fetch car1`, `git diff <last ported car 1 commit> car1/main`, then `git apply --3way`. The last port took `car1/main` up to `4bea6f2` (2026-10-29, car 1's PRs #3 to #7; [CHANGELOG.md](../CHANGELOG.md)).
 2. **For every file the patch touches, check it against the tables above.** Merge the change *into* car 2's file by hand. Never replace the file.
 3. **Never bring in** car 1's USB LiDAR settings, `webcam_launch.py`, `web_dashboard_rb1.yaml`, car 1's calibration or steering limits, car 1's `racerbot_doctor` LiDAR/camera checks, or `test_car1_hardware_config.py`.
 4. **`f1tenth_system` has its own extra checklist** of local fixes, two of which fail unsafely: see [git-setup.md](git-setup.md#updating-f1tenth_system--manual-no-submodule-machinery).
@@ -76,7 +80,7 @@ cd ~/racerbot-ws
 python3 -m pytest src/racerbot_launch/test/test_car2_hardware_config.py -v
 ```
 
-**Working when:** all 12 tests pass. They fail if any of car 1's values come back: USB LiDAR settings, webcam launch, `rb1` dashboard config, calibration, steering limits or odometry gain. They also fail if the doctor loses its Ethernet LiDAR or RealSense checks. And they fail if the IMU side is switched on by default before car 2 has a BNO085.
+**Working when:** all 14 tests pass. They fail if any of car 1's values come back: USB LiDAR settings, webcam launch, `rb1` dashboard config, calibration, steering limits, odometry gain or cornering limit. They also fail if the doctor loses its Ethernet LiDAR or RealSense checks. And they fail if the IMU side, including gap_follow's steering damping, is switched on by default before car 2 has a BNO085.
 
 **If it doesn't:** the failing test's name says which row of the tables above was clobbered.
 

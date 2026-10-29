@@ -156,6 +156,18 @@ ros2 run tf2_ros tf2_echo base_link laser          # translation x must be 0.260
 
 **Working when:** the parameter reads `0.36` and the transform's x translation reads `0.260`. Ctrl+C the `tf2_echo` once you've seen one message.
 
+### Addition 6 — bringup starts the automatic run recorder
+
+`src/f1tenth_system/f1tenth_stack/launch/bringup_launch.py`, `no_lidar_bringup_launch.py`, `sick_bringup_launch.py`, and `f1tenth_stack/package.xml`
+
+Not a fix but an addition (made on car 1 on 2026-10-26, ported to car 2 on 2026-10-29): each bringup declares a `record` launch argument (default `true`) and includes `race_diagnostics`' `auto_record_launch.py`, which records every run of an algorithm. See [run-diagnostics.md](run-diagnostics.md#automatic-recording).
+
+It is kept as small as it can be. About 20 lines at the end of each bringup; the recorder itself lives in `race_diagnostics`, which this repo owns. The lookup is wrapped so a missing `race_diagnostics` only logs a warning: bringup still starts. `package.xml` gains `<exec_depend>race_diagnostics</exec_depend>`.
+
+The layered-override pattern below doesn't fit here, because there is no config file to layer: the change is which processes bringup starts. And the whole point is that the usual `ros2 launch f1tenth_stack bringup_launch.py` command records, without anyone having to remember a second one.
+
+**How it fails if reverted:** quietly but harmlessly. Nothing drives differently; runs just stop being recorded. `python3 -m pytest src/race_diagnostics/test/test_bringup_auto_record.py` fails if any bringup loses it. On car 2 the recorder writes into `~/racerbot-ws/data/racerbot_runs/` like every other run writer, and `src/racerbot_launch/test/test_run_output_paths.py` pins that.
+
 ### Not a fix: the SLAM tuning lives outside this package
 
 [SLAM](glossary.md#slam) is the software that builds a map and locates the car in it at the same time.
@@ -292,7 +304,7 @@ colcon build --symlink-install --packages-select <package>
 
 1. **Diff your vendored copy against upstream.** Take a fresh clone or checkout of `f1tenth/f1tenth_system` at whatever branch or commit you want to pull in, and see what actually changed.
 2. **Apply the parts you want by hand** into `src/f1tenth_system/` — copy files over, or use `git diff` / `git apply` between the two trees.
-3. **Before committing, re-check all four local modifications.** Every one of them:
+3. **Before committing, re-check all four local modifications and the one addition.** Every one of them:
 
    | Check | Should still be |
    |---|---|
@@ -300,6 +312,7 @@ colcon build --symlink-install --packages-select <package>
    | `f1tenth_stack/launch/bringup_launch.py`, `no_lidar_bringup_launch.py`, `sick_bringup_launch.py` | still do **not** start a `joy_teleop` node, with `teleop_launch.py` still present separately (upstream will have bundled them back together) |
    | `f1tenth_stack/config/vesc.yaml` → `vesc_to_odom_node` | still carries a **negative** `speed_to_erpm_gain` (currently `-4447.983786`) |
    | `f1tenth_stack/config/vesc.yaml` → `wheelbase`, and the `base_link`→`laser` transform in all three `*_bringup_launch.py` files | `0.36`, and `0.26 0.0 0.11` — this car's measured geometry, **not** the `0.324` / `0.33` upstream ships |
+   | all three `*_bringup_launch.py` files, and `f1tenth_stack/package.xml` | still declare `record` (default `true`) and include `race_diagnostics`' `auto_record_launch.py` (Addition 6); `package.xml` still has `<exec_depend>race_diagnostics</exec_depend>`. `python3 -m pytest src/race_diagnostics/test/test_bringup_auto_record.py` checks the launch files |
 
 4. **Commit normally:** `git add src/f1tenth_system && git commit`. There's no submodule pointer to bump — the files themselves are the commit.
 

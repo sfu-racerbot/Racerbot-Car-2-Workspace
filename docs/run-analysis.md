@@ -204,6 +204,8 @@ Rebuilding the 2026-10-19 loop from that run's own scans was tried, and the laps
 
 ## Testing several cars at once
 
+**Terminal 1 — simulator analysis**, from the workspace root:
+
 ```bash
 cd ~/racerbot-ws
 python3 tools/f1tenth_sim/eval_gap_multi.py --track indoor_wide,asb_10000 --cars 3 --seeds 4
@@ -212,7 +214,22 @@ python3 tools/f1tenth_sim/eval_gap_multi.py --track levine_blocked --cars 2 --sp
 
 All cars run the shipped `gap_follow` on their own simulated LiDAR, which sees the other cars as obstacles. They start one behind another along the track, 3 m apart (`--spacing`). By default the leader runs at 0.7 × `max_speed` and the others at full speed, so they catch it. `--speeds` sets each car's top speed directly, leader first.
 
-**Working when:** it prints one line per track and exits. A fully passing track reads `pass N/N wall 0 car-car 0 unfinished 0`; the exit code is 0 only if every track did. `closest` is the smallest centre-to-centre distance between any two cars during the run.
+**Working when:** it prints one line per track and exits. A fully passing track reads `pass N/N wall 0 car-car 0 unfinished 0`. `closest` is the smallest centre-to-centre distance between any two cars during the run.
+
+**If it doesn't:** a missing Gym module means the simulator setup has not been completed; see [simulator setup](simulator.md). For two cars this is a comparison, and the command exits 0 even if there is contact or an unfinished car. With more than two cars, it exits 0 only if every run passes.
+
+With `--cars 2`, the head-to-head table uses car indices 0 and 1. Both cars default to their own configured maximum speed; the 0.7 multiplier above applies to runs with more than two cars. `--swap-starts` repeats each seed with the other car in front.
+
+| Result | How to read it |
+|---|---|
+| `stalls` | Per-car counts. A stall is below 0.05 m/s for more than 1.0 s while another car moves at or above 0.05 m/s. |
+| `gap_changes` | Each pair's end time gap minus its starting time gap. Negative means the car that started behind closed the gap. |
+| `gained` / `time_gained_s` | The table's `gained` is car 0's seconds gained; a positive value is better for car 0. Pair contributions are summed per car, so starting first alone does not decide this score. |
+| `recognition` | For each car, episodes start when the other car becomes visible. Delay is time to first recognition within that episode; `inf` means it was never recognised before the episode ended. |
+| Recognised fraction | Recognised ticks divided by visible ticks, not all ticks. `no visible ticks` means the fraction is unavailable; aggregate counts pool runs. |
+| `false_mover_ticks`, `false_mover_tracks` | In a one-car `eval_gap.py` run with awareness enabled, ticks with any falsely moving track and distinct false track IDs, respectively. Fewer is better. |
+
+For `gap_changes`, distance gaps are converted to seconds using the initially trailing car's average progress speed. If both cars finish, the end gap uses their finish times; otherwise it uses their final distance gap. An unavailable value is not zero.
 
 Results for the shipped config are in [gap-follow.md](gap-follow.md#several-cars-at-once): not every run passes yet.
 

@@ -349,7 +349,13 @@ The supervisor now also prints an estimate when lap 1 closes, so you know what l
 >
 > Fix: raise `closure_distance`, or start the run with the car already sitting still and let SLAM come up before you hold LB.
 
-**`heading error` too large at the moment it passes.** Same cause, different axis. `closure_heading_deg` is the knob.
+**`heading error` too large where the car comes closest to the start.** Same cause, different axis. `closure_heading_deg` is the knob.
+
+> With `close_at_closest_approach: true`, which `auto_map_race.yaml` sets, the lap closes at the nearest point to its start. It does not close on the first tick inside the closure circle (its radius is `closure_distance` until the gate widens after 1.25 laps). It keeps track of the nearest it came to the start.
+>
+> It closes there once the car is 0.05 m (`closest_approach_margin_m`) farther from the start than that nearest point, or has left the circle. The heading is checked at that nearest point. If it is off there, that point is dropped and the lap goes on.
+>
+> When a lap closes this way, the terminal prints `closed at closest approach:` with the distance and the heading error. See [operations.md](operations.md).
 
 **`turn` climbing far past 300 without closing.** The car is going round and round without ever satisfying the proximity gates — see `start distance` above. This is *not* a `minimum_lap_turn_deg` problem, and past two laps of turning the log says so outright.
 

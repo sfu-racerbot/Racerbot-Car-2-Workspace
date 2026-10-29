@@ -481,6 +481,7 @@ That leaves only one sim-to-real gap, the segmentation network's quality, and th
    - `clearance = minimum_footprint_clearance(clean, valid, boundary)`
    - `speed ≤ braking_speed_limit(clearance, reserve_distance=0.20, max_braking_decel=3.0, max_speed, latency=0.25)`
 6. **Curvature cap.** `speed ≤ sqrt(max_lateral_accel / |κ|)` with `κ = tan(δ) / wheelbase` and `max_lateral_accel: 2.0`, as in `gap_follow`.
+   - **Dated note:** `gap_follow` moved to 2.5 (decided 2026-10-26, committed 2026-10-27 as `9fa9642`). neural_racer deliberately keeps 2.0 (training cap unchanged).
    - This is a **hard cap on lap time**, so the network can't use more lateral grip than `gap_follow` assumes. That's correct for v1. Raising it is a measured decision for after Phase 10, never a training-time tweak.
 7. **Steering rate.** `|Δδ| ≤ max_steering_rate · dt`, with `max_steering_rate: 2.0` rad/s.
 8. **Map mode only:** if the ego-path forecast crosses an occupied cell of the frozen lap-1 map, the speed cap for that tick falls to `braking_speed_limit` on the distance to that crossing, and the event is logged.
@@ -495,7 +496,7 @@ Four limits stack. The lowest one wins every tick:
 | Firmware | 6.37 m/s (23250 eRPM in `vesc.yaml`) | fixed by the VESC configuration |
 | `max_speed` (the network's `v_cap`) | **1.0 m/s at first**, then +0.5 m/s per clean run, to at most 6.37 | Phase 10's ladder. Training randomizes `v_cap` from 1.0 to 6.37 so the policy is good at every step of the ladder |
 | Braking cap (step 5) | the fastest speed that can stop within the clearance the LiDAR sees | physics, every tick; never raised |
-| Cornering cap (step 6) | `sqrt(2.0 / |κ|)`: 1.6 m/s in the tightest legal corner | `max_lateral_accel: 2.0`, `gap_follow`'s value. Raising it is a measured decision after Phase 10, never a training-time change |
+| Cornering cap (step 6) | `sqrt(2.0 / |κ|)`: 1.6 m/s in the tightest legal corner | `max_lateral_accel: 2.0`, `gap_follow`'s value when this spec was written. **Dated note:** `gap_follow` moved to 2.5 (decided 2026-10-26); neural_racer deliberately keeps 2.0 (training cap unchanged). Raising it is a measured decision after Phase 10, never a training-time change |
 
 Training uses the same cornering cap as the car, so the policy never learns to rely on grip the car isn't allowed to use.
 
@@ -1218,7 +1219,7 @@ class WrapperConfig:
     max_steering_angle: float = 0.33; max_speed: float = 1.0
     car_width: float = 0.31; car_length: float = 0.58; wheelbase: float = 0.36; laser_offset_x: float = 0.26
     reserve_distance: float = 0.20; max_braking_decel: float = 3.0; braking_latency_sec: float = 0.25
-    max_lateral_accel: float = 2.0; max_steering_rate: float = 2.0
+    max_lateral_accel: float = 2.0; max_steering_rate: float = 2.0  # dated note: gap_follow moved to 2.5 (decided 2026-10-26); this stays 2.0 (training cap unchanged)
     max_invalid_fraction: float = 0.30
 
 @dataclass(frozen=True)

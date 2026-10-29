@@ -2,7 +2,7 @@
 
 > **Who this is for:** anyone trying to work out why a run went wrong, after the fact.
 > **Read first:** [operations.md](operations.md) — record the run first, diagnose it second.
-> **You'll be able to:** record a run so it can actually be diagnosed, then analyze pipeline health, pose lag and watchdog stops.
+> **You'll be able to:** find the run bringup recorded for you (or record one by hand), then analyze pipeline health, pose lag and watchdog stops.
 
 How to capture everything needed to work out what a run did — and how to
 hand that to a person or an AI agent so they can act on it.
@@ -14,9 +14,168 @@ real collision that night. The postmortem is at the end.
 
 ---
 
+## Automatic recording
+
+**Since 2026-10-26, every run of an algorithm is recorded for you.** Start
+bringup the usual way, start any algorithm on top, and a run directory
+appears under `~/racerbot-ws/data/racerbot_runs/` while it runs. You do not need the
+recorder terminal from the [TL;DR](#tldr) below any more, unless you want
+one for a run that is not an algorithm (manual driving, say).
+
+**Highlights**
+
+- **On by default, in every bringup** (`bringup_launch.py` and its two
+  alternates). Off with one flag: `record:=false`.
+- **Records only while an algorithm runs.** Bringup alone, the dashboard,
+  and manual driving with the gamepad record nothing.
+- **Any algorithm, anyone's.** It watches for any [node](glossary.md#node)
+  publishing `/drive` (or `/auto_map/drive`, `/auto_race/drive`,
+  `neural_racer`'s shadow output, or the motor command topics). Our
+  `gap_follow`, `pure_pursuit`, `auto_map_race` and `neural_racer` all count,
+  and so do team A's `ftg`, `disparity_extender` and `reactive`.
+- **Never two recorders at once.** If `record_run.py`, `map_course`,
+  `auto_map_race_launch.py` or any `ros2 bag record` is already recording,
+  it stays out of the way. If one starts mid-run, it stops its own recording
+  and keeps what it has.
+- **Same layout as a hand-started recording**, so `analyze_run.py` and
+  `summarize_run` work on it unchanged. It adds which algorithm ran, team
+  A's git commit when it was their code, and every ROS process's command line.
+- **Cannot move the car.** It creates no publisher and no subscription: it
+  only reads the list of nodes and topics, the way `ros2 node list` does.
+
+**Why it exists:** on 2026-10-26 the races against team A were run with
+plain `gap_follow_launch.py`, and nothing recorded them. All that was left
+was the node's one-line-a-second log, which cannot show what the car saw or
+how smoothly it steered.
+
+### Using it
+
+**Terminal 1** — bringup, exactly as before:
+
+```bash
+source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
+ros2 launch f1tenth_stack bringup_launch.py
+```
+
+**Working when:** among bringup's startup lines you see
+`auto_record ready: records a run while any node publishes /drive, ...`.
+
+**Terminal 2** — any algorithm, for example:
+
+```bash
+source /opt/ros/jazzy/setup.bash && source ~/racerbot-ws/install/setup.bash
+ros2 launch gap_follow gap_follow_launch.py
+```
+
+**Working when:** about 3 seconds later, Terminal 1 prints
+`recording /gap_follow_node on /drive -> /home/.../racerbot-ws/data/racerbot_runs/<time>`.
+
+When you stop the algorithm with `Ctrl+C`, about 3 seconds later Terminal 1
+prints `saved run ... (<seconds> s, bag <size> MB)` and the command to
+analyse it:
+
+```bash
+python3 ~/racerbot-ws/tools/run_analysis/analyze_run.py ~/racerbot-ws/data/racerbot_runs/<time>
+```
+
+**If it says** `another recorder is on the graph (...): not recording it`:
+that is correct. Something else (a `record_run.py` you started, or the one
+`map_course` brings) is already recording this run.
+
+**To turn it off** for a session: `ros2 launch f1tenth_stack bringup_launch.py record:=false`.
+
+**Disk use:** about 0.8 MB per second of driving (3 GB an hour), almost all
+of it [LiDAR](glossary.md#lidar) scans. Nothing deletes old runs. It refuses to start a recording
+with less than 2 GB free, and says so in Terminal 1.
+
+### What a run directory holds, beyond the usual
+
+Everything in [the table below](#what-gets-captured-and-why-each-piece-earns-its-place),
+plus three files only automatic runs have:
+
+| File | What it says |
+|---|---|
+| `auto_record.yaml` | Which node started the recording and on which topic, when it started and stopped, why it stopped (`no algorithm publishing for 3.0 s`, `another recorder started: ...`, `bringup shut down`), and whether the bag closed cleanly (`recorder_exit_code: 0`) |
+| `metadata/processes.txt` | The command line of every ROS process running when it started: which [launch file](glossary.md#launch-file), which executable, which params files. This is how you tell team A's code from ours later |
+| `recorder.log` | `record_run.py`'s own output, for when a recording went wrong |
+
+`metadata/git/` also holds `racerbot_a.txt` and `racerbot_a.diff`: team A's
+commit and uncommitted edits. That holds whether the run was theirs or ours.
+
+<details>
+<summary><b>How it decides, and every setting</b> (click to expand). Skip unless you're changing it.</summary>
+
+Bringup starts `auto_record` (`race_diagnostics/auto_record_node.py`). Twice
+a second it lists every node on the graph, and the nodes that
+[publish](glossary.md#publish--subscribe) on each trigger topic. It hands
+that list to a small state machine, `race_diagnostics/auto_record.py`. That
+file has no ROS in it and is tested in `test/test_auto_record.py`.
+
+1. A publisher on a trigger topic is an **algorithm**, unless it is on the
+   ignore list. `ackermann_mux` and `ackermann_to_vesc_node` are there
+   because they publish the motor command topics all the time, as part of
+   bringup. `rosbag2_player` is there because it is a bag being played back.
+2. An algorithm that has been up for `start_delay_sec` (3 s) starts a
+   recording, unless another recorder is on the graph. The delay gives a
+   launch that brings its own recorder (`map_course`) time to get it up:
+   measured on the car, `map_course`'s recorder appears about 1 s after its
+   algorithm.
+3. **Another recorder** is any node named `race_diag_node` or
+   `rosbag2_recorder*`. The recording `auto_record` starts is
+   `record_run.py` run with `name_prefix:=auto_`, so its own nodes are
+   `auto_race_diag_node` and `auto_rosbag2_recorder` and are never mistaken
+   for someone else's.
+4. With no algorithm for `stop_delay_sec` (3 s), it stops the recording:
+   `SIGINT` to `record_run.py`, which closes the bag the same way `Ctrl+C`
+   does.
+5. If a recording dies on its own, it does not start another until the
+   algorithm has gone and come back, so a broken recorder cannot restart in
+   a loop.
+
+Stopping is designed not to lose the bag:
+
+- On bringup's `Ctrl+C`, `auto_record` closes the recording first (up to
+  `stop_timeout_sec`, 15 s) and only then exits.
+- If `auto_record` is killed outright, the recording still gets `SIGINT` from
+  the kernel (`setpriv --pdeathsig`) and closes its bag.
+- The recording runs in its own process session, so killing it as a last
+  resort cannot touch bringup.
+
+All settings are in `src/race_diagnostics/config/auto_record.yaml`, each
+commented there. They are `trigger_topics`, `ignore_publishers`,
+`other_recorders`, `start_delay_sec`, `stop_delay_sec`, `poll_period_sec`,
+`record_bag`, `topics` (empty means the same topic list as `record_run.py`),
+`min_free_gb` and `stop_timeout_sec`.
+
+Recordings go to `~/racerbot-ws/data/racerbot_runs`. Pass
+`record_output_directory:=<dir>` to bringup to send them elsewhere.
+
+**Tests.** Three files cover it:
+
+- `test_auto_record.py`: the decisions, no ROS.
+- `test_bringup_auto_record.py`: every bringup includes the recorder, on by
+  default and off with `record:=false`, and a missing `race_diagnostics`
+  cannot stop bringup.
+- `test_auto_record_node.py`: the real node on an isolated ROS domain. It
+  records, closes the bag, defers to another recorder and survives being
+  killed. It takes about a minute.
+
+The last one needs ROS sourced. **Any terminal:**
+
+```bash
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
+export ROS_DOMAIN_ID=79 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+python3 -m pytest src/race_diagnostics/test/ -v
+```
+
+**Working when:** every test passes and none is skipped. Unsourced, the
+four node tests and two of the bringup tests skip, and say why.
+
+</details>
+
 ## TL;DR
 
-Three terminals. Start them in this order.
+For a run that [automatic recording](#automatic-recording) does not cover, or to record by hand: three terminals. Start them in this order.
 
 ```bash
 # --- Terminal 1: the recorder. Start FIRST, so nothing is missed. ---
@@ -204,6 +363,14 @@ the log line reports every one as `value/limit`:
 | back near the start | `closure_distance` | passes the start but too wide |
 | heading matches start | `closure_heading_deg` | comes back the "wrong way round" |
 
+> **With `close_at_closest_approach: true`, the last two gates are checked at one point.** `auto_map_race.yaml` sets it.
+>
+> A lap does not close on the first tick inside the closure circle. That circle's radius is `closure_distance` until the gate widens after 1.25 laps (`closure_widen_after_revolutions`).
+>
+> It closes at the nearest point the car came to its start, once the car is 0.05 m farther away (`closest_approach_margin_m`) or has left the circle.
+>
+> The heading check is made at that nearest point. If the heading is off there, that point is dropped and the lap goes on. [operations.md](operations.md) shows the log line for a lap that closes this way.
+
 `summarize_run` names the single blocking gate. On 2026-07-27 the car
 drove **114 m without closing a lap** because heading error was 30.2°
 against a 30.0° limit while every other gate had passed long before —
@@ -222,6 +389,9 @@ non-negotiables:
 - **`race_diagnostics` only subscribes.** It publishes nothing and is
   therefore not driving code. Keep it that way; if it ever needs to
   publish, it becomes driving code and inherits the whole safety policy.
+  `auto_record` goes further: it does not even subscribe, it only reads
+  the graph. That is why it may run inside bringup, which must start
+  nothing that can move the car.
 - **Test order for driving changes, never skipped:** static topic check →
   wheels off the ground → floor, low speed, open space.
 - Integration tests construct real nodes with the deadman disabled. They

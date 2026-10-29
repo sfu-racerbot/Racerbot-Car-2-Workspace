@@ -18,6 +18,14 @@ One running program that does one job. `urg_node` reads the LiDAR. `gap_follow_n
 
 A named channel that nodes use to send messages to each other, like `/scan` or `/drive`. Nodes in this workspace never call each other directly — everything goes over topics.
 
+### Namespace
+
+A prefix that groups ROS names. For example, `/car2/scan` belongs to the `car2` namespace, separate from car 1's `/scan`.
+
+### Race referee
+
+The program that scores a simulated race from simulator status, including lap progress and contact. It is separate from the mux that selects drive commands.
+
 ### Publish / subscribe
 
 Publishing means putting messages onto a topic. Subscribing means asking to receive them. A publisher doesn't know or care who is listening, which is why you can add a dashboard without touching the driving code.
@@ -143,3 +151,23 @@ How far ahead on the path the controller aims. A short lookahead follows the lin
 ### Follow-the-gap
 
 The reactive method `gap_follow` uses: look at the LiDAR scan, find the widest open gap, steer at it. It needs no map, which is why it's the starting point both for new drivers and for new code.
+
+---
+
+## Several cars
+
+### Follow cap
+
+The top speed this car is allowed while another car is ahead of it on its path. It comes from the gap: `max(0, (gap − 0.5 m) ÷ 1.0 s)`, measured from this car's front bumper to the other car.
+
+A follow cap can lower speed to zero: the gap-based law reaches zero at `opponent_follow_min_gap` (0.5 m). It never raises speed, overrides a safety stop or authorises motion by itself.
+
+It does not steer. See [Several cars at once](gap-follow.md#several-cars-at-once).
+
+### Deadlock
+
+A state the car cannot leave by itself. Here it means the controller has no forward command that its own safety rules allow, so it holds the car still. `gap_follow` never reverses, so once its nose is pressed against something, it has no way out on its own. See [Several cars at once](gap-follow.md#several-cars-at-once).
+
+### Stall
+
+In the simulator's counts, a car below 0.05 m/s for more than 1 second while another car on the track moves at 0.05 m/s or more. A stall is not a crash. It is what it looks like when one car stops and the other keeps going.

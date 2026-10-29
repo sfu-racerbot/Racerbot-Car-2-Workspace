@@ -121,9 +121,17 @@ The course this car maps is a hallway loop around a building block: **126 m roun
 
 When the car finally arrives back where it started, SLAM has to *recognise* that it has been there before. It does that by looking for an earlier scan near its current estimated position. Stock, "near" meant **within 3 m**.
 
-After 126 m of driving, the estimate is very unlikely to still be within 3 m of the truth — this car's dead reckoning has no gyro in it at all (see the deep dive below). Nothing inside 3 m means no candidate, means no loop closure, however good the scans are.
+After 126 m of driving, the estimate is very unlikely to still be within 3 m of the truth — this car's dead reckoning has no gyro in it by default (see the deep dive below). Nothing inside 3 m means no candidate, means no loop closure, however good the scans are.
 
 8.0 m matches the window SLAM already uses to *verify* a candidate once it finds one (`loop_search_space_dimension`, 8 m, unchanged). Searching a smaller radius than the matcher can correct over was simply leaving that capability unused.
+
+**With gyro odometry, the search is 3 m, on purpose.** The gyro is the sensor that measures how fast the car turns. `map_course gyro_odom:=true` takes the car's heading from it instead of from the steering command.
+
+That mode also loads [`src/racerbot_launch/config/slam_gyro.yaml`](../src/racerbot_launch/config/slam_gyro.yaml) on top of `slam_tracking.yaml`. That file sets `loop_search_maximum_distance` and `loop_search_space_dimension` to **3.0 m**. Runs without the gyro keep the 8 m search.
+
+Why 3 m: with the gyro, the position estimate is only about 1 m off after a lap. A stretch of the same course 2.2 to 2.6 m away sits inside the 8 m search's matching window (±4 m), so SLAM closed onto it. The 3 m window (±1.5 m) cannot reach that stretch.
+
+On two replayed runs, `20261026-194714` and `20261026-194913`, the largest correction with the 8 m search was 2.45 m and 2.75 m. With the 3 m search it was 0.47 m on both. The replays used `tools/run_analysis/slam_replay.py`, so check a change that way first.
 
 ### Why the chain size moved with it
 
@@ -285,7 +293,7 @@ Measure before going further. `race_diagnostics` gives pose lag; `htop` gives th
 
 ### What was considered and not done
 
-- **Raising `loop_search_maximum_distance` past 8 m.** Pointless without also raising `loop_search_space_dimension`: a candidate found outside the correlation window cannot be verified.
+- **Raising `loop_search_maximum_distance` past 8 m.** Pointless without also raising `loop_search_space_dimension`: a candidate found outside the correlation window cannot be verified. With gyro odometry the search is 3 m on purpose, so read [why the map was not closing](#why-the-map-was-not-closing) first.
 - **Lowering the loop-closure response thresholds** (`loop_match_minimum_response_coarse`/`_fine`). Would accept more closures, including wrong ones. In a building of near-identical corridors a false closure folds the map onto itself, which is much worse than no closure.
 - **Replacing the bicycle model in `vesc_to_odom`.** It is vendored code, and an EKF layered on top (item 1) achieves the same thing without a local fix that upstream syncs would clobber.
 
@@ -308,7 +316,7 @@ Everything in this doc is read-only tuning of an estimate. None of it removes a 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Car's dot on the dashboard jumps around | Corrections arriving in large infrequent lumps | Expected before this tuning; if it persists, check `summarize_run` pose lag and consider lowering `minimum_time_interval` further |
-| Map never closes into a loop | Loop-closure candidate search too small for the drift | Already raised to 8 m; for a course much bigger than 126 m, raise it *and* `loop_search_space_dimension` together |
+| Map never closes into a loop | Loop-closure candidate search too small for the drift | Already raised to 8 m; for a course much bigger than 126 m, raise it *and* `loop_search_space_dimension` together. With `gyro_odom:=true` the search is 3 m on purpose (`slam_gyro.yaml`): a wider one let the map snap onto a neighbouring stretch of track. Replay a run before widening it |
 | Map suddenly folds onto itself | A false loop closure | Raise `loop_match_minimum_chain_size`, or raise the response thresholds. Repetitive corridors are the usual trigger |
 | `Message Filter dropping message ... queue is full` | Scans arriving faster than they can be processed | Raise `throttle_scans` |
 | Pose lag fine, car still drives badly | Not a localization problem | See [racing-autonomy.md](racing-autonomy.md) for the control side |

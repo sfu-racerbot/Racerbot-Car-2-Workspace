@@ -3,7 +3,15 @@
 > **Who this is for:** anyone who wants to run the real driving stack — launch files, SLAM, the dashboard — without the physical car.
 > **Read first:** [concepts.md](concepts.md), and [simulator.md](simulator.md) for the other, simpler simulator and how the two differ.
 > **You'll be able to:** run and validate whole launch files against simulated physics, and understand the interlock that stops this running beside real hardware.
+> **Time:** about 15 minutes to read, plus setup and race time.
 > **Looking for the steps?** [sim-validation.md](sim-validation.md) is the step-by-step workflow — set up, run your own node, connect the dashboard, get a verdict. This doc is the reference behind it.
+
+## Highlights
+
+- **Two ROS-controlled cars** can share a track, each with its own simulated sensors and drive commands.
+- **Three laps by default** in the race launch; a wall or car contact ends the race early.
+- **A 3 s discovery hold** blocks simulated sensor and gamepad messages at startup.
+- **1081 LiDAR beams at 40 Hz** feed the same control stack used on the car.
 
 `tools/f1tenth_sim/run_validation.py` ([docs/simulator.md](simulator.md))
 calls the controllers' *math* directly and skips ROS entirely. That is the
@@ -52,6 +60,20 @@ simulator silences the simulator too (`racerbot_sim/hardware_guard.py`).
 It is a live-graph check rather than a flag because a flag is something
 you can forget.
 
+**Never run this simulator beside the real car's drivers, and never defeat the interlock.** Forged LB could let a physical car move without a person holding the button, and simulated sensor readings could misdirect it.
+
+The interlock starts blocked and waits `interlock_discovery_hold_sec` (3 s by default) before checking the graph. Before discovery, an empty graph can look like "no car here" even when the car is present.
+
+After the hold, the graph must show no car on every check for `interlock_clear_confirm_sec` (3 s by default). Only then do simulated `/scan`, `/odom` or `/joy` messages start, so the simulator starts about 6 s after launch. The same window applies whenever the car's drivers leave the graph later.
+
+One clean check isn't enough. On the dev box, discovery took about 2.45 s, and with the hold alone a forged `/joy` sometimes got out beside a running `urg_node` (measured 2026-10-29).
+
+If the graph cannot be read, the interlock stays blocked. It continues checking after it opens. `sim_joy_node` starts its release, hold and silence scenario timers when the interlock first opens, not when the process starts.
+
+**On the physical car, hold LB throughout motion; releasing it stops the car.** The deadman ([glossary](glossary.md#deadman)) provides a human stop if driving code makes a mistake.
+
+**Test changed driving code with the wheels off the ground first, then on the floor at low speed in open space.** Simulation cannot reproduce every physical response; follow [the test order](writing-your-own-node.md#testing-before-its-on-wheels).
+
 ## Running it
 
 ```bash
@@ -70,6 +92,73 @@ ros2 launch gap_follow gap_follow_launch.py     # second terminal
 ```
 
 Needs the F1TENTH Gym from `tools/f1tenth_sim/setup.sh` (one time).
+
+## Two cars and racing
+
+Start two simulated hardware layers to check a second car's topics (named message channels, [glossary](glossary.md#topic)). This does not start driving controllers.
+
+**Terminal 1 — simulator**, from the workspace root, with the setup above complete and no real drivers running:
+
+```bash
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
+ros2 launch racerbot_sim sim_bringup_launch.py controlled_cars:=2
+```
+
+**Working when:** `gym_bridge_node` reports two cars; after the discovery hold, the scan (one sweep of LiDAR readings, [glossary](glossary.md#scan)) check below receives a message. Leave this terminal running. **If it doesn't:** check for `REAL HARDWARE DETECTED` or a missing Gym installation.
+
+**Terminal 2 — check car 2**, sourced in a separate terminal:
+
+```bash
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
+ros2 topic echo /car2/scan --once
+```
+
+**Working when:** one scan message appears. **If it doesn't:** wait for the 3 s hold and check Terminal 1 for an interlock or track error. Stop Terminal 1 with Ctrl+C before starting the race below.
+
+`/car2` is a namespace: a prefix that keeps the second car's ROS names separate from car 1's ([glossary](glossary.md#namespace)). Car 2 receives `/car2/scan`, `/car2/odom` and `/car2/joy`. Its controller sends `/car2/drive` to `/car2/ackermann_mux`, which forwards commands on `/car2/ackermann_cmd`.
+
+The second car's TF frames (coordinate systems, [glossary](glossary.md#tf--transform--frame)) are `car2/odom` → `car2/base_link` → `car2/laser`. Its simulator-only true pose is `/sim/car2/ground_truth_pose`; controllers must not use it.
+
+`controlled_start_offsets_m` sets one comma-separated centreline offset in metres per controlled car. With two cars the default is `0.0,-3.0`. For an imported map, set `track_directory:=tools/f1tenth_sim/maps` and `track:=car1_course_2026_10_26`; `tracks.resolve` looks for its map YAML and centreline there.
+
+### Run a race
+
+This launch starts two controllers and a referee, the program that scores the race ([glossary](glossary.md#race-referee)). It stops on contact, when both cars finish, or at the timeout.
+
+**Terminal 1 — race**, from the workspace root, after stopping the previous simulator:
+
+```bash
+source /opt/ros/jazzy/setup.bash && source install/setup.bash
+ros2 launch racerbot_sim sim_race_launch.py track:=indoor_wide opponent:=ours record:=false output_dir:=/tmp/racerbot-race
+```
+
+**Working when:** the terminal prints a standings table and `/tmp/racerbot-race/race.json` exists after the race ends. A contact can end it before three laps; that is a result, not a launch failure. **If it doesn't:** check the terminal for missing packages, Gym or an interlock message.
+
+The referee reads `/sim/status` only. Each status message carries positions, speeds and contacts for one simulation step, so the score does not depend on separate pose messages arriving together.
+
+`race.json` contains `finish_order`, `laps`, `overtakes`, `stalls`, `gap_changes`, `time_gained_s`, `contacts`, `missed_steps` and `race_laps`. An unfinished car can appear in the order without having finished; `winner: null` means no winner. See [reading head-to-head metrics](run-analysis.md#testing-several-cars-at-once).
+
+| Race argument | Default | Meaning |
+|---|---|---|
+| `opponent` | `ours` | `ours` runs another `gap_follow`; `team_a` runs team A's controller and safety layer. |
+| `track` | `indoor_oval` | Generated layout or imported map name; the launch finds imported maps in `tools/f1tenth_sim/maps/`. |
+| `laps`, `timeout_s` | `3.0`, `300.0` | Required laps and simulation-time timeout in seconds. |
+| `swap_starts`, `seed` | `false`, `12345` | Swap the two start positions; set sensor noise seed. |
+| `car1_params`, `car2_params` | empty | Paths to `gap_follow` YAML files; empty uses the shipped file. `car2_params` applies only to `ours`. |
+| `car1_hold_deadman`, `car2_hold_deadman` | `true`, `true` | Whether each simulated gamepad holds LB. |
+| `record`, `record_dir` | `true`, empty | Record with `record_run.py`; optionally choose its run directory. |
+| `output_dir` | empty | Directory for `race.json`; otherwise a timestamped directory under `~/racerbot-ws/data/racerbot_sim/races/`. |
+| `reverse` | `false` | Reverse the referee's progress direction only; it does not reverse the simulator's starting poses. |
+
+Recording adds car 2's topics and simulator status and ground-truth topics to the recorder's usual list. It is separate from the `race.json` score.
+
+### Race team A
+
+Set `opponent:=team_a` on the race command to run team A's real `disparity_extender` and `safety_node` from their launch files. Their code is pinned at `6bef23d`, their latest `main`, and is not edited for this race.
+
+The launch puts both nodes in `/car2` and remaps their absolute names: `/joy`, `/scan`, `/ego_racecar/odom`, `/safety/brake` and `/drive` to the corresponding car 2 topics. Their safety layer remains on and receives car 2's simulated LB.
+
+Team A and team B both have a package named `safety_node`. If `src/racerbot_b` is checked out, place an untracked `COLCON_IGNORE` in `src/racerbot_b/src/safety_node` before building, or leave `racerbot_b` uninitialised as on the car. Otherwise colcon cannot distinguish the packages. See [the simulated results](gap-follow.md#racing-team-a-in-the-simulator).
 
 It runs in real time and does not use `/clock`: every node above the
 hardware layer is the one that runs on the car, with its own wall-clock
@@ -320,9 +409,7 @@ response is `state[3:] = 0`, which zeroes the car's speed, steering and
 In the older harness that turned two cars round to lap backwards, so
 `FidelityPlant` switches the response off
 ([tools/f1tenth_sim/README.md](../tools/f1tenth_sim/README.md) #12).
-`racerbot_sim` does **not** switch it off yet; see
-[known-issues.md](known-issues.md).
+`SimBridge` switches it off too by setting `ttc_threshold = -inf`.
 
 Either way, `racerbot_sim` samples the padded body against the occupancy
-grid itself (`SimBridge.body_contact`) and treats off-map as contact. That,
-not gym's flag, is what the validation criteria use.
+grid itself (`SimBridge.body_contact`) and treats off-map as contact. `SimBridge.car_contact` checks car-to-car overlap. These checks, not gym's flag, supply the race contact verdict.
