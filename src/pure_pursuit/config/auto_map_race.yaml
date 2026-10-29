@@ -100,6 +100,17 @@ auto_map_race_node:
     # geometry (LapRecorder._reanchor). 0 disables.
     max_pose_jump_m: 0.12
     closure_heading_deg: 30.0
+    # Close the lap at the nearest point it comes to its start, not at the
+    # first tick inside closure_distance. Run 20261026-194913 (gyro-on) closed
+    # every lap at 28.1-29.7deg of heading error: the start sits in a curve,
+    # so the first tick inside the circle with the heading inside the 30deg
+    # gate is still ~29deg off the start heading. Replayed through
+    # LapRecorder with this on, the same four laps close at 13.1, 5.9, 1.0
+    # and 0.6deg, inside the 15deg quality check. The lap closes once the car
+    # is closest_approach_margin_m past that nearest point, or out of the
+    # circle, and only if it faced the start there (closure_heading_deg).
+    close_at_closest_approach: true
+    closest_approach_margin_m: 0.05
     # A reactive controller does not repeat its line, so the car can lap
     # a course indefinitely passing just outside a fixed closure_distance
     # -- and every miss costs a full revolution, about 2.3 minutes on the

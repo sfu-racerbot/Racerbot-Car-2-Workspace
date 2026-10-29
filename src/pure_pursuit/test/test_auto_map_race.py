@@ -612,6 +612,436 @@ def test_closest_approach_only_counts_after_departing():
 
 
 # ---------------------------------------------------------------------------
+# Closing a lap at its closest approach (close_at_closest_approach,
+# 2026-10-26). The default gate closes a lap on the first tick inside the
+# closure circle with the heading inside its gate. A lap whose start sits in
+# a curve then closes about 29deg off the start heading, which is what every
+# lap of run 20261026-194913 did. The closest-approach mode closes it at the
+# nearest point to the start instead, once the car has moved on past it.
+#
+# The circle oracles are closed form. R = 3m, centred at (0, R), driven from
+# the origin facing +x: at arc length s the pose is
+# (R sin(s/R), R - R cos(s/R), s/R), and the distance from the start is the
+# chord 2R|sin(s/2R)|.
+# ---------------------------------------------------------------------------
+
+CIRCLE_RADIUS = 3.0
+CIRCLE_STEP = 0.05
+CIRCLE_SAMPLES = 401  # one lap (377 steps) and 1.15m past the start
+MARGIN = 0.05  # closest_approach_margin, as shipped
+RECORDED_RUN = os.path.expanduser(
+    '~/.ros/racerbot_runs/20261026-194913/analysis/slam.npz')
+# Out 2.5m, round the loop, and back along the x axis to the start.
+ROUND_THE_LOOP = [
+    (2.5, 0.0, 0.0),
+    (2.5, -1.5, -math.pi / 2),
+    (-2.5, -1.5, math.pi),
+    (-2.5, 0.0, math.pi / 2),
+]
+
+
+def _wrap(angle):
+    """Oracle helper: an angle wrapped into [-pi, pi)."""
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _circle_pose(s):
+    """Oracle: the car's pose at arc length s on the circle."""
+    return (CIRCLE_RADIUS * math.sin(s / CIRCLE_RADIUS),
+            CIRCLE_RADIUS - CIRCLE_RADIUS * math.cos(s / CIRCLE_RADIUS),
+            s / CIRCLE_RADIUS)
+
+
+def _circle_distance_from_start(s):
+    """Oracle: the chord from the start point, 2R|sin(s/2R)|."""
+    return 2.0 * CIRCLE_RADIUS * abs(math.sin(s / (2.0 * CIRCLE_RADIUS)))
+
+
+def _circle_nearest_and_closure():
+    """Oracle: the sample nearest the start, and the first sample more than the
+    margin past it. Both are read off the closed-form distance, never off the
+    recorder.
+    """
+    lap = 2.0 * math.pi * CIRCLE_RADIUS
+    nearest = round(lap / CIRCLE_STEP)
+    nearest_distance = _circle_distance_from_start(nearest * CIRCLE_STEP)
+    closure = next(
+        k for k in range(nearest + 1, CIRCLE_SAMPLES)
+        if _circle_distance_from_start(k * CIRCLE_STEP) > nearest_distance + MARGIN)
+    return nearest, closure
+
+
+def _circle_old_closure():
+    """Oracle: the first sample back inside the 1.5m circle after half a lap,
+    which is where the old gate closes.
+    """
+    half_lap = math.pi * CIRCLE_RADIUS
+    return next(
+        k for k in range(CIRCLE_SAMPLES)
+        if k * CIRCLE_STEP > half_lap
+        and _circle_distance_from_start(k * CIRCLE_STEP) <= 1.5)
+
+
+def _recorder(**overrides):
+    """The shipped closure gates on a 0.04m spacing: finer than the 0.05m circle
+    step, so every sample is recorded. The turn and duration gates are off, so
+    each test isolates the closure it is about. The closest-approach mode is on
+    unless overridden.
+    """
+    kwargs = dict(spacing=0.04, min_distance=0.0, departure_distance=2.0,
+                  closure_distance=1.5, closure_heading_rad=math.radians(30.0),
+                  min_duration_sec=0.0, min_turn_rad=0.0,
+                  close_at_closest_approach=True)
+    kwargs.update(overrides)
+    return LapRecorder(**kwargs)
+
+
+def _drive_circle(recorder):
+    """Feed the circle's samples in order. Returns the sample that closed the lap,
+    or None. Stops at the first closure, as the node does: it resets the recorder
+    whenever a lap closes.
+    """
+    for k in range(CIRCLE_SAMPLES):
+        x, y, yaw = _circle_pose(k * CIRCLE_STEP)
+        if recorder.update(x, y, yaw, k * CIRCLE_STEP):
+            return k
+    return None
+
+
+def _polyline(start, legs, step=0.1):
+    """Samples along straight legs from `start`, each leg at its own heading.
+
+    `legs` is [(x, y, yaw), ...]: each leg ends at (x, y) and is driven at yaw.
+    """
+    x0, y0 = start
+    samples = []
+    for x1, y1, yaw in legs:
+        count = max(1, round(math.hypot(x1 - x0, y1 - y0) / step))
+        for i in range(1, count + 1):
+            f = i / count
+            samples.append((x0 + f * (x1 - x0), y0 + f * (y1 - y0), yaw))
+        x0, y0 = x1, y1
+    return samples
+
+
+def _feed(recorder, samples, t0, dt=0.1):
+    """Feed samples dt seconds apart, from t0. Returns (verdicts, last_time)."""
+    verdicts, t = [], t0
+    for x, y, yaw in samples:
+        t += dt
+        verdicts.append(recorder.update(x, y, yaw, t))
+    return verdicts, t
+
+
+def _feed_until_closed(recorder, samples, t0, dt=0.1):
+    """Feed samples until one closes the lap. Returns (index, sample), or
+    (None, None) if none does.
+    """
+    t = t0
+    for index, (x, y, yaw) in enumerate(samples):
+        t += dt
+        if recorder.update(x, y, yaw, t):
+            return index, (x, y, yaw)
+    return None, None
+
+
+def test_closest_approach_closes_at_the_nearest_point_on_a_curve():
+    """A lap that starts on a curve closes at the point nearest its start.
+
+    On the way back in, the old gate closes on the first sample inside the
+    1.5m circle, with the car about 28.6deg off its start heading. The
+    closest-approach mode waits until the car is past its nearest sample, and
+    closes there at a heading error under 2deg.
+    """
+    nearest, closure = _circle_nearest_and_closure()
+    recorder = _recorder()
+    assert _drive_circle(recorder) == closure
+    s = nearest * CIRCLE_STEP
+    # oracle: closed form -- the nearest sample is 0.00044m from the start and
+    # 0.0085deg off its start heading
+    assert recorder.distance_from_start == pytest.approx(
+        _circle_distance_from_start(s), abs=1e-9)  # 1e-9 m
+    assert recorder.heading_error == pytest.approx(
+        abs(_wrap(s / CIRCLE_RADIUS)), abs=1e-9)  # 1e-9 rad
+    assert recorder.heading_error < math.radians(2.0)  # 0.05/3 rad, plus sampling
+
+    old = _recorder(close_at_closest_approach=False)
+    # oracle: closed form -- the old gate closes on the first sample back inside
+    assert _drive_circle(old) == _circle_old_closure()
+    assert math.degrees(old.heading_error) > 10.0
+
+
+def test_closest_approach_does_not_close_while_still_approaching():
+    """From the circle's edge on, the car is inside the circle and facing the
+    start within the gate. The old gate would close at the edge. This mode keeps
+    the lap open until the car is past its nearest point by more than the margin.
+    """
+    _, closure = _circle_nearest_and_closure()
+    entry = _circle_old_closure()
+    # Precondition, closed form: the entry heading really is inside the gate.
+    assert math.degrees(abs(_wrap(entry * CIRCLE_STEP / CIRCLE_RADIUS))) < 30.0
+    recorder = _recorder()
+    verdicts = []
+    for k in range(closure + 1):
+        x, y, yaw = _circle_pose(k * CIRCLE_STEP)
+        verdicts.append(recorder.update(x, y, yaw, k * CIRCLE_STEP))
+    # oracle: closed form -- every tick before the closure, the entry included,
+    # is still on the way in
+    assert verdicts[:closure] == [False] * closure
+    assert verdicts[closure] is True
+
+
+def _pass_the_start_facing(final_yaw):
+    """Out past the departure distance and round, then back past the start on
+    the last leg, facing final_yaw. Returns (recorder, verdicts).
+    """
+    legs = [(2.5, 0.0, 0.0), (2.5, 2.5, math.pi / 2), (0.0, 2.5, math.pi),
+            (0.0, -1.0, final_yaw)]
+    recorder = _recorder()
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    verdicts, _ = _feed(recorder, _polyline((0.0, 0.0), legs), 0.0)
+    return recorder, verdicts
+
+
+def test_closest_approach_rejects_a_bad_heading_at_the_minimum():
+    """Passing the start facing 90deg off: no closure, and the lap goes on.
+
+    The control is the same pass facing the start, which closes. Only the
+    heading differs, so the refusal belongs to the heading gate.
+    """
+    recorder, verdicts = _pass_the_start_facing(-math.pi / 2)
+    assert not any(verdicts), 'a nearest point facing 90deg off must not close the lap'
+    assert recorder.departed
+    # The car did pass the start, so the refusal is not vacuous.
+    assert recorder.closest_approach == pytest.approx(0.0, abs=1e-9)  # 1e-9 m
+    # The lap goes on: recording continues past the start, to the last sample.
+    # oracle: closed form -- the last sample of the final leg
+    assert recorder.points[-1] == pytest.approx((0.0, -1.0), abs=1e-9)  # 1e-9 m
+    _, control = _pass_the_start_facing(0.0)
+    assert any(control), 'the same pass facing the start closes the lap'
+
+
+def test_a_rejected_closest_approach_is_forgotten_so_a_later_good_one_closes():
+    """A rejected nearest point is not carried into the next pass.
+
+    The car goes past the start facing 90deg off, then comes round to the start
+    from the west, facing it. That second pass has to close on its own nearest
+    point.
+    """
+    recorder = _recorder()
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    bad = _polyline((0.0, 0.0), [(2.5, 0.0, 0.0), (2.5, 2.5, math.pi / 2),
+                                 (0.0, 2.5, math.pi), (0.0, -1.0, -math.pi / 2)])
+    verdicts, t = _feed(recorder, bad, 0.0)
+    assert not any(verdicts)
+    good = _polyline((0.0, -1.0), [(-2.0, -1.0, math.pi), (-2.0, 0.0, math.pi / 2),
+                                   (0.3, 0.0, 0.0)])
+    _, closed = _feed_until_closed(recorder, good, t)
+    assert closed is not None, 'a later pass facing the start must still close the lap'
+    # oracle: closed form -- the good pass closes on its sample 0.1m past the start
+    assert closed[0] == pytest.approx(0.1, abs=1e-9)  # 1e-9 m
+    # oracle: closed form -- the good pass faces the start, and its nearest
+    # sample is the start point
+    assert recorder.heading_error == pytest.approx(0.0, abs=1e-9)  # 1e-9 rad
+    assert recorder.points[-1] == pytest.approx((0.0, 0.0), abs=1e-9)  # 1e-9 m
+
+
+def test_stationary_inside_the_circle_does_not_close_then_moving_away_does():
+    """A car stopped at its nearest point keeps the lap open. Moving on past
+    the point closes it.
+
+    A car that stops mid-lap keeps sending the same pose. A closure must not
+    come from that.
+    """
+    recorder = _recorder()
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    verdicts, t = _feed(recorder, _polyline((0.0, 0.0), ROUND_THE_LOOP + [(0.0, 0.0, 0.0)]),
+                        0.0)
+    assert not any(verdicts), 'approaching the start: no closure yet'
+    for _ in range(50):
+        t += 0.1
+        assert not recorder.update(0.0, 0.0, 0.0, t), \
+            'stopped at the nearest point: the lap stays open'
+    t += 0.1
+    assert recorder.update(0.1, 0.0, 0.0, t), \
+        'moved 0.1m past the nearest point: the lap closes'
+
+
+def test_the_margin_is_exact_at_its_edge_and_closes_just_past_it():
+    """Exactly 0.05m past the nearest point is not more than the margin. 2.5mm
+    further is.
+    """
+    recorder = _recorder()
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    verdicts, t = _feed(recorder, _polyline((0.0, 0.0), ROUND_THE_LOOP + [(0.0, 0.0, 0.0)]),
+                        0.0)
+    assert not any(verdicts)
+    assert not recorder.update(0.05, 0.0, 0.0, t + 0.1), \
+        'exactly the margin past the nearest point: still open'
+    assert recorder.update(0.0525, 0.0, 0.0, t + 0.2), 'past the margin: closes'
+
+
+def test_closing_truncates_points_to_the_minimum():
+    """The recording ends at the nearest sample, not at the tick that closed the
+    lap.
+    """
+    nearest, closure = _circle_nearest_and_closure()
+    recorder = _recorder()
+    assert _drive_circle(recorder) == closure
+    # Every sample is recorded (0.04m spacing is under the 0.05m step), so
+    # sample k is points[k].
+    assert len(recorder.points) == nearest + 1  # oracle: closed form
+    assert len(recorder.point_turn) == len(recorder.points)
+    # oracle: closed form -- the nearest sample's position on the circle
+    assert recorder.points[-1] == pytest.approx(
+        _circle_pose(nearest * CIRCLE_STEP)[:2], abs=1e-9)  # 1e-9 m
+
+
+def test_closing_reports_the_nearest_point_not_the_tick_that_closed_the_lap():
+    """heading_error and distance_from_start are the nearest point's values, not
+    the closing tick's.
+    """
+    nearest, _ = _circle_nearest_and_closure()
+    recorder = _recorder()
+    _drive_circle(recorder)
+    s = nearest * CIRCLE_STEP
+    # oracle: closed form. The closing tick is 0.1m of arc past the nearest
+    # sample, 0.034rad off the start heading. The nearest is 0.00015rad off.
+    assert recorder.distance_from_start == pytest.approx(
+        _circle_distance_from_start(s), abs=1e-9)  # 1e-9 m
+    assert recorder.heading_error == pytest.approx(
+        abs(_wrap(s / CIRCLE_RADIUS)), abs=1e-9)  # 1e-9 rad
+
+
+def test_closest_approach_still_needs_the_turn_gate():
+    """The there-and-back run the turn gate exists for, with this mode on.
+
+    It passes every distance gate and faces the start at its nearest point. The
+    heading gate is lifted to 181deg, so only the turn gate can refuse it. Its
+    net turn is 180deg, under the 300deg gate: it is not a lap however close it
+    comes, and it must not close while moving on past the start either.
+    """
+    recorder = LapRecorder(
+        spacing=0.15, min_distance=1.0, departure_distance=1.0,
+        closure_distance=0.4, closure_heading_rad=math.radians(181.0),
+        min_duration_sec=0.0, min_turn_rad=math.radians(300.0),
+        close_at_closest_approach=True)
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    out = [(i * 0.25, 0.0, 0.0) for i in range(1, 17)]
+    back = [(4.0 - i * 0.25, 0.0, math.pi) for i in range(1, 17)]
+    beyond = [(-0.5, 0.0, math.pi)]
+    closed = [recorder.update(x, y, yaw, 0.1 * i)
+              for i, (x, y, yaw) in enumerate(out + back + beyond, start=1)]
+    # oracle: closed form -- the back run reaches the start point exactly
+    assert recorder.closest_approach == pytest.approx(0.0, abs=1e-9)  # 1e-9 m
+    assert not any(closed), 'a net 180deg turn is not a lap, however close it passes'
+
+
+# The 2026-10-26 run, replayed. The parameters are the run's own snapshot,
+# metadata/params/auto_map_race_node.yaml.
+def _recorded_closures(close_at_closest_approach):
+    """Replay the run's /slam_pose through LapRecorder, as the node does. Each
+    closure is followed by a fresh recorder, because the node resets after every
+    lap. Returns (heading_error, distance_from_start) for each closed lap, in
+    order.
+    """
+    with np.load(RECORDED_RUN) as data:
+        slam = data['slam_pose']
+        odom = data['odom']
+    odom_yaw = np.interp(slam[:, 0], odom[:, 0], np.unwrap(odom[:, 3]))
+
+    def fresh():
+        return LapRecorder(
+            spacing=0.15, min_distance=5.0, departure_distance=2.0,
+            closure_distance=1.5, closure_heading_rad=math.radians(30.0),
+            min_duration_sec=15.0, min_turn_rad=math.radians(300.0),
+            max_pose_jump=0.12, closure_widen_after_revolutions=1.25,
+            max_closure_distance=4.0,
+            close_at_closest_approach=close_at_closest_approach)
+
+    recorder = fresh()
+    closures = []
+    for index, (t, x, y, yaw) in enumerate(slam):
+        if recorder.update(x, y, yaw, t, odom_yaw=odom_yaw[index]):
+            closures.append((recorder.heading_error, recorder.distance_from_start))
+            recorder = fresh()
+    return closures
+
+
+def test_recorded_lap_passes_the_quality_check():
+    """Recorded measurement: run 20261026-194913, replayed through LapRecorder.
+
+    The old gate closed its laps at 28.1-29.7deg (logged), which the quality
+    check refuses. Closing each lap at its nearest point must put every closed
+    lap inside the quality check's heading limit.
+    """
+    if not os.path.exists(RECORDED_RUN):
+        pytest.skip('needs ~/.ros/racerbot_runs/20261026-194913/analysis/slam.npz '
+                    '(plan Task 5); absent on this machine')
+    old = _recorded_closures(close_at_closest_approach=False)
+    new = _recorded_closures(close_at_closest_approach=True)
+    # oracle: measured -- the old gate reproduces the logged 28.1-29.7deg, so the
+    # replay is the run
+    assert len(old) >= 3
+    assert all(math.degrees(heading) > 20.0 for heading, _ in old)
+    assert len(new) >= 3
+    # oracle: spec -- auto_map_race.yaml: closure_heading_deg 30 times
+    # mapping_lap_max_heading_margin_fraction 0.5
+    for heading, _ in new:
+        assert heading <= math.radians(15.0), \
+            f'lap closed at {math.degrees(heading):.1f}deg'
+
+
+def test_closest_approach_is_off_in_the_code_and_on_in_the_shipped_config():
+    """New behaviour is off where the code declares it, and the shipped config
+    turns it on.
+    """
+    import yaml
+    config = os.path.join(os.path.dirname(__file__), '..', 'config', 'auto_map_race.yaml')
+    with open(config) as handle:
+        shipped = next(iter(yaml.safe_load(handle).values()))['ros__parameters']
+    assert shipped['close_at_closest_approach'] is True
+    assert shipped['closest_approach_margin_m'] == pytest.approx(0.05, abs=1e-9)  # metres
+    node = _supervisor()
+    try:
+        assert node.recorder.close_at_closest_approach is False
+        assert node.recorder.closest_approach_margin == pytest.approx(0.05, abs=1e-9)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_closest_approach_closure_is_logged_with_its_distance_and_heading():
+    """One INFO line at the closure, naming the distance and heading the lap
+    closed on.
+    """
+    recorder = _recorder()
+    recorder.update(0.0, 0.0, 0.0, 0.0)
+    # The approach runs 0.2m to one side of the start, facing 10deg, so its
+    # nearest point is (0, 0.2), 0.2m from the start.
+    legs = ROUND_THE_LOOP + [(-2.5, 0.2, math.radians(10.0)),
+                             (0.0, 0.2, math.radians(10.0)),
+                             (0.3, 0.2, math.radians(10.0))]
+    index, _ = _feed_until_closed(recorder, _polyline((0.0, 0.0), legs), 0.0)
+    assert index is not None
+    stub = _LapQualityStub(recorder, completed_mapping_laps=0)
+    AutoMapRaceNode._mapping_lap_completed(stub)
+    lines = [m for m in stub.logger.infos if m.startswith('closed at closest approach')]
+    # oracle: closed form -- the nearest point is (0, 0.2), 0.2m from the start,
+    # driven at 10deg
+    assert lines == ['closed at closest approach: d=0.20m, heading error=10.0deg']
+
+
+def test_the_default_gate_logs_no_closest_approach_line():
+    """The new log line is for the new mode only."""
+    recorder = _recorder(close_at_closest_approach=False)
+    assert _drive_circle(recorder) is not None
+    stub = _LapQualityStub(recorder, completed_mapping_laps=0)
+    AutoMapRaceNode._mapping_lap_completed(stub)
+    assert not [m for m in stub.logger.infos if m.startswith('closed at closest approach')]
+
+
+# ---------------------------------------------------------------------------
 # Adaptive mapping-lap count (2026-08-25): _lap_quality_ok /
 # _mapping_lap_completed. Stub-based, same pattern as _SupervisorStub above
 # -- these read a handful of scalar attributes and call _write_profile,
