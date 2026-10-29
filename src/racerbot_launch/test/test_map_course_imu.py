@@ -275,7 +275,9 @@ SLAM_GYRO = SRC / 'racerbot_launch' / 'config' / 'slam_gyro.yaml'
 def test_gyro_odom_loads_the_gyro_slam_profile():
     # oracle: spec -- A1: the profile is loaded with gyro_odom:=true, from the
     # installed package, where slam_launch.py will read it.
-    _, ctx = _wired_context(gyro_odom='true')
+    # imu:=true stated explicitly: gyro_odom needs it, and car 2's map_course
+    # defaults to imu:=false (docs/car1-vs-car2.md#imu); car 1's defaults to true.
+    _, ctx = _wired_context(imu='true', gyro_odom='true')
     profile = ctx.launch_configurations['slam_profile_file']
     assert profile.endswith('/slam_gyro.yaml')
     assert Path(profile).is_file()
