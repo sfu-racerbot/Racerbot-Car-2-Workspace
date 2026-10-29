@@ -469,10 +469,11 @@ gap_follow_node:
     corner_setup_zero_side_distance: 2.5
 
     # --- Opponent awareness: other cars on track (simulator-validated only) ---
-    # Off by default: with one car on track nothing below runs, and the
-    # node's commands are identical to having no such feature
-    # (test_opponent_awareness_off_is_identical). Turn it on when two or
-    # more cars share the track. What it does: finds free-standing,
+    # ON by default since 2026-10-28 (the user's decision, option 1): awareness
+    # on, with the follow-cap memory below, and both are easy to turn off. A
+    # node started without this file keeps the old behaviour (its code default
+    # is still False), and the launch file's opponent_awareness:= argument sets
+    # this value (true by default there). What it does: finds free-standing,
     # car-sized clusters in the scan, tracks them across scans against this
     # car's dead-reckoned motion, and for those that MOVE (a parked car is
     # just an obstacle, as before) it (1) makes the gap search treat the
@@ -482,7 +483,7 @@ gap_follow_node:
     # ahead in the path. TTC, contact, swept-path and arc-guard checks keep
     # reading the real scan. Full write-up and simulator results:
     # docs/gap-follow.md#several-cars-at-once. Nothing here is car-tested.
-    enable_opponent_awareness: false
+    enable_opponent_awareness: true
     opponent_min_width: 0.15         # m, smallest cluster chord that can be a car
     opponent_max_width: 0.70         # m, a 0.30 x 0.58 car seen diagonally
     opponent_max_range: 6.0          # m
@@ -491,17 +492,68 @@ gap_follow_node:
     opponent_gate: 0.5               # m, scan-to-scan association radius (+ v*dt)
     opponent_alpha: 0.5              # position filter gain
     opponent_beta: 0.15              # velocity filter gain
+    # R3 simulator sweep 2026-10-28: 5 solo tracks and 2 race tracks, both
+    # directions, 2 seeds and swapped race starts. All pooled delay medians
+    # were infinite; (8, 0.6) won the recognised-tick fraction tie at 48.92%
+    # over the only other eligible pair (6, 0.6) at 48.85%. Each had 9 false
+    # mover ticks on car1_course, 0 on the other tracks, no contacts or race
+    # stalls, and no added solo stops. Awareness has shipped on since 2026-10-28
+    # on simulator evidence; it is not car-tested.
     opponent_min_hits: 8             # scans (0.2 s) before a track may count as moving
     opponent_max_misses: 6           # scans unseen before a track is dropped
     opponent_moving_speed: 0.6       # m/s over the ground; odometry error makes walls drift ~0.2-0.4
-    opponent_radius: 0.30            # m, footprint around the cluster centre
+    # Follow-only hold after a confirmed car's moving latch releases. Does not
+    # enable passing/inflation, or turn never-moving wall clusters into cars.
+    # R2 simulation 2026-10-28: 1/2/3 s each passed 40 two-car races and 8 solo
+    # runs (car1_course_2026_10_26 + indoor_wide, both directions), no contacts
+    # or stalls, no added solo stops. Ship fastest tested: seed 12346's former
+    # stuck follower finishes in 27.62 s at 1 s vs 29.18 s at 2/3 s.
+    opponent_stopped_release_sec: 1.0  # s; inclusive hold, release one tick later
+    opponent_radius: 0.30            # m, rear relevance cutoff only; not inflation
+    opponent_length: 0.58            # m, padded outline; visible-face centre recovery
+    opponent_width: 0.31             # m, 0.30 m tire width plus 5 mm per side
+    # R4 pass-margin sweep, 2026-10-28, on top of R2c. Leaders at 1.0, 1.5 and
+    # 2.0 m/s; car1_course_2026_10_26, indoor_wide and asb_10000; both
+    # directions; 2 seeds; 3 laps; 36 runs per setting. Only margin 0.15 m gave
+    # 0 stalls at every opponent_pass_max_steering tried (0.10, 0.20 and 0.33
+    # rad): 36 of 36 finished, 0 contacts, 1 overtake each. Margins 0.05 m and
+    # 0.10 m overtook up to 4 times but stalled 1 to 5 times. Rule: most
+    # overtakes at 0 contacts and 0 stalls; ties go to the larger time gained by
+    # the faster car. 0.15 m with 0.10 rad (both unchanged) ships: time gained
+    # +21.56 s, against +21.34 s at 0.33 rad and +16.05 s at 0.20 rad. The
+    # evidence and the designs rejected are in docs/gap-follow.md#several-cars-at-once.
     opponent_passing_margin: 0.15    # m, extra room demanded beside a moving car
     opponent_prediction_horizon: 0.8 # s of predicted path treated as blocked
     opponent_prediction_step: 0.1    # s
     opponent_follow_min_gap: 0.5     # m, bumper gap at which the follow cap reaches 0
     opponent_follow_time_gap: 1.0    # s: 0.6 stalled 6 of 8 two-car runs on the 1.2 m loop, 1.0 none
+    # m/s below an alongside car's ground speed when a pass is refused; drop behind it.
+    # Only the car whose centre is behind yields, and only on scans that see the
+    # other car (never held by the follow memory); docs/gap-follow.md step 4.
+    opponent_abort_speed_margin: 0.5
+    # Follow-cap memory (2026-10-28): when the car being followed is lost (its
+    # track is dropped from the scan, or it leaves the relevant band), the follow
+    # cap is held at its last finite value for this many seconds of scan stamps,
+    # then released. Without it the cap vanishes, the follower accelerates into
+    # the corner it was following the car into, and the controller deadlocks
+    # there (it never reverses), so the follower stalls for good. Speed only: it
+    # can lower a command, never raise one or start motion, and it applies before
+    # the no_safe_gap stop. R2b simulator sweep, 2026-10-28, 616 runs in total.
+    # The matrix: car1_course_2026_10_26 and indoor_wide, both directions, 2 seeds,
+    # 3 laps, the car ahead at 1.0, 1.5, 2.0 and 2.5 m/s (32 two-car runs a cell):
+    #   awareness off (the shipped config before 2026-10-28): 24/32 clean, 5 stalls, 3 contacts
+    #   awareness on, no memory (0.0):                         30/32 clean, 4 stalls
+    #   awareness on, 1.0 s memory (this value):               32/32 clean, 0 stalls, 0 contacts
+    # Single-car laps unchanged (24/24). Accepted cost: the follower now rarely
+    # passes on wide tracks (1 overtake against 8 before).
+    # To turn the hold off: opponent_follow_memory_sec: 0.0 keeps awareness on
+    # without it. To turn the whole layer off, memory included, use
+    # enable_opponent_awareness: false here, or opponent_awareness:=false at launch.
+    opponent_follow_memory_sec: 1.0  # s, inclusive hold, released one scan later
     opponent_follow_lateral: 0.45    # m, |y| within which a car ahead is "in the path"
     opponent_relevant_lateral: 1.0   # m, |y| beyond which a moving car is ignored
+    # Steering limit for starting a pass. 0.10 rad is shipped, chosen by the R4
+    # sweep recorded in the comment above opponent_passing_margin.
     opponent_pass_max_steering: 0.10 # rad, no new pass while steering harder (a bend)
     opponent_pass_max_heading_deg: 15.0  # no new pass while the car ahead turns more
     opponent_max_track_speed: 8.0    # m/s, clamp on the velocity estimate

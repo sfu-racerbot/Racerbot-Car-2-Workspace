@@ -111,6 +111,33 @@ class SimConfig:
     odom_speed_noise_std: float = 0.01
     odom_yaw_rate_scale: float = 1.0
     scan_dropout_probability: float = 0.0
+    controlled_cars: int = 1
+    controlled_start_offsets_m: tuple = ()
+
+    def __post_init__(self):
+        if type(self.controlled_cars) is not int or self.controlled_cars < 1:
+            raise ValueError('controlled_cars must be a positive integer')
+        if self.controlled_start_offsets_m and len(self.controlled_start_offsets_m) != self.controlled_cars:
+            raise ValueError('controlled_start_offsets_m must have one entry per controlled car')
+
+
+def car_names(car: int) -> dict:
+    """ROS names for a 1-based controlled car; car 1 retains root names."""
+    if type(car) is not int or car < 1:
+        raise ValueError('car must be a positive integer')
+    namespace = '' if car == 1 else f'car{car}'
+    prefix = f'/{namespace}' if namespace else ''
+    frame = f'{namespace}/' if namespace else ''
+    return dict(namespace=namespace, scan=f'{prefix}/scan', odom=f'{prefix}/odom',
+                drive=f'{prefix}/ackermann_cmd', joy=f'{prefix}/joy',
+                odom_frame=f'{frame}odom', base_frame=f'{frame}base_link',
+                laser_frame=f'{frame}laser',
+                truth=f'/sim/{namespace}/ground_truth_pose' if namespace else '/sim/ground_truth_pose')
+
+
+def command_is_fresh(last_time_s, now_s, timeout_s) -> bool:
+    """A command is fresh through the inclusive timeout boundary."""
+    return last_time_s is not None and now_s - last_time_s <= timeout_s
 
 
 @dataclass
@@ -241,7 +268,7 @@ class SimBridge:
         self.centerline = np.asarray(config.centerline, dtype=np.float64)
         self.followers = [CenterlineFollower(self.centerline, plan)
                           for plan in config.opponents]
-        self.num_agents = 1 + len(self.followers)
+        self.num_agents = config.controlled_cars + len(self.followers)
         self._rng = np.random.default_rng(config.seed)
 
         self.lidar_config = LiDARConfig(
@@ -275,19 +302,20 @@ class SimBridge:
         )
         self.env = gym.make('f1tenth_gym:f1tenth-v0', config=env_config,
                             render_mode=None)
+        # Gym's response zeros state[3:], including yaw, snapping a car to
+        # heading zero on padded-envelope contact. On 2026-10-20 that sent
+        # two cars lapping backwards. Use our body_contact/car_contact
+        # verdicts instead, as FidelityPlant does in sim_fidelity/plant.py.
+        self.env.unwrapped.sim.ttc_threshold = -math.inf
 
-        # Body-vs-wall contact is checked here rather than trusted to the
-        # environment. In this pinned Gym revision the wall check is
-        # `raw_scan - side_distances <= 0.005`, and with the vehicle
-        # parameters this workspace uses (`collision_body_center_x =
-        # wheelbase/2` against the ST model's own -lr offset) the LiDAR
-        # lands 0.04m *outside* the collision rectangle, so
-        # `side_distances` comes out all zeros and the test reduces to
-        # "did a beam return less than 5mm" -- which it cannot, because
-        # range_min is 0.05m. Wall collisions therefore never fire. A
-        # simulator that cannot notice the car driving through a wall is
-        # no use for validating a mapping run, so the padded body is
-        # sampled against the occupancy grid directly below.
+        # Gym's wall check uses raw_scan - side_distances <= 0.005 m. Under
+        # the old 0.33 m LiDAR offset, the sensor sat outside the centred
+        # collision rectangle and side_distances came out zero; the 0.05 m
+        # minimum range then prevented that check from firing. The measured
+        # 0.26 m offset puts the sensor inside the box and the check does
+        # fire now, but its padded-envelope flag is neither a trusted contact
+        # verdict nor allowed to act on the state. Independently sample the
+        # padded body against the occupancy grid, including off-map cells.
         track = self.env.unwrapped.track
         self._occupancy = np.asarray(track.occupancy_map)
         self._map_resolution = float(track.spec.resolution)
@@ -315,9 +343,17 @@ class SimBridge:
                                       OpponentPlan(start_offset_m=offset_m))
         return follower.start_pose()
 
-    def reset(self):
-        poses = [self._pose_on_loop(self.config.ego_start_offset_m)]
-        poses += [follower.start_pose() for follower in self.followers]
+    def reset(self, poses=None):
+        """Reset to configured starts, or explicit agent poses for experiments."""
+        if poses is None:
+            offsets = self.config.controlled_start_offsets_m or tuple(
+                self.config.ego_start_offset_m - 3.0 * i
+                for i in range(self.config.controlled_cars))
+            poses = [self._pose_on_loop(offset) for offset in offsets]
+            poses += [follower.start_pose() for follower in self.followers]
+        # Reassert before every reset: gym's collision response would zero
+        # state[3:], including yaw; body_contact/car_contact are our verdicts.
+        self.env.unwrapped.sim.ttc_threshold = -math.inf
         self._obs, _ = self.env.reset(
             options={'poses': np.asarray(poses, dtype=float)})
         # The environment zero-fills every scan until the first step, and a
@@ -329,9 +365,12 @@ class SimBridge:
         self.sim_time = 0.0
         self.steps = 0
         self._last_ego_steering = 0.0
-        ego = self.agent_state(0)
-        self.odom = DeadReckonedOdometry(ego.x, ego.y, ego.yaw,
-                                         self.config, self._rng)
+        self._odometry = []
+        for i in range(self.config.controlled_cars):
+            state = self.agent_state(i)
+            self._odometry.append(DeadReckonedOdometry(
+                state.x, state.y, state.yaw, self.config, self._rng))
+        self.odom = self._odometry[0]
         return self._obs
 
     def close(self):
@@ -349,11 +388,17 @@ class SimBridge:
         )
 
     def ego_scan(self) -> np.ndarray:
-        scan = np.asarray(self._obs['agent_0']['scan'], dtype=np.float64)
+        return self.scan(0)
+
+    def scan(self, agent: int) -> np.ndarray:
+        scan = np.asarray(self._obs[f'agent_{agent}']['scan'], dtype=np.float64)
         if self.config.scan_dropout_probability > 0.0:
             mask = self._rng.random(scan.shape) < self.config.scan_dropout_probability
             scan = np.where(mask, np.inf, scan)
         return scan
+
+    def odometry(self, agent: int) -> DeadReckonedOdometry:
+        return self._odometry[agent]
 
     @property
     def beam_angles(self) -> np.ndarray:
@@ -423,8 +468,16 @@ class SimBridge:
 
     def step(self, ego_steering: float, ego_speed: float):
         """Advance one control period with the ego's latest drive command."""
-        actions = [[float(ego_steering), float(ego_speed)]]
-        for index, follower in enumerate(self.followers, start=1):
+        if self.config.controlled_cars != 1:
+            raise ValueError('use step_cars for multiple controlled cars')
+        return self.step_cars([(ego_steering, ego_speed)])
+
+    def step_cars(self, commands):
+        """Advance each controlled car with its own (steering, speed)."""
+        if len(commands) != self.config.controlled_cars:
+            raise ValueError('step_cars requires one command per controlled car')
+        actions = [[float(steering), float(speed)] for steering, speed in commands]
+        for index, follower in enumerate(self.followers, start=self.config.controlled_cars):
             state = self.agent_state(index)
             steering, speed = follower.command(state.x, state.y, state.yaw)
             actions.append([steering, speed])
@@ -434,9 +487,10 @@ class SimBridge:
         self.sim_time += self.config.control_dt
         self.steps += 1
 
-        ego = self.agent_state(0)
-        self._last_ego_steering = float(ego_steering)
-        self.odom.update(ego.speed, float(ego_steering), self.config.control_dt)
+        self._last_ego_steering = float(commands[0][0])
+        for i, (steering, _speed) in enumerate(commands):
+            self._odometry[i].update(self.agent_state(i).speed, float(steering),
+                                     self.config.control_dt)
         return self._obs
 
 

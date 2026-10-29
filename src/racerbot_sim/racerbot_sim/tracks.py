@@ -224,6 +224,19 @@ def build(name: str, directory) -> Path:
     return write_track(directory, name, centerline, corridor_width)
 
 
+def resolve(name: str, directory) -> Path:
+    """Return a generated or already-imported track path without overwriting imports."""
+    if name in LAYOUTS:
+        return build(name, directory)
+    directory = Path(directory)
+    map_path = directory / f'{name}_map.yaml'
+    centerline = directory / f'{name}_centerline.csv'
+    if map_path.is_file() and centerline.is_file():
+        return directory / name
+    raise KeyError(
+        f"unknown track '{name}'; have layouts {sorted(LAYOUTS)} and searched {directory}")
+
+
 def centerline_path(directory, name: str) -> Path:
     return Path(directory) / f'{name}_centerline.csv'
 
@@ -231,3 +244,12 @@ def centerline_path(directory, name: str) -> Path:
 def load_centerline(directory, name: str) -> np.ndarray:
     return np.loadtxt(centerline_path(directory, name), delimiter=',',
                       skiprows=1, dtype=np.float64)
+
+
+def centerline_for(name: str, directory) -> np.ndarray:
+    """Read scoring geometry without creating or rewriting any map assets."""
+    if name in LAYOUTS:
+        spec = {key: value for key, value in LAYOUTS[name].items()
+                if key != 'corridor_width'}
+        return rounded_rectangle_centerline(**spec)
+    return load_centerline(directory, name)

@@ -28,6 +28,58 @@ ANGLES = np.linspace(-0.75 * math.pi, 0.75 * math.pi, N_BEAMS)  # the Hokuyo's 2
 MAX_RANGE = 10.0
 
 
+@pytest.mark.parametrize('speed,margin', [(1.5, 0.5), (0.2, 0.5), (1.5, 0.0)])
+def test_alongside_abort_closed_form_and_ahead_law(speed, margin):
+    p = ot.OpponentParams(abort_speed_margin=margin)
+    layer = ot.OpponentAwareness(p, WHEELBASE, LASER_X, 0.0, CAR_LENGTH)
+    track = ot.Track(FRONT, 0.7, vx=speed, moving=True)
+    layer.tracker.tracks = [track]
+    # oracle: closed form at the inclusive bumper boundary, ground speed minus margin.
+    assert layer.follow_cap(False) == pytest.approx(max(0, speed - margin), abs=1e-12)
+    assert layer.follow_cap(True) == math.inf
+    track.x = FRONT + 2.0
+    # oracle: unchanged gap-only law, even when the car is outside follow_lateral.
+    assert layer.follow_cap(False) == pytest.approx(
+        (2.0 - p.follow_min_gap) / p.follow_time_gap, abs=1e-12)  # m/s roundoff
+    track.y = p.relevant_lateral + 0.001
+    # oracle: invariant -- an irrelevant car adds no cap.
+    assert layer.follow_cap(False) == math.inf
+    layer.tracker.tracks = []
+    assert layer.follow_cap(False) == math.inf
+
+
+CENTRE = WHEELBASE / 2.0   # 0.18 m, body centre in base_link
+
+
+@pytest.mark.parametrize('ahead', [0.25, 0.01, 0.0, -0.01, -0.25])
+def test_alongside_abort_yields_only_the_car_that_is_behind(ahead):
+    """Two identical cars side by side, B's centre ``ahead`` metres in front
+    of A's, both running the rule. Each sees the other alongside (rear face
+    at or behind its bumper) with passing refused."""
+    speed = 1.5
+    p = ot.OpponentParams()
+    caps = []
+    for other_x in (CENTRE + ahead, CENTRE - ahead):   # A sees B, B sees A
+        layer = ot.OpponentAwareness(p, WHEELBASE, LASER_X, 0.0, CAR_LENGTH)
+        layer.tracker.tracks = [ot.Track(other_x, 0.7, vx=speed, moving=True)]
+        # oracle: invariant -- the scenario really is alongside for both cars.
+        assert layer.moving_body()[0][4] <= FRONT
+        caps.append(layer.follow_cap(False))
+    yield_cap = max(0.0, speed - p.abort_speed_margin)
+    # oracle: invariant -- exactly the car whose centre is behind yields, by the
+    # closed-form abort cap; level centres yield neither, so no mutual ratchet.
+    expected = ([yield_cap, math.inf] if ahead > 0 else
+                [math.inf, yield_cap] if ahead < 0 else [math.inf, math.inf])
+    assert caps == pytest.approx(expected, abs=1e-12)  # m/s roundoff
+
+
+@pytest.mark.parametrize('margin', [-0.01, math.nan, math.inf, -math.inf])
+def test_abort_margin_rejects_invalid_values(margin):
+    # oracle: spec -- abort margin must be finite and nonnegative.
+    with pytest.raises(ValueError, match='opponent_abort_speed_margin must be >= 0 and finite'):
+        ot.OpponentParams(abort_speed_margin=margin).validate()
+
+
 def _cast(segments, angles=ANGLES, origin=(LASER_X, 0.0)):
     """Ranges from ``origin`` (base_link) to the nearest of ``segments``
     [((x0, y0), (x1, y1)), ...] along each beam angle; inf where none."""
@@ -319,17 +371,18 @@ def test_velocity_clamp():
 
 # --- inflate_predicted ----------------------------------------------------------
 
-def test_stationary_disc_entry_range_is_closed_form():
-    # Disc of radius R = radius + passing_margin centred d ahead of the
-    # laser: the beam straight at it enters at d - R.
+def test_stationary_rectangle_entry_range_is_closed_form():
+    # oracle: R4 visible-face centre recovery replaces the old disc oracle.
+    # At rest heading defaults to line of sight; entry is near face - margin.
     params = ot.OpponentParams(radius=0.3, passing_margin=0.15, prediction_horizon=0.0)
     window = np.full(ANGLES.size, MAX_RANGE)
-    out = ot.inflate_predicted(window, ANGLES, [(LASER_X + 2.0, 0.0, 0.0, 0.0)],
+    out = ot.inflate_predicted(window, ANGLES, [(LASER_X + 2.0, 0.0, 0.0, 0.0, 2.0)],
                                LASER_X, 0.0, params)
     mid = int(np.argmin(np.abs(ANGLES)))
-    assert out[mid] == pytest.approx(2.0 - 0.45, abs=1e-9)
-    # A beam at bearing b grazes it when 2*sin(b) = R.
-    graze = math.asin(0.45 / 2.0)
+    assert out[mid] == pytest.approx(2.0 - params.passing_margin, abs=1e-9)
+    # oracle: closed form tangent at the inflated rear corner.
+    graze = math.atan2(params.width / 2 + params.passing_margin,
+                       2.0 - params.passing_margin)
     assert np.all(out[np.abs(ANGLES) > graze + 0.01] == MAX_RANGE)
     assert np.all(out[np.abs(ANGLES) < graze - 0.01] < MAX_RANGE)
     assert window[mid] == MAX_RANGE                        # input not modified
@@ -338,7 +391,7 @@ def test_stationary_disc_entry_range_is_closed_form():
 def test_inflation_never_lengthens_a_beam():
     params = ot.OpponentParams(prediction_horizon=0.0)
     window = np.full(ANGLES.size, 1.0)
-    out = ot.inflate_predicted(window, ANGLES, [(LASER_X + 3.0, 0.0, 0.0, 0.0)],
+    out = ot.inflate_predicted(window, ANGLES, [(LASER_X + 3.0, 0.0, 0.0, 0.0, 3.0)],
                                LASER_X, 0.0, params)
     assert np.array_equal(out, window)
 
@@ -346,7 +399,7 @@ def test_inflation_never_lengthens_a_beam():
 def test_prediction_blocks_where_the_car_is_going_not_only_where_it_is():
     # A car 2 m ahead driving left at 2 m/s will be at y = +1.6 m after 0.8 s.
     window = np.full(ANGLES.size, MAX_RANGE)
-    opp = [(LASER_X + 2.0, 0.0, 0.0, 2.0)]
+    opp = [(LASER_X + 2.0, 0.0, 0.0, 2.0, 2.0)]
     ahead = ot.inflate_predicted(window, ANGLES, opp, LASER_X, 0.0,
                                  ot.OpponentParams(prediction_horizon=0.8))
     now_only = ot.inflate_predicted(window, ANGLES, opp, LASER_X, 0.0,
@@ -359,10 +412,11 @@ def test_prediction_blocks_where_the_car_is_going_not_only_where_it_is():
     assert ahead[away] == MAX_RANGE
 
 
-def test_laser_inside_a_disc_gets_the_floor():
+def test_laser_inside_a_rectangle_gets_the_floor():
     params = ot.OpponentParams(radius=0.3, passing_margin=0.15, prediction_horizon=0.0)
     window = np.full(ANGLES.size, MAX_RANGE)
-    out = ot.inflate_predicted(window, ANGLES, [(LASER_X + 0.2, 0.0, 0.0, 0.0)],
+    # oracle: near face at 0.1 m, inside the 0.15 m expanded rear face.
+    out = ot.inflate_predicted(window, ANGLES, [(LASER_X + 0.1, 0.0, 0.0, 0.0, 0.1)],
                                LASER_X, 0.0, params, floor=0.05)
     mid = int(np.argmin(np.abs(ANGLES)))
     assert out[mid] == pytest.approx(0.05, abs=1e-12)
@@ -461,7 +515,7 @@ def test_layer_reports_a_moving_car_with_its_ground_speed():
     layer = _run_scene(ego_speed=3.0, opp_speed=1.5)
     movers = layer.moving_body()
     assert len(movers) == 1
-    x, y, vx, vy, near_x = movers[0]
+    x, y, vx, vy, near_x, _near_range = movers[0]
     # Ground speed, not closing speed: 1.5, not 1.5 - 3.0.
     assert vx == pytest.approx(1.5, abs=0.05)
     assert vy == pytest.approx(0.0, abs=0.05)
@@ -635,12 +689,25 @@ def test_association_takes_the_closest_pair_first():
 
 
 def test_prediction_follows_motion_along_x_too():
-    # 2 m ahead and 1 m left of the laser, driving +x at 2 m/s: in 0.8 s it
-    # is 3.6 m ahead. A beam at 10 deg misses where it is now (its disc
-    # spans ~15-38 deg) but crosses where it is going.
+    # oracle: closed form. Plan R4 step 1 replaces the disc, so its fixed
+    # 10-degree bearing is replaced by a rectangle tangent construction.
+    # For h=(1,0), support=(L/2*2+W/2*1)/hypot(2,1) and centre=u*(r+s).
+    # Choose halfway between the lower tangent to the unshifted rectangle
+    # and the lower tangent to the recovered rectangle at t=0. The correct
+    # rectangle misses now and sweeps over this beam at the horizon;
+    # omitting centre recovery instead hits now, which the first assert kills.
     window = np.full(ANGLES.size, MAX_RANGE)
-    opp = [(LASER_X + 2.0, 1.0, 2.0, 0.0)]
-    beam = int(np.argmin(np.abs(ANGLES - math.radians(10.0))))
+    near = math.hypot(2.0, 1.0)
+    params = ot.OpponentParams()
+    support = (params.length / 2 * 2.0 + params.width / 2) / near
+    cx, cy = (2.0 * (near + support) / near, (near + support) / near)
+    half_l = params.length / 2 + params.passing_margin
+    half_w = params.width / 2 + params.passing_margin
+    tangent_unshifted = math.atan2(1.0 - half_w, 2.0 + half_l)
+    tangent_recovered = math.atan2(cy - half_w, cx + half_l)
+    bearing = (tangent_unshifted + tangent_recovered) / 2
+    opp = [(LASER_X + 2.0, 1.0, 2.0, 0.0, near)]
+    beam = int(np.argmin(np.abs(ANGLES - bearing)))
     now_only = ot.inflate_predicted(window, ANGLES, opp, LASER_X, 0.0,
                                     ot.OpponentParams(prediction_horizon=0.0))
     ahead = ot.inflate_predicted(window, ANGLES, opp, LASER_X, 0.0,
@@ -739,3 +806,517 @@ def test_validate_rejects_servo_model_values():
         ot.OpponentParams(steer_gain=0.0).validate()
     with pytest.raises(ValueError, match='opponent_steer_delay must be >= 0'):
         ot.OpponentParams(steer_delay=-0.01).validate()
+
+
+# R2 step-4 mutation checks: dropping the hold kills the stopped-car test;
+# ignoring its timeout kills the release test; holding unconfirmed tracks kills
+# both wall cases; forcing zero kills the increasing-gap test; removing the
+# zero clamp kills the -1 mm boundary. Constant caps kill the closed-form tests.
+def _confirmed_follow_layer(**kwargs):
+    layer = ot.OpponentAwareness(ot.OpponentParams(**kwargs), WHEELBASE,
+                                 LASER_X, 0.0, CAR_LENGTH)
+    # Real detections confirm a 1 m/s car, not an injected confirmation flag.
+    _feed(layer.tracker, [(1.0 + k * 0.025, 0.0) for k in range(40)])
+    assert layer.tracker.tracks[0].moving  # oracle: constant-velocity target
+    return layer
+
+
+def test_follow_leader_two_mps_at_its_time_gap():
+    layer = _layer_with_track(FRONT + 2.5, 0.0, 2.0, 0.0,
+                              follow_time_gap=1.0, follow_min_gap=0.5)
+    # oracle: closed form, gap-only law; leader speed cancels at its time gap.
+    assert layer.follow_cap() == pytest.approx((2.5 - 0.5) / 1.0, abs=1e-12)
+
+
+def test_confirmed_car_stays_followed_when_it_stops():
+    layer = _confirmed_follow_layer()
+    t = layer.tracker.tracks[0]
+    for _ in range(24):
+        layer.tracker.update([(t.x, t.y, 0.0)], 0.025)
+    # oracle: R2 hold invariant, despite the unchanged moving latch releasing.
+    assert not t.moving
+    assert layer.followed_body()
+    assert math.isfinite(layer.follow_cap())
+    # Noise at rest must not turn a confirmed car into an oncoming car.
+    t.vx = -0.01
+    assert layer.followed_body()
+    assert layer.moving_body() == []
+    # oracle: follow-only hold cannot create an inflated obstacle or a passer.
+    window = np.full(ANGLES.size, MAX_RANGE)
+    assert np.array_equal(layer.augment(window, ANGLES), window)
+    # oracle: review round 1, held tracks always use the relevant lateral band.
+    t.x, t.y = FRONT + 1.0, layer.params.follow_lateral + 0.001
+    assert layer.follow_cap(passing=True) == pytest.approx(
+        (1.0 - layer.params.follow_min_gap) / layer.params.follow_time_gap, abs=1e-12)
+    assert math.isfinite(layer.follow_cap(passing=False))
+    for x, y in ((-layer.params.radius, 0.0),
+                 (2.0, layer.params.relevant_lateral + 0.001),
+                 (layer.params.max_range + 0.001, 0.0)):
+        t.x, t.y = x, y
+        assert layer.followed_body() == []
+        assert layer.follow_cap(passing=False) == math.inf
+
+
+@pytest.mark.parametrize('offset', [0.0, 0.001, -0.001])
+def test_follow_minimum_gap_exact_boundary(offset):
+    p = ot.OpponentParams(follow_min_gap=0.5, follow_time_gap=1.0)
+    # oracle: closed form; below the minimum is clamped, never negative.
+    result = ot.follow_speed_cap([(FRONT + p.follow_min_gap + offset, 0.0)], FRONT, p)
+    assert result == pytest.approx(max(0.0, offset / p.follow_time_gap), abs=1e-12)
+
+
+def test_held_car_cap_rises_with_gap():
+    layer = _confirmed_follow_layer()
+    t = layer.tracker.tracks[0]
+    for _ in range(24):
+        layer.tracker.update([(t.x, t.y, 0.0)], 0.025)
+    t.vx = t.vy = 0.0
+    caps = []
+    for gap in (0.6, 0.8):
+        t.x = FRONT + gap
+        caps.append(layer.follow_cap())
+        # oracle: closed form independent of the stopped leader's velocity.
+        assert caps[-1] == pytest.approx(
+            (gap - layer.params.follow_min_gap) / layer.params.follow_time_gap, abs=1e-12)
+    assert caps[1] > caps[0]  # oracle: increasing gap must release a zero cap
+
+
+@pytest.mark.parametrize('dt,release', [(0.125, 2.0), (0.025, 1.0)])
+def test_held_car_release_exact_boundary(dt, release):
+    # Exercise both binary-exact timing and the real 40 Hz scan interval;
+    # roundoff in accumulated dt must not release on the equality tick.
+    layer = _confirmed_follow_layer(stopped_release_sec=release)
+    t = layer.tracker.tracks[0]
+    t.vx = t.vy = 0.0
+    for _ in range(round(release / dt)):
+        layer.tracker.update([(t.x, t.y, 0.0)], dt)
+    # oracle: R2 inclusive hold through exactly release seconds.
+    assert layer.followed_body()
+    layer.tracker.update([(t.x, t.y, 0.0)], dt)
+    assert layer.followed_body() == []
+    assert layer.follow_cap() == math.inf
+
+
+@pytest.mark.parametrize('flicker', [False, True])
+def test_never_confirmed_wall_is_never_followed(flicker):
+    layer = ot.OpponentAwareness(ot.OpponentParams(), WHEELBASE, LASER_X, 0.0, CAR_LENGTH)
+    for k in range(80):
+        # Flickering fragment moves in the filter, but never has min_hits scans.
+        x = 1.0 + k * 0.025 if flicker else 2.0
+        detections = [] if flicker and k % 4 == 3 else [(x, 0.0, 0.0)]
+        layer.tracker.update(detections, 0.025)
+        # oracle: Review Focus 2, only once-moving-confirmed tracks may be held.
+        assert layer.followed_body() == []
+        assert layer.follow_cap() == math.inf
+
+
+@pytest.mark.parametrize('value', [0.0, -1.0, math.nan, math.inf])
+def test_stopped_release_must_be_positive_finite(value):
+    # oracle: parameter validation contract, seconds must be positive and finite.
+    with pytest.raises(ValueError, match='opponent_stopped_release_sec must be positive'):
+        ot.OpponentParams(stopped_release_sec=value).validate()
+
+
+def test_held_leader_cap_is_independent_of_passing_a_moving_car():
+    # Review mutation: using the pass-dependent held band fails the cap oracle.
+    layer = _confirmed_follow_layer()
+    held = layer.tracker.tracks[0]
+    for _ in range(24):
+        layer.tracker.update([(held.x, held.y, 0.0)], 0.025)
+    held.x, held.y = FRONT + 1.5, 0.75
+    # Alongside mover permits a pass but cannot bind a forward follow cap.
+    layer.tracker.tracks.append(ot.Track(
+        0.0, -0.75, vx=1.0, moving=True, hits=50, streak=50))
+    assert layer.may_pass(0.0)  # oracle: straight-moving alongside car
+    assert not held.moving
+    # oracle: closed form; 0.45 < |y|=0.75 < 1.0 must not discard a held leader.
+    expected = (1.5 - layer.params.follow_min_gap) / layer.params.follow_time_gap
+    assert layer.follow_cap(passing=True) == pytest.approx(expected, abs=1e-12)
+
+
+# R4 tests run with the package pytest runner, through rb (see task protocol).
+# R4 step 3, 2026-10-28: runtime mutants were observed failing, then removed
+# by process exit (no broken source was written): no rotation -> visible-face
+# entry at 90/45 deg; no centre shift -> prediction_follows_motion_along_x_too;
+# strict slab inequality -> parallel_beam_margin_boundary[0.0]; no width gate
+# -> narrow_corridor and the published-command test; half margin -> entry.
+# Also killed: no prediction (future-hit assertion), low-speed heading fallback
+# removed (undefined_heading), no width prediction (narrowing_beyond_current_body),
+# 10% wrong gap extent (synthetic_corridor), and a mirror-only width mismatch
+# (crossing_and_overtaking_mirror_parity[False]). Stub swaps covered every new
+# geometry/validation/plumbing test; restored focused suite: 146 passed.
+@pytest.mark.parametrize('heading', [0.0, math.pi / 2, math.pi / 4])
+@pytest.mark.parametrize('laser', [(0.26, 0.0), (0.13, -0.2)])
+def test_rectangle_entry_from_visible_face(heading, laser):
+    p = ot.OpponentParams(length=0.58, width=0.31, passing_margin=0.05,
+                          prediction_horizon=0.0)
+    near = 2.0
+    h = (math.cos(heading), math.sin(heading))
+    support = p.length / 2 * abs(h[0]) + p.width / 2 * abs(h[1])
+    centre_x = near + support
+    # oracle: closed form slab intersection on the x axis. At 45 degrees
+    # the narrower transverse slab determines entry, not the support plane.
+    half_l = p.length / 2 + p.passing_margin
+    half_w = p.width / 2 + p.passing_margin
+    reach = min(half_l / abs(h[0]) if abs(h[0]) > 1e-12 else math.inf,
+                half_w / abs(h[1]) if abs(h[1]) > 1e-12 else math.inf)
+    expected = centre_x - reach
+    out = ot.inflate_predicted([10.0], [0.0],
+                               [(laser[0] + near, laser[1], *h, near)],
+                               *laser, p)
+    assert out[0] == pytest.approx(expected, abs=1e-12)  # metre tolerance
+    if heading in (0.0, math.pi / 2):
+        assert out[0] == pytest.approx(near - p.passing_margin, abs=1e-12)
+
+
+@pytest.mark.parametrize('offset', [-0.001, 0.0, 0.001])
+def test_rectangle_parallel_beam_margin_boundary(offset):
+    p = ot.OpponentParams(length=0.58, width=0.31, passing_margin=0.05,
+                          prediction_horizon=0.0)
+    y = p.width / 2 + p.passing_margin + offset
+    near = 2.0
+    # oracle: closed form: at the near corner tan(b) * front_x = half-width.
+    # Higher bearings miss; lower bearings enter the rectangle's rear face.
+    front_x = near - p.passing_margin
+    angle = math.atan2(y, front_x)
+    out = ot.inflate_predicted([10.0], [angle], [(LASER_X + near, 0.0, 1.0, 0.0, near)],
+                               LASER_X, 0.0, p)
+    # At the near corner, a tangent ray has entry == exit and must be retained.
+    if offset <= 0:
+        entry = (near - p.passing_margin) / math.cos(angle)
+        assert out[0] == pytest.approx(entry, abs=1e-12)
+    else:
+        assert out[0] == 10.0
+
+
+@pytest.mark.parametrize('near', [0.0, 0.05, 0.10])
+def test_rectangle_floor_and_nan(near):
+    p = ot.OpponentParams(length=0.58, width=0.31, passing_margin=0.05,
+                          prediction_horizon=0.0)
+    out = ot.inflate_predicted([10.0, math.nan, 0.01], [0.0, 0.0, 0.0],
+                               [(LASER_X + near, 0.0, 1.0, 0.0, near)],
+                               LASER_X, 0.0, p, floor=0.05)
+    # oracle: floor clamp, NaN preservation and never-lengthen invariants.
+    assert out[0] == pytest.approx(max(0.05, near - p.passing_margin), abs=1e-12)
+    assert math.isnan(out[1])
+    assert out[2] == 0.01
+
+
+@pytest.mark.parametrize('name', ['length', 'width'])
+@pytest.mark.parametrize('value', [0.0, -0.1, math.nan, math.inf, -math.inf])
+def test_rectangle_dimensions_positive_finite(name, value):
+    # oracle: R4 interface contract, physical extents must be positive finite.
+    with pytest.raises(ValueError, match=f'opponent_{name} must be positive and finite'):
+        ot.OpponentParams(**{name: value}).validate()
+
+
+def test_visible_nearest_range_is_carried_without_changing_follow_offset():
+    layer = _run_scene(ego_speed=1.0, opp_speed=1.0)
+    d = layer.detections[0]
+    ranges, valid = _scan(_box(3.0, 0.0))
+    # oracle: nearest beam range is measured from the LiDAR, not base_link.
+    assert d.near_range == pytest.approx(float(np.min(ranges[valid])), abs=1e-12)
+    mover = layer.moving_body()[0]
+    assert mover[5] == pytest.approx(d.near_range, abs=1e-12)
+    assert mover[4] == pytest.approx(d.near_x, abs=0.001)  # 1 mm filter residual
+
+
+def test_rectangle_horizon_blocks_an_additional_beam():
+    near, horizon, velocity = 2.0, 0.8, 2.0
+    p = ot.OpponentParams(length=0.58, width=0.31, passing_margin=0.05,
+                          prediction_horizon=horizon, prediction_step=horizon)
+    # oracle: side-on centre starts at x=near+W/2, and translates v*T in y.
+    cx = near + p.width / 2
+    angle = math.atan2(velocity * horizon, cx)
+    opp = [(LASER_X + near, 0.0, 0.0, velocity, near)]
+    future = ot.inflate_predicted([10.0], [angle], opp, LASER_X, 0.0, p)
+    p.prediction_horizon = 0.0
+    now = ot.inflate_predicted([10.0], [angle], opp, LASER_X, 0.0, p)
+    # At the future rectangle, the x slab gives the entry distance.
+    assert future[0] == pytest.approx((near - p.passing_margin) / math.cos(angle),
+                                       abs=1e-12)
+    assert now[0] == 10.0
+
+
+@pytest.mark.parametrize('width', [1.06, 1.52])
+@pytest.mark.parametrize('margin', [0.05, 0.10, 0.15])
+def test_narrow_corridor_refuses_pass_at_required_physical_width(width, margin):
+    p = ot.OpponentParams(length=0.58, width=0.31, passing_margin=margin)
+    # oracle: closed form, centred rectangle leaves half the corridor minus
+    # half the opponent and one margin. Ego needs its width plus TWO margins.
+    available = (width - p.width) / 2 - margin
+    required = 0.31 + 2 * margin
+    expected = available >= required
+    assert ot.avoidance_usable((10, 40, False), (5, 60, False),
+                               gap_width=available, required_width=required) == expected
+
+
+def test_passing_width_exact_boundary_and_next_tick_abort():
+    required = 0.31 + 2 * 0.05
+    # oracle: inclusive physical-width gate, reevaluated without a pass latch.
+    for available, expected in ((required, True), (required - 0.001, False),
+                                ((1.52 - 0.31) / 2 - 0.05, True),
+                                ((1.06 - 0.31) / 2 - 0.05, False)):
+        assert ot.avoidance_usable((10, 40, False), (5, 60, False),
+                                   gap_width=available, required_width=required) == expected
+
+
+def test_rectangle_synthetic_corridor_aborts_on_first_narrow_tick():
+    layer = ot.OpponentAwareness(ot.OpponentParams(passing_margin=0.05),
+                                 WHEELBASE, LASER_X, 0.0, CAR_LENGTH)
+    layer.tracker.tracks = [ot.Track(LASER_X + 2.0, 0.0, vx=1.0, moving=True,
+                                     near_range=2.0)]
+    side = (int(np.searchsorted(ANGLES, 0.15)), int(np.searchsorted(ANGLES, 0.25)), False)
+    plain = (int(np.searchsorted(ANGLES, -0.4)), int(np.searchsorted(ANGLES, 0.4)), False)
+    modes = []
+    for width in (1.52, 1.06):
+        walls = [((-1.0, sign * width / 2), (8.0, sign * width / 2))
+                 for sign in (-1, 1)]
+        window, _valid = _scan(walls + _box(LASER_X + 2.0 + CAR_LENGTH / 2, 0.0))
+        room = layer.passing_gap_width(window, ANGLES, side)
+        # oracle: physical gap between a straight wall and inflated car edge.
+        expected_room = width / 2 - layer.params.width / 2 - layer.params.passing_margin
+        assert room == pytest.approx(expected_room, abs=1e-12)
+        passing = layer.may_pass(0.0) and ot.avoidance_usable(
+            side, plain, gap_width=room,
+            required_width=0.31 + 2 * layer.params.passing_margin)
+        modes.append('pass' if passing else 'follow')
+        if not passing:
+            # oracle: unchanged R2 follow cap, nearest face 2 m from laser.
+            assert layer.follow_cap(False) == pytest.approx(
+                (LASER_X + 2.0 - FRONT - layer.params.follow_min_gap) /
+                layer.params.follow_time_gap, abs=1e-12)
+    assert modes == ['pass', 'follow']  # oracle: no tick of latched passing
+
+
+def test_rectangle_prediction_checks_narrowing_beyond_current_body():
+    layer = ot.OpponentAwareness(ot.OpponentParams(passing_margin=0.05),
+                                 WHEELBASE, LASER_X, 0.0, CAR_LENGTH)
+    layer.tracker.tracks = [ot.Track(LASER_X + 2.0, 0.0, vx=1.0, moving=True,
+                                     near_range=2.0)]
+    side = (int(np.searchsorted(ANGLES, 0.15)), int(np.searchsorted(ANGLES, 0.25)), False)
+    # The neck starts beyond the present inflated rectangle's front, inside
+    # its prediction horizon. Both walls are visible beside the other car.
+    neck_x = LASER_X + 2.0 + CAR_LENGTH + 0.1
+    walls = [((-1.0, s * .76), (neck_x, s * .76)) for s in (-1, 1)]
+    walls += [((neck_x, s * .76), (neck_x, s * .53)) for s in (-1, 1)]
+    walls += [((neck_x, s * .53), (8.0, s * .53)) for s in (-1, 1)]
+    window, _ = _scan(walls + _box(LASER_X + 2.0 + CAR_LENGTH / 2, 0.0))
+    # oracle: once prediction reaches the neck, room is .53-.155-.05=.325,
+    # too narrow for ego's .31+2*.05=.41 m, on this first observed tick.
+    assert layer.passing_gap_width(window, ANGLES, side) == pytest.approx(
+        1.06 / 2 - layer.params.width / 2 - layer.params.passing_margin, abs=1e-12)
+
+
+@pytest.mark.parametrize('heading', [0.0, math.pi / 2])
+def test_rectangle_crossing_side_beam_closed_form(heading):
+    p = ot.OpponentParams(passing_margin=0.05, prediction_horizon=0.0)
+    near = 2.0
+    transverse = p.width / 2 if heading == 0.0 else p.length / 2
+    y = transverse + p.passing_margin - .001
+    angle = math.atan2(y, near - p.passing_margin)
+    out = ot.inflate_predicted([10.0], [angle],
+                               [(LASER_X + near, 0.0, math.cos(heading),
+                                 math.sin(heading), near)], LASER_X, 0, p)
+    # oracle: rear view spans W, crossing view spans L; both meet x=d-margin.
+    assert out[0] == pytest.approx((near - p.passing_margin) / math.cos(angle), abs=1e-12)
+
+
+def test_rectangle_undefined_heading_uses_line_of_sight():
+    p = ot.OpponentParams(passing_margin=0.05, prediction_horizon=0.0)
+    # Below half moving_speed, even a perpendicular velocity must not set h.
+    angle = math.atan2((p.length + p.width) / 4 + p.passing_margin,
+                       2.0 - p.passing_margin)
+    out = ot.inflate_predicted([10.0, 10.0], [0.0, angle],
+                               [(LASER_X + 2.0, 0.0, 0.0, .29, 2.0)], LASER_X, 0, p)
+    # oracle: line-of-sight rear face d, regardless of the low-speed vector.
+    assert out[0] == pytest.approx(2.0 - p.passing_margin, abs=1e-12)
+    assert out[1] == 10.0  # oracle: beyond rear-view width, inside crossing length
+
+
+# --- FollowCapMemory: the follow cap held for a moment after its car is lost ---
+#
+# Spec: the FollowCapMemory docstring in opponent_tracking.py, and the user's
+# decision of 2026-10-28 (option 1): awareness on, with opponent_follow_memory_sec
+# 1.0 s. Each oracle is restated in its test: an inclusive hold of memory_sec
+# measured from the last stored finite cap; the clock rule of
+# OpponentAwareness.observe, 0 < dt <= 0.5 s; and speed-only, so a held cap is
+# never above the stored one. FollowCapMemory is reached through ot.* inside each
+# test body, so the module still imports before the class exists.
+
+@pytest.mark.parametrize('memory_sec, dt', [(1.0, 0.025), (1.0, 0.125), (0.5, 0.025)])
+def test_follow_memory_holds_inclusive_then_releases_one_tick_past(memory_sec, dt):
+    # oracle: spec -- an infinite cap is held while t - t_stored <= memory_sec.
+    # Times are k * dt (a product, as the mirror computes them). dt 0.125 is
+    # binary-exact; dt 0.025 is the real 40 Hz scan interval.
+    memory = ot.FollowCapMemory(memory_sec)
+    assert memory.update(0.4, 0.0) == (0.4, False)
+    last_hold = round(memory_sec / dt)
+    for k in range(1, last_hold + 1):
+        assert memory.update(math.inf, k * dt) == (0.4, True), k
+    assert memory.update(math.inf, (last_hold + 1) * dt) == (math.inf, False)
+
+
+def test_follow_memory_of_zero_disables_the_hold():
+    # oracle: spec -- memory_sec == 0 always returns (follow_cap, False).
+    memory = ot.FollowCapMemory(0.0)
+    assert memory.update(0.4, 0.0) == (0.4, False)
+    assert memory.update(math.inf, 0.0) == (math.inf, False)
+    assert memory.update(math.inf, 0.025) == (math.inf, False)
+    assert memory.update(0.9, 0.05) == (0.9, False)
+    assert memory.update(math.inf, 0.075) == (math.inf, False)
+    # oracle: the same spec -- NaN comes back as it is, not turned into no cap.
+    # Removing the zero guard turns it into inf; this line catches that.
+    cap, held = memory.update(math.nan, 0.1)
+    assert math.isnan(cap) and held is False
+
+
+def test_a_new_finite_cap_replaces_the_stored_value_and_restarts_the_hold():
+    # oracle: spec -- the newest finite cap is the one held, and its hold runs
+    # from its own stored time (0.9 s), not from the first cap (0.0 s).
+    memory = ot.FollowCapMemory(1.0)
+    assert memory.update(0.4, 0.0) == (0.4, False)
+    for k in range(1, 36):                       # 0.025 .. 0.875 s: the old cap
+        assert memory.update(math.inf, k * 0.025) == (0.4, True), k
+    assert memory.update(0.9, 36 * 0.025) == (0.9, False)    # t = 0.9 s
+    for k in range(37, 77):                      # to 1.9 s: 1.0 s after the new cap
+        assert memory.update(math.inf, k * 0.025) == (0.9, True), k
+    # From t=0 the hold would have ended at 1.0 s, so this is the restart.
+    assert memory.update(math.inf, 77 * 0.025) == (math.inf, False)
+
+
+@pytest.mark.parametrize('second_time', [0.5, 0.45])
+def test_a_repeated_or_backwards_clock_clears_the_hold(second_time):
+    # oracle: spec -- a non-monotonic t_s clears the memory. The rule is the one
+    # OpponentAwareness.observe uses, 0 < dt <= 0.5 s, so a repeated stamp (dt 0,
+    # second_time 0.5) clears it too; 0.45 is a step backwards.
+    memory = ot.FollowCapMemory(1.0)
+    assert memory.update(0.4, 0.5) == (0.4, False)
+    assert memory.update(math.inf, second_time) == (math.inf, False)
+    # Nothing is stored any more, so the clock moving on does not bring it back.
+    assert memory.update(math.inf, 0.525) == (math.inf, False)
+
+
+@pytest.mark.parametrize('gap, held', [(0.5, True), (0.5 + 2.0 ** -20, False)])
+def test_a_gap_over_half_a_second_clears_the_hold_and_exactly_half_does_not(gap, held):
+    # Binary-exact times (0.25 and 0.75) make the boundary exact. The hold would
+    # still be inside memory_sec here (0.75 + 2**-20 < 1.0 s), so only the clock
+    # rule can release it.
+    memory = ot.FollowCapMemory(1.0)
+    assert memory.update(0.4, 0.0) == (0.4, False)
+    assert memory.update(math.inf, 0.25) == (0.4, True)
+    # oracle: observe's staleness rule, 0 < dt <= 0.5 s, inclusive at exactly 0.5.
+    expected = (0.4, True) if held else (math.inf, False)
+    assert memory.update(math.inf, 0.25 + gap) == expected
+
+
+def test_a_nan_cap_reads_as_no_cap_and_clears_the_hold():
+    # oracle: spec -- NaN is no cap: clear, and return (inf, False).
+    memory = ot.FollowCapMemory(1.0)
+    assert memory.update(0.4, 0.0) == (0.4, False)
+    assert memory.update(math.nan, 0.025) == (math.inf, False)
+    assert memory.update(math.inf, 0.05) == (math.inf, False)
+
+
+def test_the_held_cap_never_exceeds_the_last_stored_finite_cap():
+    # oracle: invariant over a fixed-seed random run. Whenever a cap is held it
+    # is the last finite cap stored, and never higher. The expected answer for
+    # every call comes from a reference model written here from the spec, not
+    # from the implementation: a finite cap is stored with its time; NaN and a
+    # stale or backwards clock clear the store; an infinite cap is held while
+    # t - t_stored <= 1.0 s (inclusive).
+    rng = np.random.default_rng(20261028)
+    memory = ot.FollowCapMemory(1.0)
+    stored = None                 # (cap, time) as the spec defines it
+    k = 0                         # tick index, t = k * 0.025 (no accumulated roundoff)
+    holds = stale = nans = 0
+    for _ in range(4000):
+        u = rng.random()
+        step = 24 if u < 0.03 else (-1 if u < 0.05 else 1)   # 0.6 s gap, backwards, normal
+        if step != 1:
+            stored = None
+            stale += 1
+        k += step
+        t = k * 0.025
+        u = rng.random()
+        if u < 0.02:
+            cap = math.nan
+        elif u < 0.45:
+            cap = float(rng.uniform(0.0, 3.0))
+        else:
+            cap = math.inf
+        if math.isnan(cap):
+            expected = (math.inf, False)
+            stored = None
+            nans += 1
+        elif math.isfinite(cap):
+            expected = (cap, False)
+            stored = (cap, t)
+        elif stored is not None and t - stored[1] <= 1.0 + 1e-12:
+            expected = (stored[0], True)
+            holds += 1
+        else:
+            expected = (math.inf, False)
+        got = memory.update(cap, t)
+        assert got == expected, (k, cap, got, expected)
+        if got[1]:
+            # oracle: invariant -- a held cap is finite and never above the stored one.
+            assert math.isfinite(got[0]) and got[0] <= stored[0], (k, got, stored)
+    # The run must exercise every branch, or the invariant proves little.
+    assert holds >= 100 and stale >= 50 and nans >= 20, (holds, stale, nans)
+
+
+@pytest.mark.parametrize('value', [-0.1, -1e-9, math.nan, math.inf])
+def test_follow_memory_must_be_finite_and_not_negative(value):
+    # oracle: spec -- validate() requires finite and >= 0; -1e-9 is one step past 0.
+    with pytest.raises(ValueError, match='opponent_follow_memory_sec must be >= 0'):
+        ot.OpponentParams(follow_memory_sec=value).validate()
+
+
+def test_follow_memory_defaults_to_one_second_and_zero_is_accepted():
+    # oracle: spec (Interfaces) -- default 1.0 s; 0.0 is the off switch and validates.
+    assert ot.OpponentParams().follow_memory_sec == 1.0
+    ot.OpponentParams(follow_memory_sec=0.0).validate()
+
+
+def _layer():
+    return ot.OpponentAwareness(ot.OpponentParams(), WHEELBASE, LASER_X, 0.0, CAR_LENGTH)
+
+
+@pytest.mark.parametrize('memory_sec, expected', [(0.0, (math.inf, False)),
+                                                  (1.0, (0.4, True))])
+def test_the_layer_passes_its_memory_parameter_to_the_memory(memory_sec, expected):
+    # oracle: spec -- follow_memory_sec is the memory's hold; 0 holds nothing.
+    layer = ot.OpponentAwareness(ot.OpponentParams(follow_memory_sec=memory_sec),
+                                 WHEELBASE, LASER_X, 0.0, CAR_LENGTH)
+    layer.follow_memory.update(0.4, 0.0)
+    assert layer.follow_memory.update(math.inf, 0.025) == expected
+
+
+def test_resetting_the_layer_forgets_the_held_cap():
+    # oracle: spec -- the memory is reset wherever the node resets its opponent layer.
+    layer = _layer()
+    layer.follow_memory.update(0.4, 0.0)
+    layer.reset()
+    assert layer.follow_memory.update(math.inf, 0.025) == (math.inf, False)
+
+
+def test_a_bad_scan_interval_forgets_the_held_cap():
+    # oracle: the same reset path as test_layer_bad_dt_resets_history. A dt that is
+    # not positive makes the layer start over, and the memory starts over with it.
+    layer = _layer()
+    layer.follow_memory.update(0.4, 0.0)
+    r, v = _scan(_box(1.0, 0.0))
+    layer.observe(r, v, ANGLES, 1.0, 0.0, math.nan)
+    assert layer.follow_memory.update(math.inf, 0.025) == (math.inf, False)
+
+
+@pytest.mark.parametrize('bad_time', [math.nan, math.inf, -math.inf])
+def test_a_non_finite_time_clears_the_memory_and_passes_the_cap_through(bad_time):
+    # oracle: spec -- a t_s that is not finite clears the memory and returns
+    # (follow_cap, False): the cap given comes back as it is, never held. The
+    # layer's own reset is a separate path, so this is the memory's own branch.
+    memory = ot.FollowCapMemory(1.0)
+    assert memory.update(0.4, 0.0) == (0.4, False)
+    assert memory.update(0.9, bad_time) == (0.9, False)
+    assert memory.update(math.inf, 0.025) == (math.inf, False)

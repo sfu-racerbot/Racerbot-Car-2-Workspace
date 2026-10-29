@@ -19,6 +19,9 @@ these nodes hold their output and say why, and they keep checking, so
 bringing the car up *after* the simulator shuts it up too.
 """
 
+import math
+import time
+
 # Node names started by f1tenth_stack/launch/bringup_launch.py that mean
 # "there is real hardware on this graph".
 HARDWARE_NODE_NAMES = (
@@ -47,21 +50,48 @@ def conflicting_hardware_nodes(node):
 class HardwareInterlock:
     """Latched 'is it safe to publish' check with a throttled explanation."""
 
-    def __init__(self, node, purpose: str):
+    def __init__(self, node, purpose: str, discovery_hold_sec=3.0, clock=time.monotonic,
+                 clear_confirm_sec=0.0):
+        if not math.isfinite(discovery_hold_sec) or discovery_hold_sec <= 0:
+            raise ValueError('interlock_discovery_hold_sec must be finite and greater than zero')
+        if not math.isfinite(clear_confirm_sec) or clear_confirm_sec < 0:
+            raise ValueError('interlock_clear_confirm_sec must be finite and >= 0')
         self._node = node
         self._purpose = purpose
-        self._blocked = False
+        self._blocked = True
+        self._clock = clock
+        self._started = clock()
+        self._discovery_hold_sec = discovery_hold_sec
+        # Opening needs the graph clean on every check for this long, not on
+        # one check: discovery on a loaded machine can outlast the hold
+        # (measured 2026-10-29: ~2.45 s typical, and a forged /joy leaked
+        # beside a urg_node with a 3 s hold alone).
+        self._clear_confirm_sec = clear_confirm_sec
+        self._clean_since = None
+        self._waiting_logged = False
+        self._checked_graph = False
 
     @property
     def blocked(self) -> bool:
         return self._blocked
 
     def safe(self) -> bool:
+        if self._clock() - self._started < self._discovery_hold_sec:
+            if not self._waiting_logged:
+                self._node.get_logger().info(
+                    f'waiting {self._discovery_hold_sec}s for ROS discovery before {self._purpose}',
+                    throttle_duration_sec=5.0)
+                self._waiting_logged = True
+            return False
         conflicts = conflicting_hardware_nodes(self._node)
+        first_check = not self._checked_graph
+        self._checked_graph = True
+        if conflicts is None or conflicts:
+            self._clean_since = None
         if conflicts is None:
             # Fail closed: an unreadable graph keeps (or starts) the block.
             # Only a successful query showing no drivers may clear it.
-            if not self._blocked:
+            if not self._blocked or first_check:
                 self._blocked = True
                 self._node.get_logger().error(
                     f'Cannot read the ROS graph, so cannot rule out real hardware. '
@@ -72,7 +102,7 @@ class HardwareInterlock:
                     throttle_duration_sec=5.0)
             return False
         if conflicts:
-            if not self._blocked:
+            if not self._blocked or first_check:
                 self._blocked = True
                 self._node.get_logger().error(
                     f'REAL HARDWARE DETECTED ({", ".join(conflicts)}). '
@@ -85,6 +115,11 @@ class HardwareInterlock:
                     throttle_duration_sec=5.0)
             return False
         if self._blocked:
+            now = self._clock()
+            if self._clean_since is None:
+                self._clean_since = now
+            if now - self._clean_since < self._clear_confirm_sec:
+                return False
             self._blocked = False
             self._node.get_logger().info(
                 f'Hardware drivers are gone; {self._purpose} resumed.')

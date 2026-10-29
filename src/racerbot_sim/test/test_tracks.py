@@ -1,6 +1,7 @@
 """Coverage for the generated closed-loop tracks.
 
-No ROS and no F1TENTH Gym, so:
+No ROS. One test loads the imported map into F1TENTH Gym (it skips without
+the gym checkout at .sim/), so:
 
     python3 -m pytest src/racerbot_sim/test/test_tracks.py -v
 """
@@ -8,6 +9,7 @@ No ROS and no F1TENTH Gym, so:
 import math
 import sys
 import os
+import shutil
 
 import numpy as np
 import pytest
@@ -162,6 +164,84 @@ def _car_width():
     return params['car_width']
 
 
-def test_unknown_layout_is_refused():
-    with pytest.raises(KeyError):
-        tracks.build('no_such_track', '/tmp')
+CAR1_COURSE = 'car1_course_2026_10_26'
+
+
+def _copy_car1_course(directory):
+    """The imported car 1 course, copied into `directory` (never linked: a hard
+    link fails across filesystems, and tmp_path is often a different one)."""
+    source = os.path.join(os.path.dirname(__file__), '..', '..', '..',
+                          'tools', 'f1tenth_sim', 'maps')
+    for suffix in ('_map.yaml', '_centerline.csv', '.png'):
+        shutil.copy2(os.path.join(source, CAR1_COURSE + suffix),
+                     directory / (CAR1_COURSE + suffix))
+    return directory
+
+
+def test_resolve_generated_layout_builds_the_track(tmp_path):
+    path = tracks.resolve('indoor_oval', tmp_path)
+    assert path == tmp_path / 'indoor_oval.yaml'
+    assert (tmp_path / 'indoor_oval_map.yaml').exists()
+
+
+def test_resolve_imported_map_returns_stem_without_writing(tmp_path):
+    _copy_car1_course(tmp_path)
+    copies = sorted(CAR1_COURSE + suffix for suffix in ('_map.yaml', '_centerline.csv', '.png'))
+    for item in tmp_path.iterdir():
+        # A write would leave a fresh mtime behind; the copies start at 1970.
+        os.utime(item, ns=(0, 0))
+    assert tracks.resolve(CAR1_COURSE, tmp_path) == tmp_path / CAR1_COURSE
+    assert sorted(item.name for item in tmp_path.iterdir()) == copies
+    for item in tmp_path.iterdir():
+        assert item.stat().st_mtime_ns == 0, f'resolve wrote {item.name}'
+
+
+def test_unknown_track_is_refused_and_names_the_directory(tmp_path):
+    with pytest.raises(KeyError, match='no_such_track') as refused:
+        tracks.resolve('no_such_track', tmp_path)
+    assert str(tmp_path) in refused.value.args[0]
+    assert 'indoor_oval' in refused.value.args[0], 'the message should list the layouts'
+
+
+def test_centerline_for_generated_layout_does_not_write(tmp_path):
+    line = tracks.centerline_for('indoor_oval', tmp_path)
+    # oracle: closed form, layout begins at (0, -half_y), and its rounded perimeter.
+    assert line[0] == pytest.approx([0.0, -3.2], abs=1e-9)  # metres
+    expected = 4 * (5 - 1.8) + 4 * (3.2 - 1.8) + 2 * math.pi * 1.8
+    assert _lap_length(line) == pytest.approx(expected, abs=0.002)  # metres, polygon discretization
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_centerline_for_imported_map_reads_csv_without_writing(tmp_path):
+    # oracle: invariant, reads exactly the supplied CSV, without requiring a map build.
+    csv = tmp_path / 'imported_centerline.csv'
+    csv.write_text('x_m,y_m\n1,2\n3,4\n5,6\n')
+    os.utime(csv, ns=(0, 0))
+    assert tracks.centerline_for('imported', tmp_path).tolist() == [[1, 2], [3, 4], [5, 6]]
+    assert csv.stat().st_mtime_ns == 0
+    assert list(tmp_path.iterdir()) == [csv]
+
+
+def test_imported_car1_course_starts_car_one_on_its_centreline(tmp_path):
+    """Gym-backed: SimBridge loads the imported map and puts car 1 on the
+    first centreline point, outside every wall."""
+    from racerbot_sim import sim_bridge
+    sim_bridge.add_sim_python_path()
+    try:
+        import f1tenth_gym  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if exc.name != 'f1tenth_gym':
+            raise
+        pytest.skip('needs the gym checkout at .sim/ (docs/ros-simulator.md); runs wherever racerbot_sim runs')
+    _copy_car1_course(tmp_path)
+    centerline = tracks.load_centerline(tmp_path, CAR1_COURSE)
+    path = tracks.resolve(CAR1_COURSE, tmp_path)
+    bridge = sim_bridge.SimBridge(sim_bridge.SimConfig(
+        track_path=str(path), centerline=centerline, odom_speed_noise_std=0.0))
+    try:
+        state = bridge.agent_state(0)
+        # oracle: car 1 starts at offset 0.0 of the centreline, the first point; 5 cm allowed.
+        assert math.hypot(state.x - centerline[0][0], state.y - centerline[0][1]) <= 0.05
+        assert not bridge.body_contact(0)
+    finally:
+        bridge.close()

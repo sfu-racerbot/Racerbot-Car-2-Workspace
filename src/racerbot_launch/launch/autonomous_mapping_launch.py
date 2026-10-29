@@ -43,6 +43,10 @@ def generate_launch_description():
     ordering against max_speed at startup and will not run at all if only
     max_speed moves.
     """
+    opponent_arg = DeclareLaunchArgument(
+        'opponent_awareness', default_value='false',
+        description='Mapping is one car; opponent awareness is for racing. '
+                    'Set true to enable it while mapping.')
     max_speed_arg = DeclareLaunchArgument(
         'mapping_max_speed', default_value='',
         description="Optional cap, empty by default -- gap_follow.yaml's own tuned "
@@ -74,6 +78,9 @@ def generate_launch_description():
     # coupled cap comes down by the same factor here; see
     # gap_follow/speed_overrides.py.
     def gap_follow_node(context):
+        enabled = LaunchConfiguration('opponent_awareness').perform(context).lower()
+        if enabled not in ('true', 'false'):
+            raise RuntimeError(f"opponent_awareness:={enabled!r}: use true or false")
         speeds = mapping_speed_overrides(
             gap_follow_config,
             LaunchConfiguration('mapping_max_speed').perform(context),
@@ -83,10 +90,10 @@ def generate_launch_description():
             executable='gap_follow_node',
             name='gap_follow_node',
             output='screen',
-            parameters=[gap_follow_config, speeds],
+            parameters=[gap_follow_config, {'enable_opponent_awareness': enabled == 'true'}, speeds],
         )]
 
     return LaunchDescription([
-        max_speed_arg, min_speed_arg, slam_launch,
+        opponent_arg, max_speed_arg, min_speed_arg, slam_launch,
         OpaqueFunction(function=gap_follow_node),
     ])

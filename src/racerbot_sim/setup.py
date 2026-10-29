@@ -11,9 +11,10 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', [
-            'launch/sim_bringup_launch.py',
-            'launch/sim_auto_map_race_launch.py',
-        ]),
+             'launch/sim_bringup_launch.py',
+             'launch/sim_auto_map_race_launch.py',
+             'launch/sim_race_launch.py',
+         ]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -28,6 +29,7 @@ setup(
         'console_scripts': [
             'gym_bridge_node = racerbot_sim.gym_bridge_node:main',
             'sim_joy_node = racerbot_sim.sim_joy_node:main',
+            'race_referee_node = racerbot_sim.race_referee_node:main',
         ],
     },
 )

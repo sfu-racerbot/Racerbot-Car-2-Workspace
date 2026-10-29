@@ -38,6 +38,9 @@ EXPECTED = [
      "LOG_DIRECTORY = '~/racerbot-ws/data/racerbot_runs'"),
     ('src/racerbot_sim/launch/sim_auto_map_race_launch.py',
      "'~/racerbot-ws/data/racerbot_sim/auto'"),
+    # racerbot_sim's race referee (sim_race_launch.py, from car 1)
+    ('src/racerbot_sim/racerbot_sim/race_referee_node.py',
+     "f'~/racerbot-ws/data/racerbot_sim/races/"),
     # bringup's automatic recorder (race_diagnostics auto_record, from car 1)
     ('src/race_diagnostics/race_diagnostics/auto_record_node.py',
      "'output_directory', '~/racerbot-ws/data/racerbot_runs'"),
@@ -53,7 +56,7 @@ EXPECTED = [
      "'~/racerbot-ws/data/racerbot_runs/<time>/"),
 ]
 
-OLD_PATH = re.compile(r'\.ros/racerbot_(runs|auto|sim/auto)\b')
+OLD_PATH = re.compile(r'\.ros/racerbot_(runs|auto|sim/auto|sim/races)\b')
 
 
 @pytest.mark.parametrize('relpath,needle', EXPECTED)

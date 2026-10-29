@@ -153,12 +153,16 @@ REQUIRED_PARAMS = frozenset((
     "opponent_min_hits",
     "opponent_max_misses",
     "opponent_moving_speed",
+    "opponent_stopped_release_sec",
     "opponent_radius",
+    "opponent_length",
+    "opponent_width",
     "opponent_passing_margin",
     "opponent_prediction_horizon",
     "opponent_prediction_step",
     "opponent_follow_min_gap",
     "opponent_follow_time_gap",
+    "opponent_abort_speed_margin",
     "opponent_follow_lateral",
     "opponent_relevant_lateral",
     "opponent_pass_max_steering",
@@ -167,6 +171,7 @@ REQUIRED_PARAMS = frozenset((
     "opponent_steer_delay",
     "opponent_steer_gain",
     "opponent_steer_rate_max",
+    "opponent_follow_memory_sec",
 ))
 
 
@@ -202,6 +207,8 @@ LEGACY_VALUES = {
     "enable_opponent_awareness": False,
     **{f"opponent_{name}": getattr(opponent_tracking.OpponentParams(), name)
        for name in opponent_tracking.OpponentParams.__dataclass_fields__},
+    # The follow-cap memory (2026-10-28) did not exist: 0 is no hold, the old behaviour.
+    "opponent_follow_memory_sec": 0.0,
 }
 
 
@@ -384,6 +391,7 @@ class GapController:
                 switch_margin=p["gap_switch_margin"])
 
         follow_cap = math.inf
+        alongside_cap = math.inf
         self.opponent_mode = None
         if self.opponents is not None and self.opponents.moving_body():
             avoid = select(self.opponents.augment(window, beam_angles))
@@ -395,17 +403,41 @@ class GapController:
             # means follow instead.
             # And only on a straight (opponent_tracking.pass_allowed).
             passing = (self.opponents.may_pass(self.steering_basis)
-                       and opponent_tracking.avoidance_usable(avoid[1:], plain[1:]))
+                       and opponent_tracking.avoidance_usable(
+                           avoid[1:], plain[1:],
+                           gap_width=self.opponents.passing_gap_width(
+                               window, beam_angles, avoid[1:]),
+                           required_width=p["car_width"]
+                           + 2 * self.opponents.params.passing_margin))
             if passing:
                 processed, gap_start, gap_end, used_fallback = avoid
                 self.opponent_mode = "clear"
             else:
                 processed, gap_start, gap_end, used_fallback = plain
                 self.opponent_mode = "follow"
-            follow_cap = self.opponents.follow_cap(passing)
-            tel["follow_cap"] = follow_cap
+            follow_cap = self.opponents.follow_law_cap(passing)
+            alongside_cap = self.opponents.alongside_cap(passing)
+            tel["follow_cap"] = min(follow_cap, alongside_cap)
         else:
             processed, gap_start, gap_end, used_fallback = select(window)
+
+        if (self.opponents is not None and self.opponent_mode is None
+                and self.opponents.followed_body()):
+            self.opponent_mode = "follow"
+            follow_cap = self.opponents.follow_law_cap(passing=False)
+            alongside_cap = self.opponents.alongside_cap(passing=False)
+            tel["follow_cap"] = min(follow_cap, alongside_cap)
+
+        # The follow cap outlives its car for opponent_follow_memory_sec, as in
+        # gap_follow_node: speed only, on the same tick, before the no_safe_gap stop.
+        # The alongside-abort ceiling is added after the memory, never held by it.
+        if self.opponents is not None:
+            follow_cap, held = self.opponents.follow_memory.update(
+                follow_cap, step * CONTROL_DT)
+            follow_cap = min(follow_cap, alongside_cap)
+            if held:
+                self.opponent_mode = "follow_memory"
+                tel["follow_cap"] = follow_cap
 
         if gap_start is None:
             return self._stop(step, "no_safe_gap")

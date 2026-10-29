@@ -14,6 +14,10 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    opponent_arg = DeclareLaunchArgument(
+        'opponent_awareness', default_value='false',
+        description='Mapping is one car; opponent awareness is for racing. '
+                    'Set true to enable it while mapping.')
     include_bringup_arg = DeclareLaunchArgument(
         'include_bringup', default_value='true',
         description=(
@@ -87,6 +91,9 @@ def generate_launch_description():
         get_package_share_directory('pure_pursuit'), 'config', 'pure_pursuit.yaml')
 
     def mapping_controller(context):
+        enabled = LaunchConfiguration('opponent_awareness').perform(context).lower()
+        if enabled not in ('true', 'false'):
+            raise RuntimeError(f"opponent_awareness:={enabled!r}: use true or false")
         # Empty speed arguments mean "no cap" and produce no overrides at
         # all -- gap_follow maps at its own tuned speeds. The 2026-08-19
         # run is why that is the default: a forced max_speed of 1.0 was
@@ -109,7 +116,7 @@ def generate_launch_description():
             executable='gap_follow_node',
             name='gap_follow_node',
             output='screen',
-            parameters=[gap_config, dict(
+            parameters=[gap_config, {'enable_opponent_awareness': enabled == 'true'}, dict(
                 {'drive_topic': '/auto_map/drive'}, **speeds)],
         )]
 
@@ -142,6 +149,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        opponent_arg,
         include_bringup_arg,
         mapping_max_speed_arg,
         mapping_min_speed_arg,

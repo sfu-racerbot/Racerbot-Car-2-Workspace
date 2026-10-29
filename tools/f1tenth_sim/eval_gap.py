@@ -22,7 +22,13 @@ tight, gets stuck near walls) live.
 
     python3 tools/f1tenth_sim/eval_gap.py --track asb_10000
     python3 tools/f1tenth_sim/eval_gap.py --track all --set corner_speed=1.5
+    python3 tools/f1tenth_sim/eval_gap.py --track indoor_oval --seeds 2 --workers 2 --set enable_opponent_awareness=true
     python3 tools/f1tenth_sim/eval_gap.py --track all --baseline
+
+With opponent awareness on and one car on track, every moving track is a
+false mover: a wall taken for a car. ``false_mover_ticks`` counts the ticks
+with any moving track and ``false_mover_tracks`` the distinct tracks that
+moved (recognition.false_movers). The aggregate sums both over the runs.
 
 Exit code is 0 when every selected track passes (one lap, no wall contact).
 """
@@ -34,6 +40,7 @@ import json
 import math
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -58,6 +65,7 @@ from f1tenth_gym.envs.observation import ObservationType  # noqa: E402
 
 from gap_follow import gap_logic  # noqa: E402
 from gap_mirror import GapController, node_params  # noqa: E402
+from recognition import false_movers, moving_track_ids  # noqa: E402
 from racerbot_sim import tracks as sim_tracks  # noqa: E402
 from run_analysis import weave  # noqa: E402
 from sim_fidelity import CALIBRATION, PROFILES  # noqa: E402
@@ -214,6 +222,8 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
     speed_shed = 0.0
     hard_brake_ticks = 0
     last_true_speed = None
+    # Per tick, the ids of the tracks marked moving (awareness on only).
+    moving_per_tick = []
 
     for step in range(max_steps):
         ego = obs["agent_0"]
@@ -225,6 +235,8 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
         steering, cmd_speed = ctrl.command(ego["scan"], speed_meas, step,
                                            yaw_rate=float(state[5]))
         steerings.append(steering)
+        if ctrl.opponents is not None:
+            moving_per_tick.append(moving_track_ids(ctrl.opponents.tracker.tracks))
         stop_steps += int(ctrl.stopped)
         min_body_clear = min(min_body_clear, ctrl.telemetry.get("min_clear", math.inf))
         if ctrl.stopped:
@@ -283,6 +295,7 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
                                       np.asarray(steerings), swing_rad=weave.SWING_RAD)
     result = {
         "track": track,
+        "seed": seed,
         "reverse": reverse,
         "passed": bool(laps >= 1.0 and not collision),
         "laps": laps,
@@ -306,6 +319,12 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
         "hard_brake_ticks": hard_brake_ticks,
         "steering_reversals_per_s": round(reversals, 3),
     }
+    # One car alone on track, so every moving track is a false mover. Without
+    # awareness nothing is measured, so None rather than a count of zero.
+    if ctrl.opponents is not None:
+        result.update(false_movers(moving_per_tick))
+    else:
+        result.update(false_mover_ticks=None, false_mover_tracks=None)
     result.update(plant_report)
     return result
 
@@ -412,13 +431,22 @@ def parse_set(values):
     return params
 
 
+def _job(job):
+    track, seed, params, timeout, reverse = job
+    return run_track(track, params, seed, timeout, reverse)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--track", default="asb_10000",
                         help="track name, 'indoor', 'narrow', 'maps', 'gym', 'all', "
                              "or a comma-separated list of any of these")
-    parser.add_argument("--seed", type=int, default=12345)
+    parser.add_argument("--seed", type=int, default=12345, help="the first seed")
+    parser.add_argument("--seeds", type=int, default=1,
+                        help="seeds per track: --seed and the ones after it")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="processes to run the (track, seed) jobs in")
     parser.add_argument("--timeout", type=float, default=240.0,
                         help="simulated seconds before giving up on a lap")
     parser.add_argument("--set", action="append", default=[],
@@ -429,22 +457,37 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     selected = select_tracks(args.track)
-
     params = parse_set(args.set)
-    results = []
     for track in selected:
-        res = run_track(track, params, args.seed, args.timeout, args.reverse)
-        results.append(res)
+        track_path(track)  # build the layouts before any worker process forks
+    jobs = [(track, args.seed + k, params, args.timeout, args.reverse)
+            for track in selected for k in range(args.seeds)]
+    if args.workers > 1:
+        with ProcessPoolExecutor(max_workers=args.workers) as pool:
+            results = list(pool.map(_job, jobs))
+    else:
+        results = [_job(job) for job in jobs]
+    for res in results:
         status = "PASS" if res["passed"] else "FAIL"
-        print(f"{status} {track:14s} laps={res['laps']:.2f} "
+        print(f"{status} {res['track']:14s} seed={res['seed']} laps={res['laps']:.2f} "
               f"time={res['sim_time_s']:7.1f}s vmean={res['mean_speed']:.2f} "
               f"stops={res['stop_steps']} stuck={res['max_stuck_steps']} "
               f"contact={res.get('contact_steps', 0)} "
               f"minfwd={res['min_forward_scan_m']} rev={res['steering_reversals_per_s']:.2f}/s "
+              f"false_mover_ticks={res['false_mover_ticks']} "
+              f"false_mover_tracks={res['false_mover_tracks']} "
               f"caps={res['cap_histogram']}", flush=True)
 
     passed = sum(1 for r in results if r["passed"])
+    measured = [r for r in results if r["false_mover_ticks"] is not None]
+    fm_ticks = sum(r["false_mover_ticks"] for r in measured) if measured else None
+    fm_tracks = sum(r["false_mover_tracks"] for r in measured) if measured else None
+    if measured:
+        print(f"false movers over {len(measured)} runs with awareness on: "
+              f"false_mover_ticks={fm_ticks} false_mover_tracks={fm_tracks} "
+              "(tracks are counted within each run, then summed)", flush=True)
     print(json.dumps({"passed": passed, "total": len(results),
+                      "false_mover_ticks": fm_ticks, "false_mover_tracks": fm_tracks,
                       "results": results}, indent=2))
     if args.output:
         Path(args.output).write_text(json.dumps(results, indent=2) + "\n")

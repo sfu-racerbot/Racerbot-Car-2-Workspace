@@ -25,6 +25,13 @@ aggregate the wins, the mean gap and the contacts per car. ``--swap-starts``
 runs every seed twice with the start order swapped, so the starting position
 cancels out.
 
+For a two-car head-to-head, each car's recognition of the other is measured
+too: whether the other car is visible to its scan, and whether a moving track
+sits on it (leader_visible and is_recognised give the exact rules). The report
+shows, per car, the delay of each visibility episode from the other car coming
+into view to its first recognition, the median of those delays, and the share
+of visible ticks recognised.
+
     python3 tools/f1tenth_sim/eval_gap_multi.py --track indoor_wide --cars 3 --seeds 4
     python3 tools/f1tenth_sim/eval_gap_multi.py --track asb_10000 --cars 2 --speeds 3.5,2.0
     python3 tools/f1tenth_sim/eval_gap_multi.py --track indoor_wide --cars 2 --car-set 1:max_lateral_accel=2.0 --swap-starts --seeds 2
@@ -35,6 +42,7 @@ Exit code 0 when every run passes; always 0 for a two-car head-to-head.
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import sys
 from concurrent.futures import ProcessPoolExecutor
@@ -50,13 +58,25 @@ from f1tenth_gym.envs.env_config import EnvConfig, ObservationConfig, Simulation
 from f1tenth_gym.envs.integrators import IntegratorType  # noqa: E402
 from f1tenth_gym.envs.observation import ObservationType  # noqa: E402
 
+from gap_follow import gap_logic  # noqa: E402
 from gap_mirror import GapController  # noqa: E402
+from recognition import (  # noqa: E402
+    median_delay,
+    recognised_fraction,
+    recognition_counts,
+    recognition_delays,
+)
 from sim_fidelity import CALIBRATION, PROFILES  # noqa: E402
 from sim_fidelity.plant import DEFAULT_PROFILE, FidelityPlant, env_components  # noqa: E402
 
 CONTROL_DT = eval_gap.CONTROL_DT
 # An overtake is a change of the gap's sign that holds at least this long.
 PERSIST_S = 0.5
+STALL_SPEED_MPS = 0.05
+STALL_MIN_S = 1.0
+# Recognition: a moving track within this distance of the other car's centre
+# recognises it, and a scan reading within it of the car's near side sees it.
+RECOGNITION_TOLERANCE_M = 0.5
 _TRUE_WORDS = ("1", "true", "yes", "on")
 _FALSE_WORDS = ("0", "false", "no", "off")
 
@@ -154,13 +174,94 @@ def line_up_progress(reference: np.ndarray, poses, reverse: bool) -> list:
     return [_Progress(reference, pose[:2], reverse, origin_s=0.0) for pose in poses]
 
 
+def in_base_link(car, point, rear_offset: float) -> tuple:
+    """``point`` (x, y) in the base_link frame of ``car`` = (x, y, yaw).
+
+    ``car`` is a gym state, which is the car's centre of gravity. base_link is
+    the rear axle, ``rear_offset`` metres behind it along the heading. It is the
+    frame OpponentAwareness.moving_body() is expressed in, since its dead
+    reckoning is the rear axle's. The axes follow the car: +x ahead, +y left.
+    """
+    x, y, yaw = car
+    ox = x - rear_offset * math.cos(yaw)
+    oy = y - rear_offset * math.sin(yaw)
+    dx, dy = point[0] - ox, point[1] - oy
+    c, s = math.cos(yaw), math.sin(yaw)
+    return c * dx + s * dy, -s * dx + c * dy
+
+
+def leader_visible(leader_base, lidar_x: float, ranges, valid, angle_min: float,
+                   angle_increment: float, max_range: float, leader_half_length: float,
+                   tolerance: float = RECOGNITION_TOLERANCE_M,
+                   leader_half_width=None, leader_yaw: float = 0.0) -> bool:
+    """Whether a follower's scan sees the other car on this tick.
+
+    ``leader_base`` is the other car's centre in the follower's base_link.
+    ``lidar_x`` is where the scan starts along base_link x, the simulator's
+    real sensor position. ``ranges`` and ``valid`` are the scan as the
+    controller gets it, after gap_logic.sanitize_ranges.
+
+    Visible when all four hold:
+
+    1. the centre is within ``max_range`` of base_link (opponent_max_range, the
+       same gate moving_body() applies);
+    2. the centre's bearing from the sensor is inside the scan's field of view;
+    3. the beam nearest that bearing is valid and reads within ``tolerance``
+       of the near side of a rectangle centred on the truth position, oriented
+       at ``leader_yaw`` relative to base_link. The centre ray intersects the
+       rectangle at distance min(half_length/|cos|, half_width/|sin|) before
+       its centre. If no width is supplied, use a circle of half_length radius;
+    4. the near side lies in front of the sensor.
+
+    Returns a bool. An empty scan sees nothing.
+    """
+    if len(ranges) == 0:
+        return False
+    bx, by = leader_base
+    if math.hypot(bx, by) > max_range:
+        return False
+    qx, qy = bx - lidar_x, by
+    bearing = math.atan2(qy, qx)
+    last = angle_min + (len(ranges) - 1) * angle_increment
+    if not angle_min <= bearing <= last:
+        return False
+    index = round((bearing - angle_min) / angle_increment)
+    if not valid[index]:
+        return False
+    if leader_half_width is None:
+        radius = leader_half_length
+    else:
+        relative = bearing - leader_yaw
+        along, across = abs(math.cos(relative)), abs(math.sin(relative))
+        radius = min(leader_half_length / along if along else math.inf,
+                     leader_half_width / across if across else math.inf)
+    near_side = math.hypot(qx, qy) - radius
+    if near_side <= 0.0:
+        return False
+    return bool(abs(ranges[index] - near_side) <= tolerance)
+
+
+def is_recognised(moving_body, leader_base, tolerance: float = RECOGNITION_TOLERANCE_M) -> bool:
+    """Whether some moving track lies within ``tolerance`` of the other car's centre.
+
+    ``moving_body`` is OpponentAwareness.moving_body(), whose entries begin with
+    base_link x and y, and ``leader_base`` is the other car's centre in that frame.
+    """
+    lx, ly = leader_base
+    return any(math.hypot(entry[0] - lx, entry[1] - ly) <= tolerance for entry in moving_body)
+
+
 def run_multi(track: str, params_list: list, seed: int, duration_s: float,
               spacing: float = 3.0, laps_required: float = 2.0, reverse: bool = False,
               slots=None) -> dict:
     """One run of every car. The result's ``cars`` entries carry each car's
     stats, ``progress_m`` (its position along the centreline every tick, see
-    _Progress.position) and the contact flags; ``slots`` is the line-up the
-    cars started in and ``dt_s`` the tick, for head_to_head."""
+    _Progress.position), ``speed_mps`` (ground-truth speed magnitude in m/s)
+    and the contact flags; ``slots`` is the line-up the
+    cars started in and ``dt_s`` the tick, for head_to_head. With two cars each
+    car also gets ``visible`` and ``recognised``, one bool per tick: whether it
+    can see the other car, and whether it recognises it (see leader_visible
+    and is_recognised)."""
     cars = len(params_list)
     slots = tuple(range(cars)) if slots is None else tuple(slots)
     if sorted(slots) != list(range(cars)):
@@ -178,12 +279,28 @@ def run_multi(track: str, params_list: list, seed: int, duration_s: float,
     progress = line_up_progress(reference, poses, reverse)
     stats = [dict(stop_ticks=0, ttc_ticks=0, speed_sum=0.0, ticks=0, braking_ticks=0,
                   wall_contact=False, car_contact=False, laps=0.0, finish_time_s=None,
-                  opponent_ticks=0, follow_ticks=0, progress_m=[])
+                  opponent_ticks=0, follow_ticks=0, progress_m=[], speed_mps=[],
+                  visible=[], recognised=[])
              for _ in range(cars)]
+    # Recognition is a head-to-head measure: each car against the other one.
+    recognition_on = cars == 2
+    # Where the scans start, in the follower's base_link. The gym state is the centre
+    # of gravity, lr ahead of base_link (the rear axle that the controller's dead
+    # reckoning uses). The simulator then puts the LiDAR lidar_offset_x ahead of the
+    # state itself (gym's _lidar_pose_from_base), so the sensor sits lr + offset ahead
+    # of base_link, not at the controller's laser_offset_x. See leader_visible.
+    rear = float(plant.params.lr)
+    lidar_x_base = rear + float(plant.calibration.lidar_offset_x)
+    half_length = float(plant.calibration.body_length) / 2.0
+    half_width = float(plant.calibration.body_width) / 2.0
     min_gap = math.inf
     last_cmd = [0.0] * cars
     steps = int(math.ceil(duration_s / CONTROL_DT))
     for step in range(steps):
+        # Current ground truth, before the step moves the cars. The car-profile
+        # scan for the degraded agent can be delayed by the sensor model.
+        truth_now = ([np.array(plant.truth(k), dtype=float) for k in range(cars)]
+                     if recognition_on else None)
         commands = []
         for k, ctrl in enumerate(ctrls):
             ego = obs[f"agent_{k}"]
@@ -205,6 +322,19 @@ def run_multi(track: str, params_list: list, seed: int, duration_s: float,
             st["opponent_ticks"] += int(ctrl.opponent_mode is not None)
             st["follow_ticks"] += int(ctrl.binding_cap == "follow")
             last_cmd[k] = speed
+            if recognition_on:
+                other = truth_now[1 - k]
+                mine = truth_now[k]
+                leader = in_base_link((mine[0], mine[1], mine[4]), (other[0], other[1]), rear)
+                clean, valid = gap_logic.sanitize_ranges(
+                    ego["scan"], max_range=params_list[k]["max_range"], range_min=lid.range_min)
+                st["visible"].append(leader_visible(
+                    leader, lidar_x_base, clean, valid, lid.angle_min, lid.angle_increment,
+                    params_list[k]["opponent_max_range"], half_length,
+                    leader_half_width=half_width, leader_yaw=other[4] - mine[4]))
+                st["recognised"].append(
+                    ctrl.opponents is not None
+                    and is_recognised(ctrl.opponents.moving_body(), leader))
             commands.append((steer, speed))
         obs, _r, _done, _t, _info = plant.step(commands)
         truth = [plant.truth(k) for k in range(cars)]
@@ -216,6 +346,7 @@ def run_multi(track: str, params_list: list, seed: int, duration_s: float,
             laps_now.append(progress[k].update(truth[k][:2]))
             stats[k]["laps"] = round(laps_now[k], 3)
             stats[k]["progress_m"].append(float(progress[k].position))
+            stats[k]["speed_mps"].append(abs(float(truth[k][3])))
         # Contact is sim_fidelity's own real-chassis check, run on every tick.
         # gym's collision flag is not read.
         pair = plant._chassis_contact()
@@ -292,6 +423,106 @@ def count_overtakes(traces, dt_s: float, persist_s: float = PERSIST_S) -> list:
     return counts
 
 
+def count_stalls(speeds, dt_s: float, stop_speed: float = STALL_SPEED_MPS,
+                 min_s: float = STALL_MIN_S) -> list:
+    """Count per-car stalls in speed traces (m/s), sampled every ``dt_s`` seconds.
+
+    A stall is a maximal run longer than ``min_s`` seconds with absolute speed
+    below ``stop_speed`` while another car is at or above that speed. Either
+    condition breaking ends the run; an open final run counts. Empty traces
+    and a single car have no stalls. Unequal or non-finite traces raise ValueError.
+    """
+    lengths = {len(trace) for trace in speeds}
+    if len(lengths) > 1:
+        raise ValueError(f"speed traces differ in length: {sorted(lengths)}")
+    for car, trace in enumerate(speeds):
+        if not all(math.isfinite(x) for x in trace):
+            raise ValueError(f"car {car}: non-finite speed")
+    need = math.floor(min_s / dt_s + 1e-9) + 1
+    counts = [0] * len(speeds)
+    runs = [0] * len(speeds)
+    for tick in zip(*speeds):
+        moving = [abs(v) >= stop_speed for v in tick]
+        for k in range(len(speeds)):
+            if not moving[k] and any(moving):
+                runs[k] += 1
+                if runs[k] == need:
+                    counts[k] += 1
+            else:
+                runs[k] = 0
+    return counts
+
+
+def pair_gap_changes(traces, finish_times, dt_s: float) -> list:
+    """Return each pair's change in the initial trailer's time deficit, in seconds.
+
+    ``traces[k]`` is unwrapped centreline progress in metres, one value per
+    ``dt_s`` seconds; ``finish_times[k]`` is seconds or None if unfinished.
+    The smaller initial position is the trailer (higher index on a tie). Its
+    mean speed v is (last - first) / ((n - 1) * dt_s). The start gap is the
+    initial distance deficit / v. The end gap is trailer finish time minus
+    leader finish time if both finished, otherwise final distance deficit / v.
+    Gap change is end minus start; negative means the trailer closed in.
+    Pairs are ordered by indices a < b. Fewer than two ticks gives None gaps;
+    nonpositive trailer speed gives infinite gaps. Unequal or non-finite traces
+    raise ValueError.
+    """
+    lengths = {len(trace) for trace in traces}
+    if len(lengths) > 1:
+        raise ValueError(f"progress traces differ in length: {sorted(lengths)}")
+    for car, trace in enumerate(traces):
+        if not all(math.isfinite(x) for x in trace):
+            raise ValueError(f"car {car}: non-finite progress along the centreline")
+    changes = []
+    for a in range(len(traces)):
+        for b in range(a + 1, len(traces)):
+            n = len(traces[a])
+            trailer = a if n and traces[a][0] < traces[b][0] else b
+            leader = b if trailer == a else a
+            start = end = change = None
+            if n >= 2:
+                speed = (traces[trailer][-1] - traces[trailer][0]) / ((n - 1) * dt_s)
+                if speed <= 0:
+                    start = end = change = math.inf
+                else:
+                    start = (traces[leader][0] - traces[trailer][0]) / speed
+                    if finish_times[trailer] is not None and finish_times[leader] is not None:
+                        end = finish_times[trailer] - finish_times[leader]
+                    else:
+                        end = (traces[leader][-1] - traces[trailer][-1]) / speed
+                    change = end - start
+            changes.append(dict(pair=(a, b), leader=leader, trailer=trailer,
+                                start_gap_s=start, end_gap_s=end, gap_change_s=change))
+    return changes
+
+
+def time_gained(pair_changes, cars: int) -> list:
+    """Per-car seconds gained: trailer gets minus the gap change, leader plus it.
+
+    Undefined (None) pair changes contribute nothing; infinite changes retain
+    their sign. A car's score sums its contributions against every other car.
+    """
+    gained = [0.0] * cars
+    for pair in pair_changes:
+        change = pair["gap_change_s"]
+        if change is not None:
+            gained[pair["leader"]] += change
+            gained[pair["trailer"]] -= change
+    return gained
+
+
+def _recognition_of(car: dict, dt_s: float) -> dict:
+    """One car's recognition of the other car, from its per-tick traces."""
+    visible = car.get("visible", [])
+    recognised = car.get("recognised", [])
+    counts = recognition_counts(visible, recognised)
+    delays = recognition_delays(visible, recognised, dt_s)
+    return dict(delays=delays, median_s=median_delay(delays),
+                visible_ticks=counts["visible_ticks"],
+                recognised_ticks=counts["recognised_ticks"],
+                fraction=recognised_fraction(counts["visible_ticks"], counts["recognised_ticks"]))
+
+
 def head_to_head(run_result: dict) -> dict:
     """The verdict of one run, from run_multi's result, for any number of cars.
 
@@ -301,7 +532,12 @@ def head_to_head(run_result: dict) -> dict:
     than two. ``overtakes``: per car, how many times it moved from behind to
     ahead of another car (count_overtakes). ``contacts``: per car, whether
     sim_fidelity's chassis check found it touching a wall or another car.
-    ``winner``: the first finisher with no contact, or None.
+    ``winner``: the first finisher with no contact, or None. ``gap_changes``:
+    pairwise deficit changes in seconds; ``time_gained_s``: per-car seconds
+    gained; ``stalls``: per-car counts from the ground-truth speed traces.
+    ``recognition``: per car, the delay of each visibility episode of the other
+    car (``delays``, inf if never recognised), its ``median_s``, the visible and
+    recognised tick counts, and the ``fraction`` of visible ticks recognised.
     """
     cars = run_result["cars"]
     times = [c["finish_time_s"] for c in cars]
@@ -312,22 +548,35 @@ def head_to_head(run_result: dict) -> dict:
     contacts = [bool(c["car_contact"] or c["wall_contact"]) for c in cars]
     winner = next((k for k in finished if not contacts[k]), None)
     gap_s = times[finished[1]] - times[finished[0]] if len(finished) >= 2 else math.inf
+    gap_changes = pair_gap_changes([c["progress_m"] for c in cars], times, run_result["dt_s"])
     return dict(
         finish_order=finished + unfinished,
         gap_s=gap_s,
         overtakes=count_overtakes([c["progress_m"] for c in cars], run_result["dt_s"]),
+        gap_changes=gap_changes,
+        time_gained_s=time_gained(gap_changes, len(cars)),
+        stalls=count_stalls([c["speed_mps"] for c in cars], run_result["dt_s"]),
         contacts=contacts,
         winner=winner,
+        recognition=[_recognition_of(c, run_result["dt_s"]) for c in cars],
     )
 
 
 def aggregate_head_to_head(outcomes: list) -> dict:
     """Wins, the mean gap, overtakes and contacts over head_to_head() results.
-    The mean gap leaves out runs with fewer than two finishers."""
+    The mean gap leaves out runs with fewer than two finishers. Mean time gained
+    uses only runs where every car's gain is finite, or None if there are none.
+    Recognition is pooled over the runs: every car's episode delays and its
+    visible and recognised ticks. Older outcomes without the new fields contribute
+    no stalls, gain or recognition runs."""
     n = len(outcomes[0]["contacts"]) if outcomes else 0
     agg = dict(runs=len(outcomes), wins=[0] * n, no_winner=0,
-               overtakes=[0] * n, contact_runs=[0] * n)
+               overtakes=[0] * n, contact_runs=[0] * n, stalls=[0] * n)
     gaps = []
+    gains = []
+    pooled_delays = [[] for _ in range(n)]
+    visible_total = [0] * n
+    recognised_total = [0] * n
     for out in outcomes:
         if out["winner"] is None:
             agg["no_winner"] += 1
@@ -335,11 +584,26 @@ def aggregate_head_to_head(outcomes: list) -> dict:
             agg["wins"][out["winner"]] += 1
         if math.isfinite(out["gap_s"]):
             gaps.append(out["gap_s"])
+        if "time_gained_s" in out and all(math.isfinite(x) for x in out["time_gained_s"]):
+            gains.append(out["time_gained_s"])
         for k in range(n):
             agg["overtakes"][k] += out["overtakes"][k]
             agg["contact_runs"][k] += int(out["contacts"][k])
+            agg["stalls"][k] += out.get("stalls", [0] * n)[k]
+        for k, car in enumerate(out.get("recognition", [])):
+            pooled_delays[k].extend(car["delays"])
+            visible_total[k] += car["visible_ticks"]
+            recognised_total[k] += car["recognised_ticks"]
     agg["gap_runs"] = len(gaps)
     agg["mean_gap_s"] = sum(gaps) / len(gaps) if gaps else None
+    agg["time_gained_runs"] = len(gains)
+    agg["mean_time_gained_s"] = [sum(g[k] for g in gains) / len(gains) if gains else None
+                                 for k in range(n)]
+    agg["recognition"] = [
+        dict(delays=pooled_delays[k], median_s=median_delay(pooled_delays[k]),
+             visible_ticks=visible_total[k], recognised_ticks=recognised_total[k],
+             fraction=recognised_fraction(visible_total[k], recognised_total[k]))
+        for k in range(n)]
     return agg
 
 
@@ -431,6 +695,25 @@ def _job(job):
     return run_multi(*job)
 
 
+def _seconds(value) -> str:
+    if value is None:
+        return "n/a"
+    return "inf" if math.isinf(value) else f"{value:.2f}s"
+
+
+def _recognition_text(entry: dict, show_delays: bool) -> str:
+    """One car's recognition of the other car, as a fragment of a report line."""
+    if entry["fraction"] is None:
+        return "no visible ticks"
+    never = sum(math.isinf(d) for d in entry["delays"])
+    text = (f"{len(entry['delays'])} episodes ({never} never recognised), "
+            f"median {_seconds(entry['median_s'])}")
+    if show_delays and entry["delays"]:
+        text += ", delays " + " ".join(_seconds(d) for d in entry["delays"])
+    return text + (f", recognised {entry['fraction']:.0%} of "
+                   f"{entry['visible_ticks']} visible ticks")
+
+
 def _report_head_to_head(track: str, runs: list, params_list: list) -> None:
     """Per-run table and aggregate for a two-car head-to-head."""
     differ = [key for key in params_list[0]
@@ -439,7 +722,7 @@ def _report_head_to_head(track: str, runs: list, params_list: list) -> None:
         f"car {k}: " + " ".join(f"{key}={p[key]}" for key in differ)
         for k, p in enumerate(params_list)), flush=True)
     print(f"  {'seed':>6}  {'starts':<6}  {'finish order':<44}  {'gap':>6}  {'overtakes':>9}  "
-          f"{'contact':<18}  {'winner':<6}", flush=True)
+          f"{'contact':<18}  {'winner':<6}  {'stalls':>9}  {'gained':>8}", flush=True)
     outcomes = []
     for run in runs:
         out = head_to_head(run)
@@ -458,8 +741,14 @@ def _report_head_to_head(track: str, runs: list, params_list: list) -> None:
                 touched.append(f"car {k} ({'+'.join(kinds)})")
         contact = ", ".join(touched) or "none"
         winner = f"car {out['winner']}" if out["winner"] is not None else "none"
+        gain = out["time_gained_s"][0]
+        gained = f"{gain:+.2f}s" if math.isfinite(gain) else ("inf" if math.isinf(gain) else "n/a")
         print(f"  {run['seed']:>6}  car {run['slots'].index(0):<2}  {finish:<44}  {gap:>6}  "
-              f"{' / '.join(str(x) for x in out['overtakes']):>9}  {contact:<18}  {winner:<6}", flush=True)
+              f"{' / '.join(str(x) for x in out['overtakes']):>9}  {contact:<18}  {winner:<6}  "
+              f"{' / '.join(str(x) for x in out['stalls']):>9}  {gained:>8}", flush=True)
+        print("          recognition: " + "; ".join(
+            f"car {k} {_recognition_text(entry, show_delays=True)}"
+            for k, entry in enumerate(out["recognition"])), flush=True)
     agg = aggregate_head_to_head(outcomes)
     n = len(params_list)
     wins = ", ".join(f"car {k} {agg['wins'][k]}" for k in range(n))
@@ -470,6 +759,14 @@ def _report_head_to_head(track: str, runs: list, params_list: list) -> None:
     print(f"  aggregate, {agg['runs']} runs: wins {wins}; no winner {agg['no_winner']}", flush=True)
     print(f"  mean gap {mean}", flush=True)
     print(f"  runs with contact: {contacts}; overtakes: {overtakes}", flush=True)
+    stalls = ", ".join(f"car {k} {agg['stalls'][k]}" for k in range(n))
+    gained = ", ".join(f"car {k} {v:+.2f}s" if v is not None else f"car {k} n/a"
+                       for k, v in enumerate(agg["mean_time_gained_s"]))
+    print(f"  stalls: {stalls}; mean time gained: {gained} over {agg['time_gained_runs']} of {agg['runs']} runs",
+          flush=True)
+    print(f"  recognition, pooled over {agg['runs']} runs: " + "; ".join(
+        f"car {k} {_recognition_text(entry, show_delays=True)}"
+        for k, entry in enumerate(agg["recognition"])), flush=True)
 
 
 def main(argv=None) -> int:
@@ -486,6 +783,7 @@ def main(argv=None) -> int:
     ap.add_argument("--spacing", type=float, default=3.0, help="metres between start positions")
     ap.add_argument("--reverse", action="store_true")
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--output", help="write the per-run results as JSON")
     ap.add_argument("--set", action="append", default=[], help="override a parameter for every car")
     ap.add_argument("--car-set", action="append", default=[], metavar="N:name=value",
                     help="override a parameter for car N only (0-based), applied after --set; repeatable")
@@ -504,6 +802,8 @@ def main(argv=None) -> int:
             for t in tracks for k in range(args.seeds) for order in orders]
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         results = list(pool.map(_job, jobs))
+    if args.output:
+        Path(args.output).write_text(json.dumps(results) + "\n")
     ok = True
     for t in tracks:
         runs = [r for r in results if r["track"] == t]

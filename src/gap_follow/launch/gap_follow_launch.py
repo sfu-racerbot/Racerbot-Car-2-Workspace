@@ -28,11 +28,12 @@ def generate_launch_description():
     )
 
     opponent_arg = DeclareLaunchArgument(
-        'opponent_awareness', default_value='false',
-        description='true when other cars share the track: track moving '
-                    'cars, follow them, pass only with room on a straight '
-                    '(docs/gap-follow.md#several-cars-at-once). Simulator-'
-                    'validated only.')
+        'opponent_awareness', default_value='true',
+        description='on by default since 2026-10-28; false turns the whole layer off. '
+                    'When on: track moving cars, follow them (the follow cap is held '
+                    'for opponent_follow_memory_sec after one is lost), and pass only '
+                    'with room on a straight (docs/gap-follow.md#several-cars-at-once). '
+                    'Simulator-validated only.')
     max_speed_arg = DeclareLaunchArgument(
         'max_speed', default_value='',
         description='Top speed for this run (m/s), up to 5.0: e.g. 1.0 for '

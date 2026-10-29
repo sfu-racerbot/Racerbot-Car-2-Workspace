@@ -6,11 +6,29 @@
 
 Reactive "follow-the-gap" autonomy: no map, no localization, no memory of the track — every LIDAR scan is looked at fresh and the car steers into the biggest safe opening it currently sees. This file documents the algorithm and code in detail; for the broader workspace context (safety model, how to run it, how to write your own node) see [docs/architecture.md](../../docs/architecture.md), [docs/operations.md](../../docs/operations.md#running-autonomy-gap_follow-pure_pursuit-or-your-own-node), and [docs/writing-your-own-node.md](../../docs/writing-your-own-node.md).
 
+## Highlights
+
+- **No map needed.** Each LiDAR scan is read fresh, and the car steers at the widest safe opening in it. It can drive a course it has never seen.
+- **The [LB deadman](../../docs/glossary.md#deadman) is checked inside this node.** Every drive command needs LB held on a live `/joy` stream. The [mux](../../docs/glossary.md#mux--multiplexer) does not do that check.
+- **Other cars: on by default since 2026-10-28.** Two simulated cars on the shipped settings passed 32 of 32 runs, with no contact and no stalls. With the layer off, 24 of 32 passed.
+- **The YAML is the source of truth.** Every knob is a parameter in `config/gap_follow.yaml`, and it overrides the defaults in the code. Edit the YAML, not the `.py`.
+- **The newest parts are simulator-only.** Steering damping (on since 2026-10-27) and the other-car layer (on since 2026-10-28) have not been driven on the car. Read [the validation order](../../docs/gap-follow.md#validation) first.
+
+**Why it exists.** It is the no-map driver. A car with no map can still drive a course it has never seen, and every new driving node in this workspace copies its deadman pattern from this one.
+
 ## New in October 2026: swept clearance, arc guard, corner setup
 
 Three additions change how this node drives through corridors: a speed limit from how far the *body* can drive along its arc, a check that the steered arc is clear, and a move to the outside wall before a turn. In the simulator they took the indoor layouts from 24 wall contacts in 60 runs to none, and lapped about 20% faster. **They have not been driven on the real car yet.**
 
 What each does, how to turn each off, the results, and the order to bring them up on the car (wheels off first): **[docs/gap-follow.md](../../docs/gap-follow.md)**. The step-by-step algorithm below describes the pipeline they sit in.
+
+**Other cars on the track.** The other-car layer (`opponent_tracking.py`) is on by default since 2026-10-28. It tracks moving cars, follows them, and passes only with room on a straight. It can only lower speed or choose a side of an opening.
+
+Turn it off with `opponent_awareness:=false` on `gap_follow_launch.py`. The mapping launches (`map_course`, `auto_map_race`, `autonomous_mapping_launch.py`) read this YAML too, but they turn the layer off, because mapping is always one car.
+
+Each of them takes `opponent_awareness`, which defaults to `false`; `opponent_awareness:=true` turns the layer on there.
+
+The details and the first-run order are in [docs/gap-follow.md](../../docs/gap-follow.md#several-cars-at-once).
 
 ## Making the car faster
 
@@ -30,7 +48,7 @@ Test any increase wheels-off first, then at low speed in open space.
 | [`gap_follow/gap_follow_node.py`](gap_follow/gap_follow_node.py) | ROS orchestration: deadman, odometry watchdog, TTC brake, diagnostics, and drive publisher. |
 | [`gap_follow/gap_logic.py`](gap_follow/gap_logic.py) | Unit-tested footprint, TTC, disparity extension, safety bubble, and gap-selection math. |
 | [`config/gap_follow.yaml`](config/gap_follow.yaml) | Every tunable parameter, loaded at launch. Change behavior here, not in the code. |
-| [`launch/gap_follow_launch.py`](launch/gap_follow_launch.py) | Starts the node with the YAML above as its parameters. Launch arguments: `opponent_awareness:=true` (other cars on track) and `max_speed:=<m/s>`, which sets the top speed for one run, anywhere up to 5.0 m/s (the logic is [`gap_follow/launch_speed.py`](gap_follow/launch_speed.py)). See [docs/launchstart.md](../../docs/launchstart.md#car-1-and-car-2-together-first-run). |
+| [`launch/gap_follow_launch.py`](launch/gap_follow_launch.py) | Starts the node with the YAML above as its parameters. Launch arguments: `opponent_awareness:=true` or `false` (other cars on track; on by default since 2026-10-28, and `false` turns it off) and `max_speed:=<m/s>`, which sets the top speed for one run, anywhere up to 5.0 m/s (the logic is [`gap_follow/launch_speed.py`](gap_follow/launch_speed.py)). See [docs/launchstart.md](../../docs/launchstart.md#car-1-and-car-2-together-first-run). |
 | `resource/gap_follow` | Empty marker file required by `ament_python` — not code. |
 
 ## Interface
@@ -46,6 +64,8 @@ command. An unchanged decision is repeated every `decision_log_period_sec`
 (1.0 s by default); set it to `0.0` for transitions only. A small status timer
 also reports a missing/stale `/scan`, which otherwise stops this callback-driven
 node by letting `/drive` time out silently at the mux.
+
+With the other-car layer on, a decision line can also carry `opponent mode=clear`, `opponent mode=follow` or `opponent mode=follow_memory`, and `follow cap=<m/s>` when a car ahead sets a limit. `opponent mode=` with no other car on the track means a wall is being taken for a car.
 
 ## The algorithm, step by step
 
@@ -471,7 +491,12 @@ apex, only change the car's pace approaching one.
 | `speed_hold_sec` | `0.0` s (off) | Hold the lowest desired speed of this window instead of following every scan's ceiling up and down |
 | `arc_guard_blocked_fallback` | `freest` | What the arc guard does when no arc in reach is clear: `freest` (most free length) or `request` (keep the gap's choice). Shipped YAML: `request` |
 | `narrow_corridor_speed` / `narrow_corridor_clearance` / `open_corridor_clearance` | `2.5` m/s (shipped YAML: `3.571`) / `0.05` / `0.15` m | Speed ceiling from the body's clearance to the nearer side wall: `max_speed` at `open_corridor_clearance` and above, falling linearly to `narrow_corridor_speed` at `narrow_corridor_clearance`. `narrow_corridor_speed ≥ max_speed` turns it off |
-| `enable_opponent_awareness` + `opponent_*` | `false` (off) | Other cars on track: track moving clusters, follow a car ahead at `(gap − opponent_follow_min_gap) / opponent_follow_time_gap`, and only pass on a straight with `opponent_passing_margin` of room. With it off nothing runs and the commands are identical. Every `opponent_*` value is commented in the YAML; the code is `gap_follow/opponent_tracking.py`. Simulator-validated only — [docs/gap-follow.md](../../docs/gap-follow.md#several-cars-at-once) |
+| `enable_opponent_awareness` + `opponent_*` | `true` (since 2026-10-28; was `false`). Launch: `opponent_awareness:=false` turns it off | Other cars on track: track moving clusters, follow a car ahead at `(gap − opponent_follow_min_gap) / opponent_follow_time_gap`, and only pass on a straight with `opponent_passing_margin` of room. With it off nothing runs and the commands are identical. Every `opponent_*` value is commented in the YAML; the code is `gap_follow/opponent_tracking.py`. Simulator-validated only — [docs/gap-follow.md](../../docs/gap-follow.md#several-cars-at-once) |
+| `opponent_follow_memory_sec` | `1.0` s (`0.0` turns it off) | Holds the follow cap this long after the followed car is lost. Speed only: it can lower a command, never raise one, and never steers or stops the car. Since 2026-10-28 |
+| `opponent_stopped_release_sec` | `1.0` s | Follow hold: a car that counted as moving stays followed this long after it drops below half of `opponent_moving_speed` (0.3 m/s). Must be above zero |
+| `opponent_radius` | `0.30` m | Rear cutoff only, not an inflation radius: a moving car more than this far behind `base_link` is ignored. The other car's outline is `opponent_length` × `opponent_width` |
+| `opponent_length` / `opponent_width` | `0.58` / `0.31` m | The other car's outline for the gap search: the measured car, padded. Its centre is worked out from the face the scan sees |
+| `opponent_passing_margin` / `opponent_pass_max_steering` | `0.15` m / `0.10` rad | Room added on every side of the other car's outline, and the steering limit for starting a pass. A pass also needs `car_width + 2 × opponent_passing_margin` of room beside the other car (0.61 m shipped). Chosen by the 2026-10-28 margin sweep |
 | `command_slew_max_dt` | `0.10` s | Longest interval one slew step may integrate, so a scan gap isn't cashed in as a jump |
 | `emergency_stop_clearance` | `0.0` m (was `0.02`, cut 2026-08-25) | All-direction final contact floor measured from the padded body |
 | `forward_stop_clearance` / `forward_stop_fov_deg` | `0.20m` (was `0.25m`, cut 2026-08-25) / `60°` | Odom-independent forward-cone braking fallback |

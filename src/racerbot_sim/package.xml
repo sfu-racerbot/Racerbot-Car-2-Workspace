@@ -20,6 +20,7 @@
   <exec_depend>gap_follow</exec_depend>
   <exec_depend>pure_pursuit</exec_depend>
   <exec_depend>racerbot_launch</exec_depend>
+  <exec_depend>race_diagnostics</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
 
   <test_depend>python3-pytest</test_depend>

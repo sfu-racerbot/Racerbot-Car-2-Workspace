@@ -145,6 +145,10 @@ def _wiring(context):
 def generate_launch_description():
     args = [
         DeclareLaunchArgument(
+            'opponent_awareness', default_value='false',
+            description='Mapping is one car; opponent awareness is for racing. '
+                        'Set true to enable it while mapping.'),
+        DeclareLaunchArgument(
             'laps', default_value='3',
             description='Closed laps to drive before saving. The first is '
                         'discovery; the last is kept as the racing line. '
@@ -217,6 +221,9 @@ def generate_launch_description():
         get_package_share_directory('gap_follow'), 'config', 'gap_follow.yaml')
 
     def nodes(context):
+        enabled = LaunchConfiguration('opponent_awareness').perform(context).lower()
+        if enabled not in ('true', 'false'):
+            raise RuntimeError(f"opponent_awareness:={enabled!r}: use true or false")
         # Same speed-override rule as auto_map_race_launch.py: a cap moves
         # corner_speed/corner_speed_wide with it, or gap_follow refuses to
         # start (gap_follow/speed_overrides.py).
@@ -234,7 +241,7 @@ def generate_launch_description():
         gap_follow = Node(
             package='gap_follow', executable='gap_follow_node', name='gap_follow_node',
             output='screen',
-            parameters=[gap_config,
+            parameters=[gap_config, {'enable_opponent_awareness': enabled == 'true'},
                         dict({'drive_topic': '/auto_map/drive'}, **speeds, **odom)],
         )
         supervisor = Node(
