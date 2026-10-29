@@ -37,6 +37,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# tools/, for run_analysis. Appended, so it shadows nothing.
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 from sim_fidelity.bootstrap import bootstrap  # noqa: E402
 
 ROOT = bootstrap()
@@ -57,6 +59,7 @@ from f1tenth_gym.envs.observation import ObservationType  # noqa: E402
 from gap_follow import gap_logic  # noqa: E402
 from gap_mirror import GapController, node_params  # noqa: E402
 from racerbot_sim import tracks as sim_tracks  # noqa: E402
+from run_analysis import weave  # noqa: E402
 from sim_fidelity import CALIBRATION, PROFILES  # noqa: E402
 from sim_fidelity.plant import DEFAULT_PROFILE, FidelityPlant, env_components  # noqa: E402
 
@@ -195,6 +198,7 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
     min_forward = math.inf
     corridor_offsets = []
     speeds = []
+    steerings = []
     prev_idx = None
     max_cross = 0.0
     reference = np.column_stack((line.xs, line.ys))
@@ -215,7 +219,12 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
         ego = obs["agent_0"]
         state = np.asarray(ego["std_state"], dtype=float)
         speed_meas = float(state[3])
-        steering, cmd_speed = ctrl.command(ego["scan"], speed_meas, step)
+        # The gym's true yaw rate (std_state is x, y, delta, v, yaw, yaw_rate,
+        # beta). The mirror reads it only with enable_steering_damping or
+        # enable_adaptive_grip on, so with both off this changes nothing.
+        steering, cmd_speed = ctrl.command(ego["scan"], speed_meas, step,
+                                           yaw_rate=float(state[5]))
+        steerings.append(steering)
         stop_steps += int(ctrl.stopped)
         min_body_clear = min(min_body_clear, ctrl.telemetry.get("min_clear", math.inf))
         if ctrl.stopped:
@@ -269,6 +278,9 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
     plant.close()
     wall_time = time.monotonic() - started
     collision = bool(obs["agent_0"]["collision"]) or plant_report.get("contact_steps", 0) > 0
+    # Weave: the commanded steering's direction changes per second, each a swing over 0.2 rad.
+    reversals = weave.reversals_per_s(np.arange(len(steerings)) * CONTROL_DT,
+                                      np.asarray(steerings), swing_rad=weave.SWING_RAD)
     result = {
         "track": track,
         "reverse": reverse,
@@ -292,6 +304,7 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
                                  if math.isfinite(min_body_clear) else None),
         "speed_shed_mps": round(speed_shed, 2),
         "hard_brake_ticks": hard_brake_ticks,
+        "steering_reversals_per_s": round(reversals, 3),
     }
     result.update(plant_report)
     return result
@@ -427,7 +440,8 @@ def main(argv=None) -> int:
               f"time={res['sim_time_s']:7.1f}s vmean={res['mean_speed']:.2f} "
               f"stops={res['stop_steps']} stuck={res['max_stuck_steps']} "
               f"contact={res.get('contact_steps', 0)} "
-              f"minfwd={res['min_forward_scan_m']} caps={res['cap_histogram']}", flush=True)
+              f"minfwd={res['min_forward_scan_m']} rev={res['steering_reversals_per_s']:.2f}/s "
+              f"caps={res['cap_histogram']}", flush=True)
 
     passed = sum(1 for r in results if r["passed"])
     print(json.dumps({"passed": passed, "total": len(results),

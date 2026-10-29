@@ -1029,3 +1029,550 @@ def test_side_clearance_speed_limit_rejects_bad_parameters():
         gap_logic.side_clearance_speed_limit(0.1, 2.0, 0.15, 0.15, 4.0)
     with pytest.raises(ValueError, match='max_speed must be finite'):
         gap_logic.side_clearance_speed_limit(0.1, 2.0, 0.05, 0.15, math.inf)
+
+
+# ============================================================================
+# steering_damping: the gyro's yaw rate, opposed, in radians
+# (docs/gap-follow.md#steering-damping-gyro)
+# ============================================================================
+
+def test_steering_damping_is_minus_gain_times_yaw_rate():
+    # oracle: closed form -- the law is -gain_s * yaw_rate.
+    assert gap_logic.steering_damping(0.5, 0.07) == pytest.approx(-0.035, abs=1e-12)  # rad
+
+
+def test_a_left_yaw_rate_is_damped_to_the_right():
+    # oracle: invariant -- yaw is positive to the left (imu_bridge: x forward,
+    # y left, z up), so the damping steers right, and the mirror image steers
+    # left.
+    assert gap_logic.steering_damping(1.0, 0.07) < 0.0
+    assert gap_logic.steering_damping(-1.0, 0.07) > 0.0
+    assert gap_logic.steering_damping(1.0, 0.07) == pytest.approx(-0.07, abs=1e-12)  # rad
+    assert gap_logic.steering_damping(-1.0, 0.07) == pytest.approx(0.07, abs=1e-12)  # rad
+
+
+@pytest.mark.parametrize('yaw, gain', [(0.3, 0.05), (-2.0, 0.1), (4.0, 0.02)])
+def test_damping_is_linear_in_yaw_rate_and_in_gain(yaw, gain):
+    # oracle: invariant -- doubling either input doubles the term.
+    base = gap_logic.steering_damping(yaw, gain)
+    assert gap_logic.steering_damping(2.0 * yaw, gain) == pytest.approx(2.0 * base, abs=1e-12)  # rad
+    assert gap_logic.steering_damping(yaw, 2.0 * gain) == pytest.approx(2.0 * base, abs=1e-12)  # rad
+
+
+def test_zero_yaw_rate_adds_no_steering():
+    assert gap_logic.steering_damping(0.0, 0.07) == 0.0
+
+
+@pytest.mark.parametrize('yaw', [math.nan, math.inf, -math.inf])
+def test_a_non_finite_yaw_rate_adds_exactly_zero(yaw):
+    # A bad gyro sample must never become NaN steering
+    # (docs/gap-follow.md#steering-damping-gyro).
+    assert gap_logic.steering_damping(yaw, 0.07) == 0.0
+
+
+@pytest.mark.parametrize('gain', [0.0, -0.07, -1.0, math.nan, math.inf])
+def test_a_zero_negative_or_non_finite_gain_adds_exactly_zero(gain):
+    # A negative gain would steer *with* the rotation (positive feedback), so
+    # it must switch the term off, never flip it.
+    assert gap_logic.steering_damping(0.5, gain) == 0.0
+
+
+# ============================================================================
+# Adaptive grip from the gyro (docs/gap-follow.md#adaptive-grip-imu)
+# ============================================================================
+
+GRIP_WHEELBASE = 0.36
+# Demand that is judged against any limit up to the 3.0 ceiling: at least
+# judge_fraction (0.8) of 3.0 is 2.4 m/s^2, below this.
+FULL_DEMAND = 3.0
+
+
+def _grip(limit=None, **overrides):
+    """The shipped grip values (gap_follow.yaml), base 2.0, ceiling 3.0."""
+    params = dict(base=2.0, ceiling=3.0, rise_per_s=0.2, cut_factor=0.85,
+                  hold_ratio=0.95, slip_ratio=0.90, judge_fraction=0.8)
+    params.update(overrides)
+    return gap_logic.AdaptiveGrip(limit=limit, **params)
+
+
+def _kinematic_yaw(speed, steering, wheelbase=GRIP_WHEELBASE):
+    # oracle: the yaw rate of a car that does not slip, speed * tan(steer) / L.
+    return speed * math.tan(steering) / wheelbase
+
+
+# --- grip_ratio -------------------------------------------------------------
+
+def test_grip_ratio_is_one_on_the_circle_the_steering_asks_for():
+    # oracle: closed form. A 2 m radius circle at 2 m/s is 1.0 rad/s of yaw,
+    # and the steering that draws it is atan(0.36 / 2).
+    steering = math.atan(GRIP_WHEELBASE / 2.0)
+    assert gap_logic.grip_ratio(1.0, 2.0, steering, GRIP_WHEELBASE) == pytest.approx(
+        1.0, abs=1e-12)  # dimensionless
+
+
+def test_grip_ratio_halves_when_the_car_yaws_half_as_fast():
+    # oracle: closed form -- the ratio is linear in the measured yaw rate.
+    steering = math.atan(GRIP_WHEELBASE / 2.0)
+    assert gap_logic.grip_ratio(0.5, 2.0, steering, GRIP_WHEELBASE) == pytest.approx(
+        0.5, abs=1e-12)  # dimensionless
+
+
+def test_grip_ratio_reads_a_mirror_image_turn_the_same_way():
+    # oracle: invariant -- a right turn (negative yaw and steering) has the same ratio.
+    steering = math.atan(GRIP_WHEELBASE / 2.0)
+    assert gap_logic.grip_ratio(-1.0, 2.0, -steering, GRIP_WHEELBASE) == pytest.approx(
+        1.0, abs=1e-12)  # dimensionless
+
+
+@pytest.mark.parametrize('speed', [0.0, 0.5, 0.999, -2.0])
+def test_grip_ratio_makes_no_judgement_below_one_metre_per_second(speed):
+    # oracle: spec -- speed < 1.0 returns nan. Reversing (-2.0) is below it too.
+    assert math.isnan(gap_logic.grip_ratio(1.0, speed, 0.2, GRIP_WHEELBASE))
+
+
+def test_grip_ratio_judges_at_exactly_one_metre_per_second():
+    # One step past the guard: 1.0 m/s is judged, because the guard is 'below 1.0'.
+    assert math.isfinite(gap_logic.grip_ratio(0.5, 1.0, 0.2, GRIP_WHEELBASE))
+
+
+@pytest.mark.parametrize('steering', [0.0, 0.0499, -0.0499])
+def test_grip_ratio_makes_no_judgement_with_the_rack_near_centre(steering):
+    assert math.isnan(gap_logic.grip_ratio(0.1, 2.0, steering, GRIP_WHEELBASE))
+
+
+def test_grip_ratio_judges_at_exactly_five_hundredths_of_a_radian():
+    assert math.isfinite(gap_logic.grip_ratio(0.1, 2.0, 0.05, GRIP_WHEELBASE))
+
+
+@pytest.mark.parametrize('yaw, speed, steering', [
+    (math.nan, 2.0, 0.2), (math.inf, 2.0, 0.2), (1.0, math.nan, 0.2),
+    (1.0, math.inf, 0.2), (1.0, 2.0, math.nan), (1.0, 2.0, -math.inf),
+])
+def test_grip_ratio_makes_no_judgement_on_non_finite_input(yaw, speed, steering):
+    assert math.isnan(gap_logic.grip_ratio(yaw, speed, steering, GRIP_WHEELBASE))
+
+
+def test_grip_ratio_makes_no_judgement_on_a_non_finite_wheelbase():
+    assert math.isnan(gap_logic.grip_ratio(1.0, 2.0, 0.2, math.nan))
+
+
+def test_grip_ratio_refuses_a_wheelbase_that_is_not_positive():
+    with pytest.raises(ValueError, match='wheelbase'):
+        gap_logic.grip_ratio(1.0, 2.0, 0.2, 0.0)
+
+
+# --- LowPass ----------------------------------------------------------------
+
+def test_low_pass_starts_at_its_first_sample():
+    f = gap_logic.LowPass(0.3)
+    assert f.update(1.5, 0.025) == 1.5
+
+
+def test_low_pass_steps_toward_a_new_value_by_the_closed_form():
+    # oracle: closed form. A first-order filter's step response is
+    # x + (y0 - x) * exp(-t / tau). After 12 ticks of 0.025 s (t = 0.3 s, one
+    # time constant) the remaining gap is exp(-1) of the starting gap.
+    f = gap_logic.LowPass(0.3)
+    f.update(0.0, 0.025)
+    for _ in range(12):
+        last = f.update(1.0, 0.025)
+    assert last == pytest.approx(1.0 - math.exp(-1.0), abs=1e-9)  # dimensionless
+
+
+def test_the_grip_ratio_is_low_passed_over_three_tenths_of_a_second():
+    # oracle: spec -- the Task 15 plan and docs/gap-follow.md#adaptive-grip-imu:
+    # the ratio is low-passed with a 0.3 s time constant. Twelve ticks of 0.025 s
+    # is one time constant, so the step response is 1 - exp(-1) of the way there.
+    f = gap_logic.LowPass(gap_logic.GRIP_RATIO_TAU_SEC)
+    f.update(0.0, 0.025)
+    for _ in range(12):
+        last = f.update(1.0, 0.025)
+    assert last == pytest.approx(1.0 - math.exp(-1.0), abs=1e-9)  # dimensionless
+
+
+def test_low_pass_breaks_its_chain_on_nan_and_restarts_from_the_next_sample():
+    # A NaN is no value. The next finite sample starts the filter afresh, so
+    # nothing from before the gap is blended in.
+    f = gap_logic.LowPass(0.3)
+    f.update(0.0, 0.025)
+    assert math.isnan(f.update(math.nan, 0.025))
+    assert f.update(1.0, 0.025) == 1.0
+
+
+def test_low_pass_reset_forgets_its_value():
+    f = gap_logic.LowPass(0.3)
+    f.update(5.0, 0.025)
+    f.reset()
+    assert f.update(1.0, 0.025) == 1.0
+
+
+def test_low_pass_refuses_a_negative_dt_and_a_non_positive_time_constant():
+    with pytest.raises(ValueError, match='dt'):
+        gap_logic.LowPass(0.3).update(1.0, -0.01)
+    with pytest.raises(ValueError, match='time_constant_s'):
+        gap_logic.LowPass(0.0)
+
+
+# --- AdaptiveGrip: the rise, the cut, and their bounds -----------------------
+
+def test_ten_seconds_of_grip_raises_the_limit_to_the_ceiling_by_the_closed_form():
+    # oracle: closed form -- min(ceiling, base + rise_per_s * t) at t = 10 s.
+    grip = _grip()
+    for _ in range(100):
+        grip.update(1.0, FULL_DEMAND, 0.1)
+    assert grip.limit == pytest.approx(min(3.0, 2.0 + 0.2 * 10.0), abs=1e-9)  # m/s^2
+
+
+def test_two_seconds_of_grip_raises_the_limit_by_the_rate_alone():
+    # oracle: closed form -- 2.0 + 0.2 * 2 = 2.4, below the ceiling, so only
+    # the rate sets it. Keeps the 10 s test above from passing on the ceiling alone.
+    grip = _grip()
+    for _ in range(20):
+        grip.update(1.0, FULL_DEMAND, 0.1)
+    assert grip.limit == pytest.approx(2.4, abs=1e-9)  # m/s^2
+
+
+def test_one_slip_tick_cuts_the_limit_to_cut_factor_of_itself():
+    # oracle: closed form -- 2.8 * 0.85 = 2.38.
+    grip = _grip(limit=2.8)
+    assert grip.update(0.5, FULL_DEMAND, 0.025) == pytest.approx(2.8 * 0.85, abs=1e-12)
+
+
+def test_a_cut_never_takes_the_limit_below_the_base():
+    # oracle: invariant -- the floor. From 2.1 at 0.85 a tick, the limit goes
+    # under 2.0 on the third tick; it must stop at the base instead.
+    grip = _grip(limit=2.1)
+    for _ in range(50):
+        grip.update(0.5, FULL_DEMAND, 0.025)
+    assert grip.limit == 2.0  # m/s^2
+
+
+def test_a_rise_never_takes_the_limit_above_the_ceiling():
+    # oracle: invariant -- the ceiling.
+    grip = _grip(limit=2.9)
+    for _ in range(50):
+        grip.update(1.0, FULL_DEMAND, 0.025)
+    assert grip.limit == 3.0  # m/s^2
+
+
+def test_a_ratio_exactly_at_hold_counts_as_grip():
+    # The hold boundary is inclusive: ratio >= hold_ratio rises.
+    grip = _grip()
+    grip.update(0.95, FULL_DEMAND, 0.1)
+    assert grip.limit == pytest.approx(2.0 + 0.2 * 0.1, abs=1e-12)  # m/s^2
+
+
+def test_a_ratio_just_under_hold_holds_the_limit():
+    grip = _grip()
+    grip.update(0.95 - 1e-9, FULL_DEMAND, 0.1)
+    assert grip.limit == 2.0  # m/s^2
+
+
+def test_a_ratio_exactly_at_slip_is_not_a_slip():
+    # The slip boundary is exclusive: ratio < slip_ratio cuts, equal does not.
+    grip = _grip(limit=2.8)
+    grip.update(0.90, FULL_DEMAND, 0.025)
+    assert grip.limit == 2.8  # m/s^2
+
+
+def test_a_ratio_just_under_slip_is_a_slip():
+    grip = _grip(limit=2.8)
+    grip.update(0.90 - 1e-9, FULL_DEMAND, 0.025)
+    assert grip.limit == pytest.approx(2.8 * 0.85, abs=1e-12)  # m/s^2
+
+
+def test_a_ratio_between_slip_and_hold_holds_the_limit():
+    grip = _grip(limit=2.4)
+    grip.update(0.92, FULL_DEMAND, 0.1)
+    assert grip.limit == 2.4  # m/s^2
+
+
+def test_a_demand_exactly_at_the_judge_fraction_is_judged():
+    # The judge boundary is inclusive: demand == judge_fraction * limit is judged.
+    grip = _grip(limit=2.0)
+    grip.update(1.0, 0.8 * 2.0, 0.1)
+    assert grip.limit == pytest.approx(2.0 + 0.2 * 0.1, abs=1e-12)  # m/s^2
+
+
+def test_a_demand_just_under_the_judge_fraction_is_not_judged():
+    grip = _grip(limit=2.0)
+    grip.update(1.0, 0.8 * 2.0 - 1e-9, 0.1)
+    assert grip.limit == 2.0  # m/s^2
+
+
+def test_low_demand_leaves_the_limit_alone_whatever_the_ratio():
+    # 0.8 * 2.4 = 1.92 m/s^2: at 0.5 the car is not asking the tyres for enough.
+    grip = _grip(limit=2.4)
+    grip.update(1.0, 0.5, 0.1)
+    grip.update(0.5, 0.5, 0.1)
+    assert grip.limit == 2.4  # m/s^2
+
+
+def test_a_nan_ratio_leaves_the_limit_alone():
+    grip = _grip(limit=2.4)
+    grip.update(math.nan, FULL_DEMAND, 0.1)
+    assert grip.limit == 2.4  # m/s^2
+
+
+@pytest.mark.parametrize('demand', [math.nan, math.inf])
+def test_a_non_finite_demand_leaves_the_limit_alone(demand):
+    grip = _grip(limit=2.4)
+    grip.update(1.0, demand, 0.1)
+    assert grip.limit == 2.4  # m/s^2
+
+
+def test_zero_dt_judges_but_moves_nothing_on_a_rise():
+    grip = _grip(limit=2.4)
+    grip.update(1.0, FULL_DEMAND, 0.0)
+    assert grip.limit == 2.4  # m/s^2
+
+
+@pytest.mark.parametrize('dt', [-0.1, math.nan, math.inf])
+def test_a_bad_dt_is_refused(dt):
+    with pytest.raises(ValueError, match='dt'):
+        _grip().update(1.0, FULL_DEMAND, dt)
+
+
+def test_the_limit_starts_at_the_base_unless_told_otherwise():
+    assert _grip().limit == 2.0  # m/s^2
+
+
+@pytest.mark.parametrize('overrides, match', [
+    (dict(ceiling=1.9), 'ceiling'),
+    (dict(slip_ratio=0.95, hold_ratio=0.95), 'slip_ratio'),
+    (dict(slip_ratio=0.96), 'slip_ratio'),
+    (dict(cut_factor=0.0), 'cut_factor'),
+    (dict(cut_factor=1.01), 'cut_factor'),
+    (dict(rise_per_s=-0.1), 'rise_per_s'),
+    (dict(judge_fraction=-0.1), 'judge_fraction'),
+    (dict(limit=3.5), 'limit'),
+    (dict(base=0.0, ceiling=3.0), 'base'),
+    (dict(hold_ratio=math.nan), 'finite'),
+])
+def test_a_band_that_cannot_hold_is_refused(overrides, match):
+    with pytest.raises(ValueError, match=match):
+        _grip(**overrides)
+
+
+# --- AdaptiveGrip: following max_lateral_accel ------------------------------
+
+def test_following_a_new_base_restarts_the_limit_at_it():
+    grip = _grip(limit=2.6)
+    grip.follow_base(2.4, 3.0)
+    assert (grip.base, grip.limit, grip.ceiling) == (2.4, 2.4, 3.0)
+
+
+def test_a_base_above_the_configured_ceiling_lifts_the_ceiling_and_a_lower_base_brings_it_back():
+    grip = _grip()
+    grip.follow_base(3.5, 3.0)
+    assert (grip.ceiling, grip.limit) == (3.5, 3.5)
+    grip.follow_base(2.4, 3.0)
+    assert grip.ceiling == 3.0  # recomputed from the configured ceiling, not kept
+
+
+def test_following_the_same_base_changes_nothing():
+    grip = _grip(limit=2.6)
+    grip.follow_base(2.0, 3.0)
+    assert grip.limit == 2.6  # m/s^2
+
+
+def test_following_a_base_refuses_a_non_positive_value():
+    with pytest.raises(ValueError, match='base'):
+        _grip().follow_base(0.0, 3.0)
+
+
+# --- adaptive_grip_step: the grip ratio judged on a whole tick --------------
+
+def test_a_car_on_the_circle_the_steering_asks_for_rises_by_the_rate_each_tick():
+    # oracle: closed form. On the circle the rack asks for, every tick has
+    # ratio 1.0 and a demand of 2.0 m/s^2 (judged below 2.5). Ten ticks of
+    # 0.1 s give 2.0 + 0.2 * 1.0.
+    steering = math.atan(GRIP_WHEELBASE / 2.0)
+    grip = _grip()
+    ratio_filter = gap_logic.LowPass(gap_logic.GRIP_RATIO_TAU_SEC)
+    limit = None
+    for _ in range(10):
+        limit = gap_logic.adaptive_grip_step(
+            grip, ratio_filter, _kinematic_yaw(2.0, steering), 2.0, steering,
+            GRIP_WHEELBASE, 0.1)
+    assert limit == pytest.approx(2.0 + 0.2 * 1.0, abs=1e-9)  # m/s^2
+
+
+def test_a_tick_with_no_judgement_makes_none_and_restarts_the_filter():
+    # Below 1 m/s the ratio is NaN, so the limit holds and the filter forgets.
+    steering = math.atan(GRIP_WHEELBASE / 2.0)
+    grip = _grip(limit=2.2)
+    ratio_filter = gap_logic.LowPass(gap_logic.GRIP_RATIO_TAU_SEC)
+    ratio_filter.update(0.4, 0.1)
+    limit = gap_logic.adaptive_grip_step(
+        grip, ratio_filter, 0.4, 0.5, steering, GRIP_WHEELBASE, 0.1)
+    assert limit == 2.2  # m/s^2
+    assert ratio_filter.value is None
+
+
+# ============================================================================
+# SteeringLag: the yaw is judged against the steering from a lag ago, while the
+# steering is steady (docs/gap-follow.md#adaptive-grip-imu)
+# ============================================================================
+
+LAG = 0.15      # s: the steering lag the yaw trails by (gap_follow.yaml)
+TICK = 0.025    # s: one control tick
+
+
+def _first_order_yaw(kinematic_yaws, dt, tau):
+    """A first-order lag on the kinematic yaw, from rest:
+    y_k = y_(k-1) + (1 - exp(-dt / tau)) * (kin_k - y_(k-1)).
+    That is the lag's own recurrence, written out here."""
+    a = 1.0 - math.exp(-dt / tau)
+    y, out = 0.0, []
+    for kin in kinematic_yaws:
+        y += a * (kin - y)
+        out.append(y)
+    return out
+
+
+def test_steering_lag_refuses_bad_inputs():
+    with pytest.raises(ValueError, match='lag_sec'):
+        gap_logic.SteeringLag(-0.1)
+    lag = gap_logic.SteeringLag(LAG)
+    with pytest.raises(ValueError, match='dt'):
+        lag.step(-0.01, 0.2, 0.05)
+    with pytest.raises(ValueError, match='steering'):
+        lag.step(TICK, math.nan, 0.05)
+    with pytest.raises(ValueError, match='max_change'):
+        lag.step(TICK, 0.2, -0.05)
+
+
+def test_the_lagged_steering_is_not_judged_until_the_history_reaches_back_a_lag():
+    # oracle: spec -- until the history covers the lag there is nothing to judge
+    # against. The first sample is one tick in, and the window's edge is a lag
+    # before each tick, so with 0.025 s ticks the seventh call (index 6) is the
+    # first whose edge is at that first sample.
+    lag = gap_logic.SteeringLag(LAG)
+    judged = [lag.step(TICK, 0.2, 0.05) for _ in range(12)]
+    assert all(math.isnan(v) for v in judged[:6])
+    assert judged[6:] == pytest.approx([0.2] * 6, abs=1e-12)  # rad
+
+
+def test_the_lagged_steering_is_interpolated_between_the_samples_either_side():
+    # oracle: closed form. A steering linear in time is reproduced exactly by
+    # linear interpolation, so the judged value is 2 * (time - lag). With 0.04 s
+    # ticks the window's edge falls between two samples, so this exercises the
+    # interpolation itself.
+    dt = 0.04
+    lag = gap_logic.SteeringLag(LAG)
+    clock, judged = 0.0, []
+    for _ in range(25):
+        clock += dt
+        judged.append((clock, lag.step(dt, 2.0 * clock, 1.0)))
+    finite = [(t, j) for t, j in judged if math.isfinite(j)]
+    assert len(finite) >= 15, judged                           # not vacuous
+    for t, j in finite:
+        assert j == pytest.approx(2.0 * (t - LAG), abs=1e-12)  # rad
+
+
+def test_a_lag_of_zero_judges_the_steering_now_as_the_code_did_before():
+    # oracle: spec -- lag 0 is the behaviour before this change: the steering
+    # now, on every tick. The steadiness window is empty, so even a zero
+    # threshold passes.
+    lag = gap_logic.SteeringLag(0.0)
+    judged = [lag.step(TICK, 0.1 * k, 0.0) for k in range(6)]
+    assert judged == pytest.approx([0.1 * k for k in range(6)], abs=1e-12)  # rad
+
+
+def _lag_response(kin_of_t, t_end, tau, sample_dt, h=1e-4):
+    """The response of the continuous first-order lag dy/dt = (kin(t) - y) / tau
+    from rest, integrated with RK4 on a fine grid and sampled every sample_dt.
+    out[j] is the yaw at time (j + 1) * sample_dt."""
+    def f(t, y):
+        return (kin_of_t(t) - y) / tau
+    steps, every = round(t_end / h), round(sample_dt / h)
+    y, t, out = 0.0, 0.0, []
+    for i in range(steps):
+        k1 = f(t, y)
+        k2 = f(t + h / 2, y + h / 2 * k1)
+        k3 = f(t + h / 2, y + h / 2 * k2)
+        k4 = f(t + h, y + h * k3)
+        y += h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        t += h
+        if (i + 1) % every == 0:
+            out.append(y)
+    return out
+
+
+def test_no_judgement_while_the_steering_changes_by_more_than_the_threshold():
+    # oracle: closed form. The rack steps from 0 to 0.3 rad on the tenth call
+    # (index 9, at 0.25 s). For the next six calls the window's edge is still
+    # before the step, so the steering a lag ago is 0 and the change is 0.3 rad,
+    # over the 0.05 rad threshold: no judgement. On the sixth call after the step
+    # the edge is at the step and the window is steady, so judging resumes.
+    lag = gap_logic.SteeringLag(LAG)
+    judged = [lag.step(TICK, 0.3 if k >= 9 else 0.0, 0.05) for k in range(20)]
+    assert all(math.isnan(v) for v in judged[9:15])
+    assert judged[15] == pytest.approx(0.3, abs=1e-12)  # rad
+
+
+def test_a_steering_ramp_reads_one_when_the_lag_is_compensated_and_one_minus_tau_over_t_without():
+    # oracle: the continuous first-order lag (tau = 0.15 s) on the kinematic yaw,
+    # integrated on a fine grid (_lag_response), at 2.5 m/s. The rack ramps at
+    # 0.3 rad/s: over the 0.15 s window that is 0.045 rad, inside the 0.05 rad
+    # threshold, so it is quasi-steady. A first-order lag follows a steady ramp
+    # one time constant behind. With the lag compensated the ratio is 1; without
+    # it, 1 - tau / t, which stays below 0.9 until t = 1.5 s. The early ticks
+    # carry the lag's own transient, a few hundredths, so the check starts at 0.5 s.
+    speed, dt, tau = 2.5, TICK, LAG
+    ticks = 45                                          # 1.125 s
+    rack = [0.3 * (k + 1) * dt for k in range(ticks)]   # rad
+    yaw = _lag_response(lambda t: speed * math.tan(0.3 * t) / GRIP_WHEELBASE,
+                        ticks * dt, tau, dt)
+    comp, plain = gap_logic.SteeringLag(LAG), gap_logic.SteeringLag(0.0)
+    grip_c, grip_p = _grip(base=2.5), _grip(base=2.5)
+    filt_c = gap_logic.LowPass(gap_logic.GRIP_RATIO_TAU_SEC)
+    filt_p = gap_logic.LowPass(gap_logic.GRIP_RATIO_TAU_SEC)
+    for k in range(ticks):
+        t = (k + 1) * dt
+        judged_c = comp.step(dt, rack[k], 0.05)
+        judged_p = plain.step(dt, rack[k], 0.05)
+        gap_logic.adaptive_grip_step(
+            grip_c, filt_c, yaw[k], speed, judged_c, GRIP_WHEELBASE, dt)
+        gap_logic.adaptive_grip_step(
+            grip_p, filt_p, yaw[k], speed, judged_p, GRIP_WHEELBASE, dt)
+        if t >= 0.5 and math.isfinite(judged_c) and math.isfinite(judged_p):
+            r_c = gap_logic.grip_ratio(yaw[k], speed, judged_c, GRIP_WHEELBASE)
+            r_p = gap_logic.grip_ratio(yaw[k], speed, judged_p, GRIP_WHEELBASE)
+            assert r_c == pytest.approx(1.0, abs=0.03)              # dimensionless
+            assert r_p == pytest.approx(1.0 - tau / t, abs=0.03)    # dimensionless
+    assert grip_c.limit > 2.5 + 0.02                        # m/s^2: the compensated limit rose
+    assert grip_p.limit == pytest.approx(2.5, abs=1e-12)    # m/s^2: never rose
+
+
+def test_a_step_in_the_steering_is_only_partly_rescued_by_the_lag():
+    # oracle: closed form. The rack steps to 0.2 rad at time 0 and holds, so the
+    # yaw is the first-order lag's step response: after k+1 ticks of 0.025 s it is
+    # 1 - exp(-(k+1)/6) of the steady value, since tau is six ticks. Judged against
+    # the steering now, that is the ratio on every tick. Judged against the
+    # steering a lag ago it is the same curve from the seventh tick on: the lag
+    # withholds the first lag's judgements and leaves the settling as it was.
+    speed, steer, ticks = 2.0, 0.2, 30
+    yaw = _first_order_yaw(
+        [speed * math.tan(steer) / GRIP_WHEELBASE] * ticks, TICK, LAG)
+    plain, comp = gap_logic.SteeringLag(0.0), gap_logic.SteeringLag(LAG)
+    r_p, r_c = [], []
+    for k in range(ticks):
+        r_p.append(gap_logic.grip_ratio(
+            yaw[k], speed, plain.step(TICK, steer, 0.05), GRIP_WHEELBASE))
+        r_c.append(gap_logic.grip_ratio(
+            yaw[k], speed, comp.step(TICK, steer, 0.05), GRIP_WHEELBASE))
+    for k in range(ticks):
+        expected = 1.0 - math.exp(-(k + 1) / 6.0)                # dimensionless
+        assert r_p[k] == pytest.approx(expected, abs=1e-9)       # dimensionless
+        if k < 6:
+            assert math.isnan(r_c[k]), k
+        else:
+            assert r_c[k] == pytest.approx(expected, abs=1e-9)   # dimensionless
+    # The transient: below 0.9 for the first thirteen ticks, with or without the lag.
+    assert all(r < 0.9 for r in r_p[:13]) and r_p[13] >= 0.9
+    # Settled: 0.95 is first reached at the eighteenth tick (0.45 s, three time
+    # constants), not at the lag.
+    assert r_p[16] < 0.95 <= r_p[17]
+    assert r_c[16] < 0.95 <= r_c[17]

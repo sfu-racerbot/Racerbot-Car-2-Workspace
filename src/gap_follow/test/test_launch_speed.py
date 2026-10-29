@@ -29,6 +29,11 @@ SHIPPED = yaml_parameters(PACKAGED_CONFIG)
 # Synthetic, so the expected overrides below follow from these numbers alone.
 PARAMS = {'max_speed': 3.5, 'min_speed': 1.0, 'corner_speed': 1.5,
           'corner_speed_wide': 1.9}
+# The four speeds the shipped YAML had before the 2026-10-27 race defaults. The
+# shipped max_speed is now the 5.0 ceiling itself, so a raise has no headroom on
+# the shipped file: the raise path is tested from these instead.
+PRE_RACE = {'max_speed': 3.5, 'min_speed': 1.0, 'corner_speed': 1.5,
+            'corner_speed_wide': 1.9}
 
 
 @pytest.mark.parametrize('text', ['', '   '])
@@ -129,7 +134,7 @@ def capped():
 
 @pytest.fixture
 def raised():
-    node = _node(speed_cap_overrides(SHIPPED, str(MAX_SPEED_CEILING)))
+    node = _node({**PRE_RACE, **speed_cap_overrides(PRE_RACE, str(MAX_SPEED_CEILING))})
     yield node
     node.destroy_node()
     rclpy.shutdown()
@@ -172,21 +177,29 @@ def test_capped_node_still_stops_when_lb_is_released(capped):
     assert all(msg.drive.speed == 0.0 for msg in published)
 
 
-# Already moving faster than the YAML's top speed, so the acceleration ramp
-# is not what holds the command down -- only max_speed can.
+# The speed the car is moving at in the stop test below.
 FAST = 4.5  # m/s
 
 
 def test_yaml_top_speed_holds_the_command_at_the_yaml_value(uncapped):
-    # Precondition for the next test: without the flag, this tick is capped.
-    assert _drive(uncapped, OPEN, FAST).speed == pytest.approx(
+    # Already faster than the shipped top speed, so the acceleration ramp is
+    # not what holds the command down -- max_speed is. The ramp from 5.5 m/s
+    # allows 6.0 m/s on this tick (5.5 + 5.0 x 0.1 s), above the 5.0 cap.
+    above_top = SHIPPED['max_speed'] + 0.5  # m/s
+    assert _drive(uncapped, OPEN, above_top).speed == pytest.approx(
         SHIPPED['max_speed'], abs=1e-6)  # m/s
+
+
+# Above the old 3.5 m/s top speed, and low enough that the ramp (4.9 + 5.0 x
+# 0.1 s = 5.4 m/s) is not what holds a 5.0 m/s command down: the raised cap is.
+RAISE_FROM = 4.9  # m/s
 
 
 def test_raised_node_commands_above_the_yaml_top_speed(raised):
     assert raised.max_speed == MAX_SPEED_CEILING
-    speed = _drive(raised, OPEN, FAST).speed
-    assert SHIPPED['max_speed'] + 0.5 < speed <= MAX_SPEED_CEILING  # m/s
+    speed = _drive(raised, OPEN, RAISE_FROM).speed
+    assert PRE_RACE['max_speed'] + 0.5 < speed  # m/s: above the old top speed
+    assert speed == pytest.approx(MAX_SPEED_CEILING, abs=1e-6)  # m/s: the raised cap binds
 
 
 def test_raised_node_still_stops_when_lb_is_released(raised):

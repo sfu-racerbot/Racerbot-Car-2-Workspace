@@ -262,7 +262,10 @@ GAP_FOLLOW_TUNABLES = (
             description='Floor for ordinary driving, so the car keeps '
                         'moving through a tight section rather than '
                         'creeping to a halt.'),
-    Tunable('corner_speed', 'Speed', 0.1, 2.0, unit='m/s', step=0.05,
+    # 2.85 = 2.0 x 5.0/3.5: the range moves with the speed envelope, as the
+    # race defaults of 2026-10-27 did (shipped corner_speed is now 2.143, and
+    # the shipped-config guard test needs it inside this range).
+    Tunable('corner_speed', 'Speed', 0.1, 2.85, unit='m/s', step=0.05,
             description='Speed held when the chosen gap is off to one side '
                         'rather than straight ahead.'),
     Tunable('max_acceleration', 'Speed', 0.5, 6.0, unit='m/s^2', step=0.25,

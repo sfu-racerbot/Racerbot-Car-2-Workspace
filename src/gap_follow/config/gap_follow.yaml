@@ -13,11 +13,15 @@
 #                       (on the 2026-08-06 run: ~80% of all driving ticks)
 #   corner_speed_wide   the same cap on a corner sensed as wide
 #   max_lateral_accel   curvature cap: v <= sqrt(max_lateral_accel / curvature).
-#                       Since 2026-10-19 (2.0) this and the acceleration ramp
-#                       are what bind most ticks in simulation. A grip limit --
-#                       raise in small steps, and drop it back to 1.0 first if
-#                       the car feels too fast in corners on the floor.
-#   max_acceleration    SAFETY-CRITICAL: the braking the car assumes it has
+#                       Since 2026-10-19 (2.0; 2.5 from 2026-10-26) this and
+#                       the acceleration ramp are what bind most ticks in
+#                       simulation. A grip limit -- raise in small steps, and
+#                       drop it back to 1.0 first if the car feels too fast in
+#                       corners on the floor.
+#   max_acceleration    how fast a speed command may RISE, in m/s^2. It never
+#                       limits braking. Race defaults 2026-10-27: 5.0 (was 3.0),
+#                       see docs/gap-follow.md#race-defaults-2026-10-27.
+#   max_braking_decel   SAFETY-CRITICAL: the braking the car assumes it has
 #                       for the clearance it sees. Raising it lets the car
 #                       drive faster than it can stop. Do not raise to go
 #                       faster.
@@ -79,10 +83,18 @@ gap_follow_node:
     #
     # Raised 2026-09-26 (1.1 -> 1.5, max 2.5 -> 3.5, min 0.8 -> 1.0) to make
     # the car faster. NOT yet validated on the car. Note max_lateral_accel
-    # below still caps the tightest corners near 1.0 m/s (full lock 0.349).
-    corner_speed: 1.5
-    max_speed: 3.5
-    min_speed: 1.0
+    # below still caps the tightest corners at full lock (0.349 rad): about
+    # 1.41 m/s at car 2's 2.0, from sqrt(2.0 * 0.36 / tan 0.349).
+    # Race defaults (2026-10-27, ported from car 1 on 2026-10-29,
+    # docs/gap-follow.md#race-defaults-2026-10-27):
+    # max_speed 3.5 -> 5.0, and the speeds tied to it scaled by 5.0/3.5: min_speed
+    # 1.0 -> 1.429, corner_speed 1.5 -> 2.143, corner_speed_wide 1.9 -> 2.714 (below),
+    # narrow_corridor_speed 2.5 -> 3.571 (below). Simulator-validated only, zero
+    # contacts; never driven on car 2. A launch's max_speed:= also lowers min_speed,
+    # corner_speed and corner_speed_wide; it cannot go above 5.0.
+    corner_speed: 2.143
+    max_speed: 5.0
+    min_speed: 1.429
     # 0.349 rad = 20 deg (was 0.26). Both sides reach ~25 deg since the
     # 2026-10-16 steering calibration (docs/hardware-reference.md); 20 leaves
     # 5 deg for the gain's error below 19 deg, where nothing was measured.
@@ -102,11 +114,18 @@ gap_follow_node:
     steering_gain_speed_ref: 1.8
     # Raised 1.0 -> 2.0 on 2026-10-19 with the swept-path / corner-setup
     # rework: 1.0 m/s^2 (~0.1 g) held the car near 1.4 m/s through every
-    # corner. 2.0 is still below pure_pursuit's 2.5 on the same car and well
-    # under the simulator's grip limit (0.7 g). Simulation only, not yet
-    # validated on the floor -- see docs/gap-follow.md#validation.
+    # corner. Car 2 stays at 2.0 (car 1 went to 2.5 on 2026-10-26 from car 1's
+    # own run 20261026-194514): car 2's 2026-10-19 floor run read 0.91 of the
+    # commanded curvature at 2.0-2.5 and the car started to slide above 2.0
+    # (docs/gap-follow.md). A car 2 floor run at 2.5 would follow the usual
+    # order: wheels off, then low speed (docs/gap-follow.md#validation).
+    # Equal to neural_racer's 2.0 (test_config.py checks they match).
     max_lateral_accel: 2.0
-    max_acceleration: 3.0
+    # Race defaults (2026-10-27): 3.0 -> 5.0, the speed ramp. The car's VESC speed
+    # loop already lags a 3.0 ramp (measured 2026-10-27), so on the car this mostly
+    # removes a software cap. It limits how fast a speed command may RISE and never
+    # limits braking; the braking the car assumes is max_braking_decel, below.
+    max_acceleration: 5.0
     # SAFETY-CRITICAL, and NOT the same knob as pure_pursuit's identically
     # named one. Here it is the braking authority the car *assumes it has*
     # when deciding how fast it may drive for the clearance it can see
@@ -141,9 +160,56 @@ gap_follow_node:
     # the hard stops the old 0.18 m TTC corridor made for side walls with a
     # smooth slowdown. narrow_corridor_speed >= max_speed turns it off.
     # Simulator-validated only.
-    narrow_corridor_speed: 2.5
+    # 3.571 on 2026-10-27: 2.5 scaled with max_speed (race defaults, see corner_speed).
+    narrow_corridor_speed: 3.571
     narrow_corridor_clearance: 0.05
     open_corridor_clearance: 0.15
+    # --- Steering damping from the IMU yaw rate (docs/gap-follow.md#steering-damping-gyro) ---
+    # Car 2: OFF until its BNO085 is mounted and calibrated (docs/car1-vs-car2.md#imu,
+    # flip it with the other IMU defaults there). Car 1 ships it ON since 2026-10-27
+    # (race defaults, docs/gap-follow.md#race-defaults-2026-10-27). When on, the steering request gets -steering_damping_gain x the gyro's yaw
+    # rate added to it, before the clip, the arc guard and the slew limit, so the
+    # car steers against its own rotation. The term is used only while
+    # /imu/status says 'ok' and /imu/data is fresh (imu_timeout_sec); otherwise
+    # it adds exactly zero, which is today's behaviour without the IMU. Turn it
+    # off with gap_follow_launch.py steering_damping:=false.
+    #
+    # The gain, in seconds, is 0.10 (0.03 before 2026-10-27). The weave diagnosis of runs 20261026-194514
+    # and 20261026-194913 (tools/run_analysis/weave.py, 2026-10-27) found the
+    # steering loop itself oscillating: 0.625 Hz, steering-to-gyro coherence
+    # 0.95-0.97, measured steering lag tau 0.125-0.150 s, and loop damping ratio
+    # zeta 0.60-0.65. With the loop model zeta = (1 + Kd v / L) / (2 sqrt(tau v K
+    # / L)), a Kd of 0.03 s brings zeta to about 0.7 at 2 m/s; the simulator race
+    # table (docs/gap-follow.md#race-defaults-2026-10-27) chose 0.10. Not measured
+    # on the car: simulator-validated only (docs/gap-follow.md#steering-damping-gyro).
+    enable_steering_damping: false
+    steering_damping_gain: 0.10
+    imu_topic: /imu/data
+    imu_status_topic: /imu/status
+    imu_timeout_sec: 0.1
+    # --- Adaptive grip from the gyro (docs/gap-follow.md#adaptive-grip-imu) ---
+    # Ships OFF. When on, the lateral limit behind the curvature speed caps
+    # starts at max_lateral_accel. The gyro's grip ratio (about 1.0 when the
+    # tyres make the turn the rack asks for) is averaged over 0.3 s, then: at or
+    # above adaptive_grip_hold_ratio the limit rises by adaptive_grip_rise_per_s
+    # up to adaptive_grip_ceiling; below adaptive_grip_slip_ratio (sliding) it is
+    # cut to adaptive_grip_cut_factor of itself, never below max_lateral_accel.
+    # A tick where the car asks for less than adaptive_grip_judge_fraction of the
+    # limit is not judged. The yaw trails the rack (about 0.15 s, the weave
+    # diagnosis in docs/gap-follow.md#steering-damping-gyro), so the yaw is judged
+    # against the steering from adaptive_grip_steering_lag_sec ago, and only while
+    # that steering has moved no more than adaptive_grip_max_steering_change (rad)
+    # over the window. Turn it on with gap_follow_launch.py adaptive_grip:=true.
+    # Not yet run in the simulator or on the car (docs/gap-follow.md#adaptive-grip-imu).
+    enable_adaptive_grip: false
+    adaptive_grip_ceiling: 3.0
+    adaptive_grip_rise_per_s: 0.2
+    adaptive_grip_cut_factor: 0.85
+    adaptive_grip_hold_ratio: 0.95
+    adaptive_grip_slip_ratio: 0.90
+    adaptive_grip_judge_fraction: 0.8
+    adaptive_grip_steering_lag_sec: 0.15
+    adaptive_grip_max_steering_change: 0.05
     # --- Rectangular vehicle footprint ---
     # Measured on this car with a tape, 2026-08-24, NOT the Traxxas 74276-4
     # published figures the earlier values came from:
@@ -231,7 +297,8 @@ gap_follow_node:
     # 1.9 on 2026-09-26: raised with corner_speed (1.1 -> 1.5) at the same
     # 1.4/1.1 ratio, because corner_speed <= corner_speed_wide is checked
     # at startup and 1.5 against the old 1.4 would stop the node.
-    corner_speed_wide: 1.9
+    # 2.714 on 2026-10-27: 1.9 scaled with max_speed (race defaults, see corner_speed).
+    corner_speed_wide: 2.714
     disparity_threshold: 0.4
     # Obstacles are already inflated by half-width + margin on both sides.
     # Requiring another car width here was double-padding tight openings.
@@ -367,7 +434,11 @@ gap_follow_node:
     # On the approach to a turn in a corridor, move toward the OUTSIDE wall so
     # the car turns in late (a racing line) instead of hugging the inside from
     # the moment the bend appears. Off on straights and in open rooms.
-    enable_corner_setup: true
+    # Off by default since 2026-10-27 (race defaults, docs/gap-follow.md#race-defaults-2026-10-27).
+    # On its own it measured 1.5% faster and 18% more weave (plan A6); the race
+    # table ships it off with the gyro damping on. Edit this file and restart to
+    # turn it back on. Its values below are unchanged.
+    enable_corner_setup: false
     # Target position: this fraction of the room between the middle and the
     # outside wall (room = corridor_half - car_width/2 - wall_margin).
     corner_setup_fraction: 0.6

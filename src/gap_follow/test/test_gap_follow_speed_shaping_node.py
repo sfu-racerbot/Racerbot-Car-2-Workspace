@@ -149,7 +149,11 @@ def test_speed_hold_keeps_a_dip_for_the_hold_time(node):
     node.speed_hold_sec = 0.25
     node.speed_hold = gap_logic.SpeedHold(0.25)
     node.command_slew_max_dt = dt
-    node.max_acceleration = 100.0
+    # The release tick must not be ramp-limited. At 100 m/s^2 the ramp reaches
+    # only 1.2 + 100/32 = 4.3 m/s on that tick, which was under the old 3.5
+    # top speed but is under the 5.0 shipped since 2026-10-27. At 1000 it
+    # reaches 32 m/s, so the top speed is what the release has to reach.
+    node.max_acceleration = 1000.0
     open_road = _raycast(_corridor(1.5, 1.5))
     top = node.max_speed
 

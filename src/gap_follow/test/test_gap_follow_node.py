@@ -975,9 +975,14 @@ def test_packaged_config_plus_mapping_overrides_actually_starts():
 def test_lowering_only_max_speed_is_still_rejected():
     """The launch-side fix must not have quietly relaxed the check itself:
     an inconsistent set is a configuration error and the node is still
-    expected to refuse it rather than pick an interpretation."""
+    expected to refuse it rather than pick an interpretation.
+
+    2.0, not the old 1.0: the shipped min_speed is 1.429 since the 2026-10-27
+    race defaults, and 1.0 would be refused by the min_speed <= max_speed
+    check, which runs first. 2.0 passes that check and fails the
+    corner_speed_wide <= max_speed coupling this test is about."""
     rclpy.init(args=['--ros-args', '--params-file', PACKAGED_CONFIG,
-                     '-p', 'max_speed:=1.0', *TEST_ONLY_DRIVE])
+                     '-p', 'max_speed:=2.0', *TEST_ONLY_DRIVE])
     try:
         with pytest.raises(ValueError, match='corner_speed_wide'):
             GapFollowNode()

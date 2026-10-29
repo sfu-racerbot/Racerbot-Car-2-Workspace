@@ -175,6 +175,10 @@ def test_swept_clearance_still_brakes_for_a_wall_in_the_path(node):
 # ============================================================================
 
 def _setup_pair(node, segments, speed=2.0):
+    # Corner setup is the feature under test. It ships OFF since 2026-10-27
+    # (docs/gap-follow.md#race-defaults-2026-10-27), so turn it on here rather
+    # than rely on the shipped default.
+    node.enable_corner_setup = True
     node.enable_arc_guard = False      # isolate the setup term
     scan = _raycast(segments)
     with_setup = _drive(node, scan, speed).steering_angle
@@ -217,6 +221,7 @@ def test_corner_setup_does_nothing_on_a_straight(node):
 
 
 def test_corner_setup_is_reported_in_the_decision_log(node):
+    node.enable_corner_setup = True    # off by default since 2026-10-27
     node.enable_arc_guard = False
     _record_details(node)
     _drive(node, _raycast(_left_turn(0.7, 0.7, corner_x=1.5)), speed=2.0)

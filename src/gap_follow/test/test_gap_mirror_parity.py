@@ -13,6 +13,7 @@ published steering and speed tick by tick. Needs ROS sourced:
     export ROS_DOMAIN_ID=79 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
     python3 -m pytest src/gap_follow/test/test_gap_mirror_parity.py -v
 """
+import json
 import math
 import os
 import sys
@@ -22,7 +23,8 @@ import pytest
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.duration import Duration
-from sensor_msgs.msg import Joy
+from sensor_msgs.msg import Imu, Joy
+from std_msgs.msg import String
 
 from gap_follow.gap_follow_node import GapFollowNode
 
@@ -113,9 +115,13 @@ def test_mirror_commands_what_the_node_commands(node):
     node.drive_pub.publish = lambda msg: published.append(msg)
 
     scans = _scene_sequence()
+    # This sequence exists to exercise corner setup, which ships OFF since
+    # 2026-10-27, so it is switched on for the node and the mirror alike.
     params = gap_mirror.node_params()
     params['command_slew_max_dt'] = DT
+    params['enable_corner_setup'] = True
     node.command_slew_max_dt = DT
+    node.enable_corner_setup = True
     mirror = gap_mirror.GapController(params, _Lidar(scans[0][0]))
     # Already rolling fast with the rack hard left while the corridor runs
     # straight: the first ticks are braked by the arc the rack is still on.
@@ -231,6 +237,176 @@ def test_mirror_matches_the_node_with_opponent_awareness_on():
         # a confirmed mover for most of the run, and the follow cap binding.
         assert sum(m is not None for m, _b in modes) >= 30, modes
         assert sum(b == 'follow' for _m, b in modes) >= 5, modes
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def _feed_imu(node, state, yaw_rate):
+    """What imu_bridge publishes for one tick: its verdict, then one sample."""
+    node.imu_status_callback(String(data=json.dumps(
+        {'state': state, 'reason': None, 'imu': 'bno'})))
+    msg = Imu()
+    msg.angular_velocity.z = float(yaw_rate)
+    node.imu_callback(msg)
+
+
+def test_mirror_matches_the_node_with_steering_damping_on():
+    """The same comparison with steering damping on at the shipped gain, a yaw
+    rate that swings both ways, and a faulty IMU for the last third of the
+    sequence. In that third both must add exactly nothing, and they must agree
+    on every tick. The healthy part must really exercise the term, or this
+    proves nothing about it (docs/gap-follow.md#steering-damping-gyro)."""
+    rclpy.init(args=['--ros-args', '--params-file', PACKAGED_CONFIG,
+                     '-p', 'enable_steering_damping:=true', *TEST_ONLY_DRIVE])
+    node = GapFollowNode()
+    try:
+        assert node.drive_pub.topic_name == '/test_only/drive'
+        published = []
+        node.drive_pub.publish = lambda msg: published.append(msg)
+        node.command_slew_max_dt = DT
+        params = gap_mirror.node_params()
+        params['enable_steering_damping'] = True
+        params['command_slew_max_dt'] = DT
+        joy = Joy()
+        joy.buttons = [0] * 5
+        joy.buttons[4] = 1
+        scans = _scene_sequence()
+        mirror = gap_mirror.GapController(params, _Lidar(scans[0][0]))
+        speed = 2.0
+        node.last_commanded_speed = speed
+        node.steering_basis = mirror.steering_basis = 0.0
+        node.last_command_time = node.get_clock().now() - Duration(seconds=DT)
+        healthy_ticks = 2 * len(scans) // 3
+        damping = []
+        for step, (scan, forced_speed) in enumerate(scans):
+            if forced_speed is not None:
+                speed = node.last_commanded_speed = forced_speed
+            yaw = 2.0 * math.sin(0.35 * step)   # rad/s: left, then right
+            healthy = step < healthy_ticks
+            _feed_imu(node, 'ok' if healthy else 'fault', yaw)
+            node.joy_callback(joy)
+            odom = Odometry()
+            odom.twist.twist.linear.x = speed
+            node.odom_callback(odom)
+            if node.last_command_time is not None:
+                node.last_command_time = node.get_clock().now() - Duration(seconds=DT)
+            mirror.steering_basis = node.steering_basis
+            mirror.last_commanded_speed = node.last_commanded_speed
+            mirror.previous_target_idx = node.previous_target_idx
+            mirror.last_command_time = step - 1
+            node.scan_callback(scan)
+            expected_steering, expected_speed = mirror.command(
+                np.asarray(scan.ranges), speed, step,
+                yaw_rate=yaw if healthy else None)
+            drive = published[-1].drive
+            assert drive.steering_angle == pytest.approx(expected_steering, abs=TOLERANCE), (
+                f'tick {step}: steering')
+            assert drive.speed == pytest.approx(expected_speed, abs=TOLERANCE), (
+                f'tick {step}: speed')
+            damping.append(mirror.telemetry.get('steering_damping', 0.0))
+            speed = max(drive.speed, 0.8 * speed)
+        # The healthy part must carry a real term on enough driving ticks, or
+        # the agreement above is agreement about nothing.
+        assert sum(abs(d) > 1e-3 for d in damping[:healthy_ticks]) >= 10, damping
+        assert all(d == 0.0 for d in damping[healthy_ticks:]), damping
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def _grip_scene_sequence():
+    """A corridor the car steers through at a steady 2 m/s. Every tick is forced
+    to 2.0 m/s, so the grip's demand is high enough to be judged on each tick
+    (the scenes in _scene_sequence are mostly too slow to judge)."""
+    return [(_raycast(_corridor(1.4, 0.6)), 2.0)] * 74
+
+
+def test_mirror_matches_the_node_with_adaptive_grip_on():
+    """The same comparison with the adaptive grip on at the shipped values, on a
+    steady corridor at 2 m/s. Steering damping is pinned off: it ships on since
+    2026-10-27, and with it on no healthy tick moved the limit, so the test
+    would prove nothing about the grip. Eight ticks warm up with the IMU at fault, long
+    enough for the rack to settle on the corridor's steering, so the first
+    judged tick is not lagged by the rack's slew. Then the healthy part: the car
+    yaws as the rack was last commanded, scaled to a grip ratio of 1.0 for
+    fourteen ticks and 0.5 for six, then 1.0 again, so the limit rises and is
+    cut. The last ten ticks are a faulty IMU, where both must sit at the base.
+    The healthy part must really move the limit both ways, or the agreement
+    proves nothing (docs/gap-follow.md#adaptive-grip-imu)."""
+    rclpy.init(args=['--ros-args', '--params-file', PACKAGED_CONFIG,
+                     '-p', 'enable_adaptive_grip:=true',
+                     '-p', 'enable_steering_damping:=false', *TEST_ONLY_DRIVE])
+    node = GapFollowNode()
+    try:
+        assert node.drive_pub.topic_name == '/test_only/drive'
+        published = []
+        node.drive_pub.publish = lambda msg: published.append(msg)
+        node.command_slew_max_dt = DT
+        params = gap_mirror.node_params()
+        params['enable_adaptive_grip'] = True
+        params['enable_steering_damping'] = False
+        params['command_slew_max_dt'] = DT
+        joy = Joy()
+        joy.buttons = [0] * 5
+        joy.buttons[4] = 1
+        scans = _grip_scene_sequence()
+        mirror = gap_mirror.GapController(params, _Lidar(scans[0][0]))
+        speed = 2.0
+        node.last_commanded_speed = speed
+        node.steering_basis = mirror.steering_basis = 0.0
+        node.last_command_time = node.get_clock().now() - Duration(seconds=DT)
+        warm_ticks, healthy_ticks = 8, 8 + 56
+        limits = []
+        for step, (scan, forced_speed) in enumerate(scans):
+            if forced_speed is not None:
+                speed = node.last_commanded_speed = forced_speed
+            healthy = warm_ticks <= step < healthy_ticks
+            # The yaw a car makes at the rack's last command, scaled to the grip
+            # ratio this block calls for. gap_logic reads the ratio back as
+            # yaw * speed / (speed^2 * tan(steer) / wheelbase), so this is exact.
+            last_steer = published[-1].drive.steering_angle if published else 0.0
+            j = step - warm_ticks   # index within the healthy part
+            ratio = 0.5 if 14 <= j < 20 else 1.0
+            yaw = ratio * speed * math.tan(last_steer) / params['wheelbase']
+            _feed_imu(node, 'ok' if healthy else 'fault', yaw)
+            node.joy_callback(joy)
+            odom = Odometry()
+            odom.twist.twist.linear.x = speed
+            node.odom_callback(odom)
+            if node.last_command_time is not None:
+                node.last_command_time = node.get_clock().now() - Duration(seconds=DT)
+            mirror.steering_basis = node.steering_basis
+            mirror.last_commanded_speed = node.last_commanded_speed
+            mirror.previous_target_idx = node.previous_target_idx
+            mirror.last_command_time = step - 1
+            node.scan_callback(scan)
+            expected_steering, expected_speed = mirror.command(
+                np.asarray(scan.ranges), speed, step,
+                yaw_rate=yaw if healthy else None)
+            drive = published[-1].drive
+            assert drive.steering_angle == pytest.approx(expected_steering, abs=TOLERANCE), (
+                f'tick {step}: steering')
+            assert drive.speed == pytest.approx(expected_speed, abs=TOLERANCE), (
+                f'tick {step}: speed')
+            # The limit itself, not only the speed it produces, must agree.
+            assert node.adaptive_grip.limit == pytest.approx(
+                mirror.grip.limit, abs=TOLERANCE), f'tick {step}: lateral limit'
+            limits.append(mirror.telemetry.get('lateral_limit'))
+            speed = max(drive.speed, 0.8 * speed)
+        base = params['max_lateral_accel']
+        # The healthy part must move the limit both ways, or this proves nothing.
+        healthy_limits = [v for v in limits[warm_ticks:healthy_ticks] if v is not None]
+        rises = sum(b > a for a, b in zip(healthy_limits, healthy_limits[1:]))
+        cuts = sum(b < a for a, b in zip(healthy_limits, healthy_limits[1:]))
+        assert rises >= 3 and cuts >= 1, (rises, cuts, healthy_limits)
+        assert max(healthy_limits) > base + 0.05, healthy_limits
+        # The faulty part: the limit sits at the base on every driving tick. It
+        # must first have risen above the base, or the reset proves nothing.
+        assert limits[healthy_ticks - 1] > base + 1e-3, limits[healthy_ticks - 1]
+        faulty_limits = [v for v in limits[healthy_ticks:] if v is not None]
+        assert faulty_limits, 'the faulty part must drive, or it proves nothing'
+        assert all(v == pytest.approx(base, abs=1e-12) for v in faulty_limits), faulty_limits
     finally:
         node.destroy_node()
         rclpy.shutdown()

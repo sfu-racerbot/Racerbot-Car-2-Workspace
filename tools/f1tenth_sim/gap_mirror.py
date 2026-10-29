@@ -39,12 +39,24 @@ NOT_MIRRORED = {
     "intent_topic", "intent_rate_hz", "intent_horizon_sec", "intent_samples",
     "intent_max_length", "enable_cornering_anticipation",
     "anticipation_near_depth",
+    # Steering damping's gyro topics and their freshness check. The simulator
+    # hands the mirror the true yaw rate every tick, so there is no stale
+    # sample to time out (docs/gap-follow.md#steering-damping-gyro).
+    "imu_topic", "imu_status_topic", "imu_timeout_sec",
 }
 
 
 # Every parameter GapController reads. test_gap_mirror.py checks the YAML
 # provides each one and that nothing else in the YAML goes unread.
 REQUIRED_PARAMS = frozenset((
+    "adaptive_grip_ceiling",
+    "adaptive_grip_cut_factor",
+    "adaptive_grip_hold_ratio",
+    "adaptive_grip_judge_fraction",
+    "adaptive_grip_max_steering_change",
+    "adaptive_grip_rise_per_s",
+    "adaptive_grip_slip_ratio",
+    "adaptive_grip_steering_lag_sec",
     "adaptive_width_narrow",
     "adaptive_width_reference",
     "arc_guard_blocked_fallback",
@@ -90,7 +102,9 @@ REQUIRED_PARAMS = frozenset((
     "enable_adaptive_width",
     "enable_arc_guard",
     "enable_centering",
+    "enable_adaptive_grip",
     "enable_corner_setup",
+    "enable_steering_damping",
     "enable_swept_clearance",
     "enable_ttc",
     "escape_creep_speed",
@@ -115,6 +129,7 @@ REQUIRED_PARAMS = frozenset((
     "safety_margin",
     "speed_hold_sec",
     "steering_gain",
+    "steering_damping_gain",
     "steering_gain_speed_ref",
     "swept_clearance_margin",
     "swept_clearance_max_length",
@@ -168,6 +183,20 @@ LEGACY_VALUES = {
     "narrow_corridor_clearance": 0.05,
     "open_corridor_clearance": 0.15,
     "ttc_path_margin": None,  # None: the old corridor, safety_margin itself
+    # Steering damping (2026-10-27) did not exist: off.
+    "enable_steering_damping": False,
+    "steering_damping_gain": 0.0,
+    # Adaptive grip (2026-10-27) did not exist: off. Its values are inert while
+    # it is off, so these are the shipped defaults.
+    "enable_adaptive_grip": False,
+    "adaptive_grip_ceiling": 3.0,
+    "adaptive_grip_rise_per_s": 0.2,
+    "adaptive_grip_cut_factor": 0.85,
+    "adaptive_grip_hold_ratio": 0.95,
+    "adaptive_grip_slip_ratio": 0.90,
+    "adaptive_grip_judge_fraction": 0.8,
+    "adaptive_grip_steering_lag_sec": 0.15,
+    "adaptive_grip_max_steering_change": 0.05,
     # Opponent awareness (2026-10-22) did not exist: off. Its opponent_*
     # values are then never read, but the mirror requires them present.
     "enable_opponent_awareness": False,
@@ -202,7 +231,9 @@ class GapController:
 
     ``params`` is node_params() (optionally with overrides); ``lidar`` needs
     ``angle_min``, ``angle_increment`` and ``range_min``. ``command(scan,
-    measured_speed, step)`` returns ``(steering, speed)`` for one 40 Hz tick.
+    measured_speed, step, yaw_rate=None)`` returns ``(steering, speed)`` for one
+    40 Hz tick; ``yaw_rate`` is read when steering damping or the adaptive grip
+    is on, and None means no healthy IMU sample this tick.
 
     Holds parameters as attributes and reproduces the node's per-scan chain:
     sanitize -> side walls/adaptive width -> footprint/TTC -> disparity extend
@@ -240,8 +271,20 @@ class GapController:
                 self.p["wheelbase"], self.p["laser_offset_x"],
                 self.p["laser_offset_y"], self.p["car_length"])
         self.opponent_mode = None
+        # Adaptive grip, built as gap_follow_node builds it: the lateral limit
+        # and the low-pass on its ratio. Read only when the flag is on.
+        self.grip = gap_logic.AdaptiveGrip(
+            base=self.p["max_lateral_accel"],
+            ceiling=max(self.p["adaptive_grip_ceiling"], self.p["max_lateral_accel"]),
+            rise_per_s=self.p["adaptive_grip_rise_per_s"],
+            cut_factor=self.p["adaptive_grip_cut_factor"],
+            hold_ratio=self.p["adaptive_grip_hold_ratio"],
+            slip_ratio=self.p["adaptive_grip_slip_ratio"],
+            judge_fraction=self.p["adaptive_grip_judge_fraction"])
+        self.grip_ratio_filter = gap_logic.LowPass(gap_logic.GRIP_RATIO_TAU_SEC)
+        self.steering_lag = gap_logic.SteeringLag(self.p["adaptive_grip_steering_lag_sec"])
 
-    def command(self, scan, current_speed, step):
+    def command(self, scan, current_speed, step, yaw_rate=None):
         p = self.p
         tel = self.telemetry = {}
         clean, valid = gap_logic.sanitize_ranges(
@@ -419,8 +462,14 @@ class GapController:
                          min(abs(float(current_speed)), p["max_speed"]))
         bearing_gain *= gap_logic.speed_scheduled_gain(
             gain_basis, p["steering_gain_speed_ref"])
+        # Steering damping (gap_follow_node._steering_damping_term): minus the
+        # gain times the gyro's yaw rate. yaw_rate None means no healthy IMU
+        # sample this tick, which the car answers with exactly zero.
+        damping = 0.0
+        if p["enable_steering_damping"] and yaw_rate is not None:
+            damping = gap_logic.steering_damping(yaw_rate, p["steering_damping_gain"])
         desired_steering = float(np.clip(
-            bearing_gain * target_angle + centering_bias + setup_bias,
+            bearing_gain * target_angle + centering_bias + setup_bias + damping,
             -p["max_steering_angle"], p["max_steering_angle"]))
         if p["enable_arc_guard"] and not creeping:
             speed_basis = max(self.last_commanded_speed,
@@ -449,9 +498,10 @@ class GapController:
             desired_steering, self.steering_basis, dt, p["max_steering_rate"])
         self.steering_basis = steering
 
+        lateral_limit = self._lateral_limit(steering, dt, current_speed, yaw_rate)
         limited_curvature = math.tan(desired_steering) / p["wheelbase"]
         curve_speed = gap_logic.curvature_speed_limit(
-            limited_curvature, p["max_lateral_accel"], p["max_speed"])
+            limited_curvature, lateral_limit, p["max_speed"])
         normal_speed = max(p["min_speed"], curve_speed)
 
         braking_clearance = forward_clearance
@@ -514,7 +564,10 @@ class GapController:
         tel.update(target_angle=target_angle, target_distance=target_distance,
                    gap_width=(gap_end - gap_start + 1) * self.lidar.angle_increment,
                    fallback=used_fallback, creeping=creeping,
-                   centering_bias=centering_bias, desired_steering=desired_steering,
+                   centering_bias=centering_bias, steering_damping=damping,
+                   lateral_limit=lateral_limit,
+                   desired_steering=desired_steering,
+                   requested_steering=steering,  # after the slew limit: what this tick returns
                    curve_cap=normal_speed, clearance_cap=clearance_speed,
                    corner_cap=effective_corner, binding=binding)
 
@@ -535,6 +588,24 @@ class GapController:
             width_factor, p["corner_speed"], p["corner_speed_wide"])
         return width_factor, margin, corner
 
+    def _lateral_limit(self, steering, dt, current_speed, yaw_rate):
+        """gap_follow_node._lateral_limit, as the simulator runs it. The
+        simulator's odometry is always fresh, so the limit restarts only when
+        the gyro is untrusted (yaw_rate None) or max_lateral_accel changes."""
+        p = self.p
+        if not p["enable_adaptive_grip"]:
+            return p["max_lateral_accel"]
+        self.grip.follow_base(p["max_lateral_accel"], p["adaptive_grip_ceiling"])
+        judged = self.steering_lag.step(
+            dt, steering, p["adaptive_grip_max_steering_change"])
+        if yaw_rate is None:
+            self.grip.limit = self.grip.base
+            self.grip_ratio_filter.reset()
+            return self.grip.limit
+        return gap_logic.adaptive_grip_step(
+            self.grip, self.grip_ratio_filter, yaw_rate, float(current_speed),
+            judged, p["wheelbase"], dt)
+
     def _stop(self, step, reason):
         self.speed_hold.reset()
         self.opponent_mode = None
@@ -543,5 +614,6 @@ class GapController:
         self.stopped = True
         self.stop_reason = reason
         self.binding_cap = 'stop'
-        self.telemetry.update(binding='stop', stop_reason=reason)
+        self.telemetry.update(binding='stop', stop_reason=reason,
+                              requested_steering=self.steering_basis)
         return self.steering_basis, 0.0

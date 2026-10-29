@@ -273,10 +273,14 @@ PROVENANCE: dict[str, tuple[Provenance, str]] = {
     ),
     "surface_friction": (
         Provenance.MEASURED,
-        "fitted to run 20261019-200703 (tools/run_analysis/fit_sim.py): 0.55 "
-        "best matched the real yaw rate of 0.40/0.55/0.70/0.90; the car "
+        "fitted to car 2's run 20261019-200703 (data/racerbot_runs/, recorded on car 2; "
+        "tools/run_analysis/fit_sim.py): 0.55 best matched the real yaw rate of 0.40/0.55/0.70/0.90; the car "
         "reached 91% of commanded curvature at 2.0-2.5 m/s^2 lateral and 78% "
-        "above 2.5. Floor of that run only",
+        "above 2.5. Floor of that run only. Re-checked on car 1 on 2026-10-27 with "
+        "tools/run_analysis/fit_sim.py (first LB hold): run 20261026-194514 yaw-rate "
+        "RMS (rad/s) 0.169 at 0.45, 0.153 at 0.55 (minimum), 0.162 at 0.65; run "
+        "20261026-194913 yaw-rate RMS 0.126-0.133 across 0.45-0.65, nearly flat. Summed over both "
+        "runs 0.55 is lowest (0.283 against 0.295 at either end), so 0.55 stands for car 1",
     ),
     "longitudinal_grip_coupling": (
         Provenance.ESTIMATED,

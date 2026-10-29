@@ -29,10 +29,15 @@ The processing pipeline, in the order the node applies it:
   near_gap_bearing    -> the same gap's near-only bearing, for anticipation
   side_wall_distance  -> perpendicular distance to the wall on one side
   corridor_centering  -> bounded cross-track bias, faded in on straights
+  steering_damping    -> gyro yaw rate, opposed; added before the clip
+  grip_ratio, AdaptiveGrip, adaptive_grip_step -> the gyro's lateral-limit judge
+  SteeringLag         -> the rack steering from a lag ago, while it is steady
   corridor_width_fac. -> how open the sensed corridor is, as a 0..1 fade
   scale_between       -> blend a margin/speed between its narrow/wide values
 """
 
+from collections import deque
+from dataclasses import dataclass
 import math
 
 import numpy as np
@@ -1180,6 +1185,266 @@ def corner_setup_bias(left_distance: float, right_distance: float,
     position = turn_sign * (left_distance - right_distance) / 2.0
     magnitude = min(max_bias, max(-max_bias, gain * (target - position)))
     return -turn_sign * magnitude * weight, weight
+
+
+def steering_damping(yaw_rate: float, gain_s: float) -> float:
+    """Steering, in radians, that opposes the car's own rotation.
+
+    ``yaw_rate`` is the gyro's z rate in rad/s from /imu/data, positive to the
+    left (imu_bridge's car axes: x forward, y left, z up). ``gain_s`` is a time
+    constant in seconds, and the term is ``-gain_s * yaw_rate``: a car turning
+    left is steered right by gain_s radians per rad/s. gap_follow_node adds it
+    to the requested steering before the clip, the arc guard and the slew limit
+    (docs/gap-follow.md#steering-damping-gyro), so everything downstream checks
+    the damped command.
+
+    Exactly zero whenever the term cannot be trusted: a non-finite yaw rate or
+    gain (never NaN steering), or a gain that is not positive. A negative gain
+    would steer *with* the rotation, so it switches the term off rather than
+    flipping it.
+    """
+    if not (math.isfinite(yaw_rate) and math.isfinite(gain_s)) or gain_s <= 0.0:
+        return 0.0
+    return -gain_s * yaw_rate
+
+
+# ============================================================================
+# Adaptive grip from the gyro: how much of the turn the tyres are making
+# (docs/gap-follow.md#adaptive-grip-imu)
+# ============================================================================
+
+# Time constant, in seconds, of the low-pass on the grip ratio before it is
+# judged. A constant rather than a parameter: the spec fixes it.
+GRIP_RATIO_TAU_SEC = 0.3
+
+
+def grip_ratio(yaw_rate: float, speed: float, steering: float,
+               wheelbase: float) -> float:
+    """How much of the requested turn the car is making: the yaw rate the gyro
+    measures, over the yaw rate the steering geometry asks for.
+
+    A car that does not slip yaws at speed * tan(steering) / wheelbase, so the
+    ratio is 1.0 when the tyres hold the line the rack asks for. Below 1.0 the
+    car yaws less than the geometry says, which is what sliding wide looks
+    like. ``yaw_rate`` is positive to the left, the same sign as ``steering``.
+
+    NaN, meaning no judgement, for any non-finite input, for speed below
+    1 m/s (the ratio divides by speed squared), and for a rack within 0.05 rad
+    of centre (the demand is too small to tell a slip from noise).
+    """
+    if not all(math.isfinite(value) for value in (yaw_rate, speed, steering, wheelbase)):
+        return math.nan
+    if wheelbase <= 0.0:
+        raise ValueError('wheelbase must be positive')
+    if speed < 1.0 or abs(steering) < 0.05:
+        return math.nan
+    demanded = speed * speed * math.tan(steering) / wheelbase
+    return yaw_rate * speed / demanded
+
+
+class LowPass:
+    """First-order low-pass over a stream of samples, with time constant
+    ``time_constant_s``.
+
+    A NaN sample is not a value, so it breaks the chain: the filter forgets
+    its state, and the next finite sample starts it afresh. reset() does the
+    same. Nothing from before a gap is blended into what comes after it.
+    """
+
+    def __init__(self, time_constant_s: float):
+        if not (math.isfinite(time_constant_s) and time_constant_s > 0.0):
+            raise ValueError('time_constant_s must be finite and positive')
+        self.time_constant_s = float(time_constant_s)
+        self.value = None
+
+    def reset(self) -> None:
+        self.value = None
+
+    def update(self, sample: float, dt: float) -> float:
+        """Feed one sample taken ``dt`` seconds after the previous one. Returns
+        the filtered value, or NaN when there is none."""
+        if not (math.isfinite(dt) and dt >= 0.0):
+            raise ValueError('dt must be finite and non-negative')
+        if not math.isfinite(sample):
+            self.value = None
+            return math.nan
+        if self.value is None:
+            self.value = float(sample)
+        else:
+            alpha = 1.0 - math.exp(-dt / self.time_constant_s)
+            self.value += alpha * (float(sample) - self.value)
+        return self.value
+
+
+@dataclass
+class AdaptiveGrip:
+    """The adaptive lateral-acceleration limit, in m/s^2.
+
+    ``base`` is max_lateral_accel: the limit never drops below it. ``ceiling``
+    is the highest it may rise to. ``limit`` starts at the base. ``update``
+    judges one tick and returns the limit to use on that tick.
+    """
+    base: float
+    ceiling: float
+    rise_per_s: float
+    cut_factor: float
+    hold_ratio: float
+    slip_ratio: float
+    judge_fraction: float
+    limit: float = None
+
+    def __post_init__(self):
+        values = (self.base, self.ceiling, self.rise_per_s, self.cut_factor,
+                  self.hold_ratio, self.slip_ratio, self.judge_fraction)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError('adaptive grip parameters must be finite')
+        if self.limit is None:
+            self.limit = self.base
+        if not math.isfinite(self.limit):
+            raise ValueError('adaptive grip limit must be finite')
+        if self.base <= 0.0:
+            raise ValueError('base must be positive')
+        if self.ceiling < self.base:
+            raise ValueError('ceiling must be at least base')
+        if self.rise_per_s < 0.0:
+            raise ValueError('rise_per_s must be non-negative')
+        if not 0.0 < self.cut_factor <= 1.0:
+            raise ValueError('cut_factor must be in (0, 1]')
+        if not self.slip_ratio < self.hold_ratio:
+            raise ValueError('slip_ratio must be below hold_ratio, or the two bands overlap')
+        if self.judge_fraction < 0.0:
+            raise ValueError('judge_fraction must be non-negative')
+        if not self.base <= self.limit <= self.ceiling:
+            raise ValueError('limit must lie between base and ceiling')
+
+    def update(self, ratio: float, demand: float, dt: float) -> float:
+        """Judge one tick and return the limit to use on it.
+
+        The tick is not judged, and the limit stays where it is, when the
+        ratio is NaN, when the demand is not finite, or when the demand is
+        below judge_fraction of the limit (the car is not asking the tyres for
+        much). Otherwise a ratio at or above hold_ratio raises the limit by
+        rise_per_s * dt, up to the ceiling. A ratio below slip_ratio cuts it to
+        cut_factor of itself, never below the base. Between the two it holds.
+        """
+        if not (math.isfinite(dt) and dt >= 0.0):
+            raise ValueError('dt must be finite and non-negative')
+        if not (math.isfinite(ratio) and math.isfinite(demand)):
+            return self.limit
+        if demand < self.judge_fraction * self.limit:
+            return self.limit
+        if ratio >= self.hold_ratio:
+            self.limit = min(self.ceiling, self.limit + self.rise_per_s * dt)
+        elif ratio < self.slip_ratio:
+            self.limit = max(self.base, self.limit * self.cut_factor)
+        return self.limit
+
+    def follow_base(self, base: float, configured_ceiling: float) -> None:
+        """Track a new base. max_lateral_accel is live-tunable and is the floor,
+        so the band follows it. A change restarts the limit at the new base.
+        The ceiling is never below the base, so the band stays valid."""
+        if not (math.isfinite(base) and base > 0.0):
+            raise ValueError('base must be finite and positive')
+        if base == self.base:
+            return
+        self.base = float(base)
+        self.ceiling = max(float(configured_ceiling), self.base)
+        self.limit = self.base
+
+
+# Reading the lag back off the control clock. The clock is a running sum of
+# float intervals, so a sample exactly lag_sec old can land a few 1e-17 s the
+# wrong side of the window's edge. This slack counts such a sample as covering
+# the edge.
+LAG_SLACK_SEC = 1e-9
+
+
+class SteeringLag:
+    """The rack steering on each control tick, time-stamped on the control
+    clock, so the steering commanded ``lag_sec`` ago can be read back.
+
+    The measured yaw trails the rack, so the grip compares the yaw with the
+    steering that produced it (docs/gap-follow.md#adaptive-grip-imu). The clock
+    is the sum of the command intervals, which the node and the simulator both
+    have, not the wall clock, so the two judge identically tick for tick. A stop
+    neither advances the clock nor is recorded: the rack is held during a stop
+    (gap_follow_node._stop), so nothing is lost.
+    """
+
+    def __init__(self, lag_sec: float):
+        if not (math.isfinite(lag_sec) and lag_sec >= 0.0):
+            raise ValueError('lag_sec must be finite and non-negative')
+        self.lag_sec = float(lag_sec)
+        self._clock = 0.0
+        self._samples = deque()   # (control time, steering), oldest first
+
+    def step(self, dt: float, steering: float, max_change: float) -> float:
+        """Record this tick's steering, and return the steering to judge against.
+
+        That is the steering commanded ``lag_sec`` ago, interpolated between the
+        two samples either side of that moment. It is returned only when the
+        history reaches back that far and the steering moved no more than
+        ``max_change`` across the window (quasi-steady). Otherwise NaN: this
+        tick is not judged.
+        """
+        if not (math.isfinite(dt) and dt >= 0.0):
+            raise ValueError('dt must be finite and non-negative')
+        if not math.isfinite(steering):
+            raise ValueError('steering must be finite')
+        if not (math.isfinite(max_change) and max_change >= 0.0):
+            raise ValueError('max_change must be finite and non-negative')
+        self._clock += dt
+        self._samples.append((self._clock, float(steering)))
+        edge = self._clock - self.lag_sec
+        lagged = self._value_at(edge)
+        self._trim(edge)
+        # NaN compares false, so a window the history does not cover is never judged.
+        # NaN compares false, so a window the history does not cover is never judged.
+        if abs(steering - lagged) <= max_change:
+            return lagged
+        return math.nan
+
+    def _value_at(self, t: float) -> float:
+        left = right = None
+        for time, value in self._samples:
+            if time <= t + LAG_SLACK_SEC:
+                left = (time, value)
+            else:
+                right = (time, value)
+                break
+        if left is None:
+            return math.nan                  # the history does not reach back to t
+        if right is None:
+            return left[1]
+        return left[1] + (right[1] - left[1]) * (t - left[0]) / (right[0] - left[0])
+
+    def _trim(self, t: float) -> None:
+        # The clock only moves forward, so only the last sample at or before t
+        # is ever read again. Older samples go.
+        while len(self._samples) >= 2 and self._samples[1][0] <= t + LAG_SLACK_SEC:
+            self._samples.popleft()
+
+
+def adaptive_grip_step(grip: AdaptiveGrip, ratio_filter: LowPass, yaw_rate: float,
+                       speed: float, steering: float, wheelbase: float,
+                       dt: float) -> float:
+    """One tick of the adaptive grip with a healthy gyro: the grip ratio,
+    low-passed, judged against the demand the steering asks for. Returns the
+    lateral limit to use on this tick.
+
+    ``steering`` is the steering to judge against: the value SteeringLag.step
+    returns, which is the rack's steering from a lag ago when it is steady and
+    NaN when this tick is not judged. The demand is speed squared times
+    |tan(steering)| over the wheelbase: the lateral acceleration that steering
+    asks the tyres for. Call this only while the gyro can be trusted
+    (gap_follow_node._imu_gate).
+    """
+    ratio = ratio_filter.update(grip_ratio(yaw_rate, speed, steering, wheelbase), dt)
+    if math.isfinite(speed) and math.isfinite(steering):
+        demand = speed * speed * abs(math.tan(steering)) / wheelbase
+    else:
+        demand = math.nan
+    return grip.update(ratio, demand, dt)
 
 
 def corridor_width_factor(left_distance: float, right_distance: float,
