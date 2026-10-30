@@ -1,0 +1,107 @@
+# IMU spectrum: 20261026-174911
+
+## Streams (header stamps; receive times in brackets)
+  /sensors/imu/raw   7086 samples over 141.7 s: 50.0 Hz (dt median 20.0 ms, std 1.3 ms, p99 24.7 ms), 0 gap(s), 0 backwards stamp(s), Nyquist 25.0 Hz [50.0 Hz, dt std 1.7 ms]
+  /imu/vesc/data     not in this run
+  /imu/bno/data      not in this run
+  /imu/bno/raw       not in this run
+
+BNO085: not in this run (no /imu/bno/data); every section below is the VESC's
+
+## 1. Bias and noise: vesc (/sensors/imu/raw rotated with /home/racerbotcar-2/imu-calibration/config/car.yaml (given, not the run's own copy) (rpy_deg [-0.35, -0.07, -84.69]), calibrated with vesc_calib.json)
+  4 still stretch(es), 62.7 s, 3138 samples
+  gyro x: bias -0.00197 rad/s, noise 0.00254 rad/s (np.std 0.00254)   vs gyro_sigma 0.0017 at src/imu_bridge/config/imu_bridge.yaml:27
+  gyro y: bias -0.00143 rad/s, noise 0.00247 rad/s (np.std 0.00247)   vs gyro_sigma 0.0017 at src/imu_bridge/config/imu_bridge.yaml:27
+  gyro z: bias -0.01181 rad/s, noise 0.00195 rad/s (np.std 0.00195)   vs gyro_sigma 0.0017 at src/imu_bridge/config/imu_bridge.yaml:27
+  accel x: bias +0.3851 m/s^2, noise 0.0751 m/s^2 (np.std 0.0751)   vs accel_sigma 0.03 at src/imu_bridge/config/imu_bridge.yaml:29
+  accel y: bias -0.1875 m/s^2, noise 0.0371 m/s^2 (np.std 0.0371)   vs accel_sigma 0.03 at src/imu_bridge/config/imu_bridge.yaml:29
+  accel z: reads +9.8914 (gravity 9.80665: off by +0.0848) m/s^2, noise 0.0633 m/s^2 (np.std 0.0633)   vs accel_sigma 0.03 at src/imu_bridge/config/imu_bridge.yaml:29
+  gyro z bias across stretches: -0.01171, -0.01189, -0.01185, -0.01177 rad/s (spread 0.00017): its stability between stops
+
+## 2. Vibration: vesc
+  no steady motor speed of 5 s (/sensors/core ERPM within 3%, over 500): record run B, wheels lifted, at 3-4 steady throttles
+
+## 3. IMU delay and gyro scale: vesc gyro z vs LiDAR scan matching
+  delay -10 ms (gyro later than LiDAR when positive), scale 1.008, RMS 0.071 rad/s at that lag, 3839 samples
+  relative to the LiDAR, whose own latency is not removed (scan_motion uses receive times)
+  vs the documented VESC latency ~20 ms (stamped on arrival) and neural_racer's imu_delay_ticks 1.0 x 25 ms at tools/neural_racer/neural_racer_train/gpu_sim/params.py:71
+
+## 4. Steering response: commanded yaw rate v tan(delta) / L -> measured yaw rate
+  wheelbase 0.36 m from src/f1tenth_system/f1tenth_stack/config/vesc.yaml:67; coherence threshold 0.6 (below it a bin is not reported)
+  measured by vesc gyro (2 moving stretch(es), commands from /drive):
+     0.10 Hz  gain 0.836  phase   -10.8 deg  coherence 0.99
+     0.20 Hz  gain 0.808  phase   -13.9 deg  coherence 0.99
+     0.30 Hz  gain 0.758  phase   -20.1 deg  coherence 0.99
+     0.40 Hz  gain 0.794  phase   -20.2 deg  coherence 0.97
+     0.50 Hz  gain 0.638  phase   -29.5 deg  coherence 0.97
+     0.60 Hz  gain 0.664  phase   -41.7 deg  coherence 0.99
+     0.70 Hz  gain 0.659  phase   -45.3 deg  coherence 0.99
+     0.80 Hz  gain 0.667  phase   -49.1 deg  coherence 0.95
+     0.90 Hz  gain 0.705  phase   -45.2 deg  coherence 0.82
+     1.00 Hz  gain 0.593  phase   -58.5 deg  coherence 0.82
+     1.10 Hz  gain 0.585  phase   -65.2 deg  coherence 0.98
+     1.20 Hz  gain 0.545  phase   -62.8 deg  coherence 0.89
+     1.30 Hz  gain 0.601  phase   -71.7 deg  coherence 0.84
+     1.40 Hz  gain 0.625  phase   -70.6 deg  coherence 0.88
+     1.50 Hz  gain 0.592  phase   -62.6 deg  coherence 0.92
+     1.60 Hz  gain 0.650  phase   -64.4 deg  coherence 0.97
+     1.70 Hz  gain 0.630  phase   -62.0 deg  coherence 0.94
+     1.80 Hz  gain 0.630  phase   -61.2 deg  coherence 0.92
+     1.90 Hz  gain 0.763  phase   -53.7 deg  coherence 0.91
+     2.00 Hz  gain 0.601  phase   -65.1 deg  coherence 0.71
+     2.10 Hz  gain 0.474  phase   -90.0 deg  coherence 0.69
+     2.20 Hz  gain 0.544  phase   -94.5 deg  coherence 0.71
+     2.30 Hz  gain 0.430  phase   -98.6 deg  coherence 0.64
+     2.40 Hz  gain 0.602  phase  -101.8 deg  coherence 0.74
+     2.50 Hz  gain 0.551  phase  -113.3 deg  coherence 0.82
+     2.60 Hz  gain 0.469  phase   -97.1 deg  coherence 0.65
+     2.70 Hz  gain 0.521  phase  -107.6 deg  coherence 0.72
+     2.80 Hz  gain 0.440  phase  -117.9 deg  coherence 0.63
+     2.90 Hz  gain 0.491  phase  -122.9 deg  coherence 0.68
+     3.00 Hz  gain 0.595  phase  -122.7 deg  coherence 0.71
+     3.10 Hz  gain 0.561  phase  -118.5 deg  coherence 0.75
+     3.30 Hz  gain 0.354  phase  -166.2 deg  coherence 0.63
+     3.50 Hz  gain 0.516  phase  -140.8 deg  coherence 0.66
+     3.60 Hz  gain 0.512  phase  -136.1 deg  coherence 0.61
+     3.70 Hz  gain 0.467  phase  -162.5 deg  coherence 0.61
+    delay from phase slope 0.104 s; best_lag 0.145 s; documented 0.15 s (run 20261019-200703)
+    plant: yaw_rate = 0.679 e^(-0.075 s) / (1 + 0.051 s) x v tan(delta) / L
+    bandwidth (-3 dB) 1.02 Hz
+  measured by LiDAR (2 moving stretch(es), commands from /drive):
+     0.10 Hz  gain 0.817  phase   -12.2 deg  coherence 0.99
+     0.20 Hz  gain 0.790  phase   -15.9 deg  coherence 0.99
+     0.30 Hz  gain 0.745  phase   -22.4 deg  coherence 0.98
+     0.40 Hz  gain 0.788  phase   -21.6 deg  coherence 0.97
+     0.50 Hz  gain 0.646  phase   -32.0 deg  coherence 0.96
+     0.60 Hz  gain 0.669  phase   -43.5 deg  coherence 0.99
+     0.70 Hz  gain 0.663  phase   -46.9 deg  coherence 0.99
+     0.80 Hz  gain 0.682  phase   -51.8 deg  coherence 0.96
+     0.90 Hz  gain 0.723  phase   -48.8 deg  coherence 0.85
+     1.00 Hz  gain 0.611  phase   -61.6 deg  coherence 0.84
+     1.10 Hz  gain 0.602  phase   -68.3 deg  coherence 0.98
+     1.20 Hz  gain 0.553  phase   -65.9 deg  coherence 0.89
+     1.30 Hz  gain 0.591  phase   -75.0 deg  coherence 0.85
+     1.40 Hz  gain 0.618  phase   -77.0 deg  coherence 0.90
+     1.50 Hz  gain 0.590  phase   -69.6 deg  coherence 0.92
+     1.60 Hz  gain 0.637  phase   -71.9 deg  coherence 0.96
+     1.70 Hz  gain 0.612  phase   -68.5 deg  coherence 0.93
+     1.80 Hz  gain 0.616  phase   -63.2 deg  coherence 0.90
+     1.90 Hz  gain 0.769  phase   -53.6 deg  coherence 0.88
+     2.00 Hz  gain 0.593  phase   -65.8 deg  coherence 0.67
+     2.10 Hz  gain 0.446  phase   -91.3 deg  coherence 0.69
+     2.20 Hz  gain 0.529  phase  -100.6 deg  coherence 0.76
+     2.30 Hz  gain 0.441  phase  -112.9 deg  coherence 0.72
+     2.40 Hz  gain 0.682  phase  -115.0 deg  coherence 0.78
+     2.50 Hz  gain 0.632  phase  -118.6 deg  coherence 0.84
+     2.60 Hz  gain 0.486  phase  -104.6 deg  coherence 0.67
+     2.70 Hz  gain 0.509  phase  -108.6 deg  coherence 0.70
+     2.80 Hz  gain 0.443  phase  -119.8 deg  coherence 0.66
+     2.90 Hz  gain 0.495  phase  -129.6 deg  coherence 0.67
+     3.00 Hz  gain 0.552  phase  -139.2 deg  coherence 0.63
+     3.10 Hz  gain 0.503  phase  -137.2 deg  coherence 0.67
+     3.50 Hz  gain 0.668  phase  -151.3 deg  coherence 0.75
+     3.60 Hz  gain 0.652  phase  -147.4 deg  coherence 0.71
+    delay from phase slope 0.106 s; best_lag 0.160 s; documented 0.15 s (run 20261019-200703)
+    plant: yaw_rate = 0.651 e^(-0.090 s) / (1 + 0.037 s) x v tan(delta) / L
+    bandwidth (-3 dB) 1.15 Hz
+plot: steering_bode.png

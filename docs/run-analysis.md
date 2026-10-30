@@ -78,6 +78,64 @@ python3 tools/run_analysis/imu_report.py ~/racerbot-ws/data/racerbot_runs/<run>
 
 **If it says `not enough driving`:** the car was parked or below 0.5 m/s. That's expected for a stationary test. The whole report, scan matching included, took 13 s for a one-minute recording on the car (2026-10-24); `--no-icp` skips the scan matching.
 
+### Yaw-rate tracking: is it the sensor, the odometry, or the car?
+
+When a turn goes wrong, `yaw_tracking.py` works out whose fault it was. It compares four yaw rates (how fast the car is turning, in rad/s): the VESC's gyro, LiDAR scan matching, `/odom`, and what the steering command asked for. It works on any run with the VESC IMU, including runs recorded before the BNO085 or `imu_bridge` existed.
+
+On run `20261026-174911` (a 142 s `map_course` run with `gap_follow`) it found:
+
+- **The gyro is trustworthy.** It agrees with the LiDAR to 1% in scale and leads it by 10 ms. Its noise is 0.0012 rad/s parked and 0.025 rad/s driving, 31 dB below the turning signal.
+- **`/odom`'s turn rate is not a measurement.** `vesc_to_odom` works it out from the steering command, so it runs 135 ms *ahead* of the car and over-reads turns by 12–31%. The gyro is 5x closer to the truth.
+- **The steering model is right; the grip runs out.** On steady commands the car turns 1.09x what `tan(delta)/L` predicts, the same left and right. Above about 2.0 m/s² of sideways acceleration the tyres stop delivering, and the rear slides out 1.5–2.7°. The shipped `max_lateral_accel` is 2.5.
+- **Every turn was entered too fast.** At the moment the command peaked, every one of the 30 turns asked for more sideways acceleration than the floor gives (median 6.7 m/s²). The steering reaches full lock before the speed has come down.
+
+**Terminal 1**, ROS sourced for the first run only (it reads the bag once and caches it):
+
+```bash
+python3 tools/run_analysis/yaw_tracking.py ~/racerbot-ws/data/racerbot_runs/<run> --car-yaml ~/imu-calibration/config/car.yaml
+```
+
+`--car-yaml` is only needed for a run whose `metadata/files/` has no `car.yaml`, which means it was recorded before `~/imu-calibration` was cloned.
+
+**Working when:** it prints an **Answers** block first, then five numbered sections. The output is saved as:
+
+- `analysis/yaw_tracking.txt`, the printed report;
+- `analysis/yaw_tracking.json`, every number in it;
+- `analysis/yaw_tracking_maneuvers.csv`, one row per turn;
+- `analysis/yaw_tracking/`, the plots. `overview.png` shows the whole run, and there is one `maneuver_NN_*.png` per turn, up to 24 of them.
+
+The Answers block answers six questions:
+1. Is the gyro noisy?
+2. Is `/odom` wrong?
+3. Is the LiDAR late?
+4. Does the car understeer?
+5. Does tracking get worse at speed?
+6. Should you change the estimator or the controller?
+
+Each answer quotes the numbers it rests on.
+
+**If it says `no VESC IMU in this run`:** the bag has neither `/sensors/imu/raw` nor `/imu/vesc/data`. **If it says `needs /odom and /drive or /ackermann_cmd`:** the recording started before bringup.
+
+<details>
+<summary>How each number is measured (safe to skip; read it before you argue with a number)</summary>
+
+- **Common timeline.** Every signal is put on one 50 Hz timeline, using receive times. The gyro's parked bias is removed, as `imu_bridge` does at startup.
+- **Like-for-like comparison with the LiDAR.** A LiDAR yaw rate is the heading change between two scans 50 ms apart. The gyro is averaged over the same window wherever the two are compared.
+- **Gyro noise.**
+  - **Parked:** the Welch noise floor. `np.std` can read higher, because it also counts bumps at the edges of the parked stretches.
+  - **Moving:** the gyro's 10–25 Hz band, where a car this size has no real turning motion, scaled up to the full band as if it were white noise.
+- **Latency.** Normalised cross-correlation, refined to a fraction of a sample. It is computed over the whole run and per 10 s window, and the spread across windows is printed. The method is exact for smooth signals. It is biased for a sudden step, but a real yaw rate has no steps.
+- **Commanded yaw rate.** `v tan(delta(t - lag)) / L`, with `v` from the LiDAR, because `/odom` reads wheel speed about 5% high. The lag is the measured steering lag.
+- **Grip curve.** Uses only commands held within 0.02 rad for 0.3 s. It plots achieved over commanded sideways acceleration. The grip limit is where that ratio drops below 0.95 and stays below.
+- **Sideslip.** The LiDAR's sideways speed, less 0.26 m times the yaw rate (the LiDAR is 0.26 m ahead of the rear axle). That leaves the rear axle's own sideways speed, which is zero for a tyre that isn't sliding.
+- **A turn.** A stretch where `|commanded yaw rate|` stays above 0.5 rad/s for at least 0.4 s.
+- **Overshoot.** Measured against the car's *own* settled yaw rate within that turn, not against the command. The settled value comes from the turn's own stretch; the next turn, which may start in the tail, is excluded.
+- **Lag per turn.** Time to half of the peak, because full-lock commands have flat tops with no single peak time.
+
+Tests: `tools/run_analysis/tests/test_yaw_tracking.py`, 29 tests on signals with known answers. Run it with `python3 -m pytest tools/run_analysis/tests -q`; no ROS needed.
+
+</details>
+
 ## Reading the report
 
 Each LB hold gets four parts.

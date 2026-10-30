@@ -1,0 +1,152 @@
+# Yaw-rate tracking: 20261026-174911
+
+## Answers (each from the sections below; the rule used is stated)
+- Is the VESC gyro noisy? No. Parked floor 0.0012 rad/s (0.07 deg/s); moving, its 10-25 Hz band gives 0.0250 rad/s (vibration raises it 20.4x), 31 dB below the 0.86 rad/s yaw-rate signal. Even the whole gyro-LiDAR disagreement, 0.071 rad/s, is 8% of the signal, and most of it is the LiDAR's scan-matching noise (section 1's residual spectrum).
+- Is /odom wrong during fast rotation? It is wrong at every rate, in two ways. It LEADS the car by 135 ms (it is v tan(delta)/L of the command, not a measurement), which alone makes its raw RMSE 0.54 rad/s; and once that lead is removed it still over-reads rotation, gain 1.12 -> 1.31 -> 1.27 over |w| bands 0.0-0.5, 0.5-1.0, 1.0-2.0 rad/s (RMSE 0.33 aligned). The over-read is the car's understeer seen from the other side, plus /odom's speed reading high. The gyro's gain in the same bands: 0.98, 1.01, 1.01.
+- Is the LiDAR lagging by 60 ms? No. The gyro is -10 ms against the LiDAR (positive = gyro later), so the LiDAR is 10 ms behind the gyro; per 10 s window median -10 ms, p10..p90 -11..-8 ms over 7 windows. A 60 ms LiDAR lag would read -60 here. The ~130-160 ms delays in section 3 are the CAR's response to steering (and /odom's lead), not a sensor lag.
+- Does the car consistently understeer? No; it understeers only at the grip limit. On held commands below 1.5 m/s^2 it turns 1.09x the geometry's curvature (n=130, slightly MORE than asked), and left 0.88 / right 0.85 overall match, so the steering model and calibration are right. The overall gain below 1 comes from transients (next answer), not steady understeer. Achieved / commanded lateral acceleration by commanded a_y: 1.0-1.5 1.09, 1.5-2.0 1.02, 2.0-2.5 0.92: the tyres stop delivering above ~2.0 m/s^2 (p99 achieved 2.9 m/s^2), and the rear axle slides out -0.0, -0.2, -0.7, -0.5, -1.5, -2.7 deg over achieved a_y bands 0.0-0.5, 0.5-1.0, 1.0-1.5, 1.5-2.0, 2.0-2.5, 2.5-3.0. That is limit understeer: the car pushes wide when asked for more grip than the floor has. The planners ask for up to 2.5 (src/gap_follow/config/gap_follow.yaml:130), 2.5 (src/pure_pursuit/config/pure_pursuit.yaml:129).
+- Does yaw-rate tracking degrade above 3 m/s? Yes, as a continuation, not a cliff. Below 3 m/s gain 0.85, NRMSE 22%; above, gain 0.71, NRMSE 38% (17 s of data). It is not grip: only 11% of the samples above 3 m/s asked for more than the ~2.0 m/s^2 limit (p90 commanded 2.1 m/s^2). It is dynamics: the gain on a CHANGING command falls with speed, 0.99 -> 0.82 -> 0.74 -> 0.74 -> 0.74 -> 0.64 over 1.0-1.5, 1.5-2.0, 2.0-2.5, 2.5-3.0, 3.0-3.5, 3.5-4.0 m/s, and the steering lag grows from 125-135 ms below 3 m/s to 135, 175 ms above. Too few held commands above 3 m/s to measure steady tracking there directly.
+- Estimator or controller? Change the estimator first; then change the controller's limits, not its gains. The gyro is 5x closer to the LiDAR than /odom (0.071 vs 0.334 rad/s, even after removing /odom's 135 ms lead), and /odom is what slam_toolbox, the particle filter and pure_pursuit consume today: gyro yaw in the odometry (vehicle_state's /odom/imu, gyro_odom:=true) improves every pose the controller sees. On the controller side the steering model is right, so do not retune it: lower max_lateral_accel to the measured ~2.0 m/s^2, and account for the ~145 ms steering lag (lookahead / the MPC's delay term). Raising steering gains would chase that lag into a weave. And slow before turning in: at the command's peak, 30 of 30 turns asked for more than the grip (median 6.7 m/s^2), because the steering reaches lock while the speed is still coming down.
+
+## Run
+  140.9 s on a 50 Hz grid, 76.6 s moving above 0.5 m/s (LiDAR speed); commands from /drive; wheelbase 0.36 m
+  LiDAR speed p50/p90/p99/max 2.16/3.40/3.95/4.65 m/s; /odom reads +5.1% vs LiDAR (median while moving)
+  gyro parked bias removed: -0.01181 rad/s; LiDAR yaw rate is the mean over 50 ms (two scans), and the gyro is averaged the same way where compared to it
+
+## 1. Gyro noise
+  parked (63 s): bias -0.01181 rad/s, sigma 0.00195 rad/s
+  parked Welch floor 0.00122 rad/s (0.070 deg/s); 10-25 Hz white-equivalent 0.00123. np.std above it counts bumps at the stretches' ends; the floor is the sensor
+  moving (77 s): 10-25 Hz white-equivalent 0.0250 rad/s (20.4x parked: vibration)
+  yaw-rate signal while moving: 0.864 rad/s RMS; whole gyro - LiDAR residual 0.071 rad/s (aligned): an upper bound on the gyro's error
+
+## 2. RMSE while moving, rad/s (after nothing: no lag or gain correction)
+  gyro_vs_lidar          RMSE 0.076  bias +0.0192  gain 1.013
+  gyro_instant_vs_lidar  RMSE 0.078  bias +0.0192  gain 1.014
+  odom_vs_lidar          RMSE 0.536  bias +0.1139  gain 1.152
+  gyro_vs_odom           RMSE 0.502  bias -0.0947  gain 0.706
+  gyro_vs_lidar_aligned  RMSE 0.071  bias +0.0192  gain 1.013
+  odom_vs_lidar_aligned  RMSE 0.334  bias +0.1143  gain 1.267
+  by |LiDAR yaw rate| (reference = LiDAR):
+   gyro:
+     0.00- 0.50 rad/s: n= 1709  gain 0.976  bias +0.023  RMSE 0.065 rad/s  NRMSE  26.4%
+     0.50- 1.00 rad/s: n=  671  gain 1.012  bias +0.019  RMSE 0.084 rad/s  NRMSE  11.3%
+     1.00- 2.00 rad/s: n= 1451  gain 1.014  bias +0.015  RMSE 0.084 rad/s  NRMSE   6.6%
+     2.00- 3.00 rad/s: n=    0  (too few)
+     3.00- 6.00 rad/s: n=    0  (too few)
+   odom:
+     0.00- 0.50 rad/s: n= 1709  gain 0.957  bias +0.051  RMSE 0.492 rad/s  NRMSE 199.1%
+     0.50- 1.00 rad/s: n=  671  gain 1.352  bias +0.293  RMSE 0.782 rad/s  NRMSE 105.4%
+     1.00- 2.00 rad/s: n= 1451  gain 1.129  bias +0.106  RMSE 0.437 rad/s  NRMSE  34.0%
+     2.00- 3.00 rad/s: n=    0  (too few)
+     3.00- 6.00 rad/s: n=    0  (too few)
+
+## 3. Latency (normalised cross-correlation; positive = second LATER than first)
+  scan receive - header stamp (median): -2.3 ms
+  VESC IMU receive - header stamp (median): +0.1 ms
+  gyro vs LiDAR      -10 ms, r 0.996; per 10 s window (7 with r >= 0.8): median -10, p10..p90 -11..-8 ms
+  odom vs LiDAR      -135 ms, r 0.968; per 10 s window (7 with r >= 0.8): median -131, p10..p90 -139..-128 ms
+  LiDAR vs command   +157 ms, r 0.955; per 10 s window (7 with r >= 0.8): median +153, p10..p90 +150..+167 ms
+  gyro vs command    +145 ms, r 0.958; per 10 s window (7 with r >= 0.8): median +142, p10..p90 +139..+150 ms
+
+## 4. Commanded vs measured (gyro) yaw rate, command shifted by the steering lag 145 ms, at LiDAR speed
+  overall: RMSE 0.208 rad/s, bias -0.0304, gain 0.876, NRMSE 21%; gain left 0.884, right 0.852
+  lateral acceleration p50/p90/p99: 1.48 / 2.23 / 2.91 m/s^2
+  by LiDAR speed:
+     0.50- 1.00 m/s: n=   26  gain 1.253  bias +0.017  RMSE 0.037 rad/s  NRMSE  36.0%
+     1.00- 1.50 m/s: n=  914  gain 1.007  bias +0.032  RMSE 0.094 rad/s  NRMSE   7.3%
+     1.50- 2.00 m/s: n=  776  gain 0.820  bias -0.112  RMSE 0.279 rad/s  NRMSE  22.0%
+     2.00- 2.50 m/s: n=  661  gain 0.744  bias -0.102  RMSE 0.284 rad/s  NRMSE  30.0%
+     2.50- 3.00 m/s: n=  596  gain 0.737  bias -0.018  RMSE 0.213 rad/s  NRMSE  32.7%
+     3.00- 3.50 m/s: n=  587  gain 0.743  bias +0.021  RMSE 0.133 rad/s  NRMSE  34.6%
+     3.50- 4.00 m/s: n=  237  gain 0.645  bias +0.031  RMSE 0.143 rad/s  NRMSE  44.3%
+     4.00- 5.00 m/s: n=   34  gain 0.584  bias +0.006  RMSE 0.171 rad/s  NRMSE  47.0%
+  by |commanded steering angle|:
+     0.00- 0.05 rad: n= 1292  gain 0.772  bias +0.024  RMSE 0.114 rad/s  NRMSE  54.9%
+     0.05- 0.10 rad: n=  508  gain 0.803  bias +0.024  RMSE 0.166 rad/s  NRMSE  30.8%
+     0.10- 0.15 rad: n=  291  gain 0.797  bias -0.057  RMSE 0.210 rad/s  NRMSE  26.5%
+     0.15- 0.20 rad: n=  213  gain 0.804  bias -0.152  RMSE 0.246 rad/s  NRMSE  23.3%
+     0.20- 0.25 rad: n=  202  gain 0.854  bias -0.121  RMSE 0.263 rad/s  NRMSE  21.1%
+     0.25- 0.30 rad: n=  178  gain 0.853  bias -0.131  RMSE 0.274 rad/s  NRMSE  20.0%
+     0.30- 0.36 rad: n= 1147  gain 0.901  bias -0.055  RMSE 0.267 rad/s  NRMSE  18.2%
+  steering lag by speed: 1.0-1.5 m/s 125 ms, 1.5-2.0 m/s 135 ms, 2.0-2.5 m/s 125 ms, 2.5-3.0 m/s 125 ms, 3.0-3.5 m/s 135 ms, 3.5-4.0 m/s 175 ms
+  held commands (within 0.02 rad for 0.3 s): 15.1 s
+   achieved / commanded lateral accel, by commanded a_y [m/s^2]: 1.0-1.5 1.09 (n=95), 1.5-2.0 1.02 (n=484), 2.0-2.5 0.92 (n=125); below 0.95 from here on: 2.0 m/s^2
+   below 1.5 m/s^2: measured / commanded curvature 1.09 (n=130); by speed: 1.0-1.5 1.10 (n=87), 3.0-3.5 0.81 (n=23)
+  changing commands only, by LiDAR speed:
+     0.50- 1.00 m/s: n=    1  (too few)
+     1.00- 1.50 m/s: n=  246  gain 0.992  bias +0.022  RMSE 0.111 rad/s  NRMSE   8.8%
+     1.50- 2.00 m/s: n=  723  gain 0.817  bias -0.113  RMSE 0.283 rad/s  NRMSE  22.6%
+     2.00- 2.50 m/s: n=  656  gain 0.744  bias -0.103  RMSE 0.286 rad/s  NRMSE  30.0%
+     2.50- 3.00 m/s: n=  570  gain 0.737  bias -0.020  RMSE 0.217 rad/s  NRMSE  32.7%
+     3.00- 3.50 m/s: n=  507  gain 0.737  bias +0.019  RMSE 0.139 rad/s  NRMSE  34.5%
+     3.50- 4.00 m/s: n=  194  gain 0.643  bias +0.029  RMSE 0.153 rad/s  NRMSE  43.3%
+     4.00- 5.00 m/s: n=   24  (too few)
+  rear-axle sideslip (LiDAR lateral speed less 0.26 m x yaw rate; negative = sliding out), by achieved a_y: 0.0-0.5 -0.0 deg, 0.5-1.0 -0.2 deg, 1.0-1.5 -0.7 deg, 1.5-2.0 -0.5 deg, 2.0-2.5 -1.5 deg, 2.5-3.0 -2.7 deg
+
+## 5. Maneuvers: |commanded yaw rate| > 0.5 rad/s for >= 0.4 s (command unshifted; tail 0.6 s)
+  30 turns; peak measured / peak commanded median 0.57 (p10 0.46, p90 0.72)
+  overshoot over its own settled value (19 turns of >= 1 s): median +9%, p90 +25%, max +30%; 8 above 10%
+  lag (half-peak crossing) median 100 ms; rebound median -0.144 rad/s (p90 +0.000); heading achieved / commanded median 0.82
+  lateral accel asked for at the command's peak: median 6.7 m/s^2, p90 9.6; 30 of 30 turns asked for more than 2 m/s^2
+  command steering reversals (|delta| > 0.05 rad): 46 in 77 s moving (0.60/s)
+    t0[s]  dir  dur   v[m/s] |d|max  cmd pk  meas pk  pk ratio  overshoot  lag[ms]  rebound  heading cmd/meas[deg]
+     16.9  L   0.7   2.47  0.277    1.87     1.23      0.66        n/a     140   -0.325    45.7 /   34.4
+     18.5  L   1.1   1.87  0.349    3.09     1.44      0.47       +25%      60   +0.000   135.3 /   92.5
+     19.9  L   0.9   1.76  0.349    2.62     1.45      0.55        n/a      40   -0.193    74.7 /   69.5
+     21.7  L   1.4   1.98  0.349    1.87     1.37      0.73        +3%     140   -0.205    93.6 /   76.8
+     23.8  R   1.0   1.71  0.349    2.45     1.42      0.58        +9%     120   -0.253    90.1 /   74.2
+     26.2  L   2.6   1.54  0.349    3.43     1.44      0.42        +9%     100   -0.094   210.5 /  186.9
+     30.9  L   0.7   2.61  0.266    1.85     1.25      0.68        n/a     140   -0.145    48.0 /   34.8
+     32.5  L   2.1   1.87  0.349    2.83     1.45      0.51        +6%      80   -0.192   173.8 /  143.6
+     35.6  L   1.3   2.11  0.299    1.87     1.33      0.71        +6%     140   -0.120    79.9 /   69.7
+     37.7  R   0.8   1.90  0.349    2.65     1.44      0.54        n/a     120   -0.008    77.8 /   59.6
+     39.8  L   2.5   1.54  0.349    2.76     1.46      0.53        +9%     100   -0.028   209.0 /  187.6
+     44.4  L   0.8   2.58  0.276    1.85     1.29      0.70        n/a     140   -0.163    48.4 /   33.8
+     46.1  L   2.2   1.81  0.349    2.85     1.48      0.52       +30%      60   -0.035   164.8 /  141.9
+     49.1  L   1.4   2.14  0.349    1.87     1.38      0.74        +6%     120   -0.263    96.3 /   77.6
+     51.3  R   1.0   1.68  0.349    2.28     1.45      0.64       +14%     120   -0.187    86.7 /   73.0
+     53.7  L   2.5   1.54  0.349    3.13     1.44      0.46        +9%     100   -0.049   209.0 /  186.8
+     67.8  L   0.8   3.11  0.176    1.49     0.90      0.60        n/a      40   -0.324    49.8 /   38.8
+     69.2  L   1.4   1.81  0.349    2.65     1.44      0.54       +11%     100   +0.000   134.7 /  110.2
+     71.1  L   0.8   2.89  0.139    1.13     0.97      0.85        n/a     180   -0.244    62.6 /   39.9
+     72.2  L   1.0   1.72  0.349    2.61     1.44      0.55        n/a     120   -1.569    77.6 /   68.2
+     73.7  R   1.2   1.74  0.349    2.45     1.46      0.60       +14%      80   -0.137   103.7 /   87.2
+     76.3  L   2.4   1.54  0.349    3.00     1.45      0.48        +8%     100   +0.000   208.4 /  187.1
+     80.9  L   0.8   2.58  0.258    1.75     1.26      0.72        n/a     140   -0.153    43.6 /   33.1
+     82.5  L   2.3   1.83  0.349    2.90     1.48      0.51       +24%      80   -0.107   168.2 /  144.1
+     85.6  L   1.4   2.12  0.349    2.02     1.40      0.69        +5%     140   -0.143    97.5 /   78.7
+     87.7  R   1.1   1.67  0.349    2.24     1.46      0.65       +14%     120   -0.173    87.2 /   73.6
+     90.1  L   2.4   1.55  0.349    2.73     1.43      0.52        +8%     100   -0.034   207.1 /  185.4
+     94.7  L   0.8   2.52  0.246    1.84     1.21      0.66        n/a     100   -0.198    41.3 /   32.2
+     96.4  L   0.7   1.97  0.349    3.16     1.47      0.46        n/a      60   +0.000   101.2 /   66.4
+     97.4  L   1.0   1.69  0.349    2.66     1.45      0.55       +18%      80   +0.000    93.9 /   84.0
+plot: yaw_tracking/overview.png
+plot: yaw_tracking/xcorr.png
+plot: yaw_tracking/gyro_psd.png
+plot: yaw_tracking/error_vs_speed.png
+plot: yaw_tracking/error_vs_steer.png
+plot: yaw_tracking/gain_vs_yaw_rate.png
+plot: yaw_tracking/maneuver_00_016.9s.png
+plot: yaw_tracking/maneuver_01_018.5s.png
+plot: yaw_tracking/maneuver_02_019.9s.png
+plot: yaw_tracking/maneuver_03_021.7s.png
+plot: yaw_tracking/maneuver_04_023.8s.png
+plot: yaw_tracking/maneuver_05_026.2s.png
+plot: yaw_tracking/maneuver_06_032.5s.png
+plot: yaw_tracking/maneuver_07_035.6s.png
+plot: yaw_tracking/maneuver_08_037.7s.png
+plot: yaw_tracking/maneuver_09_039.8s.png
+plot: yaw_tracking/maneuver_10_046.1s.png
+plot: yaw_tracking/maneuver_11_049.1s.png
+plot: yaw_tracking/maneuver_12_051.3s.png
+plot: yaw_tracking/maneuver_13_053.7s.png
+plot: yaw_tracking/maneuver_14_069.2s.png
+plot: yaw_tracking/maneuver_15_072.2s.png
+plot: yaw_tracking/maneuver_16_073.7s.png
+plot: yaw_tracking/maneuver_17_076.3s.png
+plot: yaw_tracking/maneuver_18_082.5s.png
+plot: yaw_tracking/maneuver_19_085.6s.png
+plot: yaw_tracking/maneuver_20_087.7s.png
+plot: yaw_tracking/maneuver_21_090.1s.png
+plot: yaw_tracking/maneuver_22_096.4s.png
+plot: yaw_tracking/maneuver_23_097.4s.png

@@ -1,0 +1,1 @@
+no gyro in this bag (/imu/bno/data, /imu/vesc/data): was the IMU stack up?

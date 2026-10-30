@@ -1,0 +1,434 @@
+<title>Car 2 IMU Run 20261026</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: a single lab-notebook column; each question gets its answer, then the plot that proves it. */
+:root {
+  --bg: #f7f8f8; --surface: #fcfcfb; --ink: #0f1213; --ink-2: #4b5254; --ink-3: #7b8385;
+  --rule: #dfe3e3; --grid: #eceff0; --hl: #e9eef3;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --ref: #6f7779;
+  --f-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111414; --surface: #181b1c; --ink: #eef0f0; --ink-2: #b9c0c1; --ink-3: #868e90;
+    --rule: #2c3233; --grid: #232829; --hl: #1f2a33;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --ref: #9aa2a4; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111414; --surface: #181b1c; --ink: #eef0f0; --ink-2: #b9c0c1; --ink-3: #868e90;
+  --rule: #2c3233; --grid: #232829; --hl: #1f2a33;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --ref: #9aa2a4; color-scheme: dark;
+}
+body { background: var(--bg); color: var(--ink); font-family: var(--f-body); font-size: 15px; line-height: 1.55; }
+.page { max-width: 980px; margin: 0 auto; padding-block: 28px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 40px; }
+header { display: grid; gap: 10px; }
+.eyebrow { font-family: var(--f-mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+h1 { font-family: var(--f-display); font-weight: 600; font-size: clamp(28px, 5vw, 40px); line-height: 1.1; margin: 0; text-wrap: balance; }
+h2 { font-family: var(--f-display); font-weight: 600; font-size: 22px; line-height: 1.2; margin: 0; text-wrap: balance; }
+p { margin: 0; max-width: 68ch; color: var(--ink-2); }
+p strong { color: var(--ink); font-weight: 600; }
+code, .mono { font-family: var(--f-mono); font-size: .92em; }
+.answers { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+.answer { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; display: grid; gap: 4px; align-content: start; }
+.answer .q { font-size: 13px; color: var(--ink-3); }
+.answer .v { font-family: var(--f-mono); font-size: 22px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--ink); }
+.answer .n { font-size: 13px; color: var(--ink-2); }
+section { display: grid; gap: 14px; min-width: 0; }
+.figure { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 14px 10px; display: grid; gap: 8px; min-width: 0; }
+.figtitle { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 16px; align-items: baseline; }
+.figtitle b { font-weight: 600; font-size: 14px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 18px; height: 0; border-top: 2px solid; display: inline-block; }
+.sw.dash { border-top-style: dashed; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.sq { width: 9px; height: 9px; display: inline-block; border: 2px solid; box-sizing: border-box; }
+.chart { position: relative; width: 100%; min-width: 0; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.chart text { font-family: var(--f-mono); font-size: 11px; fill: var(--ink-3); }
+.chart .axlabel { fill: var(--ink-2); font-family: var(--f-body); font-size: 12px; }
+.grid line { stroke: var(--grid); stroke-width: 1; }
+.zero { stroke: var(--rule); stroke-width: 1; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 720px) { .pair { grid-template-columns: 1fr; } }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; font-size: 13px; color: var(--ink-2); }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.seg button { font: inherit; font-size: 13px; padding: 5px 11px; border: 0; background: var(--surface); color: var(--ink-2); cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--hl); color: var(--ink); font-weight: 600; }
+.seg button:focus-visible, input[type=range]:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; }
+input[type=range] { flex: 1 1 200px; min-width: 0; accent-color: var(--s1); }
+.tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 7px 9px; font-size: 12px; line-height: 1.45; color: var(--ink); box-shadow: 0 4px 14px rgba(0,0,0,.12); white-space: nowrap; z-index: 5; }
+.tip .k { color: var(--ink-3); font-family: var(--f-mono); }
+.tip .row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.tip .row span:last-child { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+.note { font-size: 13px; color: var(--ink-3); max-width: 75ch; }
+.eq { font-family: var(--f-mono); font-size: 13.5px; background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 10px 12px; overflow-x: auto; color: var(--ink); white-space: pre; }
+footer { font-size: 13px; color: var(--ink-3); display: grid; gap: 6px; border-top: 1px solid var(--rule); padding-top: 16px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="page">
+  <header>
+    <div class="eyebrow">SFU Racerbot · car 2 · run 20261026-174911 · VESC IMU only</div>
+    <h1>How the car really turned</h1>
+    <p>A 142 s autonomous <code>map_course</code> run (gap_follow under SLAM, 26 Oct 2026). The VESC's gyro is checked against an independent reference: the car's yaw rate recovered from LiDAR scan matching. The BNO085 was not fitted yet.</p>
+  </header>
+
+  <div class="answers" aria-label="Answers">
+    <div class="answer"><div class="q">How late is the VESC IMU?</div><div class="v">−10 ms</div><div class="n">vs LiDAR arrival time: not late</div></div>
+    <div class="answer"><div class="q">Does the gyro read the right scale?</div><div class="v">1.008</div><div class="n">gain vs LiDAR, within 1%</div></div>
+    <div class="answer"><div class="q">How fast does steering act?</div><div class="v">0.10–0.15 s</div><div class="n">delay; bandwidth ≈ 1.0–1.15 Hz</div></div>
+    <div class="answer"><div class="q">Gyro heading vs <span class="mono">/odom</span>?</div><div class="v" id="ans-head">2.15° vs 24.86°</div><div class="n">RMS error over 2 s windows</div></div>
+  </div>
+
+  <section id="time">
+    <h2>Yaw rate through the run</h2>
+    <p>The gyro (blue) and the LiDAR (orange) lie on top of each other, which is the scale check. The dashed line is what the controller asked for, <span class="mono">v·tan(δ)/L</span>. The gyro trails it and turns less, the steering lag and gain measured below. <span class="mono">/odom</span> (green) works its yaw rate out from the command, so it shares the command's errors.</p>
+    <div class="figure">
+      <div class="figtitle"><b>Yaw rate, rad/s</b>
+        <div class="legend"><span><i class="sw" style="border-color:var(--s1)"></i>VESC gyro</span><span><i class="sw" style="border-color:var(--s2)"></i>LiDAR scan matching</span><span><i class="sw" style="border-color:var(--s3)"></i>/odom</span><span><i class="sw dash" style="border-color:var(--ref)"></i>commanded v·tan(δ)/L</span></div>
+      </div>
+      <div class="controls">
+        <div class="seg" role="group" aria-label="Window length">
+          <button type="button" id="w-full" data-w="999">Whole run</button><button type="button" id="w-30" data-w="30" aria-pressed="true">30 s</button><button type="button" id="w-10" data-w="10">10 s</button>
+        </div>
+        <label for="t-start" class="mono">start</label><input type="range" id="t-start" min="0" max="140" step="0.5" value="38">
+        <span class="mono" id="t-label"></span>
+      </div>
+      <div class="chart" id="c-time"></div>
+    </div>
+    <p class="note">Gyro shown with its parked bias (−0.0118 rad/s) removed, as <span class="mono">imu_bridge</span> does at startup. All four on a 20 Hz grid; hover for values.</p>
+  </section>
+
+  <section id="bode">
+    <h2>Steering frequency response</h2>
+    <p>Input: the commanded yaw rate. Output: the measured one. <span class="mono">H(f) = S<sub>uy</sub>(f) / S<sub>uu</sub>(f)</span>, with <span class="mono">S<sub>uy</sub> = E[U*(f)·Y(f)]</span>. The conjugate cancels each segment's start phase, leaving <span class="mono">∠Y − ∠U</span>. Points are bins with coherence ≥ 0.6. Lines are the fitted plant.</p>
+    <div class="eq">gyro:  H(s) = 0.679 · e^(−0.075 s) / (1 + 0.051 s)     LiDAR: H(s) = 0.651 · e^(−0.090 s) / (1 + 0.037 s)</div>
+    <div class="pair">
+      <div class="figure">
+        <div class="figtitle"><b>Magnitude, dB</b>
+          <div class="legend"><span><i class="dot" style="background:var(--s1)"></i>gyro</span><span><i class="dot" style="background:var(--s2)"></i>LiDAR</span><span><i class="sw dash" style="border-color:var(--ref)"></i>fit</span></div></div>
+        <div class="chart" id="c-mag"></div>
+      </div>
+      <div class="figure">
+        <div class="figtitle"><b>Phase, degrees</b>
+          <div class="legend"><span><i class="dot" style="background:var(--s1)"></i>gyro</span><span><i class="dot" style="background:var(--s2)"></i>LiDAR</span><span><i class="sw dash" style="border-color:var(--ref)"></i>fit</span></div></div>
+        <div class="chart" id="c-phase"></div>
+      </div>
+    </div>
+    <p class="note">Low-frequency gain ≈ 0.8: the car turns about 20% less than the kinematic model says. A pure delay τ gives phase −360°·f·τ, a straight line in f. The phase slope gives τ ≈ 0.104 s, and the lag adds −atan(2πfT) on top. At 1 Hz: −37° − 18° ≈ −55° against −58.5° measured.</p>
+  </section>
+
+  <section id="heading">
+    <h2>Heading change per 2 s window</h2>
+    <p>Each point is one 2 s window while moving: how far the car really turned (LiDAR, x) against what each estimate said (y). On the diagonal is perfect. Gyro heading sits on it. <span class="mono">/odom</span> works heading out from commanded steering, so it overstates every turn.</p>
+    <div class="figure">
+      <div class="figtitle"><b>Estimated vs true heading change, degrees</b>
+        <div class="legend"><span><i class="dot" style="background:var(--s1)"></i>gyro heading <span class="mono" id="lg-g"></span></span><span><i class="sq" style="border-color:var(--s3)"></i>/odom heading <span class="mono" id="lg-o"></span></span><span><i class="sw dash" style="border-color:var(--ref)"></i>y = x</span></div></div>
+      <div class="chart" id="c-head"></div>
+    </div>
+  </section>
+
+  <section id="noise">
+    <h2>Parked gyro noise, and Parseval</h2>
+    <p>Welch PSD of gyro z over the four still stretches at 50 Hz, Nyquist 25 Hz. Parseval: the variance is the area under the PSD, <span class="mono">σ² = ∫ S(f) df</span>. The flat floor is white noise; a peak would be vibration or an alias.</p>
+    <div class="figure">
+      <div class="figtitle"><b>Gyro z PSD, (rad/s)²/Hz</b><span class="mono" id="parseval" style="font-size:13px;color:var(--ink-2)"></span></div>
+      <div class="chart" id="c-psd"></div>
+    </div>
+  </section>
+
+  <section id="conj">
+    <h2>Conjugate symmetry on real data</h2>
+    <p>64 samples of the gyro while turning, <span class="mono">x[n]</span> real, and their DFT. Because <span class="mono">x[n] = x*[n]</span>, the conjugation property <span class="mono">x*[n] ↔ X*[−k]</span> forces <span class="mono">X[−k] = X*[k]</span>. So <span class="mono">Re X</span> is even and <span class="mono">Im X</span> is odd. Hover a bin to see its mirror. This is why <span class="mono">rfft</span> keeps only k ≥ 0 and one-sided spectra double every bin except DC and Nyquist.</p>
+    <div class="figure">
+      <div class="figtitle"><b>x[n], gyro z, rad/s</b><span class="mono" id="x-note" style="font-size:13px;color:var(--ink-2)"></span></div>
+      <div class="chart" id="c-x"></div>
+    </div>
+    <div class="pair">
+      <div class="figure"><div class="figtitle"><b>Re X[k]: even</b></div><div class="chart" id="c-re"></div></div>
+      <div class="figure"><div class="figtitle"><b>Im X[k]: odd</b></div><div class="chart" id="c-im"></div></div>
+    </div>
+  </section>
+
+  <footer>
+    <div>Source: <span class="mono">data/racerbot_runs/20261026-174911</span>, analysed with <span class="mono">tools/run_analysis/imu_spectrum.py</span> and <span class="mono">estimator_replay.py</span> (PR #4). VESC mount and calibration: car 2's, from <span class="mono">~/imu-calibration</span> (measured 2026-09-28), given with <span class="mono">--car-yaml</span>.</div>
+    <div>Limits: one 2-minute run; the LiDAR's own latency is not removed, so the −10 ms delay is relative. No steady-throttle stretch, so no vibration or alias measurement yet.</div>
+  </footer>
+</div>
+
+<script type="application/json" id="data">__DATA__</script>
+<script>
+(function () {
+  const D = JSON.parse(document.getElementById("data").textContent);
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+  const fmt = (v, d) => (v == null || !isFinite(v)) ? "–" : (Math.abs(v) < 1e-3 && v !== 0 ? v.toExponential(2) : v.toFixed(d));
+
+  // ---- one chart: scales, grid, axes, layers, hover
+  function chart(host, o) {
+    host.innerHTML = "";
+    const W = Math.max(280, host.clientWidth), H = o.height || 260;
+    const m = { l: 52, r: 12, t: 10, b: 38 };
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": o.aria || "" }, host);
+    const tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; host.appendChild(tip);
+    const sc = (ax, lo, hi) => ax.log
+      ? (v => lo + (Math.log10(v) - Math.log10(ax.min)) / (Math.log10(ax.max) - Math.log10(ax.min)) * (hi - lo))
+      : (v => lo + (v - ax.min) / (ax.max - ax.min) * (hi - lo));
+    const X = sc(o.x, m.l, W - m.r), Y = sc(o.y, H - m.b, m.t);
+    const g = el("g", { class: "grid" }, svg);
+    for (const t of o.y.ticks) {
+      el("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t) }, g);
+      el("text", { x: m.l - 6, y: Y(t) + 4, "text-anchor": "end" }, svg).textContent = o.y.tf ? o.y.tf(t) : t;
+    }
+    for (const t of o.x.ticks) {
+      el("line", { x1: X(t), x2: X(t), y1: m.t, y2: H - m.b }, g);
+      el("text", { x: X(t), y: H - m.b + 15, "text-anchor": "middle" }, svg).textContent = o.x.tf ? o.x.tf(t) : t;
+    }
+    if (!o.y.log && o.y.min < 0 && o.y.max > 0) el("line", { class: "zero", x1: m.l, x2: W - m.r, y1: Y(0), y2: Y(0) }, svg);
+    el("text", { class: "axlabel", x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle" }, svg).textContent = o.x.label;
+    const clip = "c" + Math.random().toString(36).slice(2);
+    el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b }, el("clipPath", { id: clip }, el("defs", {}, svg)));
+    const plot = el("g", { "clip-path": `url(#${clip})` }, svg);
+    for (const L of o.layers) {
+      const col = css(L.color);
+      if (L.type === "line") {
+        let d = "", pen = false;
+        for (const [x, y] of L.data) {
+          if (x < o.x.min || x > o.x.max || !isFinite(y)) { pen = false; continue; }
+          d += (pen ? "L" : "M") + X(x).toFixed(1) + "," + Y(y).toFixed(1); pen = true;
+        }
+        el("path", { d, fill: "none", stroke: col, "stroke-width": L.width || 2, "stroke-dasharray": L.dash || "none", "stroke-linejoin": "round", "stroke-linecap": "round", opacity: L.opacity || 1 }, plot);
+      } else if (L.type === "points") {
+        for (const p of L.data) {
+          const cx = X(p[0]), cy = Y(p[1]);
+          if (L.shape === "square") el("rect", { x: cx - 4, y: cy - 4, width: 8, height: 8, fill: "none", stroke: col, "stroke-width": 2 }, plot);
+          else el("circle", { cx, cy, r: 4.5, fill: col, stroke: css("--surface"), "stroke-width": 2, opacity: p.op == null ? 1 : p.op }, plot);
+        }
+      } else if (L.type === "stem") {
+        for (const [x, y] of L.data) {
+          el("line", { x1: X(x), x2: X(x), y1: Y(0), y2: Y(y), stroke: col, "stroke-width": 2 }, plot);
+          el("circle", { cx: X(x), cy: Y(y), r: 3, fill: col }, plot);
+        }
+      }
+    }
+    // hover
+    const cross = el("line", { y1: m.t, y2: H - m.b, stroke: css("--ink-3"), "stroke-width": 1, "stroke-dasharray": "3 3", visibility: "hidden" }, svg);
+    const hl = el("g", {}, svg);
+    const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent" }, svg);
+    const place = (px, py, html) => {
+      tip.innerHTML = html; tip.hidden = false;
+      const r = host.getBoundingClientRect(), s = W / r.width;
+      let left = px / s + 14, top = py / s - 10;
+      if (left + tip.offsetWidth > r.width) left = px / s - tip.offsetWidth - 14;
+      tip.style.left = Math.max(0, left) + "px"; tip.style.top = Math.max(0, top) + "px";
+    };
+    const move = ev => {
+      const r = svg.getBoundingClientRect(), s = W / r.width;
+      const px = (ev.clientX - r.left) * s, py = (ev.clientY - r.top) * s;
+      hl.innerHTML = "";
+      const res = o.hover(px, py, X, Y);
+      if (!res) { tip.hidden = true; cross.setAttribute("visibility", "hidden"); return; }
+      if (res.cross != null) { cross.setAttribute("x1", res.cross); cross.setAttribute("x2", res.cross); cross.setAttribute("visibility", "visible"); }
+      else cross.setAttribute("visibility", "hidden");
+      for (const h of res.marks || []) el("circle", { cx: h[0], cy: h[1], r: 5.5, fill: "none", stroke: css("--ink"), "stroke-width": 1.5 }, hl);
+      place(px, py, res.html);
+    };
+    if (o.hover) {
+      hit.addEventListener("pointermove", move);
+      hit.addEventListener("pointerleave", () => { tip.hidden = true; hl.innerHTML = ""; cross.setAttribute("visibility", "hidden"); });
+    }
+  }
+  const row = (sw, name, val) => `<div class="row"><span>${sw}${name}</span><span>${val}</span></div>`;
+  const swl = c => `<i class="sw" style="border-color:var(${c});margin-right:6px"></i>`;
+  const swd = c => `<i class="dot" style="background:var(${c});margin-right:6px"></i>`;
+  const nearestPoint = (sets, px, py, X, Y, r = 24) => {
+    let best = null;
+    for (const s of sets) for (const p of s.data) {
+      const d = Math.hypot(X(p[0]) - px, Y(p[1]) - py);
+      if (d < r && (!best || d < best.d)) best = { d, p, s };
+    }
+    return best;
+  };
+  const ticksLin = (lo, hi, step) => { const t = []; for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) t.push(+v.toFixed(6)); return t; };
+
+  // ---- 1. time series
+  const S = D.series, bias = D.bias_z;
+  const T = S.t, G = S.gyro.map(v => v - bias);
+  let win = 30, start = 38;
+  const btns = [...document.querySelectorAll(".seg button")];
+  const range = document.getElementById("t-start"), tlab = document.getElementById("t-label");
+  function drawTime() {
+    const t0 = win >= 999 ? T[0] : start, t1 = win >= 999 ? T[T.length - 1] : Math.min(T[T.length - 1], start + win);
+    range.disabled = win >= 999;
+    tlab.textContent = `${t0.toFixed(1)}–${t1.toFixed(1)} s`;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < T.length; i++) if (T[i] >= t0 && T[i] <= t1) for (const v of [G[i], S.lidar[i], S.odom[i], S.cmd[i]]) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    const pad = 0.1 * (hi - lo || 1); lo -= pad; hi += pad;
+    const step = (hi - lo) > 3 ? 1 : 0.5, tstep = (t1 - t0) > 60 ? 20 : (t1 - t0) > 20 ? 5 : 2;
+    const zip = a => T.map((t, i) => [t, a[i]]);
+    chart(document.getElementById("c-time"), {
+      height: 280, aria: "Yaw rate over time: gyro, LiDAR, odom and commanded",
+      x: { min: t0, max: t1, ticks: ticksLin(t0, t1, tstep), label: "time since start, s" },
+      y: { min: lo, max: hi, ticks: ticksLin(lo, hi, step) },
+      layers: [
+        { type: "line", data: zip(S.cmd), color: "--ref", dash: "5 4", width: 1.5 },
+        { type: "line", data: zip(S.odom), color: "--s3", width: 1.5 },
+        { type: "line", data: zip(S.lidar), color: "--s2" },
+        { type: "line", data: zip(G), color: "--s1" },
+      ],
+      hover: (px, py, X, Y) => {
+        let i = 0, bd = Infinity;
+        for (let j = 0; j < T.length; j++) { if (T[j] < t0 || T[j] > t1) continue; const d = Math.abs(X(T[j]) - px); if (d < bd) { bd = d; i = j; } }
+        if (bd > 30) return null;
+        return { cross: X(T[i]), marks: [[X(T[i]), Y(G[i])], [X(T[i]), Y(S.lidar[i])]],
+          html: `<div class="k">t = ${T[i].toFixed(2)} s · ${S.speed[i].toFixed(2)} m/s</div>` +
+            row(swl("--s1"), "gyro", fmt(G[i], 3)) + row(swl("--s2"), "LiDAR", fmt(S.lidar[i], 3)) +
+            row(swl("--s3"), "/odom", fmt(S.odom[i], 3)) + row(swl("--ref"), "commanded", fmt(S.cmd[i], 3)) };
+      },
+    });
+  }
+  btns.forEach(b => b.addEventListener("click", () => { win = +b.dataset.w; btns.forEach(x => x.setAttribute("aria-pressed", x === b)); drawTime(); }));
+  range.addEventListener("input", () => { start = +range.value; drawTime(); });
+
+  // ---- 2. Bode
+  const FR = { gyro: D.frf["vesc gyro"], lidar: D.frf["LiDAR"] };
+  const fits = { gyro: [0.679, 0.075, 0.051], lidar: [0.651, 0.090, 0.037] };
+  const fgrid = []; for (let e = -1; e <= Math.log10(4) + 1e-9; e += 0.01) fgrid.push(10 ** e);
+  const magF = (p, f) => 20 * Math.log10(p[0] / Math.sqrt(1 + (2 * Math.PI * f * p[2]) ** 2));
+  const phF = (p, f) => -360 * f * p[1] - Math.atan(2 * Math.PI * f * p[2]) * 180 / Math.PI;
+  const fx = { min: 0.09, max: 4, log: true, ticks: [0.1, 0.2, 0.5, 1, 2, 4], label: "frequency, Hz" };
+  const bodeHover = (key, idx, unit) => (px, py, X, Y) => {
+    const sets = [{ name: "gyro", c: "--s1", data: FR.gyro.map(r => [r[0], key(r), r]) }, { name: "LiDAR", c: "--s2", data: FR.lidar.map(r => [r[0], key(r), r]) }];
+    const b = nearestPoint(sets, px, py, X, Y); if (!b) return null;
+    const r = b.p[2];
+    return { marks: [[X(b.p[0]), Y(b.p[1])]], html: `<div class="k">${b.s.name} · ${r[0].toFixed(2)} Hz</div>` +
+      row("", "gain", `${r[1].toFixed(3)} (${(20 * Math.log10(r[1])).toFixed(1)} dB)`) + row("", "phase", `${r[2].toFixed(1)}°`) + row("", "coherence", r[3].toFixed(2)) };
+  };
+  function drawBode() {
+    chart(document.getElementById("c-mag"), {
+      height: 240, aria: "Bode magnitude", x: fx,
+      y: { min: -10, max: 0, ticks: [-10, -8, -6, -4, -2, 0] },
+      layers: [
+        { type: "line", data: fgrid.map(f => [f, magF(fits.gyro, f)]), color: "--s1", dash: "5 4", width: 1.5 },
+        { type: "line", data: fgrid.map(f => [f, magF(fits.lidar, f)]), color: "--s2", dash: "5 4", width: 1.5 },
+        { type: "points", data: FR.lidar.map(r => [r[0], 20 * Math.log10(r[1])]), color: "--s2" },
+        { type: "points", data: FR.gyro.map(r => [r[0], 20 * Math.log10(r[1])]), color: "--s1" },
+      ],
+      hover: bodeHover(r => 20 * Math.log10(r[1])),
+    });
+    chart(document.getElementById("c-phase"), {
+      height: 240, aria: "Bode phase", x: fx,
+      y: { min: -180, max: 0, ticks: [-180, -135, -90, -45, 0] },
+      layers: [
+        { type: "line", data: fgrid.map(f => [f, phF(fits.gyro, f)]), color: "--s1", dash: "5 4", width: 1.5 },
+        { type: "line", data: fgrid.map(f => [f, phF(fits.lidar, f)]), color: "--s2", dash: "5 4", width: 1.5 },
+        { type: "points", data: FR.lidar.map(r => [r[0], r[2]]), color: "--s2" },
+        { type: "points", data: FR.gyro.map(r => [r[0], r[2]]), color: "--s1" },
+      ],
+      hover: bodeHover(r => r[2]),
+    });
+  }
+
+  // ---- 3. heading windows
+  const Wd = D.windows; // [t, lidar, gyro, odom]
+  const slope = k => { let a = 0, b = 0; for (const w of Wd) { a += w[1] * w[k]; b += w[1] * w[1]; } return a / b; };
+  const rms = k => Math.sqrt(Wd.reduce((s, w) => s + (w[k] - w[1]) ** 2, 0) / Wd.length);
+  document.getElementById("lg-g").textContent = `RMS ${rms(2).toFixed(2)}°, slope ${slope(2).toFixed(2)}`;
+  document.getElementById("lg-o").textContent = `RMS ${rms(3).toFixed(2)}°, slope ${slope(3).toFixed(2)}`;
+  function drawHead() {
+    let lim = 0; for (const w of Wd) lim = Math.max(lim, Math.abs(w[1]), Math.abs(w[2]), Math.abs(w[3]));
+    lim = Math.ceil(lim / 20) * 20;
+    const ax = { min: -lim, max: lim, ticks: ticksLin(-lim, lim, lim > 80 ? 40 : 20) };
+    chart(document.getElementById("c-head"), {
+      height: 340, aria: "Estimated vs LiDAR heading change per window",
+      x: { ...ax, label: "true heading change from LiDAR, °" }, y: ax,
+      layers: [
+        { type: "line", data: [[-lim, -lim], [lim, lim]], color: "--ref", dash: "5 4", width: 1.5 },
+        { type: "points", shape: "square", data: Wd.map(w => [w[1], w[3]]), color: "--s3" },
+        { type: "points", data: Wd.map(w => [w[1], w[2]]), color: "--s1" },
+      ],
+      hover: (px, py, X, Y) => {
+        const b = nearestPoint([{ data: Wd.map(w => [w[1], w[2], w]) }, { data: Wd.map(w => [w[1], w[3], w]) }], px, py, X, Y);
+        if (!b) return null; const w = b.p[2];
+        return { marks: [[X(w[1]), Y(w[2])], [X(w[1]), Y(w[3])]], html: `<div class="k">window at ${w[0].toFixed(1)} s</div>` +
+          row(swl("--s2"), "LiDAR (truth)", `${w[1].toFixed(1)}°`) + row(swd("--s1"), "gyro", `${w[2].toFixed(1)}° (${(w[2] - w[1]).toFixed(1)})`) +
+          row(swd("--s3"), "/odom", `${w[3].toFixed(1)}° (${(w[3] - w[1]).toFixed(1)})`) };
+      },
+    });
+  }
+
+  // ---- 4. PSD
+  const P = D.psd, df = P.f[1] - P.f[0];
+  let area = 0; for (let i = 1; i < P.p.length; i++) area += P.p[i] * df;
+  document.getElementById("parseval").textContent = `√∫S df = ${Math.sqrt(area).toFixed(5)} rad/s  (np.std on samples: 0.00195)`;
+  function drawPsd() {
+    const pts = P.f.map((f, i) => [f, P.p[i]]).filter(p => p[0] > 0);
+    let lo = Infinity, hi = 0; for (const p of pts) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); }
+    const e0 = Math.floor(Math.log10(lo)), e1 = Math.ceil(Math.log10(hi)); const yt = []; for (let e = e0; e <= e1; e++) yt.push(10 ** e);
+    chart(document.getElementById("c-psd"), {
+      height: 240, aria: "Parked gyro z power spectral density",
+      x: { min: 0, max: 25, ticks: [0, 5, 10, 15, 20, 25], label: "frequency, Hz (Nyquist 25)" },
+      y: { min: 10 ** e0, max: 10 ** e1, log: true, ticks: yt, tf: v => "1e" + Math.round(Math.log10(v)) },
+      layers: [{ type: "line", data: pts, color: "--s1" }],
+      hover: (px, py, X, Y) => {
+        let b = null, bd = Infinity; for (const p of pts) { const d = Math.abs(X(p[0]) - px); if (d < bd) { bd = d; b = p; } }
+        if (!b || bd > 20) return null;
+        return { cross: X(b[0]), marks: [[X(b[0]), Y(b[1])]], html: `<div class="k">${b[0].toFixed(2)} Hz</div>` + row("", "S(f)", b[1].toExponential(2)) };
+      },
+    });
+  }
+
+  // ---- 5. conjugate symmetry
+  const F = D.dft, N = F.x.length;
+  document.getElementById("x-note").textContent = `N = ${N}, from t = ${F.t_start.toFixed(1)} s, fs = 50 Hz`;
+  let pairK = null;
+  function drawConj() {
+    const xs = F.x.map((v, n) => [n, v]);
+    let xl = Math.min(...F.x), xh = Math.max(...F.x); const xp = 0.15 * (xh - xl || 1);
+    chart(document.getElementById("c-x"), {
+      height: 180, aria: "x[n]",
+      x: { min: -1, max: N, ticks: [0, 16, 32, 48, 63], label: "n" },
+      y: { min: Math.min(0, xl - xp), max: xh + xp, ticks: ticksLin(Math.min(0, xl - xp), xh + xp, 0.5) },
+      layers: [{ type: "stem", data: xs, color: "--s1" }],
+      hover: (px, py, X, Y) => { const n = Math.round((px - X(0)) / (X(1) - X(0))); if (n < 0 || n >= N) return null;
+        return { cross: X(n), marks: [[X(n), Y(F.x[n])]], html: row("", `x[${n}]`, F.x[n].toFixed(4)) }; },
+    });
+    for (const [id, arr, lab] of [["c-re", F.re, "Re"], ["c-im", F.im, "Im"]]) {
+      const m = Math.max(...arr.map(Math.abs)) * 1.1;
+      const step = m > 8 ? 4 : m > 4 ? 2 : 1;
+      chart(document.getElementById(id), {
+        height: 200, aria: `${lab} X[k]`,
+        x: { min: -33, max: 32, ticks: [-32, -16, 0, 16, 31], label: "k (bin = k·50/64 Hz)" },
+        y: { min: -m, max: m, ticks: ticksLin(-m, m, step) },
+        layers: [{ type: "stem", data: F.k.map((k, i) => [k, arr[i]]), color: lab === "Re" ? "--s1" : "--s2" }],
+        hover: (px, py, X, Y) => {
+          const k = Math.round((px - X(0)) / (X(1) - X(0))); const i = k + 32, j = -k + 32;
+          if (i < 0 || i >= N) return null;
+          const mirror = j >= 0 && j < N;
+          const c = (re, im) => `${re.toFixed(3)} ${im < 0 ? "−" : "+"} ${Math.abs(im).toFixed(3)}j`;
+          return { cross: X(k), marks: mirror ? [[X(k), Y(arr[i])], [X(-k), Y(arr[j])]] : [[X(k), Y(arr[i])]],
+            html: `<div class="k">${(k * 50 / 64).toFixed(2)} Hz</div>` + row("", `X[${k}]`, c(F.re[i], F.im[i])) +
+              (mirror ? row("", `X[${-k}]`, c(F.re[j], F.im[j])) : row("", `X[${-k}]`, "= X[32], aliased")) };
+        },
+      });
+    }
+  }
+
+  function drawAll() { drawTime(); drawBode(); drawHead(); drawPsd(); drawConj(); }
+  drawAll();
+  let rt; window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(drawAll, 120); });
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
+  new MutationObserver(drawAll).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+})();
+</script>
