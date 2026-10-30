@@ -59,7 +59,13 @@ class Tick:
 
 def replay(run, t0: float, t1: float, overrides: dict | None = None,
            params: dict | None = None) -> list:
-    """One Tick per scan received in (t0, t1); t0 should be an LB press."""
+    """One Tick per scan received in (t0, t1); t0 should be an LB press.
+
+    Raises ValueError (runlog.NO_DRIVE) for a manually driven run: there is
+    no /drive to compare the replay with."""
+    if len(run.drive) == 0:
+        from run_analysis.runlog import NO_DRIVE
+        raise ValueError(NO_DRIVE)
     p = dict(params if params is not None else gap_mirror.node_params())
     p.update(overrides or {})
     ctrl = gap_mirror.GapController(p, _Lidar(run))

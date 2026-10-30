@@ -49,6 +49,9 @@ vehicle_state_node:
     # the wheel speed unchanged). bno: car 1's VESC mount rotation in
     # imu-calibration's car.yaml is still car 2's, so the VESC's x axis is
     # not trusted yet (its z gyro is: both lie flat).
+    # both: the four-state filter, x = [v, a, b_vesc, b_bno] -- both
+    # accelerometers measured, each with its own bias (the four sigma_jerk ..
+    # sigma_accel0 values below). Not yet driven on.
     accel_source: bno
     # Speed random walk from accelerometer error [m/s per sqrt(s)].
     sigma_accel: 0.15
@@ -58,6 +61,20 @@ vehicle_state_node:
     sigma_wheel: 0.08
     # Prior on the accelerometer's forward bias, 1 sigma [m/s^2].
     sigma_bias0: 0.3
+    # accel_source: both only. Starting guesses, none measured yet. How:
+    # Jerk density [m/s^3 per sqrt(Hz)]: how fast the true acceleration
+    # changes. Measure from a recorded run: differentiate LiDAR speed
+    # (tools/run_analysis/scan_motion.py) twice; sigma_jerk^2 ~ var(jerk) * dt.
+    # Then tune: mean y^2/S over the wheel updates should be ~1.
+    sigma_jerk: 6.0
+    # Per-sample accelerometer noise while driving [m/s^2]: std of
+    # (accel - d/dt LiDAR speed) on a run at steady speed. Vibration
+    # dominates, so measure on the car, not on a bench.
+    sigma_accel_bno: 1.0
+    sigma_accel_vesc: 1.0
+    # Prior on the acceleration at (re)start [m/s^2]: about the hardest the
+    # car accelerates or brakes.
+    sigma_accel0: 3.0
     # The published speed never differs from the wheel speed by more [m/s].
     # This is the whole of what /odom/fused can change for a consumer.
     max_divergence: 0.3
