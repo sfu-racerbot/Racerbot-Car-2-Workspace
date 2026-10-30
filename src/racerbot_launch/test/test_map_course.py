@@ -168,15 +168,19 @@ def test_the_recorder_gets_its_own_folder_not_the_map_run_folder():
         assert "'output_directory': '~/racerbot-ws/data/racerbot_runs'" in text, name
 
 
-def test_simulator_runs_get_imu_false_unless_imu_was_given():
-    # oracle: spec -- map_course_launch.py docstring: no IMU in the simulator.
-    assert mc.launch_arguments(['laps:=4'], simulated=True) == ['laps:=4', 'imu:=false']
-    assert mc.launch_arguments(['imu:=true'], simulated=True) == ['imu:=true']
+def test_simulator_runs_get_imu_hardware_false_unless_imu_hardware_was_given():
+    # oracle: spec -- map_course.launch_arguments docstring; approved 2026-10-29
+    # (I1 part b): simulated IMU stays on, only its hardware readers stay off.
+    assert mc.launch_arguments(['laps:=4'], simulated=True) == ['laps:=4', 'imu_hardware:=false']
+    assert mc.launch_arguments(['imu_hardware:=true'], simulated=True) == ['imu_hardware:=true']
+    assert mc.launch_arguments(['imu:=false'], simulated=True) == ['imu:=false', 'imu_hardware:=false']
     assert mc.launch_arguments(['laps:=4'], simulated=False) == ['laps:=4']
     assert mc.launch_arguments([], simulated=False) == []
 
 
-def test_main_in_the_simulator_launches_without_the_imu(tmp_path, monkeypatch, capsys):
+def test_main_in_the_simulator_launches_without_imu_hardware(tmp_path, monkeypatch, capsys):
+    # oracle: spec -- map_course.launch_arguments docstring; approved 2026-10-29
+    # (I1 part b): the real launch receives imu_hardware:=false, keeping the IMU.
     monkeypatch.setattr(mc, 'LOG_DIRECTORY', str(tmp_path / 'logs'))
     out = tmp_path / 'runs'
     args_file = tmp_path / 'args'
@@ -186,4 +190,159 @@ def test_main_in_the_simulator_launches_without_the_imu(tmp_path, monkeypatch, c
     assert mc.main([f'output_directory:={out}']) == 0
     assert args_file.read_text().split() == [
         'launch', 'racerbot_launch', 'map_course_launch.py',
-        f'output_directory:={out}', 'imu:=false']
+        f'output_directory:={out}', 'imu_hardware:=false']
+
+
+def _analysis_fixture(tmp_path, monkeypatch, recorder=True, fail=False):
+    run = tmp_path / 'recorded run'
+    run.mkdir()
+    maps = tmp_path / 'maps'
+    events = tmp_path / 'events'
+    args = tmp_path / 'args'
+    root = tmp_path / 'workspace'
+    scripts = root / 'tools' / 'run_analysis'
+    scripts.mkdir(parents=True)
+    for name in ('imu_report', 'slam_report'):
+        (scripts / f'{name}.py').write_text(
+            'import sys\n'
+            f'open({str(events)!r}, "a").write({name!r} + " " + repr(sys.argv[1:]) + "\\n")\n'
+            f'print({name!r})\n'
+            'print("\\n".join("line " + str(i) for i in range(20)))\n')
+    bin_dir = _fake_ros2(tmp_path, (
+        'if [ "$1" = run ]; then\n'
+        f'  echo "summarize_run $4" >> "{events}"\n'
+        '  echo summary-headline\n'
+        f'  exit {7 if fail else 0}\n'
+        'fi\n'
+        f'printf "%s\\n" "$@" > "{args}"\n'
+        f'mkdir -p "{maps}/latest"\n'
+        f'echo RACE-COMMANDS > "{maps}/latest/commands.txt"\n'
+        + (f'echo "Recording run to: {run}"\n' if recorder else '') +
+        'exit 3\n'))
+    monkeypatch.setenv('PATH', f'{bin_dir}{os.pathsep}{os.environ["PATH"]}')
+    monkeypatch.setenv('RACERBOT_WS', str(root))
+    monkeypatch.setattr(mc, 'LOG_DIRECTORY', str(tmp_path / 'logs'))
+    _drivers(monkeypatch, 'gym_bridge_node')
+    return run, maps, events, args, root
+
+
+def test_analysis_reports_order_arguments_headlines_and_full_output(tmp_path, monkeypatch, capsys):
+    # oracle: Task J1a specifies order, 15-line headlines, and commands last.
+    run, maps, events, args, root = _analysis_fixture(tmp_path, monkeypatch)
+    assert mc.main([f'output_directory:={maps}']) == 3
+    printed = capsys.readouterr().out
+    log = Path(printed.strip().split('Full log of this run: ')[-1])
+    lines = events.read_text().splitlines()
+    assert lines == [f'summarize_run {run}', f'imu_report {[str(run)]!r}',
+                     f'slam_report {[str(run), "--log", str(log)]!r}']
+    for name in ('imu_report', 'slam_report'):
+        target = run / 'analysis' / 'map_course' / f'{name}.txt'
+        assert target.read_text().splitlines() == [name] + [f'line {i}' for i in range(20)]
+        assert '\n'.join(target.read_text().splitlines()[:15]) in printed
+        assert 'line 14' not in printed
+        assert str(target) in printed
+        assert printed.index(str(target)) < printed.index('RACE-COMMANDS')
+    assert 'summary-headline' in printed
+    assert printed.index('summary-headline') < printed.index('RACE-COMMANDS')
+    assert 'RACE-COMMANDS' in log.read_text()
+
+
+def test_analysis_disabled_is_stripped_and_runs_no_reports(tmp_path, monkeypatch, capsys):
+    # oracle: Task J1a: wrapper-only option and no subprocess reports.
+    run, maps, events, args, root = _analysis_fixture(tmp_path, monkeypatch)
+    assert mc.main([f'output_directory:={maps}', 'analysis:=false']) == 3
+    assert 'analysis:=false' not in args.read_text()
+    assert not events.exists()
+    assert not (run / 'analysis').exists()
+
+
+def test_analysis_invalid_values_never_launch(tmp_path, monkeypatch, capsys):
+    # oracle: Task J1a: only true/false; empty is invalid too.
+    run, maps, events, args, root = _analysis_fixture(tmp_path, monkeypatch)
+    for value in ('maybe', ''):
+        assert mc.main([f'analysis:={value}']) == 2
+        assert 'analysis' in capsys.readouterr().err
+        assert not args.exists()
+
+
+def test_analysis_without_recording_reports_skip_and_keeps_exit(tmp_path, monkeypatch, capsys):
+    # oracle: Task J1a: absent recorder banner skips analysis and preserves launch status.
+    run, maps, events, args, root = _analysis_fixture(tmp_path, monkeypatch, recorder=False)
+    assert mc.main([f'output_directory:={maps}']) == 3
+    assert 'Analysis skipped' in capsys.readouterr().out
+    assert not events.exists()
+
+
+def test_analysis_failure_reports_command_without_changing_launch_status(tmp_path, monkeypatch, capsys):
+    # oracle: Task J1a: report failures are advisory.
+    run, maps, events, args, root = _analysis_fixture(tmp_path, monkeypatch, fail=True)
+    assert mc.main([f'output_directory:={maps}']) == 3
+    output = capsys.readouterr().out
+    assert 'exit 7' in output
+    assert f"ros2 run race_diagnostics summarize_run '{run}'" in output
+    assert 'slam_report' in output
+
+
+def _interrupt_analysis_at(boundary, tmp_path, monkeypatch, capsys):
+    import builtins
+    import pytest
+    run, maps, events, _, _ = _analysis_fixture(tmp_path, monkeypatch)
+    write_text, print_text = Path.write_text, builtins.print
+    interrupted = []
+
+    def write(path, *args, **kwargs):
+        if boundary == 'save' and path.name == 'summarize_run.txt':
+            interrupted.append('save')
+            raise KeyboardInterrupt
+        return write_text(path, *args, **kwargs)
+
+    def emit(*args, **kwargs):
+        if boundary == 'print' and args and str(args[0]).startswith('summarize_run:'):
+            interrupted.append('print')
+            raise KeyboardInterrupt
+        return print_text(*args, **kwargs)
+
+    monkeypatch.setattr(Path, 'write_text', write)
+    monkeypatch.setattr(builtins, 'print', emit)
+    try:
+        code = mc.main([f'output_directory:={maps}'])
+    except KeyboardInterrupt:
+        pytest.fail(f'analysis {boundary} interrupt escaped before final commands')
+    output = capsys.readouterr().out
+    # oracle: spec R5a: keep launch status and final commands; skip all
+    # remaining analyses after an interrupt anywhere in run/save/print.
+    assert code == 3
+    assert interrupted == [boundary]
+    assert events.read_text().splitlines() == [f'summarize_run {run}']
+    assert 'RACE-COMMANDS' in output
+    body, _, last = output.rstrip().rpartition('\n')
+    assert body.rstrip().endswith('RACE-COMMANDS')
+    assert last.startswith('Full log of this run: ')
+    log = Path(output.strip().split('Full log of this run: ')[-1])
+    assert 'RACE-COMMANDS' in log.read_text()
+
+
+def test_analysis_save_interrupt_preserves_commands_and_launch_status(tmp_path, monkeypatch, capsys):
+    _interrupt_analysis_at('save', tmp_path, monkeypatch, capsys)
+
+
+def test_analysis_print_interrupt_preserves_commands_and_launch_status(tmp_path, monkeypatch, capsys):
+    _interrupt_analysis_at('print', tmp_path, monkeypatch, capsys)
+
+
+def test_simulator_probe_matches_executable_not_shell_text(monkeypatch):
+    import re
+    from types import SimpleNamespace
+
+    for command, expected in [
+        ('/ws/install/racerbot_sim/lib/racerbot_sim/gym_bridge_node --ros-args', True),
+        ('/usr/bin/python3 /ws/install/racerbot_sim/lib/racerbot_sim/gym_bridge_node', True),
+        ('/bin/bash -c wait-for gym_bridge_node', False),
+        ('/bin/bash -c wait-for /ws/install/racerbot_sim/lib/racerbot_sim/gym_bridge_node', False),
+    ]:
+        def probe(argv, **kwargs):
+            assert argv[:2] == ['pgrep', '-f']
+            return SimpleNamespace(returncode=0 if re.search(argv[2], command) else 1)
+        monkeypatch.setattr(mc.subprocess, 'run', probe)
+        # oracle: spec R5b: only an executable/script process argument counts.
+        assert mc._running(mc.SIM_DRIVER) is expected, command

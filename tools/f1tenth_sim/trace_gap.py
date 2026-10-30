@@ -68,7 +68,10 @@ def trace(track, params, seed, timeout_s):
     for step in range(int(math.ceil(timeout_s / CONTROL_DT))):
         ego = obs["agent_0"]
         speed_meas = float(np.asarray(ego["std_state"], dtype=float)[3])
-        steering, cmd_speed = ctrl.command(ego["scan"], speed_meas, step)
+        steering, cmd_speed = ctrl.command(ego["scan"], speed_meas, step,
+                                          horizontal_accel=0.0, lb_pressed=True,
+                                          yaw_rate=float(ego["std_state"][5]),
+                                          fused_speed=float(plant.truth(0)[3]))
         truth = plant.truth(0)
         tel = ctrl.telemetry
         row = dict(

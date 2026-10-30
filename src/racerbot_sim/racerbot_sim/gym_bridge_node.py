@@ -27,12 +27,15 @@ import numpy as np
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Imu, LaserScan
 from std_msgs.msg import String
 from tf2_ros import TransformBroadcaster
 
 from racerbot_sim import tracks
+from imu_bridge.convert import ORIENTATION_UNKNOWN, covariance_diag
+from racerbot_sim.sim_imu import BNO_NOISE, VESC_NOISE, FAULTS, SimImu
 from racerbot_sim.hardware_guard import HardwareInterlock
 from racerbot_sim.sim_bridge import (
     LIDAR_BEAMS, LIDAR_HALF_FOV, LIDAR_OFFSET_X, LIDAR_OFFSET_Z,
@@ -81,6 +84,11 @@ class GymBridgeNode(Node):
         self.declare_parameter('odom_speed_noise_std', 0.01)
         self.declare_parameter('odom_yaw_rate_scale', 1.0)
         self.declare_parameter('publish_ground_truth', True)
+        self.declare_parameter('publish_imu', True)
+        self.declare_parameter('imu_fault', 'none')
+        self.declare_parameter('car2_imu_fault', 'none')
+        self.declare_parameter('imu_fault_bias', 0.1)
+        self.declare_parameter('imu_fault_scale', 1.1)
         self.declare_parameter('interlock_discovery_hold_sec', 3.0)
         self.declare_parameter('interlock_clear_confirm_sec', 3.0)
 
@@ -95,6 +103,9 @@ class GymBridgeNode(Node):
         self.command_timeout_sec = float(value('command_timeout_sec'))
         self.publish_ground_truth = bool(value('publish_ground_truth'))
         self.controlled_cars = int(value('controlled_cars'))
+        for name in ('imu_fault', 'car2_imu_fault'):
+            if value(name) not in FAULTS:
+                raise ValueError(f'{name} must be one of {FAULTS}')
 
         import os
         track_directory = os.path.expanduser(str(value('track_directory')))
@@ -130,9 +141,10 @@ class GymBridgeNode(Node):
         ))
 
         self.interlock = HardwareInterlock(
-            self, 'simulated /scan and /odom',
+            self, 'simulated /scan, /odom and /imu',
             discovery_hold_sec=float(value('interlock_discovery_hold_sec')),
             clear_confirm_sec=float(value('interlock_clear_confirm_sec')))
+        self._interlock_was_open = False
         self.commanded_speed = 0.0
         self.commanded_steering = 0.0
         self.last_command_time = None
@@ -166,11 +178,32 @@ class GymBridgeNode(Node):
         latched = QoSProfile(depth=1,
                              reliability=QoSReliabilityPolicy.RELIABLE,
                              durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+        self._imu_status_qos = latched
         self.truth_pubs = [self.create_publisher(PoseStamped, names['truth'], 10)
                            for names in self.names]
         self.truth_pub = self.truth_pubs[0]
         self.opponents_pub = self.create_publisher(PoseArray, '/sim/opponent_poses', 10)
         self.status_pub = self.create_publisher(String, '/sim/status', latched)
+
+        self.imus = []
+        self.imu_pubs = []
+        self.imu_status_pubs = []
+        self.imu_status_topics = []
+        self._last_imu_status = [None] * self.controlled_cars
+        if bool(value('publish_imu')):
+            # Independent per-car RNGs do not perturb LiDAR/odometry noise.
+            seeds = np.random.SeedSequence(int(value('seed'))).spawn(self.controlled_cars)
+            for i, names in enumerate(self.names):
+                fault = value(('imu_fault', 'car2_imu_fault')[i]) if i < 2 else 'none'
+                self.imus.append(SimImu(np.random.default_rng(seeds[i]), fault=fault,
+                    bias=float(value('imu_fault_bias')), scale=float(value('imu_fault_scale'))))
+                prefix = '/' + names['namespace'] if names['namespace'] else ''
+                self.imu_pubs.append({sensor: self.create_publisher(
+                    Imu, f'{prefix}/imu/{suffix}', 10)
+                    for sensor, suffix in [('bno', 'bno/data'), ('vesc', 'vesc/data'), ('primary', 'data')]})
+                self.imu_status_topics.append(f'{prefix}/imu/status')
+                self.imu_status_pubs.append(self.create_publisher(String, self.imu_status_topics[-1], latched))
+        self.add_on_set_parameters_callback(self._validate_imu_parameters)
 
         self._beam_angles = self.bridge.beam_angles
         self.create_timer(1.0 / self.rate_hz, self._step)
@@ -181,6 +214,13 @@ class GymBridgeNode(Node):
             f"'{value('drive_topic')}'.")
 
     # -- ROS plumbing ------------------------------------------------------
+
+    def _validate_imu_parameters(self, parameters):
+        for parameter in parameters:
+            if parameter.name in ('imu_fault', 'car2_imu_fault') and parameter.value not in FAULTS:
+                return SetParametersResult(successful=False,
+                    reason=f'{parameter.name} must be one of {FAULTS}')
+        return SetParametersResult(successful=True)
 
     def _drive_callback(self, msg: AckermannDriveStamped, index=0):
         steering, speed, ok = sanitize_command(
@@ -205,7 +245,22 @@ class GymBridgeNode(Node):
 
     def _step(self):
         if not self.interlock.safe():
+            if self._interlock_was_open:
+                # Stopping publish() alone leaves durable simulated verdicts
+                # available to driving nodes that start beside real hardware.
+                for publisher in self.imu_status_pubs:
+                    self.destroy_publisher(publisher)
+                self.imu_status_pubs = []
+            self._interlock_was_open = False
             return
+
+        if not self._interlock_was_open and not self.imu_status_pubs:
+            self.imu_status_pubs = [self.create_publisher(String, topic, self._imu_status_qos)
+                                    for topic in self.imu_status_topics]
+            # Republish the current verdict on this first open tick, even if
+            # it is unchanged since the previous publisher was withdrawn.
+            self._last_imu_status = [None] * self.controlled_cars
+        self._interlock_was_open = True
 
         commands = [(command['steering'], command['speed']) if self._command_is_fresh(i)
                     else (0.0, 0.0) for i, command in enumerate(self.commands)]
@@ -229,9 +284,37 @@ class GymBridgeNode(Node):
         for i in range(self.controlled_cars):
             self._publish_scan(stamp, i)
             self._publish_odom(stamp, i)
+            if self.imus:
+                self._publish_imu(stamp, i)
             if self.publish_ground_truth:
                 self._publish_truth(stamp, self.bridge.agent_state(i), i)
         self._publish_status(ego)
+
+    def _publish_imu(self, stamp, index):
+        imu = self.imus[index]
+        if index < 2:
+            imu.fault = self.get_parameter(('imu_fault', 'car2_imu_fault')[index]).value
+        state = self.bridge.agent_state(index)
+        sample = imu.step(state.speed, state.yaw_rate, self.bridge.config.control_dt)
+        if sample is not None:
+            for sensor, noise in [('bno', BNO_NOISE), ('vesc', VESC_NOISE)]:
+                msg = Imu()
+                msg.header.stamp = stamp
+                msg.header.frame_id = car_names(index + 1)['base_frame']
+                msg.orientation_covariance = list(ORIENTATION_UNKNOWN)
+                msg.angular_velocity_covariance = covariance_diag(noise.gyro_std)
+                msg.linear_acceleration_covariance = covariance_diag(noise.accel_std)
+                for axis, acc, gyro in zip('xyz', getattr(sample, sensor + '_acc'),
+                                            getattr(sample, sensor + '_gyro')):
+                    setattr(msg.linear_acceleration, axis, acc)
+                    setattr(msg.angular_velocity, axis, gyro)
+                self.imu_pubs[index][sensor].publish(msg)
+                if sensor == 'bno':
+                    self.imu_pubs[index]['primary'].publish(msg)
+        status = imu.status()
+        if status != self._last_imu_status[index]:
+            self.imu_status_pubs[index].publish(String(data=json.dumps(status)))
+            self._last_imu_status[index] = status
 
     def _publish_scan(self, stamp, index=0):
         ranges = self.bridge.scan(index)

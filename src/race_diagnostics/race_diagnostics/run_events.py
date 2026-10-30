@@ -204,6 +204,86 @@ def parse_lap_progress(line: str):
     }
 
 
+def parse_lap_closed(line):
+    """Extract the recorded closure's distance, turning and correction counts."""
+    number = r'(-?(?:\d+(?:\.\d*)?|\.\d+))'
+    pattern = (r'Closed mapping lap (\d+)/(\d+) detected \('
+               + number + r'm, ' + number + r'deg of turning, '
+               + number + r' revolutions, (\d+) samples, closest approach to the start '
+               + number + r'm against a ' + number + r'm gate, (\d+) SLAM corrections absorbed')
+    match = re.search(pattern, line) if isinstance(line, str) else None
+    if not match:
+        return None
+    lap, total, distance, turn, revolutions, samples, closest, gate, corrections = match.groups()
+    return {'lap': int(lap), 'of': int(total), 'distance_m': float(distance),
+            'turn_deg': float(turn), 'revolutions': float(revolutions),
+            'samples': int(samples), 'closest_m': float(closest), 'gate_m': float(gate),
+            'corrections': int(corrections)}
+
+
+def parse_lap_quality(line):
+    """Extract every failed comparison and whether the ceiling accepted it.
+
+    Single-metric results retain the original dictionary contract. Multiple
+    comparisons also expose an ordered ``metrics`` list; the legacy fields
+    always describe its first entry.
+    """
+    if not isinstance(line, str) or len(line) > 65536:
+        return None
+    match = re.search(r'Lap (\d+) did not pass the quality check \(', line)
+    if not match:
+        return None
+    # Explanations have their own parentheses. Find the outer close rather
+    # than interpreting a truncated comparison as a complete quality verdict.
+    start = match.end()
+    depth = 1
+    for end in range(start, len(line)):
+        if line[end] == '(':
+            depth += 1
+        elif line[end] == ')':
+            depth -= 1
+            if depth == 0:
+                break
+    else:
+        return None
+    tail = line[end + 1:]
+    accepted = re.match(
+        r', but the \d+-lap ceiling is reached -- accepting it anyway\b', tail)
+    if not accepted and not re.match(
+            r' and the \d+-lap ceiling has not been reached -- ', tail):
+        return None
+    number = r'(-?(?:\d+(?:\.\d*)?|\.\d+))'
+    pattern = (r'(\w+)=' + number + r'(?:deg)? > '
+               + number + r'(?:deg)?(?:\s+\(.*\))?')
+    widened = (r'closed only after the proximity gate widened '
+               r'\(closest_approach=' + number
+               + r'm > the original closure_distance=' + number + r'm\)')
+    metrics = []
+    for comparison in line[start:end].split(';'):
+        widened_match = re.fullmatch(widened, comparison.strip())
+        if widened_match:
+            value, limit = widened_match.groups()
+            metrics.append({'metric': 'closest_approach',
+                            'value': float(value), 'limit': float(limit)})
+            continue
+        metric_match = re.fullmatch(pattern, comparison.strip())
+        if not metric_match:
+            return None
+        metric, value, limit = metric_match.groups()
+        metrics.append({'metric': metric, 'value': float(value), 'limit': float(limit)})
+    result = {'lap': int(match[1]), 'passed': False, **metrics[0],
+              'accepted_at_ceiling': bool(accepted)}
+    if len(metrics) > 1:
+        result['metrics'] = metrics
+    return result
+
+
+def parse_lap_unjudged(line):
+    """Parse the supervisor's intermediate-lap message."""
+    match = re.search(r'Lap (\d+)/(\d+) closed; keep holding LB\.', line) if isinstance(line, str) else None
+    return {'lap': int(match[1]), 'of': int(match[2]), 'judged': False} if match else None
+
+
 def blocking_gate(progress) -> str:
     """Which single gate is keeping this lap from closing, or '' if none.
 

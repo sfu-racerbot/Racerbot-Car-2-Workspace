@@ -43,12 +43,24 @@ NOT_MIRRORED = {
     # hands the mirror the true yaw rate every tick, so there is no stale
     # sample to time out (docs/gap-follow.md#steering-damping-gyro).
     "imu_topic", "imu_status_topic", "imu_timeout_sec",
+    'fused_odom_topic', 'wheel_odom_topic', 'imu_traction_timeout_sec',
 }
 
 
 # Every parameter GapController reads. test_gap_mirror.py checks the YAML
 # provides each one and that nothing else in the YAML goes unread.
 REQUIRED_PARAMS = frozenset((
+    'enable_imu_impact_stop', 'imu_impact_threshold', 'imu_impact_min_samples',
+    'enable_imu_traction', 'imu_traction_slip_threshold', 'imu_traction_release_slip',
+    'imu_traction_min_speed', 'imu_traction_max_hold_sec',
+    'enable_imu_understeer',
+    'imu_understeer_engage_ratio',
+    'imu_understeer_release_ratio',
+    'imu_understeer_speed_factor',
+    'imu_understeer_hold_sec',
+    'imu_understeer_timeout_sec',
+    'imu_understeer_steering_lag_sec',
+    'imu_understeer_max_steering_change',
     "adaptive_grip_ceiling",
     "adaptive_grip_cut_factor",
     "adaptive_grip_hold_ratio",
@@ -180,6 +192,22 @@ REQUIRED_PARAMS = frozenset((
 # an older YAML (git show <commit>:src/gap_follow/config/gap_follow.yaml) be
 # replayed against the run it drove -- see tools/run_analysis/replay.py.
 LEGACY_VALUES = {
+    'enable_imu_impact_stop': False,
+    'imu_impact_threshold': 33.7257297468959,
+    'imu_impact_min_samples': 1,
+    'enable_imu_traction': False,
+    'imu_traction_slip_threshold': 0.246,
+    'imu_traction_release_slip': 0.123,
+    'imu_traction_min_speed': 0.3,
+    'imu_traction_max_hold_sec': 0.5,
+    'enable_imu_understeer': False,
+    'imu_understeer_engage_ratio': 0.75,
+    'imu_understeer_release_ratio': 0.85,
+    'imu_understeer_speed_factor': 0.85,
+    'imu_understeer_hold_sec': 0.2,
+    'imu_understeer_timeout_sec': 0.1,
+    'imu_understeer_steering_lag_sec': 0.15,
+    'imu_understeer_max_steering_change': 0.05,
     "arc_guard_blocked_fallback": "freest",
     "braking_latency_sec": 0.0,
     "speed_hold_sec": 0.0,
@@ -238,9 +266,12 @@ class GapController:
 
     ``params`` is node_params() (optionally with overrides); ``lidar`` needs
     ``angle_min``, ``angle_increment`` and ``range_min``. ``command(scan,
-    measured_speed, step, yaw_rate=None)`` returns ``(steering, speed)`` for one
+    measured_speed, step, yaw_rate=None, measured_steering=None,
+    fused_speed=None)`` returns
+    ``(steering, speed)`` for one
     40 Hz tick; ``yaw_rate`` is read when steering damping or the adaptive grip
-    is on, and None means no healthy IMU sample this tick.
+    is on, and None means no healthy IMU sample this tick. Traction also requires
+    a finite fused_speed supplied by the caller; None means no fresh fused input.
 
     Holds parameters as attributes and reproduces the node's per-scan chain:
     sanitize -> side walls/adaptive width -> footprint/TTC -> disparity extend
@@ -290,10 +321,38 @@ class GapController:
             judge_fraction=self.p["adaptive_grip_judge_fraction"])
         self.grip_ratio_filter = gap_logic.LowPass(gap_logic.GRIP_RATIO_TAU_SEC)
         self.steering_lag = gap_logic.SteeringLag(self.p["adaptive_grip_steering_lag_sec"])
+        self.understeer_check = gap_logic.UndersteerCheck(
+            self.p['imu_understeer_engage_ratio'], self.p['imu_understeer_release_ratio'],
+            self.p['imu_understeer_hold_sec'])
+        self.understeer_steering_lag = gap_logic.SteeringLag(
+            self.p['imu_understeer_steering_lag_sec'])
+        self.traction_hold = gap_logic.TractionHold(
+            self.p['imu_traction_slip_threshold'], self.p['imu_traction_release_slip'],
+            self.p['imu_traction_min_speed'], self.p['imu_traction_max_hold_sec'])
+        self.impact_latch = gap_logic.ImpactLatch(
+            self.p['imu_impact_threshold'], self.p['imu_impact_min_samples'])
 
-    def command(self, scan, current_speed, step, yaw_rate=None):
+    def command(self, scan, current_speed, step, yaw_rate=None, measured_steering=None,
+                fused_speed=None, horizontal_accel=None, lb_pressed=True):
+        """Caller supplies horizontal force (m/s²), or None when untrusted.
+
+        Gym supplies zero unless a test injects an impact. LB defaults held for
+        existing simulation callers; None is a missing Joy button, not release.
+        """
         p = self.p
         tel = self.telemetry = {}
+        if p['enable_imu_impact_stop']:
+            self.impact_latch.on_lb(lb_pressed)
+            trusted = (horizontal_accel is not None and yaw_rate is not None
+                       and math.isfinite(yaw_rate))
+            self.impact_latch.on_sample(
+                horizontal_accel if horizontal_accel is not None else math.nan,
+                0.0, trusted)
+        if lb_pressed is not True:
+            return self._stop(step, 'deadman_released' if lb_pressed is False
+                              else 'waiting_for_joy')
+        if self.impact_latch.latched:
+            return self._stop(step, 'imu_impact_stop')
         clean, valid = gap_logic.sanitize_ranges(
             scan, max_range=p["max_range"], range_min=self.lidar.range_min)
 
@@ -359,6 +418,16 @@ class GapController:
                 current_speed, self.last_commanded_speed, command_age,
                 p["ttc_command_speed_timeout_sec"],
                 p["ttc_command_fallback_max_odom_speed"])
+            if (fused_speed is not None and math.isfinite(fused_speed)
+                    and yaw_rate is not None and math.isfinite(yaw_rate)):
+                # current_speed is raw wheels; an optional trusted fused
+                # sample can only add vigilance. Combine fallback results,
+                # never measurements, just as the node's fused path does.
+                fused_effective_speed = gap_logic.conservative_ttc_speed(
+                    fused_speed, self.last_commanded_speed, command_age,
+                    p["ttc_command_speed_timeout_sec"],
+                    p["ttc_command_fallback_max_odom_speed"])
+                effective_speed = max(effective_speed, fused_effective_speed)
             if effective_speed >= p["ttc_min_brake_speed"]:
                 min_ttc = gap_logic.minimum_ttc(
                     window, window_valid, beam_angles, effective_speed,
@@ -574,6 +643,10 @@ class GapController:
         if follow_cap < desired_speed:
             desired_speed = follow_cap
             binding = 'follow'
+        understeer_cap = self._understeer_cap(
+            steering, dt, current_speed, yaw_rate, measured_steering)
+        tel['imu_understeer_engaged'] = math.isfinite(understeer_cap)
+        tel['imu_understeer_cap'] = understeer_cap
         if creeping:
             binding = 'creep'
         if used_fallback and effective_corner < desired_speed:
@@ -585,13 +658,40 @@ class GapController:
         if p["speed_hold_sec"] > 0.0:
             self.speed_hold_clock += dt
             desired_speed = self.speed_hold.update(self.speed_hold_clock, desired_speed)
+        # An untrusted sensor must not leave a cap behind in the speed hold.
+        if understeer_cap < desired_speed:
+            desired_speed = understeer_cap
+            binding = 'understeer'
 
-        ramp_basis = max(self.last_commanded_speed,
-                         min(abs(float(current_speed)), p["max_speed"]))
-        accel_ceiling = ramp_basis + p["max_acceleration"] * dt
-        speed = min(desired_speed, accel_ceiling)
-        if accel_ceiling < desired_speed:
-            binding = 'accel'
+        off_basis = max(self.last_commanded_speed,
+                        min(abs(float(current_speed)), p['max_speed']))
+        traction_off_ceiling = off_basis + p['max_acceleration'] * dt
+        holding = False
+        basis_speed = abs(float(current_speed))
+        if p['enable_imu_traction']:
+            trusted = (yaw_rate is not None and math.isfinite(yaw_rate)
+                       and fused_speed is not None and math.isfinite(fused_speed)
+                       and math.isfinite(current_speed))
+            if trusted:
+                holding = self.traction_hold.update(current_speed, fused_speed, dt)
+                if (current_speed >= p['imu_traction_min_speed']
+                        and fused_speed >= p['imu_traction_min_speed']):
+                    basis_speed = fused_speed
+            else:
+                self.traction_hold.reset()
+        tel['imu_traction_holding'] = holding
+        if holding:
+            speed = gap_logic.traction_limited_speed(desired_speed, self.last_commanded_speed, True)
+            binding = 'traction'
+        else:
+            ramp_basis = max(self.last_commanded_speed, min(basis_speed, p['max_speed']))
+            accel_ceiling = ramp_basis + p["max_acceleration"] * dt
+            speed = min(desired_speed, accel_ceiling)
+            if accel_ceiling < desired_speed:
+                binding = 'accel'
+        if traction_off_ceiling < speed:
+            binding = 'traction_off'
+        speed = min(speed, traction_off_ceiling)
         self.binding_cap = binding
         tel.update(target_angle=target_angle, target_distance=target_distance,
                    gap_width=(gap_end - gap_start + 1) * self.lidar.angle_increment,
@@ -607,6 +707,23 @@ class GapController:
         self.last_command_time = step
         self.stopped = False
         return steering, float(speed)
+
+    def _understeer_cap(self, steering, dt, current_speed, yaw_rate, measured_steering):
+        """Fresh samples arrive per tick; None is an untrusted/missing sample."""
+        p = self.p
+        if not p['enable_imu_understeer']:
+            return math.inf
+        lagged = self.understeer_steering_lag.step(
+            dt, steering, p['imu_understeer_max_steering_change'])
+        trusted = (yaw_rate is not None and math.isfinite(yaw_rate)
+                   and measured_steering is not None)
+        ratio = (gap_logic.understeer_ratio(measured_steering, lagged, current_speed)
+                 if trusted else math.nan)
+        engaged = self.understeer_check.update(ratio, dt)
+        if not math.isfinite(ratio):
+            return math.inf
+        return gap_logic.understeer_speed_cap(
+            engaged, current_speed, p['imu_understeer_speed_factor'])
 
     def _adaptive_width(self, left, right):
         p = self.p

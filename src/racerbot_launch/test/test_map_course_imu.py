@@ -316,3 +316,108 @@ def test_gyro_profile_window_cannot_reach_the_neighbouring_track():
     # (A1: the 8.0 m search is +/-4 m), so it must stay short of 2.2 m.
     profile = yaml.safe_load(SLAM_GYRO.read_text())['slam_toolbox']['ros__parameters']
     assert profile['loop_search_space_dimension'] / 2 < 2.2
+
+
+@pytest.mark.parametrize('all_value', ['false', 'true'])
+@pytest.mark.parametrize('flag', ['gyro_odom', 'fused_speed', 'imu_lap_turns'])
+def test_imu_all_defaults_and_explicit_false_wins(all_value, flag):
+    # oracle: Task J1a R1: each flag follows imu_all unless explicitly set.
+    # Car 2: imu:=true written out, as its map_course default is false
+    # (docs/car1-vs-car2.md#imu); test_imu_flags_refuse_when_imu_disabled
+    # covers the refusal without it.
+    _, ctx = _wired_context(imu='true', imu_all=all_value)
+    assert ctx.launch_configurations[flag] == all_value
+    overrides = {'imu': 'true', 'imu_all': all_value, flag: 'false'}
+    if flag == 'gyro_odom':
+        overrides['imu_lap_turns'] = 'false'
+    _, ctx = _wired_context(**overrides)
+    assert ctx.launch_configurations[flag] == 'false'
+
+
+@pytest.mark.parametrize('flag', ['imu_all', 'imu_lap_turns', 'gyro_odom', 'fused_speed'])
+def test_imu_flags_refuse_when_imu_disabled(flag):
+    # oracle: Task J1a R2: identify the requested flag and the fix.
+    with pytest.raises(RuntimeError, match=flag + r':=true needs imu:=true'):
+        _wired_context(imu='false', **{flag: 'true'})
+
+
+def test_lap_turns_require_gyro_odometry_even_with_imu_all():
+    # oracle: Task J1a R2: do not let the lap counter consume an absent frame.
+    with pytest.raises(RuntimeError, match='imu_lap_turns:=false'):
+        _wired_context(imu='true', imu_all='true', gyro_odom='false')
+
+
+@pytest.mark.parametrize('flag', ['imu', 'imu_all', 'imu_lap_turns', 'gyro_odom', 'fused_speed'])
+def test_imu_flags_reject_invalid_boolean(flag):
+    # oracle: Task J1a R2: launch booleans accept true/false/1/0 only.
+    with pytest.raises(RuntimeError, match=flag + r'.*expected'):
+        _wired_context(**{flag: 'maybe'})
+
+
+def test_lap_turn_frame_matches_publisher_and_default_yaml():
+    # oracle: Task J1a R3: compare against the two actual parameter files.
+    vehicle = yaml.safe_load((SRC / 'imu_bridge/config/vehicle_state.yaml').read_text())
+    supervisor = yaml.safe_load((SRC / 'pure_pursuit/config/auto_map_race.yaml').read_text())
+    vehicle_frame = vehicle['vehicle_state_node']['ros__parameters']['imu_odom_frame']
+    default_frame = supervisor['auto_map_race_node']['ros__parameters']['odom_frame']
+    for on in (False, True):
+        ld, ctx = _wired_context(imu='true', imu_lap_turns=str(on).lower(),
+                                 gyro_odom=str(on).lower())
+        nodes = _opaque(ld, None).execute(ctx)
+        node = next(n for n in nodes if isinstance(n, Node) and n.node_package == 'pure_pursuit')
+        params = _node_params(node, ctx)
+        if on:
+            assert params['odom_frame'] == vehicle_frame
+        else:
+            assert 'odom_frame' not in params
+            assert params.get('odom_frame', default_frame) == default_frame
+
+
+@pytest.mark.parametrize('requested,expected', [(None, 3.5), ('2.1', 2.1)])
+def test_mapping_speed_default_and_override(requested, expected):
+    # oracle: Task J1a R4: 3.5 m/s default; explicit cap wins.
+    overrides = {} if requested is None else {'mapping_max_speed': requested}
+    assert _gap_follow_params(**overrides)['max_speed'] == expected
+
+
+@pytest.mark.parametrize('requested', [None, '/x/y'])
+def test_recorder_include_cannot_overwrite_supervisor_output_directory(requested):
+    # oracle: Task J1a R5: recorder arguments used to leak into the parent
+    # context, sending maps to racerbot_runs. This fails without GroupAction.
+    from launch.actions import GroupAction, SetLaunchConfiguration
+
+    ld = ml.generate_launch_description(imu_probe=lambda: True)
+    ctx = LaunchContext()
+    if requested is not None:
+        ctx.launch_configurations['output_directory'] = requested
+    recorded = []
+    supervisors = []
+
+    def visit(entities):
+        for entity in entities:
+            if entity.condition is not None and not entity.condition.evaluate(ctx):
+                continue
+            if isinstance(entity, DeclareLaunchArgument):
+                entity.execute(ctx)
+            elif isinstance(entity, GroupAction):
+                visit(entity.execute(ctx))
+            elif isinstance(entity, IncludeLaunchDescription):
+                entity.launch_description_source.get_launch_description(ctx)
+                if entity.launch_description_source.location.endswith('/record_run.py'):
+                    for action in entity.execute(ctx):
+                        if isinstance(action, SetLaunchConfiguration):
+                            action.execute(ctx)
+                    recorded.append(ctx.launch_configurations['output_directory'])
+            elif isinstance(entity, OpaqueFunction):
+                visit(entity.execute(ctx))
+            elif isinstance(entity, Node):
+                if entity.node_package == 'pure_pursuit':
+                    supervisors.append(_node_params(entity, ctx)['output_directory'])
+            elif entity.__class__.__name__ in ('PushLaunchConfigurations', 'PopLaunchConfigurations',
+                                               'SetLaunchConfiguration'):
+                entity.execute(ctx)
+
+    visit(ld.entities)
+    # Car 2 records into the workspace's data/ (test_run_output_paths.py).
+    assert recorded == ['~/racerbot-ws/data/racerbot_runs']
+    assert supervisors == [requested or '~/racerbot-ws/data/racerbot_auto']

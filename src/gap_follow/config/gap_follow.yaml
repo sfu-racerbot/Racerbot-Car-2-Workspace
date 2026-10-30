@@ -44,6 +44,31 @@ gap_follow_node:
     scan_topic: /scan
     drive_topic: /drive
     odom_topic: /odom
+    fused_odom_topic: /odom/fused
+    wheel_odom_topic: /odom
+    # CAR 1'S VALUES (impact, traction, understeer below), from car 1's runs,
+    # not car 2's: keep every feature off on car 2 until car 2 records its own
+    # (docs/car1-vs-car2.md#imu-feature-thresholds).
+    # Impact stop: provisional 1.5 x largest recorded horizontal spike
+    # (22.4838198313 m/s², car 1 run 20261029-132902). Needs a recorded wheels-off bump.
+    # A latched stop survives IMU failure and live retuning: release/press LB to clear.
+    enable_imu_impact_stop: false
+    imu_impact_threshold: 33.7257297468959  # m/s²; strict exceedance
+    imu_impact_min_samples: 1              # consecutive trusted samples, integer >= 1
+    # Traction is a floor-trial feature, OFF: gym cannot spin driven wheels.
+    # Exact-stamp /odom minus /odom/fused, car 1 runs 20261026-194514 / 194913:
+    # positive slip p50/p90/p95/p99 (m/s), accelerating:
+    # 194514: .02252/.11675/.14857/.19874 (531); 194913:
+    # .04812/.12719/.15089/.17340 (485). Cruising:
+    # 194514: .01635/.06021/.07860/.14848 (645); 194913:
+    # .00812/.05125/.07155/.11661 (1269). Combined p99=.163902809;
+    # max(.15, 1.5*p99)=.245854213, rounded .246 < estimator clamp .3.
+    enable_imu_traction: false
+    imu_traction_slip_threshold: 0.246
+    imu_traction_release_slip: 0.123
+    imu_traction_min_speed: 0.3
+    imu_traction_max_hold_sec: 0.5
+    imu_traction_timeout_sec: 0.2
     max_range: 10.0
     forward_fov_deg: 180.0
     # Deliberately higher than the code default (1.0): with this car's top
@@ -217,6 +242,19 @@ gap_follow_node:
     adaptive_grip_judge_fraction: 0.8
     adaptive_grip_steering_lag_sec: 0.15
     adaptive_grip_max_steering_change: 0.05
+    # --- Understeer check (docs/gap-follow.md#understeer-check-imu) ---
+    # Floor-trial feature: gym tyres cannot model real loss of grip.
+    # Car 1's replayed runs 20261026-194514/194913 normally read ratios
+    # 0.84-0.97; the bands below are car 1's until car 2 replays its own.
+    enable_imu_understeer: false
+    imu_understeer_engage_ratio: 0.75       # below this for hold_sec
+    imu_understeer_release_ratio: 0.85      # above this releases
+    imu_understeer_speed_factor: 0.85       # fraction of fresh odometry speed
+    imu_understeer_hold_sec: 0.2            # low-ratio hold / missing-judgement reset [s]
+    imu_understeer_timeout_sec: 0.1         # measured-steering freshness [s]
+    # Car 1 run 20261026-194514 analysis/report.md: steering lag 0.150 s.
+    imu_understeer_steering_lag_sec: 0.15
+    imu_understeer_max_steering_change: 0.05  # steadiness over that lag [rad]
     # --- Rectangular vehicle footprint ---
     # Measured on this car with a tape, 2026-08-24, NOT the Traxxas 74276-4
     # published figures the earlier values came from:

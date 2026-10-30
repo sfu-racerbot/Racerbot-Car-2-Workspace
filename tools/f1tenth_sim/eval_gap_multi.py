@@ -60,6 +60,7 @@ from f1tenth_gym.envs.observation import ObservationType  # noqa: E402
 
 from gap_follow import gap_logic  # noqa: E402
 from gap_mirror import GapController  # noqa: E402
+from imu_bridge.vehicle_state import steering_from_yaw_rate  # noqa: E402
 from recognition import (  # noqa: E402
     median_delay,
     recognised_fraction,
@@ -309,7 +310,12 @@ def run_multi(track: str, params_list: list, seed: int, duration_s: float,
             # with steering damping or the adaptive grip on, so with both off
             # this changes nothing.
             steer, speed = ctrl.command(ego["scan"], float(state[3]), step,
-                                        yaw_rate=float(state[5]))
+                                        horizontal_accel=0.0, lb_pressed=True,
+                                        fused_speed=float(plant.truth(k)[3]),
+                                        yaw_rate=float(state[5]),
+                                        measured_steering=steering_from_yaw_rate(
+                                            float(state[5]), float(state[3]),
+                                            ctrl.p['wheelbase'], 0.3))
             st = stats[k]
             st["ticks"] += 1
             st["speed_sum"] += speed

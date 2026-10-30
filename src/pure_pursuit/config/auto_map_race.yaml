@@ -78,7 +78,20 @@ auto_map_race_node:
     # accumulated yaw whatever its size. 300 leaves room for a lap driven
     # with some counter-steer in it.
     minimum_lap_turn_deg: 300.0
-    minimum_lap_duration_sec: 15.0
+    # Car 1's run 20261026-194913 mapped 28.7 m: even at gap_follow's
+    # 5.0 m/s cap a circuit takes >= 28.7/5.0 = 5.74 s. A 4 s floor leaves
+    # it open on the first return; 15 s forced two circuits in indoor_oval.
+    # Car 2's 0.99 m minimum radius at 0.349 rad (docs/hardware-reference.md)
+    # gives 5.0/0.99 = 5.05 rad/s = 289 deg/s: 300 deg takes >= 1.04 s
+    # (car 1's 1.05 m: 1.1 s). Keep the floor above that, below 5.74 s;
+    # turning is the lap gate.
+    minimum_lap_duration_sec: 4.0
+    # Once a lap has closed, the next must also take at least this fraction
+    # of it: the previous lap's time is the course length over the speed
+    # actually driven, so the gate follows the course. Car 1's 28.7 m in
+    # 16-17 s gives ~8 s; at 5.0 m/s (5.74 s a lap) 2.9 s, and the 4 s floor
+    # governs. Half a circuit never forces a second one, as fixed 15 s did.
+    minimum_lap_duration_fraction: 0.5
     departure_distance: 2.0
     # How close to its start the car has to pass for the lap to count as
     # closed. This was 0.75m, which existed to keep the start/finish seam

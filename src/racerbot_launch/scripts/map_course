@@ -21,6 +21,7 @@ Hold LB the whole time the car should move. See docs/launchstart.md.
 """
 
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -31,18 +32,24 @@ DEFAULT_OUTPUT = '~/racerbot-ws/data/racerbot_auto'
 # from bringup_launch.py (VESC and LiDAR), or the simulator's bridge.
 REAL_DRIVERS = ('vesc_driver_node', 'urg_node_driver')
 SIM_DRIVER = 'gym_bridge_node'
+SIM_PROCESS = r'^([^ ]*python[0-9.]* +)?/[^ ]*/lib/racerbot_sim/gym_bridge_node( |$)'
 
 
 def _running(pattern) -> bool:
+    if pattern == SIM_DRIVER:
+        pattern = SIM_PROCESS
     return subprocess.run(['pgrep', '-f', pattern], capture_output=True).returncode == 0
 
 
 def launch_arguments(argv, simulated):
-    """argv as given, plus imu:=false in the simulator unless imu was set:
-    there is no IMU there, and the BNO bridge would read the real sensor on
-    a car that is not moving."""
-    if simulated and not any(a.startswith('imu:=') for a in argv):
-        return [*argv, 'imu:=false']
+    """Pass argv through, adding imu_hardware:=false in the simulator unless set.
+
+    The simulator supplies IMU topics; hardware:=false runs the estimator
+    without starting the real sensor bridge. An explicit imu:= is untouched.
+    Outside the simulator nothing is appended.
+    """
+    if simulated and not any(a.startswith('imu_hardware:=') for a in argv):
+        return [*argv, 'imu_hardware:=false']
     return list(argv)
 
 
@@ -96,12 +103,74 @@ def report(parent: Path, since: float) -> str:
     return '\n' + (run / 'commands.txt').read_text()
 
 
+def repo_root():
+    candidates = []
+    if os.environ.get('RACERBOT_WS'):
+        candidates.append(Path(os.environ['RACERBOT_WS']).expanduser())
+    candidates.extend(Path(__file__).resolve().parents)
+    candidates.append(Path('~/racerbot-ws').expanduser())
+    return next((p for p in candidates if (p / 'tools/run_analysis/slam_report.py').is_file()), None)
+
+
+def analyse(run, log, handle):
+    def emit(text):
+        print(text, flush=True)
+        handle.write(text + '\n')
+        handle.flush()
+
+    if run is None:
+        emit('Analysis skipped: no Recording run to: line in launch output.')
+        return
+    root = repo_root()
+    commands = [('summarize_run', ['ros2', 'run', 'race_diagnostics', 'summarize_run', str(run)])]
+    if root is None:
+        emit('IMU and SLAM reports skipped: workspace report scripts not found.')
+    else:
+        commands.extend([
+            ('imu_report', [sys.executable, str(root / 'tools/run_analysis/imu_report.py'), str(run)]),
+            ('slam_report', [sys.executable, str(root / 'tools/run_analysis/slam_report.py'), str(run),
+                             '--log', str(log)]),
+        ])
+    for name, command in commands:
+        interrupted = False
+        try:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, errors='replace')
+            output, code = result.stdout, result.returncode
+        except KeyboardInterrupt:
+            output, code, interrupted = '', 130, True
+        except OSError as exc:
+            output, code = str(exc) + '\n', 127
+        try:
+            target = run / 'analysis' / 'map_course' / f'{name}.txt'
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(output)
+            emit(f'{name}:\n' + '\n'.join(output.splitlines()[:15]) + f'\nFull report: {target}')
+        except OSError as exc:
+            emit(f'{name}: could not save report: {exc}')
+        if code:
+            emit(f'{name} failed (exit {code}); re-run: {shlex.join(command)}')
+        if interrupted:
+            break
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     bad = [a for a in argv if ':=' not in a]
     if bad:
         print(f'map_course: arguments must look like name:=value, got {bad}', file=sys.stderr)
         return 2
+    analysis = True
+    launch_argv = []
+    for arg in argv:
+        if arg.startswith('analysis:='):
+            value = arg.split(':=', 1)[1].lower()
+            if value not in ('true', 'false'):
+                print('map_course: analysis must be true or false', file=sys.stderr)
+                return 2
+            analysis = value == 'true'
+        else:
+            launch_argv.append(arg)
     missing = missing_drivers()
     if missing:
         print('map_course: the hardware is not running (no ' + ', '.join(missing) +
@@ -113,9 +182,10 @@ def main(argv=None):
     log = log_path()
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, 'w', errors='replace') as handle:
+        recorded_run = None
         child = subprocess.Popen(
             ['ros2', 'launch', 'racerbot_launch', 'map_course_launch.py',
-             *launch_arguments(argv, _running(SIM_DRIVER))],
+             *launch_arguments(launch_argv, _running(SIM_DRIVER))],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             errors='replace', bufsize=1)
         while True:
@@ -123,13 +193,23 @@ def main(argv=None):
                 for line in child.stdout:
                     sys.stdout.write(line)
                     handle.write(line)
+                    if recorded_run is None and 'Recording run to: ' in line:
+                        recorded_run = Path(line.split('Recording run to: ', 1)[1].strip()).expanduser()
                 code = child.wait()
                 break
             except KeyboardInterrupt:
                 # The terminal already sent SIGINT to ros2 launch too; keep
                 # copying its shutdown output, then report.
                 continue
-        text = report(output_directory(argv), started)
+        handle.flush()
+        if analysis:
+            try:
+                analyse(recorded_run, log, handle)
+            except KeyboardInterrupt:
+                # Analysis is advisory, including saving/printing its output.
+                # Keep the launch status and always show the race commands.
+                print('Analysis interrupted; remaining reports skipped.', flush=True)
+        text = report(output_directory(launch_argv), started)
         handle.write(text)
     print(text)
     print(f'Full log of this run: {log}')

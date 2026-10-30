@@ -23,6 +23,10 @@ MAP_TF_CHILDREN = ("odom", "odom_imu")  # the odometry frames SLAM can map on
 ROW_KEYS = ("map_odom", "odom_base", "odom", "odom_imu", "pose", "slam_pose")
 
 
+class NoSlamMapping(ValueError):
+    """Raised when the bag has no map → odom/odom_imu transform."""
+
+
 def _yaw(q) -> float:
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
 
@@ -67,8 +71,8 @@ def read_bag(bag_dir) -> dict:
             rows[POSE_TOPICS[topic]].append(
                 (t, pose.position.x, pose.position.y, _yaw(pose.orientation)))
     if not children:
-        raise ValueError(f"{bag_dir}: no map -> odom or map -> odom_imu transform on /tf; "
-                         "SLAM did not map this run")
+        raise NoSlamMapping(f"{bag_dir}: no map -> odom or map -> odom_imu transform on /tf; "
+                            "SLAM did not map this run")
     if len(children) > 1:
         raise ValueError(f"{bag_dir}: map has more than one odometry child, {sorted(children)}")
     out = {k: np.array(v, dtype=float).reshape(-1, 4) for k, v in rows.items()}
