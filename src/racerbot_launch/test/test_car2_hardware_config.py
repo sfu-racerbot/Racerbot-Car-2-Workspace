@@ -200,3 +200,45 @@ def test_gap_follow_steering_damping_is_off_by_default():
     launch = _read(_SRC, 'gap_follow', 'launch', 'gap_follow_launch.py')
     defaults = re.findall(r"'steering_damping', default_value='(\w+)'", launch)
     assert defaults == ['false']
+
+
+def test_gap_follow_imu_features_ship_off_on_car2():
+    # Ported from car 1's Part B-2/3 (PR #8): the understeer, traction and
+    # impact thresholds are car 1's measurements, and car 2's BNO085 is not
+    # calibrated (docs/car1-vs-car2.md#imu-feature-thresholds). Every one of
+    # them, and imu_all that would turn them all on, must default off.
+    params = _yaml(os.path.join(_SRC, 'gap_follow', 'config', 'gap_follow.yaml'))
+    p = params['gap_follow_node']['ros__parameters']
+    for name in ('enable_imu_understeer', 'enable_imu_traction', 'enable_imu_impact_stop'):
+        assert p[name] is False, name
+    for launch_file in (os.path.join(_SRC, 'gap_follow', 'launch', 'gap_follow_launch.py'),
+                        os.path.join(_SRC, 'racerbot_launch', 'launch', 'map_course_launch.py')):
+        launch = _read(launch_file)
+        assert re.findall(r"'imu_all', default_value='(\w+)'", launch) == ['false'], launch_file
+        # Each feature flag either says false outright or follows imu_all.
+        for flag in re.findall(r"'((?:fused_speed|imu_\w+))', default_value=", launch):
+            if flag in ('imu_all', 'imu_hardware'):
+                continue
+            m = re.search(r"'%s', default_value=(LaunchConfiguration\('imu_all', "
+                          r"default='false'\)|'false')" % flag, launch)
+            assert m, f'{launch_file}: {flag} no longer defaults off'
+
+
+def test_car_1_imu_values_stay_labelled_as_car_1s():
+    # Car 1's numbers can stay as placeholders only while they say whose they
+    # are; replace the label and the value together when car 2 records its own.
+    yaml_text = _read(_SRC, 'gap_follow', 'config', 'gap_follow.yaml')
+    if '33.7257297468959' in yaml_text or 'imu_traction_slip_threshold: 0.246' in yaml_text:
+        assert "CAR 1'S VALUES" in yaml_text
+    sim_imu = _read(_SRC, 'racerbot_sim', 'racerbot_sim', 'sim_imu.py')
+    if '0.000711560678439245' in sim_imu:
+        assert "CAR 1'S NOISE" in sim_imu
+
+
+def test_grip_replay_finds_runs_in_car_2s_data_folder():
+    # Car 1's grip_replay looks in ~/.ros/racerbot_runs; car 2 saves runs in
+    # the workspace (docs/car1-vs-car2.md, "Where runs are saved").
+    text = _read(_SRC, '..', 'tools', 'run_analysis', 'grip_replay.py')
+    assert re.search(r"^RUNS_DIR = Path\.home\(\) / 'racerbot-ws' / 'data' / 'racerbot_runs'",
+                     text, re.M)
+    assert '.ros/racerbot_runs' not in text and "'.ros'" not in text

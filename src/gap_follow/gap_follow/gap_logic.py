@@ -1242,6 +1242,125 @@ def grip_ratio(yaw_rate: float, speed: float, steering: float,
     return yaw_rate * speed / demanded
 
 
+def horizontal_force(ax, ay) -> float:
+    """Horizontal specific force in car axes (m/s²); invalid input is unknown."""
+    if not (math.isfinite(ax) and math.isfinite(ay)):
+        return math.nan
+    return math.hypot(ax, ay)
+
+
+class ImpactLatch:
+    """Stop on consecutive spikes; only a post-impact LB release/press clears."""
+
+    def __init__(self, threshold, min_samples):
+        self.validate(threshold, min_samples)
+        self.threshold = threshold
+        self.min_samples = min_samples
+        self.latched = False
+        self._count = 0
+        self._released = False
+
+    @staticmethod
+    def validate(threshold, min_samples):
+        if not math.isfinite(threshold) or threshold <= 0:
+            raise ValueError('imu_impact_threshold must be finite and positive')
+        if type(min_samples) is not int or min_samples < 1:
+            raise ValueError('imu_impact_min_samples must be an integer >= 1')
+
+    def on_sample(self, ax, ay, trusted) -> bool:
+        h = horizontal_force(ax, ay)
+        if trusted and math.isfinite(h) and h > self.threshold:
+            self._count += 1
+            if self._count >= self.min_samples and not self.latched:
+                self.latched = True
+                self._released = False
+        else:
+            self._count = 0
+        return self.latched
+
+    def on_lb(self, pressed) -> bool:
+        if self.latched and pressed is not None:
+            if not pressed:
+                self._released = True
+            elif self._released:
+                self.latched = False
+                self._released = False
+                self._count = 0
+        return self.latched
+
+
+def understeer_ratio(measured_steering, commanded_steering, speed,
+                     min_steering=0.05, min_speed=1.0) -> float:
+    """Measured/commanded turn, or NaN when the turn cannot be judged.
+
+    Opposite-sign measured steering at or above the steering floor means
+    counter-steering, not understeer. Tiny opposite-sign readings are noise.
+    """
+    if not all(math.isfinite(v) for v in
+               (measured_steering, commanded_steering, speed)):
+        return math.nan
+    if abs(commanded_steering) < min_steering or speed < min_speed:
+        return math.nan
+    if (measured_steering * commanded_steering < 0
+            and abs(measured_steering) >= min_steering):
+        return math.nan
+    return math.tan(measured_steering) / math.tan(commanded_steering)
+
+
+def understeer_speed_cap(engaged, measured_speed, factor) -> float:
+    """A ceiling from fresh measured speed; infinity means no ceiling."""
+    if not engaged or not math.isfinite(measured_speed):
+        return math.inf
+    return max(0.0, measured_speed * factor)
+
+
+class TractionHold:
+    """Bounded wheelspin hold, with low-slip rearming after expiry."""
+
+    def __init__(self, slip_threshold, release_slip, min_speed, max_hold_sec):
+        if not all(math.isfinite(v) and v > 0 for v in
+                   (slip_threshold, release_slip, min_speed, max_hold_sec)):
+            raise ValueError('traction parameters must be finite and positive')
+        if release_slip >= slip_threshold:
+            raise ValueError('traction release_slip must be below slip_threshold')
+        self.slip_threshold = slip_threshold
+        self.release_slip = release_slip
+        self.min_speed = min_speed
+        self.max_hold_sec = max_hold_sec
+        self.reset()
+
+    def reset(self) -> None:
+        self.holding = False
+        self.armed = True
+        self.held_sec = 0.0
+
+    def update(self, wheel_speed, fused_speed, dt) -> bool:
+        if not all(math.isfinite(v) for v in (wheel_speed, fused_speed, dt)) or dt < 0:
+            self.reset()
+            return False
+        slip = wheel_speed - fused_speed
+        if slip < self.release_slip:
+            self.reset()
+            return False
+        if wheel_speed < self.min_speed or fused_speed < self.min_speed:
+            self.holding = False
+            self.held_sec = 0.0
+            return False
+        if self.armed and slip > self.slip_threshold:
+            self.holding = True
+        if self.holding:
+            self.held_sec += dt
+            if self.held_sec + 1e-12 >= self.max_hold_sec:
+                self.holding = False
+                self.armed = False
+        return self.holding
+
+
+def traction_limited_speed(desired_speed, last_commanded_speed, holding) -> float:
+    """Hold without delaying a lower speed ceiling."""
+    return min(desired_speed, last_commanded_speed) if holding else desired_speed
+
+
 class LowPass:
     """First-order low-pass over a stream of samples, with time constant
     ``time_constant_s``.
@@ -1274,6 +1393,55 @@ class LowPass:
             alpha = 1.0 - math.exp(-dt / self.time_constant_s)
             self.value += alpha * (float(sample) - self.value)
         return self.value
+
+
+class UndersteerCheck:
+    """Hysteresis and hold time over a low-passed measured turn ratio.
+
+    Missing judgements preserve state briefly, but never justify a cap at the
+    caller. A gap longer than hold_sec forgets both state and filter.
+    """
+
+    def __init__(self, engage_ratio, release_ratio, hold_sec,
+                 tau_sec=GRIP_RATIO_TAU_SEC):
+        if not (math.isfinite(engage_ratio) and math.isfinite(release_ratio)
+                and 0.0 < engage_ratio < release_ratio <= 1.5):
+            raise ValueError('understeer ratios must satisfy 0 < engage < release <= 1.5')
+        if not (math.isfinite(hold_sec) and hold_sec > 0.0):
+            raise ValueError('understeer hold_sec must be finite and positive')
+        self.engage_ratio = engage_ratio
+        self.release_ratio = release_ratio
+        self.hold_sec = hold_sec
+        self.ratio_filter = LowPass(tau_sec)
+        self.reset()
+
+    def reset(self) -> None:
+        self.engaged = False
+        self.low_sec = 0.0
+        self.missing_sec = 0.0
+        self.ratio_filter.reset()
+
+    def update(self, ratio, dt) -> bool:
+        if not (math.isfinite(dt) and dt >= 0.0):
+            raise ValueError('dt must be finite and non-negative')
+        if not math.isfinite(ratio):
+            self.missing_sec += dt
+            self.low_sec = 0.0
+            if self.missing_sec > self.hold_sec:
+                self.reset()
+            return self.engaged
+        self.missing_sec = 0.0
+        filtered = self.ratio_filter.update(ratio, dt)
+        if filtered > self.release_ratio:
+            self.engaged = False
+        if filtered < self.engage_ratio:
+            self.low_sec += dt
+            # Control intervals accumulate floating-point roundoff.
+            if self.low_sec + 1e-12 >= self.hold_sec:
+                self.engaged = True
+        else:
+            self.low_sec = 0.0
+        return self.engaged
 
 
 @dataclass

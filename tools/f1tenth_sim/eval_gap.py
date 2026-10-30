@@ -49,6 +49,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from sim_fidelity.bootstrap import bootstrap  # noqa: E402
 
 ROOT = bootstrap()
+sys.path.insert(0, str(ROOT / 'src' / 'imu_bridge'))
 sys.path.insert(0, str(ROOT / "src" / "racerbot_sim"))
 
 import gymnasium as gym  # noqa: E402
@@ -65,6 +66,7 @@ from f1tenth_gym.envs.observation import ObservationType  # noqa: E402
 
 from gap_follow import gap_logic  # noqa: E402
 from gap_mirror import GapController, node_params  # noqa: E402
+from imu_bridge.vehicle_state import steering_from_yaw_rate  # noqa: E402
 from recognition import false_movers, moving_track_ids  # noqa: E402
 from racerbot_sim import tracks as sim_tracks  # noqa: E402
 from run_analysis import weave  # noqa: E402
@@ -233,7 +235,12 @@ def run_track(track: str, params: dict, seed: int, timeout_s: float,
         # beta). The mirror reads it only with enable_steering_damping or
         # enable_adaptive_grip on, so with both off this changes nothing.
         steering, cmd_speed = ctrl.command(ego["scan"], speed_meas, step,
-                                           yaw_rate=float(state[5]))
+                                           horizontal_accel=0.0, lb_pressed=True,
+                                           fused_speed=float(plant.truth(0)[3]),
+                                           yaw_rate=float(state[5]),
+                                           measured_steering=steering_from_yaw_rate(
+                                               float(state[5]), float(state[3]),
+                                               params['wheelbase'], 0.3))
         steerings.append(steering)
         if ctrl.opponents is not None:
             moving_per_tick.append(moving_track_ids(ctrl.opponents.tracker.tracks))

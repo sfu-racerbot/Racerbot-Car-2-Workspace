@@ -14,6 +14,8 @@ as printed. See docs/run-diagnostics.md.
 """
 
 import os
+import sys
+from pathlib import Path
 from time import strftime
 
 from ament_index_python.packages import get_package_share_directory
@@ -24,7 +26,8 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from race_diagnostics.auto_record import recorder_node_names
 from race_diagnostics.run_metadata import (
-    find_repo_root, imu_calibration_files, team_repos, write_run_metadata)
+    find_repo_root, imu_calibration_files, team_repos, write_packages,
+    write_run_metadata, write_submodules)
 import yaml
 
 # Everything needed to reconstruct a run offline. /scan dominates the size
@@ -102,8 +105,9 @@ def _setup(context, *args, **kwargs):
     # Bringup's auto_record passes a prefix so it can tell the nodes of its
     # own recording from someone else's recorder (race_diagnostics/
     # auto_record.py). Empty for a recording started by hand.
+    prefix = LaunchConfiguration('name_prefix').perform(context).strip()
     diag_name, snapshot_name, bag_name = recorder_node_names(
-        LaunchConfiguration('name_prefix').perform(context).strip())
+        prefix)
 
     # What the run was made with -- code, calibration, parameters -- written
     # into <run>/metadata/ (race_diagnostics/run_metadata.py). Never fatal.
@@ -118,10 +122,34 @@ def _setup(context, *args, **kwargs):
         meta = write_run_metadata(
             run_dir, repos, imu_calibration_files(racer_imu_root))
     except Exception as e:  # noqa: BLE001 -- a metadata failure must not stop a run
+        repos = {}
         meta = os.path.join(run_dir, 'metadata')
         os.makedirs(meta, exist_ok=True)
         with open(os.path.join(meta, 'ERROR.txt'), 'w') as handle:
             handle.write(f'metadata not written: {e!r}\n')
+
+    # The installed apt package versions (slam_toolbox's release -- apt,
+    # so git state cannot say which one ran) and each submodule's
+    # checked-out commit next to what the workspace records for it
+    # (team A's pin moves often). Two separate tries: one failing must
+    # not skip the other, and neither may stop a run.
+    meta = Path(meta)
+    try:
+        write_packages(meta)
+    except Exception as e:  # noqa: BLE001 -- must not stop a run
+        try:
+            with open(meta / 'ERROR.txt', 'a') as handle:
+                handle.write(f'metadata packages.txt not written: {e!r}\n')
+        except OSError as log_error:
+            print(f'metadata packages.txt not written: {e!r}; error log: {log_error}', file=sys.stderr)
+    try:
+        write_submodules(meta, repos.get('racerbot-ws'))
+    except Exception as e:  # noqa: BLE001 -- must not stop a run
+        try:
+            with open(meta / 'ERROR.txt', 'a') as handle:
+                handle.write(f'metadata submodules.txt not written: {e!r}\n')
+        except OSError as log_error:
+            print(f'metadata submodules.txt not written: {e!r}; error log: {log_error}', file=sys.stderr)
 
     topics = LaunchConfiguration('topics').perform(context).split()
     config = os.path.join(
@@ -173,6 +201,13 @@ def _setup(context, *args, **kwargs):
                  '--max-bag-size', str(MAX_BAG_FILE_BYTES)] + topics,
             output='screen',
         ))
+    if LaunchConfiguration('system_log', default='true').perform(context).lower() in ('true', '1'):
+        actions.append(ExecuteProcess(
+            cmd=['ros2', 'run', 'race_diagnostics', 'system_log',
+                 '--output', os.path.join(run_dir, 'system')],
+            name=f'{prefix}system_log',
+            output='screen',
+        ))
     return actions
 
 
@@ -194,6 +229,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'record_bag', default_value='true',
             description='Record a rosbag. Set false to capture only the probe stream.'),
+        DeclareLaunchArgument(
+            'system_log', default_value='true',
+            description='Record per-process system resource usage.'),
         DeclareLaunchArgument(
             'topics', default_value=' '.join(DEFAULT_TOPICS),
             description='Space-separated topics to bag. Drop /scan to shrink ~10x.'),

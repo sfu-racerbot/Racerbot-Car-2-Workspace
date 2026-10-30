@@ -53,6 +53,9 @@ def _setup(context):
         PythonLaunchDescriptionSource(os.path.join(sim_share, 'launch', 'sim_bringup_launch.py')),
         launch_arguments={
             'track': track, 'track_directory': track_directory,
+            'publish_imu': LaunchConfiguration('publish_imu'),
+            'imu_fault': LaunchConfiguration('imu_fault'),
+            'car2_imu_fault': LaunchConfiguration('car2_imu_fault'),
             'seed': LaunchConfiguration('seed'), 'controlled_cars': '2',
             'controlled_start_offsets_m': offsets,
             'hold_deadman': LaunchConfiguration('car1_hold_deadman'),
@@ -122,6 +125,9 @@ def _setup(context):
 
 def generate_launch_description():
     args = [
+        DeclareLaunchArgument('publish_imu', default_value='true'),
+        DeclareLaunchArgument('imu_fault', default_value='none'),
+        DeclareLaunchArgument('car2_imu_fault', default_value='none'),
         DeclareLaunchArgument('drive_topic_prefix', default_value=''),
         DeclareLaunchArgument('track', default_value='indoor_oval'),
         DeclareLaunchArgument('opponent', default_value='ours'),

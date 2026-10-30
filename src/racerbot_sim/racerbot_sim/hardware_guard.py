@@ -6,8 +6,9 @@ Two nodes in this package are dangerous next to real hardware:
   workspace safety policy (docs/architecture.md) is that nothing moves
   unless a human is holding LB on the physical controller. A synthetic
   `/joy` is that human's hand, forged.
-* `gym_bridge_node` publishes `/scan` and `/odom`. Alongside `urg_node`
-  and `vesc_to_odom_node` those become two publishers per topic, and the
+* `gym_bridge_node` publishes `/scan`, `/odom` and `/imu/*`. Alongside
+  `urg_node`, `vesc_to_odom_node` or the real `imu_bridge_node`, these
+  become two publishers per topic, and the
   driving nodes would be steering on a mixture of a real room and an
   imaginary one.
 
@@ -22,14 +23,17 @@ bringing the car up *after* the simulator shuts it up too.
 import math
 import time
 
-# Node names started by f1tenth_stack/launch/bringup_launch.py that mean
-# "there is real hardware on this graph".
+# Real bringup drivers and the hardware IMU stack: hardware on this graph.
 HARDWARE_NODE_NAMES = (
     'vesc_driver_node',
     'ackermann_to_vesc_node',
     'vesc_to_odom_node',
     'urg_node',
     'joy',
+    # The real IMU stack (vehicle_state_launch.py hardware:=true). The
+    # simulator never starts it; two /imu/data publishers would mix a real
+    # gyro with a simulated one.
+    'imu_bridge_node',
 )
 
 

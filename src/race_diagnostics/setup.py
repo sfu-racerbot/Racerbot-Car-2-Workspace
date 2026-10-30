@@ -32,6 +32,7 @@ setup(
             'filter_log = race_diagnostics.filter_log:main',
             'summarize_run = race_diagnostics.summarize_run:main',
             'snapshot_params = race_diagnostics.snapshot_params:main',
+            'system_log = race_diagnostics.system_log:main',
             'auto_record = race_diagnostics.auto_record_node:main',
         ],
     },
