@@ -6,7 +6,48 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
-## 2026-10-29 (latest) — Port from car 1 (to `car1/main` `4bea6f2`): racing, Part A and B-1
+## 2026-10-29 (latest) — Port from car 1 (to `car1/main` `8a88dcc`): Part B-2/3, SLAM observability and IMU
+
+Car 1's PR #8 ([Racerbot-Car-1-Workspace](https://github.com/sfu-racerbot/Racerbot-Car-1-Workspace)),
+ported on branch `port-car1-part-b23` (`git diff 4bea6f2 car1/main`, `git apply --3way`,
+five conflicts merged by hand). Car 2's differences are in `docs/car1-vs-car2.md`
+(new section "IMU feature thresholds"); `test_car2_hardware_config.py` gained three checks.
+**Nothing here was driven on car 2.**
+
+- **`race_diagnostics`**: `snapshot_params` keeps watching for the whole run, so nodes that start
+  late (or restart, `<name>.<n>.yaml`, or share a name across namespaces) are snapshotted.
+  New `system_log` (`<run>/system/tegrastats.log` and 1 Hz per-node `proc.jsonl`;
+  `system_log:=false` turns it off; a missing `tegrastats` only warns). `metadata/packages.txt`
+  (`ros-jazzy-*` versions, slam_toolbox first) and `metadata/submodules.txt`. Lap-quality parser
+  in `run_events.py`.
+- **`tools/run_analysis`**: `slam_report.py` (drift, corrections, laps, map consistency, scan drops
+  against CPU, `--compare`), `slam_replay.py --exact` with `slam_exact_feed.py`, `grip_replay.py`.
+- **`racerbot_sim`**: a simulated IMU per controlled car (`sim_imu.py`; `/imu/*` and `/car2/imu/*`),
+  injectable faults (`imu_fault`, `car2_imu_fault`), covered by the interlock.
+  `tools/racerbot_sim/run_gap_follow_validation.py` gained the IMU fall-back harness.
+- **`imu_bridge`**: `vehicle_state_launch.py hardware:=false` starts only `vehicle_state_node`,
+  on the simulator's IMU topics.
+- **`gap_follow`**: `fused_speed`, `imu_understeer`, `imu_traction` and `imu_impact_stop`, each with
+  its own launch flag, plus `imu`, `imu_all` and `imu_hardware`. All off by default. Every IMU
+  failure gives the feature-off command. Conservative safety inputs: with fused speed on, TTC
+  and the stale-odometry stop take the more cautious of wheel and fused speed.
+- **`racerbot_launch`**: `map_course` takes `imu_all`, `imu_lap_turns` and `imu_hardware`, runs
+  `summarize_run`, `imu_report` and `slam_report` after the launch (`analysis:=false` skips them),
+  and maps at `mapping_max_speed` **3.5** by default (was empty, i.e. gap_follow.yaml's 5.0).
+- **`pure_pursuit`** (`auto_map_race`): odometry-gap reconciliation for gyro lap turns; the minimum
+  lap time is `max(4 s, 0.5 × previous lap)` (was a fixed 15 s).
+- **Car 2 keeps:** `map_course imu:=false`, `vehicle_state_launch.py bno:=false`,
+  `steering_damping:=false` (a literal, not car 1's `imu` default); runs in `data/racerbot_runs/`
+  (`grip_replay.py` and the ported tests' run paths changed to match); car 2's four-state speed
+  filter (car 1's fused-speed fallback tests pass against it unchanged).
+- **Car 1's values, labelled as car 1's, features off:** impact threshold 33.73 m/s², traction slip
+  0.246 / 0.123 m/s, understeer bands 0.75 / 0.85, simulated IMU noise and mount offsets.
+- **Tests:** car 1's new map_course IMU tests now pass `imu:=true` explicitly (car 2's default is
+  false), and `test_imu_flags_both_launches.py` expects car 2's per-launch `imu` defaults.
+  `test_snapshot_params_node.py` finds the recorder's child with `pgrep -P`: car 2's Tegra kernel
+  has no `/proc/<pid>/task/<pid>/children` (`CONFIG_PROC_CHILDREN` not set).
+
+## 2026-10-29 — Port from car 1 (to `car1/main` `4bea6f2`): racing, Part A and B-1
 
 Car 1's PRs #3 to #7 ([Racerbot-Car-1-Workspace](https://github.com/sfu-racerbot/Racerbot-Car-1-Workspace)),
 ported feature by feature on branch `port-car1-part-b1` (`git diff 0265263 car1/main`,
