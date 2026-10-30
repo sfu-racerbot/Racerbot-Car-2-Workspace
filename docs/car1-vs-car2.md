@@ -95,7 +95,7 @@ The lap-time floor in `auto_map_race.yaml` (`minimum_lap_duration_sec: 4.0`) hol
 
 ## Porting from car 1, step by step
 
-1. **Port only what was asked for.** Car 1 is not upstream. The repos share no git history, so a port is a patch: `git fetch car1`, `git diff <last ported car 1 commit> car1/main`, then `git apply --3way`. The last port took `car1/main` up to `8a88dcc` (2026-10-29, car 1's PR #8, Part B-2/3; before it `4bea6f2`, PRs #3 to #7; [CHANGELOG.md](../CHANGELOG.md)).
+1. **Port only what was asked for.** Car 1 is not upstream. The repos share no git history, so a port is a patch: `git fetch car1`, `git diff <last ported car 1 commit> car1/main`, then `git apply --3way`. The last port took `car1/main` up to `8a88dcc` (2026-10-29, car 1's PR #8, Part B-2/3; before it `4bea6f2`, PRs #3 to #7; [CHANGELOG.md](../CHANGELOG.md)). On top of that, the launch boost alone was taken from car 1's PR #10 (`git diff bf56121 ffbfac0`, 2026-10-30). Car 1's PR #9 (`db3e9e9`) has not been ported, so the next full port still starts from `8a88dcc` and should expect the launch boost hunks to be there already.
 2. **For every file the patch touches, check it against the tables above.** Merge the change *into* car 2's file by hand. Never replace the file.
 3. **Never bring in** car 1's USB LiDAR settings, `webcam_launch.py`, `web_dashboard_rb1.yaml`, car 1's calibration or steering limits, car 1's `racerbot_doctor` LiDAR/camera checks, or `test_car1_hardware_config.py`.
 4. **`f1tenth_system` has its own extra checklist** of local fixes, two of which fail unsafely: see [git-setup.md](git-setup.md#updating-f1tenth_system--manual-no-submodule-machinery).
