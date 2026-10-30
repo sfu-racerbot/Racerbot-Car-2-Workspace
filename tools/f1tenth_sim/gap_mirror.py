@@ -24,6 +24,7 @@ import numpy as np
 import yaml
 
 from gap_follow import gap_logic
+from gap_follow import launch_boost
 from gap_follow import opponent_tracking
 
 CONTROL_DT = 0.025
@@ -154,6 +155,10 @@ REQUIRED_PARAMS = frozenset((
     "wheelbase",
 
     "enable_opponent_awareness",
+    "enable_launch_boost",
+    "launch_boost_max_sec",
+    "launch_boost_max_distance",
+    "launch_boost_end_steering",
     "opponent_min_width",
     "opponent_max_width",
     "opponent_max_range",
@@ -237,6 +242,12 @@ LEGACY_VALUES = {
        for name in opponent_tracking.OpponentParams.__dataclass_fields__},
     # The follow-cap memory (2026-10-28) did not exist: 0 is no hold, the old behaviour.
     "opponent_follow_memory_sec": 0.0,
+    # The launch boost (2026-10-30) did not exist: off. Its limits are inert
+    # while it is off, so these are the shipped defaults.
+    "enable_launch_boost": False,
+    "launch_boost_max_sec": 3.0,
+    "launch_boost_max_distance": 5.0,
+    "launch_boost_end_steering": 0.0,
 }
 
 
@@ -309,6 +320,11 @@ class GapController:
                 self.p["wheelbase"], self.p["laser_offset_x"],
                 self.p["laser_offset_y"], self.p["car_length"])
         self.opponent_mode = None
+        # Launch boost (gap_follow/launch_boost.py). The simulator's LB is held
+        # from the first tick, so the first command is the first press.
+        self.launch_boost = launch_boost.LaunchBoost(
+            self.p["enable_launch_boost"], self.p["launch_boost_max_sec"],
+            self.p["launch_boost_max_distance"], self.p["launch_boost_end_steering"])
         # Adaptive grip, built as gap_follow_node builds it: the lateral limit
         # and the low-pass on its ratio. Read only when the flag is on.
         self.grip = gap_logic.AdaptiveGrip(
@@ -462,7 +478,17 @@ class GapController:
         follow_cap = math.inf
         alongside_cap = math.inf
         self.opponent_mode = None
-        if self.opponents is not None and self.opponents.moving_body():
+        # gap_follow_node: opponents ignored while the launch runs, or on the
+        # driving tick that starts it (not creeping, not an escape).
+        launching = self.launch_boost.active or (
+            self.launch_boost.armed and not creeping
+            and not (emergency_tripped or ttc_tripped))
+        if launching:
+            # gap_follow_node: opponents ignored for the start, plain search.
+            processed, gap_start, gap_end, used_fallback = select(window)
+            if self.opponents is not None:
+                self.opponent_mode = "launch"
+        elif self.opponents is not None and self.opponents.moving_body():
             avoid = select(self.opponents.augment(window, beam_angles))
             plain = select(window)
             # Use the avoiding gap only to pick a side within the opening
@@ -491,7 +517,7 @@ class GapController:
             processed, gap_start, gap_end, used_fallback = select(window)
 
         if (self.opponents is not None and self.opponent_mode is None
-                and self.opponents.followed_body()):
+                and not launching and self.opponents.followed_body()):
             self.opponent_mode = "follow"
             follow_cap = self.opponents.follow_law_cap(passing=False)
             alongside_cap = self.opponents.alongside_cap(passing=False)
@@ -513,6 +539,8 @@ class GapController:
 
         if emergency_tripped or ttc_tripped:
             creeping = True
+            self.launch_boost.end("emergency_escape" if emergency_tripped
+                                  else "ttc_escape")
 
         target_in_window = gap_logic.aim_within_gap(
             processed, gap_start, gap_end, beam_angles)
@@ -588,6 +616,26 @@ class GapController:
             tel["arc_guard"] = guarded - desired_steering
             desired_steering = guarded
 
+        # gap_follow_node: during the launch, hold straight (damping only)
+        # while the body's straight path is clear for the stopping distance.
+        tel["launch_straight"] = False
+        if launching and not creeping:
+            straight_room = gap_logic.swept_path_clearance(
+                window, window_valid, beam_angles, 0.0,
+                p["car_width"] / 2.0 + p["swept_clearance_margin"],
+                p["car_length"], p["wheelbase"], p["laser_offset_x"],
+                p["laser_offset_y"], p["swept_clearance_max_length"])
+            basis = max(self.last_commanded_speed,
+                        min(abs(float(current_speed)), p["max_speed"]))
+            needed = min(p["swept_clearance_max_length"], max(
+                p["arc_guard_length"],
+                basis ** 2 / (2.0 * p["max_braking_decel"])
+                + p["forward_stop_clearance"]))
+            if straight_room >= needed:
+                desired_steering = float(np.clip(
+                    damping, -p["max_steering_angle"], p["max_steering_angle"]))
+                tel["launch_straight"] = True
+
         dt = CONTROL_DT
         if self.last_command_time is not None:
             dt = min(p["command_slew_max_dt"],
@@ -631,33 +679,46 @@ class GapController:
 
         desired_speed = min(normal_speed, clearance_speed)
         binding = 'curve' if normal_speed <= clearance_speed else 'clearance'
-        if p["narrow_corridor_speed"] < p["max_speed"]:
-            side_cap = gap_logic.side_clearance_speed_limit(
-                min(side_left, side_right) - p["car_width"] / 2.0,
-                p["narrow_corridor_speed"], p["narrow_corridor_clearance"],
-                p["open_corridor_clearance"], p["max_speed"])
-            tel["side_cap"] = side_cap
-            if side_cap < desired_speed:
-                desired_speed = side_cap
-                binding = 'side'
-        if follow_cap < desired_speed:
-            desired_speed = follow_cap
-            binding = 'follow'
         understeer_cap = self._understeer_cap(
             steering, dt, current_speed, yaw_rate, measured_steering)
         tel['imu_understeer_engaged'] = math.isfinite(understeer_cap)
         tel['imu_understeer_cap'] = understeer_cap
-        if creeping:
-            binding = 'creep'
-        if used_fallback and effective_corner < desired_speed:
-            desired_speed = min(desired_speed, effective_corner)
-            binding = 'corner'
+        if launching and clearance_speed > float(current_speed):
+            # As in the node: only a tick with room to speed up starts it.
+            self.launch_boost.begin()
+        launching = self.launch_boost.step(
+            dt, float(current_speed), desired_steering, clearance_speed)
+        tel["launch_boost"] = launching
+        if launching:
+            # gap_follow_node's launch boost: only the curvature, braking and
+            # understeer ceilings; no corridor, follow or corner cap, speed
+            # hold, ramp or traction hold.
+            if creeping:
+                binding = 'creep'
         else:
-            desired_speed = min(desired_speed, effective_corner) if used_fallback else desired_speed
+            if p["narrow_corridor_speed"] < p["max_speed"]:
+                side_cap = gap_logic.side_clearance_speed_limit(
+                    min(side_left, side_right) - p["car_width"] / 2.0,
+                    p["narrow_corridor_speed"], p["narrow_corridor_clearance"],
+                    p["open_corridor_clearance"], p["max_speed"])
+                tel["side_cap"] = side_cap
+                if side_cap < desired_speed:
+                    desired_speed = side_cap
+                    binding = 'side'
+            if follow_cap < desired_speed:
+                desired_speed = follow_cap
+                binding = 'follow'
+            if creeping:
+                binding = 'creep'
+            if used_fallback and effective_corner < desired_speed:
+                desired_speed = min(desired_speed, effective_corner)
+                binding = 'corner'
+            else:
+                desired_speed = min(desired_speed, effective_corner) if used_fallback else desired_speed
 
-        if p["speed_hold_sec"] > 0.0:
-            self.speed_hold_clock += dt
-            desired_speed = self.speed_hold.update(self.speed_hold_clock, desired_speed)
+            if p["speed_hold_sec"] > 0.0:
+                self.speed_hold_clock += dt
+                desired_speed = self.speed_hold.update(self.speed_hold_clock, desired_speed)
         # An untrusted sensor must not leave a cap behind in the speed hold.
         if understeer_cap < desired_speed:
             desired_speed = understeer_cap
@@ -692,6 +753,11 @@ class GapController:
         if traction_off_ceiling < speed:
             binding = 'traction_off'
         speed = min(speed, traction_off_ceiling)
+        if launching:
+            # As in the node: no ramp and no traction hold during the launch.
+            speed = desired_speed
+            if binding in ('accel', 'traction', 'traction_off'):
+                binding = 'curve' if normal_speed <= clearance_speed else 'clearance'
         self.binding_cap = binding
         tel.update(target_angle=target_angle, target_distance=target_distance,
                    gap_width=(gap_end - gap_start + 1) * self.lidar.angle_increment,
@@ -757,6 +823,7 @@ class GapController:
 
     def _stop(self, step, reason):
         self.speed_hold.reset()
+        self.launch_boost.end(reason)
         self.opponent_mode = None
         self.last_commanded_speed = 0.0
         self.last_command_time = step

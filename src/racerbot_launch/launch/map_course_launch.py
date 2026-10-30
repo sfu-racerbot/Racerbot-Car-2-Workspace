@@ -278,7 +278,9 @@ def generate_launch_description(imu_probe=None):
         gap_follow = Node(
             package='gap_follow', executable='gap_follow_node', name='gap_follow_node',
             output='screen',
-            parameters=[gap_config, {'enable_opponent_awareness': enabled == 'true'},
+            parameters=[gap_config, {'enable_opponent_awareness': enabled == 'true',
+                         # one car, mapping: no race start (docs/gap-follow.md#launch-boost)
+                         'enable_launch_boost': False},
                         dict({'drive_topic': '/auto_map/drive'}, **speeds, **odom)],
         )
         lap_frame = ({'odom_frame': IMU_ODOM_FRAME}

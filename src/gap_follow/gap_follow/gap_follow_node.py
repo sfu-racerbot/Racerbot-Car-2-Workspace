@@ -13,7 +13,7 @@ from std_msgs.msg import String
 
 from drive_intent import predict, schema
 from drive_intent.throttle import FailureLatch, IntentThrottle
-from gap_follow import gap_logic, live_tuning, opponent_tracking
+from gap_follow import gap_logic, launch_boost, live_tuning, opponent_tracking
 
 # /imu/status is latched by imu_bridge (its STATUS_QOS), so a node started
 # after the bridge still gets the current verdict at once.
@@ -729,6 +729,23 @@ class GapFollowNode(Node):
         # (passing allowed) or 'follow'.
         self.opponent_last_stamp = None
         self.opponent_mode = None
+
+        # Launch boost (launch_boost.py, docs/gap-follow.md#launch-boost): full
+        # speed off the start line on the first LB press, once per node. Off
+        # unless enabled; the shipped YAML turns it on. Raises ValueError
+        # naming a bad limit, like the validators above.
+        self.declare_parameter('enable_launch_boost', False)
+        self.declare_parameter('launch_boost_max_sec', 3.0)
+        self.declare_parameter('launch_boost_max_distance', 5.0)
+        self.declare_parameter('launch_boost_end_steering', 0.0)
+        self.enable_launch_boost = bool(
+            self.get_parameter('enable_launch_boost').value)
+        self.launch_boost = launch_boost.LaunchBoost(
+            self.enable_launch_boost,
+            float(self.get_parameter('launch_boost_max_sec').value),
+            float(self.get_parameter('launch_boost_max_distance').value),
+            float(self.get_parameter('launch_boost_end_steering').value))
+        self.launch_end_reported = False
         if self.enable_corner_setup:
             self._validate_corner_setup_parameters()
         if not math.isfinite(self.ttc_command_speed_timeout_sec) or (
@@ -1574,7 +1591,24 @@ class GapFollowNode(Node):
         raw_window = window
         follow_cap = math.inf
         alongside_cap = math.inf
-        if self.opponents is not None and self.opponents.moving_body():
+        # Launch boost: this tick ignores opponents if the launch is running,
+        # or is armed and this is a driving tick that will start it below (not
+        # creeping, not an escape). The speed stage re-checks after the end
+        # conditions.
+        launching = self.launch_boost.active or (
+            self.launch_boost.armed and not creeping
+            and not (emergency_tripped or ttc_tripped))
+        if launching:
+            # Launch boost: opponents are ignored for the start. The plain
+            # search still reads the real scan, so the other cars remain
+            # obstacles to steer around; only the avoidance footprints, the
+            # follow cap and the alongside cap are skipped.
+            (window, closest_dist, gap_start, gap_end, used_fallback,
+             target_idx_in_window, near_bearing) = self._select_gap(
+                window, window_valid, scan.angle_increment, beam_angles)
+            if self.opponents is not None:
+                self.opponent_mode = 'launch'
+        elif self.opponents is not None and self.opponents.moving_body():
             # Another car is moving nearby. Search twice: once with its
             # predicted footprint inflated (opponent_tracking.inflate_
             # predicted), once on the real scan. The inflated answer is used
@@ -1603,7 +1637,7 @@ class GapFollowNode(Node):
                 window, window_valid, scan.angle_increment, beam_angles)
 
         if (self.opponents is not None and self.opponent_mode is None
-                and self.opponents.followed_body()):
+                and not launching and self.opponents.followed_body()):
             self.opponent_mode = 'follow'
             follow_cap = self.opponents.follow_law_cap(passing=False)
             alongside_cap = self.opponents.alongside_cap(passing=False)
@@ -1662,9 +1696,11 @@ class GapFollowNode(Node):
         if emergency_tripped:
             creeping = True
             trip_detail = emergency_detail
+            self.launch_boost.end('emergency_escape')
         elif ttc_tripped:
             creeping = True
             trip_detail = ttc_detail
+            self.launch_boost.end('ttc_escape')
 
         # Only the real driving decision updates the hysteresis basis -- this
         # is that decision whether this tick is an ordinary one or an escape,
@@ -1746,6 +1782,31 @@ class GapFollowNode(Node):
                 self.laser_offset_x, self.laser_offset_y,
                 self.max_steering_angle, self.arc_guard_max_correction,
                 self.arc_guard_candidates, self.arc_guard_blocked_fallback)
+        # Launch boost: drive straight while the straight path is clear. A car
+        # alongside fills part of the forward window, and the gap logic and
+        # centering would steer away from it (~0.23 rad in the parity scene),
+        # which the curvature cap then turns into a slow, veering start. Only
+        # the body's own straight path decides: clear for the stopping distance
+        # (at least arc_guard_length, at most swept_clearance_max_length) and
+        # the car holds straight, with steering damping only; anything in it
+        # (a car cutting in, the wall at the end) hands back to gap steering.
+        straight_room = math.nan
+        if launching and not creeping:
+            straight_room = gap_logic.swept_path_clearance(
+                raw_window, window_valid, beam_angles, 0.0,
+                self.car_width / 2.0 + self.swept_clearance_margin,
+                self.car_length, self.wheelbase,
+                self.laser_offset_x, self.laser_offset_y,
+                self.swept_clearance_max_length)
+            needed = min(self.swept_clearance_max_length, max(
+                self.arc_guard_length,
+                self._speed_basis() ** 2 / (2.0 * self.max_braking_decel)
+                + self.forward_stop_clearance))
+            if straight_room >= needed:
+                requested_steering = desired_steering = float(np.clip(
+                    damping, -self.max_steering_angle, self.max_steering_angle))
+            else:
+                straight_room = math.nan
         now, command_dt = self._command_timing()
         steering_basis_before = self.steering_basis
         steering_angle = gap_logic.slew_rate_limit(
@@ -1846,14 +1907,31 @@ class GapFollowNode(Node):
                 ),
             )
         understeer_cap, understeer_off = self._understeer_cap(steering_angle, command_dt)
-        desired_speed = min(normal_speed, clearance_speed, anticipated_speed,
-                            self._narrow_corridor_speed(side_left, side_right),
-                            follow_cap)
-        if used_fallback:
-            desired_speed = min(desired_speed, self.effective_corner_speed)
-        if self.speed_hold_sec > 0.0:
-            self.speed_hold_clock += command_dt
-            desired_speed = self.speed_hold.update(self.speed_hold_clock, desired_speed)
+        # Launch boost: end it once the braking ceiling reaches the car, the car
+        # turns, or the time/distance backstop runs out (launch_boost.step).
+        # While it lasts, only the grip and braking ceilings apply: no corner,
+        # narrow-corridor, follow or alongside cap, no speed hold, no ramp and
+        # no traction hold. The understeer ceiling (a grip limit) still applies.
+        measured_speed = (self.current_speed if self._odom_fresh()
+                          else self.last_commanded_speed)
+        if launching and clearance_speed > measured_speed:
+            # The first driving tick with room to speed up starts it; a tick
+            # the braking ceiling holds at the car's speed would only end it.
+            self.launch_boost.begin()
+        launching = self.launch_boost.step(
+            command_dt, measured_speed, desired_steering, clearance_speed)
+        self._report_launch_end()
+        if launching:
+            desired_speed = min(normal_speed, clearance_speed, anticipated_speed)
+        else:
+            desired_speed = min(normal_speed, clearance_speed, anticipated_speed,
+                                self._narrow_corridor_speed(side_left, side_right),
+                                follow_cap)
+            if used_fallback:
+                desired_speed = min(desired_speed, self.effective_corner_speed)
+            if self.speed_hold_sec > 0.0:
+                self.speed_hold_clock += command_dt
+                desired_speed = self.speed_hold.update(self.speed_hold_clock, desired_speed)
         # Do not store an IMU ceiling in speed_hold: an untrusted sample must
         # restore the feature-off command immediately, without a held cap.
         desired_speed = min(desired_speed, understeer_cap)
@@ -1895,6 +1973,10 @@ class GapFollowNode(Node):
         # the lower one, so the dashboard says which cap actually held.
         traction_off_binds = traction_off_ceiling < acceleration_ceiling
         acceleration_ceiling = min(acceleration_ceiling, traction_off_ceiling)
+        if launching:
+            # Launch boost: no ramp and no traction hold. Wheelspin off the
+            # line is accepted (the traction state above still updates).
+            speed = desired_speed
         self._publish_drive(steering_angle, speed, now=now)
         traction_text = ''
         if self.enable_imu_traction:
@@ -1977,6 +2059,8 @@ class GapFollowNode(Node):
             gap_mode = 'emergency_escape'
         elif ttc_tripped:
             gap_mode = 'ttc_escape'
+        elif launching:
+            gap_mode = 'launch_boost'
         else:
             gap_mode = 'corner_fallback' if used_fallback else 'gap_follow'
         depth_text = (
@@ -1991,7 +2075,14 @@ class GapFollowNode(Node):
                f"(near {math.degrees(near_bearing):+.1f}deg vs far "
                f"{math.degrees(target_angle):+.1f}deg)"
                if near_bearing is not None and anticipated_speed < self.max_speed else "")
-            + (f", follow cap={follow_cap:.2f}m/s" if math.isfinite(follow_cap) else "")
+            + (f", LAUNCH BOOST ({self.launch_boost.elapsed:.2f}s, "
+               f"{self.launch_boost.distance:.2f}m; ramp, corner, corridor and "
+               f"opponent caps off"
+               + (f"; holding straight, straight path clear "
+                  f"{straight_room:.2f}m)" if not math.isnan(straight_room)
+                  else "; straight path blocked, gap steering)")
+               if launching else "")
+            + (f", follow cap={follow_cap:.2f}m/s" if math.isfinite(follow_cap) and not launching else "")
             + (f", opponent mode={self.opponent_mode}" if self.opponent_mode else "")
             + (f", CREEP (forward clearance {forward_clearance:.3f}m inside "
                f"the {self.forward_stop_clearance:.3f}m reserve; crawling out)"
@@ -2030,14 +2121,15 @@ class GapFollowNode(Node):
         ]
         if used_fallback:
             intent_factors.append(schema.factor('corner cap', self.effective_corner_speed))
-        if math.isfinite(follow_cap):
+        if math.isfinite(follow_cap) and not launching:
             intent_factors.append(schema.factor('follow cap', follow_cap))
         if near_bearing is not None:
             intent_factors.append(schema.factor('anticipation cap', anticipated_speed))
         ceiling_name = ('traction hold' if traction_holding
                         else 'traction-off ceiling' if traction_off_binds
                         else 'accel ceiling')
-        intent_factors.append(schema.factor(ceiling_name, acceleration_ceiling))
+        if not launching:
+            intent_factors.append(schema.factor(ceiling_name, acceleration_ceiling))
         self._publish_intent(
             gap_mode,
             decision_detail,
@@ -2497,6 +2589,16 @@ class GapFollowNode(Node):
         hi_idx = max(0, min(hi_idx, num_points - 1))
         return lo_idx, hi_idx
 
+    def _report_launch_end(self):
+        """Log, once, why the launch boost ended -- not on every tick after."""
+        boost = self.launch_boost
+        if (boost.state == launch_boost.DONE and boost.end_reason != 'disabled'
+                and not self.launch_end_reported):
+            self.launch_end_reported = True
+            self.get_logger().info(
+                f'launch boost ended ({boost.end_reason}) after '
+                f'{boost.elapsed:.2f}s and {boost.distance:.2f}m')
+
     def _command_timing(self):
         """Return one bounded command interval and the clock sample behind it."""
         now = self.get_clock().now()
@@ -2545,6 +2647,11 @@ class GapFollowNode(Node):
         # someone noticing the car and cycling LB.
         self._publish_drive(self.steering_basis, 0.0)
         self.speed_hold.reset()
+        # Any stop ends an active launch for good (deadman released, TTC,
+        # emergency clearance, no gap, stale sensors). Before the first press
+        # this does nothing, so the waiting-for-LB stops do not spend it.
+        self.launch_boost.end(state)
+        self._report_launch_end()
         # Memoized because some stop reasons are deliberately expensive
         # thunks -- _escape_report re-runs the whole gap pipeline -- and the
         # log and the intent publisher both want that same string on the

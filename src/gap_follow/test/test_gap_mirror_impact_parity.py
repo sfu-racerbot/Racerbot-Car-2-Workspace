@@ -18,6 +18,7 @@ def test_impact_mirror_spike_hold_release_press_parity(enabled):
         scan = _scan()
         params = gap_mirror.node_params()
         params['enable_imu_impact_stop'] = enabled
+        params['enable_launch_boost'] = False  # mid-race, as _node's node
         mirror = gap_mirror.GapController(params, _Lidar(scan))
         mirror.last_command_time = -1
         speeds = []

@@ -90,7 +90,9 @@ def generate_launch_description():
             executable='gap_follow_node',
             name='gap_follow_node',
             output='screen',
-            parameters=[gap_follow_config, {'enable_opponent_awareness': enabled == 'true'}, speeds],
+            parameters=[gap_follow_config, {'enable_opponent_awareness': enabled == 'true',
+                         # one car, mapping: no race start (docs/gap-follow.md#launch-boost)
+                         'enable_launch_boost': False}, speeds],
         )]
 
     return LaunchDescription([
