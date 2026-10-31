@@ -6,7 +6,16 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
-## 2026-10-29 (latest) — Port from car 1 (to `car1/main` `8a88dcc`): Part B-2/3, SLAM observability and IMU
+## 2026-10-30 (latest) — Port from car 1: gap_follow's launch boost only
+
+Car 1's PR #10 (`git diff bf56121 ffbfac0`). Car 1's PR #9 is not included. **Never driven on car 2.**
+
+- **`gap_follow`**: new `launch_boost.py`. On the first driving tick after LB, once per node: straight to `max_speed` with no ramp, corner, corridor or opponent caps, no speed or traction hold, holding straight while its own path is clear. Deadman, TTC, emergency clearance, braking, curvature and understeer ceilings still apply. New parameters `enable_launch_boost` (shipped `true`), `launch_boost_max_sec`, `launch_boost_max_distance`, `launch_boost_end_steering`; launch argument `launch_boost:=false`. The mapping launches turn it off.
+- **`tools/f1tenth_sim`**: `gap_mirror.py` models it.
+- **Tests**: car 1's, plus five added on car 2 for what a mutation run showed nothing caught: the braking and curvature ceilings during a launch, the emergency escape, and two mirror parity scenes. Mid-race scenes turn the launch off in their setup; no assertion changed.
+- **Simulator, car 2's numbers** ([gap-follow.md](docs/gap-follow.md#launch-boost)): on car 2's room map the solo lap is 0.86 s slower, and two-car runs finish 5 to 6 of 8 against 8 of 8 with it off, no contact.
+
+## 2026-10-29 — Port from car 1 (to `car1/main` `8a88dcc`): Part B-2/3, SLAM observability and IMU
 
 Car 1's PR #8 ([Racerbot-Car-1-Workspace](https://github.com/sfu-racerbot/Racerbot-Car-1-Workspace)),
 ported on branch `port-car1-part-b23` (`git diff 4bea6f2 car1/main`, `git apply --3way`,

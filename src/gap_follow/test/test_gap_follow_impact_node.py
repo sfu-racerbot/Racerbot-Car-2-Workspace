@@ -29,6 +29,9 @@ DT = .025
 @contextmanager
 def _node(enabled=True, extra=()):
     rclpy.init(args=['--ros-args', '--params-file', CONFIG,
+                     # Mid-race scene, not a start: the launch boost (on since
+                     # 2026-10-30) skips the ramp and traction hold under test.
+                     '-p', 'enable_launch_boost:=false',
                      '-p', f'enable_imu_impact_stop:={str(enabled).lower()}',
                      '-p', 'intent_rate_hz:=0.0', *extra, *TEST_ONLY_DRIVE])
     n = None

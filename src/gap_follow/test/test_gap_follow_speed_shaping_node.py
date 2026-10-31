@@ -26,8 +26,12 @@ from test_gap_follow_corners_node import (  # noqa: E402
 
 def _make(extra=()):
     # TEST_ONLY_DRIVE last, after the params file and any override, so the
-    # YAML's drive_topic: /drive can never win (CLAUDE.md).
-    rclpy.init(args=['--ros-args', *CAR, *extra, *TEST_ONLY_DRIVE])
+    # YAML's drive_topic: /drive can never win (CLAUDE.md). These are mid-race
+    # scenes, not a start: the launch boost (shipped on since 2026-10-30)
+    # skips the ramp and speed hold for its first 3 s / 5 m, so it is off here
+    # (test_launch_boost_node.py covers it).
+    rclpy.init(args=['--ros-args', *CAR, '-p', 'enable_launch_boost:=false',
+                     *extra, *TEST_ONLY_DRIVE])
     n = GapFollowNode()
     assert n.drive_pub.topic_name == '/test_only/drive'
     n.max_steering_rate = 100.0

@@ -68,7 +68,10 @@ def _params(**overrides):
     and these tests are about the grip. Tests that want the feature off say so."""
     params = dict(gap_mirror.node_params(), enable_arc_guard=False,
                   max_steering_rate=100.0, steering_gain_speed_ref=0.0,
-                  enable_adaptive_grip=True, enable_steering_damping=False)
+                  enable_adaptive_grip=True, enable_steering_damping=False,
+                  # A car mid-course, not a start: the launch boost would hold
+                  # it straight, so the rack would never ask for a turn.
+                  enable_launch_boost=False)
     params.update(overrides)
     return params
 
@@ -227,11 +230,12 @@ def test_a_yaml_from_before_the_feature_loads_with_it_off(tmp_path):
     old = gap_mirror.node_params(path, fill_legacy=True)
     assert old['enable_adaptive_grip'] is False
     off_steer, off_speed, _l = _run(_params(enable_adaptive_grip=False), 5, lambda k: 1.0)
-    # Damping is pinned off on this side too, as _params pins it: the legacy
-    # file keeps the current YAML's damping keys, which ship on since 2026-10-27.
+    # Damping and the launch boost are pinned off on this side too, as _params
+    # pins them: the legacy file keeps the current YAML's keys for both.
     old_steer, old_speed, _l = _run(dict(old, enable_arc_guard=False, max_steering_rate=100.0,
                                          steering_gain_speed_ref=0.0,
-                                         enable_steering_damping=False),
+                                         enable_steering_damping=False,
+                                         enable_launch_boost=False),
                                     5, lambda k: 1.0)
     assert old_steer == off_steer
     assert old_speed == off_speed

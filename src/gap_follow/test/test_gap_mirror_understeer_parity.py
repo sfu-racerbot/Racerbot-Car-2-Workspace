@@ -18,7 +18,8 @@ def test_understeer_mirror_matches_each_command_with_independent_state(enabled, 
         published = _capture(node)
         params = gap_mirror.node_params()
         params.update(enable_imu_understeer=enabled, command_slew_max_dt=DT,
-                      speed_hold_sec=hold_sec)
+                      speed_hold_sec=hold_sec,
+                      enable_launch_boost=False)  # mid-race, as _make's node
         scan = _raycast(_corridor(1.4, 0.6))
         mirror = gap_mirror.GapController(params, _Lidar(scan))
         engaged = []

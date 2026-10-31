@@ -610,6 +610,32 @@ gap_follow_node:
     opponent_steer_gain: 15.0        # 1/s (steering_servo_gain)
     opponent_steer_rate_max: 3.2     # rad/s (steering_rate_max)
 
+    # --- Launch boost (2026-10-30, docs/gap-follow.md#launch-boost) ---
+    # Full speed off the start line, to reach the first corner ahead of the
+    # cars beside us. Starts on the FIRST LB press after the node starts and
+    # never again (release and press does not relaunch; restart the launch
+    # for the next race). While active: no acceleration ramp, no corner,
+    # narrow-corridor, follow or alongside cap, no speed hold, and opponents
+    # are ignored in the gap search (they are still obstacles in the real
+    # scan). The car holds straight (steering damping only) while the body's
+    # straight path, car_width/2 + swept_clearance_margin each side, is clear
+    # for its stopping distance (arc_guard_length to
+    # swept_clearance_max_length); anything in that path hands steering back
+    # to the gap logic. The deadman, emergency clearance, TTC, the braking ceiling and the
+    # curvature ceiling all still apply. Ends at the first of: braking ceiling
+    # at or below the car's speed (end of the straight), max_sec,
+    # max_distance, or any stop or TTC/emergency escape. Off for one run:
+    # launch_boost:=false. Simulator-validated only.
+    enable_launch_boost: true
+    launch_boost_max_sec: 3.0        # s, backstop
+    launch_boost_max_distance: 5.0   # m, backstop
+    # A steering request past this (rad) ends the launch; 0 is off. Ships off:
+    # a car alongside whose nose gets ahead makes gap_follow aim ~0.23 rad
+    # away from it on a straight track, which this cannot tell from a corner
+    # (launch_boost.py). The curvature ceiling still applies, and the end of
+    # the straight ends the launch through the braking ceiling.
+    launch_boost_end_steering: 0.0
+
     # --- Time-to-collision automatic emergency braking ---
     enable_ttc: true
     # Lowered from 0.5, then again from 0.35 on 2026-08-25. At the 1.6m/s

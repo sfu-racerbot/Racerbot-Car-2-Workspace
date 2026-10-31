@@ -79,6 +79,15 @@ def generate_launch_description(imu_probe=None):
                     'simulator-validated only, not yet run on the floor '
                     '(docs/gap-follow.md#adaptive-grip-imu).')
 
+    launch_boost_arg = DeclareLaunchArgument(
+        'launch_boost', default_value='true',
+        description='true (the default since 2026-10-30): full speed off the start '
+                    'line on the first LB press, once per launch -- no ramp, corner, '
+                    'corridor or opponent caps until the end of the straight makes the '
+                    'car brake, or 3 s / 5 m pass. Deadman, TTC, emergency clearance and '
+                    'the braking and curvature ceilings still apply. false turns it off '
+                    '(docs/gap-follow.md#launch-boost). Simulator-validated only.')
+
     fused_speed_arg = DeclareLaunchArgument(
         'fused_speed', default_value=LaunchConfiguration('imu_all', default='false'),
         description='true: read speed from /odom/fused (wheels plus BNO forward acceleration). '
@@ -115,6 +124,8 @@ def generate_launch_description(imu_probe=None):
                         LaunchConfiguration('steering_damping').perform(context))
         grip = _flag('adaptive_grip',
                      LaunchConfiguration('adaptive_grip').perform(context))
+        boost = _flag('launch_boost',
+                      LaunchConfiguration('launch_boost').perform(context))
         fused = _flag('fused_speed',
                       LaunchConfiguration('fused_speed').perform(context))
         understeer = _flag('imu_understeer',
@@ -145,7 +156,8 @@ def generate_launch_description(imu_probe=None):
                          'enable_adaptive_grip': grip,
                          'enable_imu_understeer': understeer,
                          'enable_imu_traction': traction,
-                         'enable_imu_impact_stop': impact},
+                         'enable_imu_impact_stop': impact,
+                         'enable_launch_boost': boost},
                         speed,
                         {'odom_topic': FUSED_ODOM} if fused else {}],
         )]
@@ -165,5 +177,5 @@ def generate_launch_description(imu_probe=None):
 
     return LaunchDescription([opponent_arg, max_speed_arg, imu_arg, imu_all_arg, steering_damping_arg,
                               adaptive_grip_arg, fused_speed_arg, understeer_arg,
-                              traction_arg, impact_arg, imu_hardware_arg,
+                              traction_arg, impact_arg, imu_hardware_arg, launch_boost_arg,
                               OpaqueFunction(function=node)])

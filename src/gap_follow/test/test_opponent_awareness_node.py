@@ -45,8 +45,13 @@ def _make(*extra):
     # command_slew_max_dt at exactly one tick makes the ramp interval exactly
     # DT whatever the wall clock did, as in test_gap_mirror_parity, so two
     # runs of the same scenes can be compared to float precision.
+    # The scenes here are mid-race, not a start: the launch boost (shipped on
+    # since 2026-10-30) ignores opponents for the first 3 s / 5 m after LB, so
+    # it is off unless a caller turns it back on with '-p
+    # enable_launch_boost:=true' in extra (test_launch_boost_node.py does).
     rclpy.init(args=['--ros-args', '--params-file', PACKAGED_CONFIG,
-                     '-p', f'command_slew_max_dt:={DT}', *extra, *TEST_ONLY_DRIVE])
+                     '-p', f'command_slew_max_dt:={DT}',
+                     '-p', 'enable_launch_boost:=false', *extra, *TEST_ONLY_DRIVE])
     node = GapFollowNode()
     assert node.drive_pub.topic_name == '/test_only/drive'
     published = []

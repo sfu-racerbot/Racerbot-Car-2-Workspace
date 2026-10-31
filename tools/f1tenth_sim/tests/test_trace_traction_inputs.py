@@ -42,7 +42,8 @@ def test_simulator_caller_supplies_trusted_inputs_and_engages_traction(
         def truth(self, index):
             return np.array([0.0, 0.0, 0.0, 1.7, 0.0, 0.0, 0.0])
 
-    params = dict(node_params(), enable_imu_traction=True)
+    # Mid-race, not a start: the launch boost would skip the traction hold.
+    params = dict(node_params(), enable_imu_traction=True, enable_launch_boost=False)
     controller = GapController(params, Lidar())
     controller.last_commanded_speed = 1.5
     state = np.array([0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0])

@@ -14,6 +14,7 @@ def test_traction_mirror_matches_hold_expiry_rearm_and_dropout(enabled):
         scan = _scan()
         params = gap_mirror.node_params()
         params['enable_imu_traction'] = enabled
+        params['enable_launch_boost'] = False  # mid-race, as _node's node
         mirror = gap_mirror.GapController(params, _Lidar(scan))
         # Both histories start one control period before tick zero.
         mirror.last_command_time = -1

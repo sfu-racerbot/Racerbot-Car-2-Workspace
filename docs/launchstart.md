@@ -113,6 +113,8 @@ Opponent awareness is on by default, and it has only been tested in the simulato
 
    Both cars have `max_speed:=` (car 2 since the 2026-10-24 port from car 1).
 
+   **Know this first:** the first LB press after each launch goes straight to `max_speed` with no ramp ([launch boost](gap-follow.md#launch-boost)), so keep hands and cables clear of the wheels. Add `launch_boost:=false` to turn that off.
+
    **Working when:** each car's wheels turn only while its own LB is held, and stop when it's released.
 
 3. **Floor, low speed, open space.** Same commands, one car about 2 m behind the other, nobody standing on the track. Start somewhere at least 2 m wide, not the 1.2 m track.

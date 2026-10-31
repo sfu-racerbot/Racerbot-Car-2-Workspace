@@ -35,9 +35,16 @@ N_BEAMS = 1081
 SPAN = math.radians(270.0)
 
 
+# Every scene here is a car mid-course meeting a corner, not a race start. The
+# launch boost (shipped on since 2026-10-30) holds the car straight on its first
+# ticks while the straight path is clear, so it is off here
+# (test_launch_boost_node.py covers it).
+MID_RACE = ['-p', 'enable_launch_boost:=false']
+
+
 @pytest.fixture
 def node():
-    rclpy.init(args=['--ros-args', *CAR, *TEST_ONLY_DRIVE])
+    rclpy.init(args=['--ros-args', *CAR, *MID_RACE, *TEST_ONLY_DRIVE])
     n = GapFollowNode()
     assert n.drive_pub.topic_name == '/test_only/drive'
     # Slew is tested elsewhere; here it would only hide the steering decision.

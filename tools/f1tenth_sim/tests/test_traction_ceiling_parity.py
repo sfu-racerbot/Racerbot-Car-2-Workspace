@@ -15,7 +15,8 @@ def _mirror(enabled, fused):
         angle_increment = np.pi / 540
         range_min = 0.023
 
-    controller = GapController(dict(node_params(), enable_imu_traction=enabled), Lidar())
+    controller = GapController(dict(node_params(), enable_imu_traction=enabled,
+                                       enable_launch_boost=False), Lidar())  # mid-race
     controller.last_commanded_speed = 1.5
     controller.last_command_time = 0
     return controller.command(np.full(541, 8.0), 2.0, 1,
@@ -44,7 +45,8 @@ def test_mirror_names_the_traction_off_ceiling_when_it_binds():
         range_min = 0.023
 
     def binding(enabled):
-        controller = GapController(dict(node_params(), enable_imu_traction=enabled), Lidar())
+        controller = GapController(dict(node_params(), enable_imu_traction=enabled,
+                                       enable_launch_boost=False), Lidar())  # mid-race
         controller.last_commanded_speed = 1.5
         controller.last_command_time = 0
         controller.command(np.full(541, 8.0), 2.0, 1, yaw_rate=0.0, fused_speed=2.2)

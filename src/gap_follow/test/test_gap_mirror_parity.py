@@ -179,9 +179,13 @@ def _box_ahead(rear_x, y=0.0, length=0.58, width=0.30):
 
 def test_mirror_matches_alongside_wide_to_narrow_abort(node):
     from test_opponent_awareness_node import _alongside_scan, _alongside_tick, OPP_SPEED
+    from gap_follow.launch_boost import LaunchBoost
     params = gap_mirror.node_params()
     params['command_slew_max_dt'] = DT
     node.command_slew_max_dt = DT
+    # Mid-race, not a start: the launch boost would ignore the alongside car.
+    params['enable_launch_boost'] = False
+    node.launch_boost = LaunchBoost(False, 3.0, 5.0, 0.0)
     mirror = gap_mirror.GapController(params, _Lidar(_alongside_scan(0)))
     published = []
     node.drive_pub.publish = published.append
@@ -313,13 +317,19 @@ def test_mirror_matches_the_node_with_opponent_awareness_on():
 def test_rectangle_crossing_and_overtaking_mirror_parity(crossing):
     from test_opponent_awareness_node import _make
     from test_opponent_tracking import _box
+    # A mid-race scene, not a start: the launch boost (on in the shipped YAML
+    # since 2026-10-30) would otherwise ignore opponents for this whole
+    # stationary-ego run and the branches compared here would never run.
+    # The launch has its own parity test below.
     node, published = _make('-p', 'enable_opponent_awareness:=true',
                             '-p', 'opponent_passing_margin:=0.05',
-                            '-p', 'opponent_pass_max_steering:=0.33')
+                            '-p', 'opponent_pass_max_steering:=0.33',
+                            '-p', 'enable_launch_boost:=false')
     try:
         params = gap_mirror.node_params()
         params.update(enable_opponent_awareness=True, command_slew_max_dt=DT,
-                      opponent_passing_margin=0.05, opponent_pass_max_steering=0.33)
+                      opponent_passing_margin=0.05, opponent_pass_max_steering=0.33,
+                      enable_launch_boost=False)
         mirror = gap_mirror.GapController(params, _Lidar(_raycast([])))
         joy = Joy()
         joy.buttons = [0, 0, 0, 0, 1]
@@ -363,6 +373,118 @@ def test_rectangle_crossing_and_overtaking_mirror_parity(crossing):
         rclpy.shutdown()
 
 
+def test_mirror_matches_the_node_through_a_launch_boost_start():
+    """A race start with the shipped launch boost (docs/gap-follow.md#launch-boost):
+    ego on the grid, another car level with it 0.55 m to the left pulling
+    ahead at 2 m/s, a wall 4 m ahead.
+    The odometry follows the command with a lag, so the launch runs, the car
+    gains speed, and the wall's braking ceiling ends it. Node and mirror must
+    agree on every tick, launch and after."""
+    from test_opponent_awareness_node import _box, _make
+    node, published = _make('-p', 'enable_launch_boost:=true')
+    try:
+        assert node.launch_boost.state == 'armed'
+        params = gap_mirror.node_params()
+        params.update(command_slew_max_dt=DT)
+        assert params['enable_launch_boost'] and params['enable_opponent_awareness']
+        mirror = gap_mirror.GapController(params, _Lidar(_raycast([])))
+        joy = Joy()
+        joy.buttons = [0, 0, 0, 0, 1]
+        speed, travelled, launched = 0.0, 0.0, []
+        for step in range(60):
+            t = step * DT
+            # The scene moves past the car: the wall and the other car are
+            # drawn relative to where ego has got to.
+            wall = 4.0 - travelled
+            other = -0.55 + (2.0 * t) - travelled   # rear face, LiDAR frame
+            scan = _raycast(_corridor(1.0, 1.0, length=wall)
+                            + [((wall, -1.0), (wall, 1.0))]
+                            + _box(other, y=0.55))
+            ns = round((100.0 + t) * 1e9)
+            scan.header.stamp.sec, scan.header.stamp.nanosec = divmod(ns, 10**9)
+            node.joy_callback(joy)
+            odom = Odometry()
+            odom.twist.twist.linear.x = speed
+            node.odom_callback(odom)
+            node.steering_basis = mirror.steering_basis = 0.0
+            mirror.previous_target_idx = node.previous_target_idx
+            node.last_command_time = node.get_clock().now() - Duration(seconds=DT)
+            node.scan_callback(scan)
+            steering, command = mirror.command(np.asarray(scan.ranges), speed, step)
+            drive = published[-1].drive
+            # oracle: integration invariant, independent controller histories.
+            assert drive.speed == pytest.approx(command, abs=TOLERANCE), f'tick {step}'
+            assert drive.steering_angle == pytest.approx(steering, abs=TOLERANCE), f'tick {step}'
+            assert node.launch_boost.state == mirror.launch_boost.state, f'tick {step}'
+            assert node.opponent_mode == mirror.opponent_mode, f'tick {step}'
+            launched.append(node.launch_boost.active)
+            # A first-order lag toward the command, about the car's 0.3 s.
+            speed += (command - speed) * (DT / 0.3)
+            travelled += speed * DT
+        # The launch must actually have run and ended here, or this proves nothing.
+        assert launched[0] and not launched[-1], (launched, node.launch_boost.end_reason)
+        assert node.launch_boost.end_reason == mirror.launch_boost.end_reason == 'braking'
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def _compare_launch(frames):
+    """Feed node and mirror the same (scan, LB held) frames with the car at rest,
+    each with its own launch state, and require the same command and state on
+    every tick. Returns the node's launch state after each one."""
+    from test_opponent_awareness_node import _make
+    node, published = _make('-p', 'enable_launch_boost:=true')
+    try:
+        params = gap_mirror.node_params()
+        params.update(command_slew_max_dt=DT)
+        assert params['enable_launch_boost']
+        mirror = gap_mirror.GapController(params, _Lidar(_raycast([])))
+        states = []
+        for step, (scan, held) in enumerate(frames):
+            ns = round((100.0 + step * DT) * 1e9)
+            scan.header.stamp.sec, scan.header.stamp.nanosec = divmod(ns, 10**9)
+            joy = Joy()
+            joy.buttons = [0, 0, 0, 0, 1 if held else 0]
+            node.joy_callback(joy)
+            odom = Odometry()
+            node.odom_callback(odom)
+            node.steering_basis = mirror.steering_basis = 0.0
+            mirror.previous_target_idx = node.previous_target_idx
+            node.last_command_time = node.get_clock().now() - Duration(seconds=DT)
+            node.scan_callback(scan)
+            steering, command = mirror.command(np.asarray(scan.ranges), 0.0, step,
+                                               lb_pressed=held)
+            drive = published[-1].drive
+            # oracle: integration invariant, independent controller histories.
+            assert drive.speed == pytest.approx(command, abs=TOLERANCE), f'tick {step}'
+            assert drive.steering_angle == pytest.approx(steering, abs=TOLERANCE), f'tick {step}'
+            assert node.launch_boost.state == mirror.launch_boost.state, f'tick {step}'
+            assert node.launch_boost.end_reason == mirror.launch_boost.end_reason, f'tick {step}'
+            states.append(node.launch_boost.state)
+        return states
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+def test_mirror_matches_the_node_when_lb_is_released_mid_launch():
+    open_road = _raycast(_corridor(1.0, 1.0))
+    states = _compare_launch([(open_road, True), (open_road, True),
+                              (open_road, False), (open_road, True)])
+    assert states == ['active', 'active', 'done', 'done']
+
+
+def test_mirror_matches_the_node_on_a_blocked_grid():
+    # A car 0.5 m ahead: the braking ceiling leaves no room to speed up, so the
+    # launch stays armed on both until the way clears.
+    from test_opponent_awareness_node import _box
+    blocked = _raycast(_corridor(1.0, 1.0) + _box(0.5))
+    states = _compare_launch([(blocked, True), (blocked, True),
+                              (_raycast(_corridor(1.0, 1.0)), True)])
+    assert states == ['armed', 'armed', 'active']
+
+
 def _feed_imu(node, state, yaw_rate):
     """What imu_bridge publishes for one tick: its verdict, then one sample."""
     node.imu_status_callback(String(data=json.dumps(
@@ -377,7 +499,9 @@ def test_mirror_matches_stopped_then_departing_confirmed_car():
     node, published = _make('-p', 'enable_opponent_awareness:=true')
     try:
         params = gap_mirror.node_params()
-        params.update(enable_opponent_awareness=True, command_slew_max_dt=DT)
+        # Mid-race, like _make's node: the launch boost would ignore the car.
+        params.update(enable_opponent_awareness=True, command_slew_max_dt=DT,
+                      enable_launch_boost=False)
         mirror = gap_mirror.GapController(params, _Lidar(_raycast([])))
         joy = Joy()
         joy.buttons = [0, 0, 0, 0, 1]
@@ -499,7 +623,10 @@ def test_mirror_matches_the_node_with_adaptive_grip_on():
     proves nothing (docs/gap-follow.md#adaptive-grip-imu)."""
     rclpy.init(args=['--ros-args', '--params-file', PACKAGED_CONFIG,
                      '-p', 'enable_adaptive_grip:=true',
-                     '-p', 'enable_steering_damping:=false', *TEST_ONLY_DRIVE])
+                     '-p', 'enable_steering_damping:=false',
+                     # A mid-course corridor, not a start: the launch boost
+                     # would hold the car straight and never move the limit.
+                     '-p', 'enable_launch_boost:=false', *TEST_ONLY_DRIVE])
     node = GapFollowNode()
     try:
         assert node.drive_pub.topic_name == '/test_only/drive'
@@ -509,6 +636,7 @@ def test_mirror_matches_the_node_with_adaptive_grip_on():
         params = gap_mirror.node_params()
         params['enable_adaptive_grip'] = True
         params['enable_steering_damping'] = False
+        params['enable_launch_boost'] = False
         params['command_slew_max_dt'] = DT
         joy = Joy()
         joy.buttons = [0] * 5
@@ -585,7 +713,9 @@ def test_mirror_matches_the_node_through_a_drop_and_hold():
     node, published = _make('-p', 'enable_opponent_awareness:=true')
     try:
         params = gap_mirror.node_params()
-        params.update(enable_opponent_awareness=True, command_slew_max_dt=DT)
+        # Mid-race, like _make's node: the launch boost would ignore the car.
+        params.update(enable_opponent_awareness=True, command_slew_max_dt=DT,
+                      enable_launch_boost=False)
         mirror = gap_mirror.GapController(params, _Lidar(_raycast([])))
         joy = Joy()
         joy.buttons = [0, 0, 0, 0, 1]
