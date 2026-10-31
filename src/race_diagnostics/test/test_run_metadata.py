@@ -191,4 +191,11 @@ def test_record_run_records_team_code_and_names_its_nodes_by_prefix():
     assert "repos.update(team_repos(repos['racerbot-ws']))" in code
     assert 'recorder_node_names(\n' in code
     assert 'name=diag_name' in code and 'name=snapshot_name' in code
-    assert "'--node-name', bag_name" in code
+    assert "bag_record_command(os.path.join(run_dir, 'bag'), bag_name, topics)" in code
+    # ...and that argument really does name the node (recording.py, shared with
+    # auto_record_node.py, which starts the bag itself).
+    from race_diagnostics.recording import bag_record_command
+    command = bag_record_command('/run/bag', 'auto_rosbag2_recorder', ['/scan'])
+    assert command[command.index('--node-name') + 1] == 'auto_rosbag2_recorder'
+    assert command[command.index('-o') + 1] == '/run/bag'
+    assert command[-1] == '/scan'

@@ -6,7 +6,21 @@ changes and new/removed parameters called out explicitly. Upstream
 submodule bumps don't go here (see `docs/git-setup.md`) — this file is
 for changes the team made.
 
-## 2026-10-30 (latest) — Port from car 1: gap_follow's launch boost only
+## 2026-10-31 (latest) — Automatic recorder: catch more of a run's start, report failures properly
+
+Follows a check of the 2026-10-30 session's 19 automatic recordings. All were intact, but two bags began with the car already moving. **Tested on an isolated ROS domain against fake publishers, not yet on a real run.**
+
+- **`race_diagnostics` recording start** (behavior change): `auto_record` starts `ros2 bag record` itself, then `record_run.py` with `record_bag:=false` once the bag is live. **`start_delay_sec` 3.0 -> 1.5, `poll_period_sec` 0.5 -> 0.25.** New parameter `live_topics`, new terminal line `recording live: ...`. Measured with the same method, the bag now misses 2.95 to 6.9 s of a run (median about 4, 8 runs), against 5.45 to 7.0 s before (median about 6.6, 4 runs). ROS discovery causes the slow end, so the worst case barely moved and a fast press of LB can still be missed.
+- **New `auto_record.yaml` fields**: `bag_live_sec`, `bag_exit_code`, `recorder_failures` (`recorder_exit_code` stays 0 when a child dies), `superseded`, and `activity` (`started_late`, `moved`, `max_speed_mps`, `first_odom_speed_mps`, `lb_held_fraction`), from the new `run_activity.py`. `summarize_run` prints them under `Recording problems`.
+- **`data/racerbot_runs/auto_record.log`**: every start, stop, refusal and late start, kept with the runs.
+- **Shutdown**: `system_log` runs without the `ros2 run` wrapper, which swallowed SIGINT and made every recording wait 5 s and log an error. `race_diag_node` no longer dies with a traceback on rclpy's shutdown race. `record_run.py` is signalled only once it has finished starting.
+- **`snapshot_params`**: default `--delay` 15 -> 3 s, so short runs get their parameters.
+- **`tools/save_runs.sh`**: lists runs that never moved and stubs; new `--skip-idle`; refuses while `run_activity` is running.
+- **`recording.py`**: `DEFAULT_TOPICS` and `MAX_BAG_FILE_BYTES` moved here from `record_run.py`.
+- **`ros2 launch` hanging at exit**: seen in `threading._shutdown` with every child gone. `record_run.py` now exits on its own 18 s after shutdown begins. The cause inside launch was not found, so a stop that hits this can still report `recorder_killed: true` after 15 s. The bag is not affected.
+- **Test**: `test_auto_record_node.py` failed 4 of 4 runs on the old code, because fixed sleeps were racing the slow bag start. It now waits for the bag to be live.
+
+## 2026-10-30 — Port from car 1: gap_follow's launch boost only
 
 Car 1's PR #10 (`git diff bf56121 ffbfac0`). Car 1's PR #9 is not included. **Never driven on car 2.**
 

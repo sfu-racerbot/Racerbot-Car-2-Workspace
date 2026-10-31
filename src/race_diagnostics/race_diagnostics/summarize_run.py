@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 
 from race_diagnostics import node_logs
+import yaml
 from race_diagnostics.run_events import (LogClassifier, RunTimeline,
                                          blocking_gate, parse_lap_progress)
 
@@ -81,6 +82,35 @@ def read_events(run_dir: Path):
         except json.JSONDecodeError:
             continue
     return events
+
+
+def recording_problems(run_dir: Path) -> list:
+    """What auto_record.yaml says went wrong with the recording itself, so a
+    run that lost its start is not read as a complete one. [] if nothing did,
+    or if this run was not recorded by auto_record."""
+    path = run_dir / 'auto_record.yaml'
+    if not path.exists():
+        return []
+    try:
+        info = yaml.safe_load(path.read_text()) or {}
+        activity = info.get('activity') or {}
+        problems = []
+        if activity.get('started_late'):
+            problems.append(
+                f"STARTED LATE: the car was already at {activity.get('first_odom_speed_mps')} "
+                'm/s at the first /odom, so the bag does not hold the start of this run')
+        for failure in info.get('recorder_failures') or []:
+            problems.append(f"recorder process {failure['process']} died "
+                            f"(exit code {failure['exit_code']})")
+        if activity.get('moved') is False:
+            problems.append('the car never moved during this recording')
+        if info.get('superseded'):
+            problems.append('replaced by another recorder within seconds: a stub')
+        if activity.get('error'):
+            problems.append(f"could not read the bag: {activity['error']}")
+        return problems
+    except (OSError, yaml.YAMLError, AttributeError, KeyError, TypeError) as e:
+        return [f'could not read auto_record.yaml: {e}']
 
 
 def analyze(run_dir: Path) -> dict:
@@ -188,6 +218,7 @@ def analyze(run_dir: Path) -> dict:
             seen.add(error)
             unique.append(error)
     result['errors'] = unique[:25]
+    result['recording_problems'] = recording_problems(run_dir)
     return result
 
 
@@ -251,6 +282,12 @@ def render(result: dict) -> str:
                          f"{detail['value']} vs limit {detail['limit']}")
         else:
             lines.append(f"  last sample was held open by '{gate['gate']}'")
+        lines.append('')
+
+    if result.get('recording_problems'):
+        lines.append('## Recording problems')
+        for problem in result['recording_problems']:
+            lines.append(f'  {problem}')
         lines.append('')
 
     if result['errors']:

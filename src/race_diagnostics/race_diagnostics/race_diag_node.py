@@ -42,6 +42,7 @@ import time
 from pathlib import Path
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
@@ -290,13 +291,25 @@ class RaceDiagNode(Node):
             self._events_file = None
 
 
+def spin_until_shutdown(node, spin=rclpy.spin, ok=rclpy.ok):
+    """Spin until a normal shutdown. SIGINT shuts the context down under the
+    executor, which can then fail mid-take with a RuntimeError (run
+    20261030-181003, after the bag had closed); that is the shutdown, not a
+    fault. The same error while the context is still up is a real one."""
+    try:
+        spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    except RuntimeError:
+        if ok():
+            raise
+
+
 def main(args=None):
     rclpy.init(args=args)
     node = RaceDiagNode()
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+        spin_until_shutdown(node)
     finally:
         node.close()
         node.destroy_node()

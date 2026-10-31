@@ -94,3 +94,42 @@ def test_late_node_restart_namespace_and_sigterm(tmp_path):
             executor.remove_node(node)
             node.destroy_node()
         rclpy.shutdown(context=context)
+
+
+def test_default_delay_snapshots_a_node_during_a_short_run(tmp_path):
+    # recorded measurement: runs 20261030-182504 (12.5 s) and -183053 (15 s) have
+    # an empty metadata/params/ because the old default waited 15 s. By shutdown
+    # the algorithm has gone, so the snapshot has to be taken early.
+    context = rclpy.Context()
+    rclpy.init(context=context)
+    executor = SingleThreadedExecutor(context=context)
+    stop = threading.Event()
+
+    def spin():
+        while not stop.is_set():
+            executor.spin_once(timeout_sec=0.05)
+
+    node = Node('short_run_node', context=context)
+    node.declare_parameter('marker', 7.5)
+    executor.add_node(node)
+    thread = threading.Thread(target=spin, daemon=True)
+    thread.start()
+    out = tmp_path / 'params'
+    proc = subprocess.Popen(['ros2', 'run', 'race_diagnostics', 'snapshot_params',
+                             '--output', str(out)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+    try:
+        path = out / 'short_run_node.yaml'
+        # Under the old delay's 15 s, with room for a slow start and DDS discovery.
+        assert wait_for_file(path, timeout=12.0), 'no snapshot within a short run'
+        # oracle: the value declared above.
+        assert yaml.safe_load(path.read_text())['/short_run_node']['ros__parameters']['marker'] == 7.5
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=10.0)
+        stop.set()
+        thread.join(timeout=5.0)
+        executor.remove_node(node)
+        node.destroy_node()
+        rclpy.shutdown(context=context)

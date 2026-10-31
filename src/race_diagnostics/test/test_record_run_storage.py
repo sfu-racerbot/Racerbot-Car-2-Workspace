@@ -1,8 +1,9 @@
 """
 Where record_run.py writes, and that what it writes can be pushed to GitHub.
 
-Read out of the launch file with `ast`, like test_record_run_topics.py, so
-this runs without ROS.
+Read out of the files with `ast`, like test_record_run_topics.py, so this runs
+without ROS. The size and the command live in recording.py, shared by the
+launch file and bringup's auto_record, which starts the bag itself.
 
 The requirement (data/README.md): runs land in the workspace's data/ folder
 and are committed, and GitHub refuses any single file over 100 MB
@@ -14,31 +15,34 @@ So the bag must be split, at a size with room for rosbag2's overshoot.
 import ast
 import os
 
-_LAUNCH = os.path.join(os.path.dirname(__file__), '..', 'launch', 'record_run.py')
+_PKG = os.path.join(os.path.dirname(__file__), '..')
+_LAUNCH = os.path.join(_PKG, 'launch', 'record_run.py')
+_RECORDING = os.path.join(_PKG, 'race_diagnostics', 'recording.py')
+_NODE = os.path.join(_PKG, 'race_diagnostics', 'auto_record_node.py')
 GITHUB_FILE_LIMIT_BYTES = 100 * 1000 * 1000
 
 
-def _tree():
-    with open(_LAUNCH) as handle:
+def _tree(path=_LAUNCH):
+    with open(path) as handle:
         return ast.parse(handle.read())
 
 
 def _max_bag_bytes():
-    for node in _tree().body:
+    for node in _tree(_RECORDING).body:
         if isinstance(node, ast.Assign) and any(
                 getattr(t, 'id', None) == 'MAX_BAG_FILE_BYTES' for t in node.targets):
-            return eval(compile(ast.Expression(node.value), _LAUNCH, 'eval'), {})
-    raise AssertionError('record_run.py no longer defines MAX_BAG_FILE_BYTES')
+            return eval(compile(ast.Expression(node.value), _RECORDING, 'eval'), {})
+    raise AssertionError('recording.py no longer defines MAX_BAG_FILE_BYTES')
 
 
 def _bag_record_command():
     """The list literal that starts `ros2 bag record`."""
-    for node in ast.walk(_tree()):
+    for node in ast.walk(_tree(_RECORDING)):
         if isinstance(node, ast.List):
             words = [e.value for e in node.elts if isinstance(e, ast.Constant)]
             if words[:3] == ['ros2', 'bag', 'record']:
                 return node
-    raise AssertionError('record_run.py no longer runs `ros2 bag record`')
+    raise AssertionError('recording.py no longer runs `ros2 bag record`')
 
 
 def test_bag_files_split_well_under_githubs_file_limit():
@@ -62,6 +66,14 @@ def test_the_recorder_is_actually_told_to_split():
     value = elts[flags[0] + 1]
     assert isinstance(value, ast.Call) and getattr(value.func, 'id', None) == 'str'
     assert [getattr(a, 'id', None) for a in value.args] == ['MAX_BAG_FILE_BYTES']
+
+
+def test_both_ways_of_recording_use_that_command():
+    # A second, hand-written `ros2 bag record` would silently not split.
+    for path in (_LAUNCH, _NODE):
+        calls = [n for n in ast.walk(_tree(path)) if isinstance(n, ast.Call)
+                 and getattr(n.func, 'id', getattr(n.func, 'attr', None)) == 'bag_record_command']
+        assert calls, f'{path} does not build its bag command with bag_record_command'
 
 
 def test_runs_are_written_into_the_workspace_data_folder():

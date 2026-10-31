@@ -39,13 +39,20 @@ auto_record:
       - rosbag2_recorder*
 
     # An algorithm must be up this long before recording starts, so a
-    # launch that brings its own recorder gets it onto the graph first.
-    start_delay_sec: 3.0
+    # launch that brings its own recorder gets it onto the graph first
+    # (map_course's appears about 1 s after its algorithm). Every second here
+    # is a second of the run the bag can miss: on 2026-10-30, at 3 s, the car
+    # was already moving when two bags began. If a recorder does arrive later,
+    # the stub this one leaves is labelled `superseded: true`.
+    start_delay_sec: 1.5
     # Recording stops once no algorithm has published for this long.
     stop_delay_sec: 3.0
-    poll_period_sec: 0.5
+    poll_period_sec: 0.25
 
     record_bag: true
+    # Once the bag has subscribed to all of these that anyone publishes, the
+    # bringup terminal says `recording live`. What a run's start is judged on.
+    live_topics: ['/scan', '/odom', '/drive', '/joy']
     # Space-separated topics to bag. Empty: record_run.py's DEFAULT_TOPICS.
     topics: ''
     # Below this much free space under output_directory, do not start.

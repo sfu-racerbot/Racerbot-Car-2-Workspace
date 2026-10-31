@@ -131,3 +131,46 @@ def test_analyze_prefers_launch_log_over_node_logs_when_both_could_apply(tmp_pat
 
     result = analyze(run_dir)
     assert result['watchdogs'].get('scan_empty') == 1
+
+
+def _auto_record_yaml(run_dir, **info):
+    import yaml
+    (run_dir / 'auto_record.yaml').write_text(yaml.safe_dump(info))
+
+
+def test_render_warns_when_a_run_lost_its_start(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    _auto_record_yaml(run_dir, activity={'started_late': True, 'first_odom_speed_mps': 3.5})
+    text = render(analyze(run_dir))
+    assert 'STARTED LATE' in text and '3.5 m/s' in text
+
+
+def test_render_reports_a_recorder_process_that_died(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    _auto_record_yaml(run_dir, recorder_failures=[{'process': 'race_diag_node', 'exit_code': 1}])
+    text = render(analyze(run_dir))
+    assert 'race_diag_node' in text and 'exit code 1' in text
+
+
+def test_render_labels_a_run_that_never_moved_and_a_stub(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    _auto_record_yaml(run_dir, superseded=True, activity={'moved': False})
+    text = render(analyze(run_dir))
+    assert 'never moved' in text and 'replaced by another recorder' in text
+
+
+def test_render_says_nothing_about_recording_on_a_clean_run(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    _auto_record_yaml(run_dir, recorder_failures=[],
+                      activity={'started_late': False, 'moved': True})
+    assert '## Recording problems' not in render(analyze(run_dir))
+
+
+def test_render_says_nothing_about_recording_without_auto_record_yaml(tmp_path):
+    assert '## Recording problems' not in render(analyze(_run_dir(tmp_path)))
+
+
+def test_a_corrupt_auto_record_yaml_does_not_stop_the_summary(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    (run_dir / 'auto_record.yaml').write_text('{{{ not yaml')
+    assert 'could not read auto_record.yaml' in render(analyze(run_dir))

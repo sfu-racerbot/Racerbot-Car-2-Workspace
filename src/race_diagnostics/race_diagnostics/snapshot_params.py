@@ -3,7 +3,9 @@
 Started by record_run.py. Read-only: it only calls each node's
 list_parameters and get_parameters services, the same ones `ros2 param dump`
 uses, and publishes nothing. It waits `--delay` seconds for the stack to come
-up, then watches for nodes and restarts for the whole run by default.
+up, then watches for nodes and restarts for the whole run by default. The delay
+is short because a run can be short (20261030-182504 lasted 12.5 s and got no
+snapshots under the old 15 s), and by shutdown the algorithm has already gone.
 Changes made during the run are in the
 bag's /parameter_events.
 
@@ -61,7 +63,7 @@ def snapshot(node, full_name, out_dir, timeout, *, file_name):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--output', required=True)
-    ap.add_argument('--delay', type=float, default=15.0)
+    ap.add_argument('--delay', type=float, default=3.0)
     ap.add_argument('--watch', type=float, default=float('inf'))
     ap.add_argument('--timeout', type=float, default=2.0)
     ap.add_argument('--poll', type=float, default=POLL_S)

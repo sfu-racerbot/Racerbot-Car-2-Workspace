@@ -205,8 +205,12 @@ def test_record_run_wiring(tmp_path):
         return [[perform_substitutions(context, part) for part in action.cmd]
                 for action in actions if type(action) is ExecuteProcess]
 
-    # oracle: requested launch contract, with the run's system directory.
-    assert commands() == [['ros2', 'run', 'race_diagnostics', 'system_log',
+    # oracle: launch signals only the process it started, and `ros2 run`
+    # swallows SIGINT without passing it on (ros2run/api run_executable). So it
+    # must start the logger itself, with the run's system directory. The real
+    # shutdown is test_auto_record_node.py's
+    # test_record_run_stops_every_process_on_sigint.
+    assert commands() == [[sys.executable, '-m', 'race_diagnostics.system_log',
                            '--output', str(tmp_path / 'run' / 'system')]]
     context.launch_configurations['system_log'] = 'false'
     assert commands() == []

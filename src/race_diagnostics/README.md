@@ -51,7 +51,9 @@ ros2 run race_diagnostics summarize_run <dir>
 | `race_diagnostics/summarize_run.py` | Turns a run directory into one page of findings (`--json` for agents). |
 | `launch/record_run.py` | Probe + rosbag into one timestamped directory. `run_directory:=` and `name_prefix:=` are for `auto_record`. |
 | `race_diagnostics/auto_record.py` | Pure logic: when the automatic recorder starts and stops. No rclpy. |
-| `race_diagnostics/auto_record_node.py` | The automatic recorder bringup starts: reads the graph, runs `record_run.py` while an algorithm runs. |
+| `race_diagnostics/auto_record_node.py` | The automatic recorder bringup starts: reads the graph, runs `ros2 bag record` and `record_run.py` while an algorithm runs. |
+| `race_diagnostics/recording.py` | What a recording bags and the command that bags it, shared by `record_run.py` and `auto_record`. No rclpy. |
+| `race_diagnostics/run_activity.py` | After a recording closes: adds what the car did to `auto_record.yaml`, including whether the bag missed the start. |
 | `launch/auto_record_launch.py` | Starts `auto_record`; included by every `f1tenth_stack` bringup. |
 | `config/race_diagnostics.yaml` | Topics, reporting cadence, pose-lag alert threshold. |
 | `config/auto_record.yaml` | Which topics mean "an algorithm is running", which nodes are another recorder, the start/stop delays. |

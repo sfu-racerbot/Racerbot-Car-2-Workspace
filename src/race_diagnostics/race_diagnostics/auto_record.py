@@ -29,6 +29,7 @@ The rules (docs/run-diagnostics.md#automatic-recording):
 
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
+import re
 
 IDLE = 'idle'            # no algorithm, or waiting out another recorder
 WAITING = 'waiting'      # algorithm seen, start_delay_sec not yet up
@@ -41,6 +42,14 @@ HELD = 'held'            # the recording died on its own; wait for a restart
 # AUTO_PREFIX, which is how it tells its own recording from anyone else's.
 RECORDER_NODES = ('race_diag_node', 'snapshot_params', 'rosbag2_recorder')
 AUTO_PREFIX = 'auto_'
+
+# A recording replaced by another recorder this soon holds nothing the other
+# one does not: it is map_course's own recorder arriving after start_delay_sec.
+# Labelled, not deleted, so a person decides.
+SUPERSEDED_WITHIN_SEC = 10.0
+
+_CHILD_DIED = re.compile(r'^\[ERROR\] \[([\w.]+)-\d+\]: process has died \[pid \d+, exit code (-?\d+)',
+                         re.MULTILINE)
 
 
 def recorder_node_names(prefix=''):
@@ -119,6 +128,26 @@ def describe(found):
                      for topic, names in sorted(found.items()))
 
 
+def waiting_on(published, subscribed):
+    """The topics someone is publishing that the bag has not subscribed to yet.
+    A topic nobody publishes is not waited for: it would never arrive."""
+    return sorted(set(published) - set(subscribed))
+
+
+def recorder_failures(log_text):
+    """Which of record_run.py's processes died, from launch's own lines in
+    recorder.log. Launch itself exits 0 when one of them dies, so its exit code
+    cannot say. [{'process': name, 'exit_code': code}, ...]"""
+    return [{'process': name, 'exit_code': int(code)}
+            for name, code in _CHILD_DIED.findall(log_text)]
+
+
+def is_superseded(stop_reason, duration_sec):
+    """Was this recording only a stub, replaced at once by another recorder?"""
+    return (bool(stop_reason) and stop_reason.startswith('another recorder started')
+            and duration_sec <= SUPERSEDED_WITHIN_SEC)
+
+
 class AutoRecorder:
     """The start/stop state machine. Feed it every graph poll; it returns
     what to do. ``now`` is any monotonic clock in seconds."""
@@ -128,6 +157,11 @@ class AutoRecorder:
         self.state = IDLE
         self._waiting_since = None
         self._last_algorithm = None
+
+    @property
+    def algorithm_seen_at(self):
+        """When the algorithm being recorded first appeared, on update()'s clock."""
+        return self._waiting_since
 
     def update(self, now, publishers, nodes, recording_alive=True):
         s = self.settings

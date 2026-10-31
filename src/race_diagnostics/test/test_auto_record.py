@@ -25,7 +25,7 @@ from race_diagnostics import auto_record as ar  # noqa: E402
 
 PKG = Path(__file__).resolve().parents[1]
 CONFIG = PKG / 'config' / 'auto_record.yaml'
-RECORD_RUN = PKG / 'launch' / 'record_run.py'
+RECORDING = PKG / 'race_diagnostics' / 'recording.py'
 
 
 def shipped_params():
@@ -286,7 +286,7 @@ def test_shipped_delays_are_positive_and_bounded():
 
 def test_every_trigger_topic_is_bagged_by_record_run():
     """A recording must contain what started it."""
-    tree = ast.parse(RECORD_RUN.read_text())
+    tree = ast.parse(RECORDING.read_text())
     topics = next(ast.literal_eval(node.value) for node in tree.body
                   if isinstance(node, ast.Assign)
                   and any(getattr(t, 'id', None) == 'DEFAULT_TOPICS' for t in node.targets))
@@ -297,3 +297,104 @@ def test_every_trigger_topic_is_bagged_by_record_run():
 def test_describe_names_every_algorithm():
     assert ar.describe({'/drive': ['/a', '/b'], '/auto_map/drive': ['/c']}) == \
         '/c on /auto_map/drive, /a+/b on /drive'
+
+
+# ------------------------------------------- how soon the recording starts
+
+def test_shipped_start_delay_leaves_room_to_catch_the_start_of_a_run():
+    # recorded measurement: on 2026-10-30 runs 20261030-183134 and -184149 were
+    # already at 2.3 and 3.5 m/s at their first /odom, with LB pressed about 6 s
+    # after the node appeared. `ros2 bag record` needs up to 2.6 s (measured
+    # 2026-10-31), so the delay has to stay well under 6 - 2.6 s; and at or above
+    # about 1 s, when map_course's recorder appears (docs/run-diagnostics.md).
+    assert 1.0 <= shipped().start_delay_sec <= 2.0
+
+
+def test_the_time_the_algorithm_appeared_is_kept_for_the_latency_report():
+    m = ar.AutoRecorder(plain(start=1.5))
+    assert m.algorithm_seen_at is None
+    m.update(10.0, ALGO, BRINGUP)
+    m.update(11.0, ALGO, BRINGUP)
+    assert m.update(11.5, ALGO, BRINGUP).action == 'start'
+    # oracle: first sighting, not the start 1.5 s later.
+    assert m.algorithm_seen_at == 10.0
+
+
+# --------------------------------------------- is the bag really listening
+
+def test_live_needs_every_published_topic_subscribed():
+    assert ar.waiting_on({'/scan', '/joy'}, {'/scan'}) == ['/joy']
+    assert ar.waiting_on({'/scan', '/joy'}, {'/scan', '/joy'}) == []
+
+
+def test_a_topic_nobody_publishes_is_not_waited_for():
+    # A controller that is not plugged in must not hold the message back forever.
+    assert ar.waiting_on(set(), {'/scan'}) == []
+
+
+def test_shipped_live_topics_are_bagged():
+    tree = ast.parse(RECORDING.read_text())
+    topics = next(ast.literal_eval(node.value) for node in tree.body
+                  if isinstance(node, ast.Assign)
+                  and any(getattr(t, 'id', None) == 'DEFAULT_TOPICS' for t in node.targets))
+    live = shipped_params()['live_topics']
+    # oracle: what a run's start is judged on -- what it saw, what it was told,
+    # how fast it went, and whether LB was held.
+    assert {'/scan', '/odom', '/drive', '/joy'} <= set(live)
+    assert not set(live) - set(topics)
+
+
+# --------------------------------------------------- what the log gives away
+
+def test_child_failures_are_found_in_a_real_recorder_log():
+    # recorded measurement: recorder.log of run 20261030-181003, whose
+    # auto_record.yaml says recorder_exit_code: 0.
+    text = (
+        "[INFO] [snapshot_params-2]: process has finished cleanly [pid 45258]\n"
+        "[ERROR] [race_diag_node-1]: process has died [pid 45257, exit code 1, cmd "
+        "'/x/race_diag_node --ros-args -r __node:=auto_race_diag_node'].\n")
+    assert ar.recorder_failures(text) == [{'process': 'race_diag_node', 'exit_code': 1}]
+
+
+def test_a_child_killed_by_a_signal_is_a_failure():
+    # recorded measurement: recorder.log of run 20261030-185653.
+    text = ("[ERROR] [auto_system_log-4]: process has died [pid 140300, exit code -15, "
+            "cmd 'ros2 run race_diagnostics system_log --output /x'].\n")
+    assert ar.recorder_failures(text) == [{'process': 'auto_system_log', 'exit_code': -15}]
+
+
+def test_every_failed_child_is_reported():
+    text = ("[ERROR] [a-1]: process has died [pid 1, exit code 1, cmd 'a'].\n"
+            "[ERROR] [b_c-2]: process has died [pid 2, exit code 2, cmd 'b'].\n")
+    assert ar.recorder_failures(text) == [{'process': 'a', 'exit_code': 1},
+                                          {'process': 'b_c', 'exit_code': 2}]
+
+
+@pytest.mark.parametrize('text', [
+    '',
+    "[INFO] [ros2-3]: process has finished cleanly [pid 140299]\n",
+    "[ERROR] [auto_system_log-4]: process[auto_system_log-4] failed to terminate\n",
+    "[race_diag_node-1] a message saying process has died [pid x]\n",
+    "\ufffd\x00 not a log line\n",
+])
+def test_clean_or_unrelated_lines_are_not_failures(text):
+    assert ar.recorder_failures(text) == []
+
+
+# ------------------------------------------------------ a stub of a recording
+
+def test_a_recording_replaced_within_seconds_is_superseded():
+    reason = 'another recorder started: /race_diag_node'
+    assert ar.is_superseded(reason, 2.0) is True
+    assert ar.is_superseded(reason, ar.SUPERSEDED_WITHIN_SEC) is True
+
+
+def test_a_long_recording_is_never_labelled_a_stub():
+    reason = 'another recorder started: /race_diag_node'
+    assert ar.is_superseded(reason, ar.SUPERSEDED_WITHIN_SEC + 0.1) is False
+
+
+@pytest.mark.parametrize('reason', ['no algorithm publishing for 3.0 s', 'bringup shut down',
+                                    'the recording exited on its own', '', None])
+def test_a_short_run_that_ended_any_other_way_is_a_real_run(reason):
+    assert ar.is_superseded(reason, 1.0) is False

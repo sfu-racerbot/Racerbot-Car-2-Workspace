@@ -31,6 +31,11 @@ git's push summary. It commits nothing, and says why, if a recorder is still
 running or a file is too big for GitHub (below). `--no-push` commits without
 pushing.
 
+Before committing it lists any new run where the car never moved, and any stub
+another recorder replaced at once. They are committed unless you pass
+`--skip-idle`, which leaves them uncommitted on disk. Nothing is deleted.
+`racerbot_runs/auto_record.log` is the recorder's log of what it decided, and is committed too.
+
 ## Things to know
 
 - **The repo is public.** Everything here is visible to anyone. Run metadata
