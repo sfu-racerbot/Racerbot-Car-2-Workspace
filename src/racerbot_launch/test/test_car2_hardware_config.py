@@ -202,6 +202,19 @@ def test_gap_follow_steering_damping_is_off_by_default():
     assert defaults == ['false']
 
 
+def test_gap_follow_keeps_car_2s_course_settings():
+    # oracle: spec -- docs/car1-vs-car2.md#gap_follow-course-settings. A port from
+    # car 1, which does not have these yet, must not drop them.
+    params = _yaml(os.path.join(_SRC, 'gap_follow', 'config', 'gap_follow.yaml'))
+    p = params['gap_follow_node']['ros__parameters']
+    assert p['swept_clearance_max_length'] == 5.0
+    assert p['aim_depth_bias'] == 0.0
+    assert p['aim_depth_bias_fallback'] == 1.0
+    assert p['opponent_follow_floor'] == 0.5
+    launch = _read(_SRC, 'gap_follow', 'launch', 'gap_follow_launch.py')
+    assert re.findall(r"'time_trial', default_value='(\w+)'", launch) == ['false']
+
+
 def test_gap_follow_imu_features_ship_off_on_car2():
     # Ported from car 1's Part B-2/3 (PR #8): the understeer, traction and
     # impact thresholds are car 1's measurements, and car 2's BNO085 is not

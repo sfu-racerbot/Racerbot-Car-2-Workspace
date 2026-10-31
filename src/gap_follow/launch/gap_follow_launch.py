@@ -7,7 +7,7 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-from gap_follow.launch_speed import speed_cap_overrides, yaml_parameters
+from gap_follow.launch_speed import TIME_TRIAL, speed_cap_overrides, yaml_parameters
 from gap_follow.launch_imu import select_imu_hardware
 
 
@@ -88,6 +88,14 @@ def generate_launch_description(imu_probe=None):
                     'the braking and curvature ceilings still apply. false turns it off '
                     '(docs/gap-follow.md#launch-boost). Simulator-validated only.')
 
+    time_trial_arg = DeclareLaunchArgument(
+        'time_trial', default_value='false',
+        description='true: one car against the clock. Aims at the deepest point of each '
+                    'gap and raises max_lateral_accel to 3.0. Turns opponent awareness '
+                    'off whatever opponent_awareness says, so never with another car on '
+                    'the track. Simulator-validated only '
+                    '(docs/gap-follow.md#speed-on-the-real-course-2026-10-30).')
+
     fused_speed_arg = DeclareLaunchArgument(
         'fused_speed', default_value=LaunchConfiguration('imu_all', default='false'),
         description='true: read speed from /odom/fused (wheels plus BNO forward acceleration). '
@@ -126,6 +134,8 @@ def generate_launch_description(imu_probe=None):
                      LaunchConfiguration('adaptive_grip').perform(context))
         boost = _flag('launch_boost',
                       LaunchConfiguration('launch_boost').perform(context))
+        time_trial = _flag('time_trial',
+                           LaunchConfiguration('time_trial').perform(context))
         fused = _flag('fused_speed',
                       LaunchConfiguration('fused_speed').perform(context))
         understeer = _flag('imu_understeer',
@@ -159,6 +169,7 @@ def generate_launch_description(imu_probe=None):
                          'enable_imu_impact_stop': impact,
                          'enable_launch_boost': boost},
                         speed,
+                        TIME_TRIAL if time_trial else {},
                         {'odom_topic': FUSED_ODOM} if fused else {}],
         )]
         if damping or grip or fused or understeer or traction or impact:
@@ -177,5 +188,5 @@ def generate_launch_description(imu_probe=None):
 
     return LaunchDescription([opponent_arg, max_speed_arg, imu_arg, imu_all_arg, steering_damping_arg,
                               adaptive_grip_arg, fused_speed_arg, understeer_arg,
-                              traction_arg, impact_arg, imu_hardware_arg, launch_boost_arg,
+                              traction_arg, impact_arg, imu_hardware_arg, launch_boost_arg, time_trial_arg,
                               OpaqueFunction(function=node)])

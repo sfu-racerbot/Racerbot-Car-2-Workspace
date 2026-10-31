@@ -496,12 +496,15 @@ def _feed_imu(node, state, yaw_rate):
 
 def test_mirror_matches_stopped_then_departing_confirmed_car():
     from test_opponent_awareness_node import _make
-    node, published = _make('-p', 'enable_opponent_awareness:=true')
+    # The car steers round this box, and only a car on its own arc is held, so the
+    # band is widened to keep the box on the arc: the memory is what is compared.
+    node, published = _make('-p', 'enable_opponent_awareness:=true',
+                            '-p', 'opponent_follow_lateral:=1.0')
     try:
         params = gap_mirror.node_params()
         # Mid-race, like _make's node: the launch boost would ignore the car.
         params.update(enable_opponent_awareness=True, command_slew_max_dt=DT,
-                      enable_launch_boost=False)
+                      enable_launch_boost=False, opponent_follow_lateral=1.0)
         mirror = gap_mirror.GapController(params, _Lidar(_raycast([])))
         joy = Joy()
         joy.buttons = [0, 0, 0, 0, 1]
@@ -710,12 +713,15 @@ def test_mirror_matches_the_node_through_a_drop_and_hold():
     mirror must hold it on the same ticks. Each controller keeps its own state."""
     from test_opponent_awareness_node import _make
     gap = 0.9
-    node, published = _make('-p', 'enable_opponent_awareness:=true')
+    # The car steers round this box, and only a car on its own arc is held, so the
+    # band is widened to keep the box on the arc: the memory is what is compared.
+    node, published = _make('-p', 'enable_opponent_awareness:=true',
+                            '-p', 'opponent_follow_lateral:=1.0')
     try:
         params = gap_mirror.node_params()
         # Mid-race, like _make's node: the launch boost would ignore the car.
         params.update(enable_opponent_awareness=True, command_slew_max_dt=DT,
-                      enable_launch_boost=False)
+                      enable_launch_boost=False, opponent_follow_lateral=1.0)
         mirror = gap_mirror.GapController(params, _Lidar(_raycast([])))
         joy = Joy()
         joy.buttons = [0, 0, 0, 0, 1]

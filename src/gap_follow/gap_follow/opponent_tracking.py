@@ -30,6 +30,10 @@ The pipeline, once per scan:
                         margin, so it will only pass with real room
   follow_speed_cap   -> speed ceiling from the gap to a moving car ahead in
                         the path: (gap - min_gap) / time_gap
+  _follow_over       -> the same law, floored at follow_floor for anything off
+                        this car's own arc: the scan cannot tell a wall
+                        fragment from a car, and only one on the arc may
+                        ask for a stop
 
 Nothing here touches the safety layers. TTC, the contact floor, the forward
 reserve, swept-path clearance and the arc guard all keep reading the real
@@ -72,6 +76,7 @@ class OpponentParams:
     prediction_horizon: float = 0.8  # s, how far ahead its path is blocked
     prediction_step: float = 0.1     # s
     follow_min_gap: float = 0.5      # m, bumper-to-car gap at zero speed
+    follow_floor: float = 0.5        # m/s, the follow law never asks for less (0: off)
     follow_time_gap: float = 1.0     # s
     abort_speed_margin: float = 0.5  # m/s, drop behind an alongside car on refusal
     follow_lateral: float = 0.45     # m, |y| within which a car is "in path"
@@ -109,7 +114,7 @@ class OpponentParams:
             if not (math.isfinite(value) and value > 0.0):
                 raise ValueError(f'opponent_{name} must be positive and finite, got {value!r}')
         for name in ('passing_margin', 'prediction_horizon', 'follow_min_gap',
-                     'steer_delay', 'follow_memory_sec', 'abort_speed_margin'):
+                     'steer_delay', 'follow_memory_sec', 'abort_speed_margin', 'follow_floor'):
             value = getattr(self, name)
             if not (math.isfinite(value) and value >= 0.0):
                 raise ValueError(f'opponent_{name} must be >= 0 and finite, got {value!r}')
@@ -756,13 +761,40 @@ class OpponentAwareness:
         full relevance band, regardless of another car permitting a pass.
         This is the part FollowCapMemory may hold after the car is lost.
         """
-        moving_cap = follow_speed_cap(
-            [(m[4], m[1]) for m in self.moving_body()], self.front_x, self.params,
-            lateral=None if passing else self.params.relevant_lateral)
-        held_cap = follow_speed_cap(
-            [(m[4], m[1]) for m in self._held_body()], self.front_x, self.params,
-            lateral=self.params.relevant_lateral)
+        moving_cap = self._follow_over(
+            self.moving_body(), None if passing else self.params.relevant_lateral, True)
+        held_cap = self._follow_over(self._held_body(), self.params.relevant_lateral, True)
         return min(moving_cap, held_cap)
+
+    def _on_my_arc(self, near_x: float, y: float) -> bool:
+        """Is this point within ``follow_lateral`` of the arc the rack is on?"""
+        curvature = math.tan(self.steer.angle) / self.wheelbase
+        if abs(curvature) < 1e-3:
+            return abs(y) <= self.params.follow_lateral
+        radius = 1.0 / curvature
+        return abs(math.hypot(near_x, y - radius) - abs(radius)) <= self.params.follow_lateral
+
+    def _follow_over(self, bodies, lateral, on_arc: bool) -> float:
+        """The follow law over the ``bodies`` on (or off) this car's own arc.
+        Off the arc it never goes below ``follow_floor``.
+
+        The scan alone cannot say a cluster is a car: fragments of walls pass for
+        moving ones (all 94 in the single-car runs of 2026-10-30 that were checked
+        against the map sat on or near a wall), and a ceiling of zero from one
+        beside the car parked it with a clear path. A car really ahead is on the
+        arc and gets the full law, and whatever the car would actually hit is
+        stopped for by the braking ceiling, TTC and the clearance stops, which
+        read the scan.
+        """
+        cap = math.inf
+        for m in bodies:
+            if self._on_my_arc(m[4], m[1]) != on_arc:
+                continue
+            law = follow_speed_cap([(m[4], m[1])], self.front_x, self.params, lateral=lateral)
+            if math.isfinite(law) and not on_arc:
+                law = max(law, self.params.follow_floor)
+            cap = min(cap, law)
+        return cap
 
     def alongside_cap(self, passing: bool = True) -> float:
         """The alongside-abort ceiling, in m/s; inf when it does not apply.
@@ -788,10 +820,15 @@ class OpponentAwareness:
         (measured 2026-10-29: two ticks of a false mover held for 1 s, and
         3 of 36 two-car runs on car 1's course ended wedged).
         """
-        abort_cap = math.inf
+        # Off the arc: only on scans that see it, so FollowCapMemory cannot hold
+        # a wall fragment's ceiling after the fragment has gone.
+        lateral = None if passing else self.params.relevant_lateral
+        abort_cap = min(self._follow_over(self.moving_body(), lateral, False),
+                        self._follow_over(self._held_body(), self.params.relevant_lateral, False))
         if not passing:
             for m in self.moving_body() + self._held_body():
                 if m[4] <= self.front_x and m[0] > self.centre_x:
                     abort_cap = min(abort_cap, max(
-                        0.0, math.hypot(m[2], m[3]) - self.params.abort_speed_margin))
+                        self.params.follow_floor,
+                        math.hypot(m[2], m[3]) - self.params.abort_speed_margin))
         return abort_cap

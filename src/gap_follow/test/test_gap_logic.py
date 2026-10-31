@@ -1576,3 +1576,51 @@ def test_a_step_in_the_steering_is_only_partly_rescued_by_the_lag():
     # constants), not at the lag.
     assert r_p[16] < 0.95 <= r_p[17]
     assert r_c[16] < 0.95 <= r_c[17]
+
+
+# --- aim_within_gap's depth bias (docs/gap-follow.md#speed-on-the-real-course-2026-10-30) --
+
+# A gap from beam 10 to beam 30 with both edges real: depth peaks at beam 26.
+_AIM_ANGLES = np.linspace(-1.0, 1.0, 41)
+_AIM_WINDOW = np.array([1.0] * 10 + [2.0] * 16 + [6.0] + [2.0] * 4 + [1.0] * 10)
+
+
+def test_aim_depth_bias_zero_is_the_midpoint():
+    # oracle: closed form, the integer midpoint.
+    assert gap_logic.aim_within_gap(_AIM_WINDOW, 10, 30, _AIM_ANGLES, 0.0) == 20
+
+
+def test_aim_depth_bias_defaults_to_the_midpoint():
+    assert gap_logic.aim_within_gap(_AIM_WINDOW, 10, 30, _AIM_ANGLES) == 20
+
+
+def test_aim_depth_bias_one_is_the_deepest_beam():
+    assert int(np.argmax(_AIM_WINDOW)) == 26
+    assert gap_logic.aim_within_gap(_AIM_WINDOW, 10, 30, _AIM_ANGLES, 1.0) == 26
+
+
+def test_aim_depth_bias_slides_between_them():
+    # oracle: closed form, midpoint + bias * (deepest - midpoint), rounded.
+    assert gap_logic.aim_within_gap(_AIM_WINDOW, 10, 30, _AIM_ANGLES, 0.5) == 23
+
+
+def test_aim_depth_bias_past_one_stays_on_the_deepest_beam():
+    # A value past the validated range must not aim beyond the gap.
+    assert gap_logic.aim_within_gap(_AIM_WINDOW, 10, 30, _AIM_ANGLES, 3.0) == 26
+
+
+def test_aim_depth_bias_ties_take_the_beam_nearest_straight_ahead():
+    window = np.array([1.0] * 10 + [5.0] * 21 + [1.0] * 10)
+    # Every beam is equally deep: straight ahead is beam 20, not the gap's edge.
+    assert gap_logic.aim_within_gap(window, 10, 30, _AIM_ANGLES, 1.0) == 20
+
+
+def test_aim_depth_bias_leaves_a_clipped_gap_on_the_deepest_beam():
+    # Edge at the field of view: the depth rule already applies, whatever the bias.
+    window = np.array([3.0] * 5 + [6.0] + [3.0] * 15 + [1.0] * 20)
+    assert (gap_logic.aim_within_gap(window, 0, 20, _AIM_ANGLES, 0.0)
+            == gap_logic.aim_within_gap(window, 0, 20, _AIM_ANGLES, 1.0) == 5)
+
+
+def test_aim_depth_bias_with_no_gap_is_none():
+    assert gap_logic.aim_within_gap(_AIM_WINDOW, None, None, _AIM_ANGLES, 1.0) is None

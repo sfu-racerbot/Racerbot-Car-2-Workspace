@@ -30,7 +30,7 @@ MAX_RANGE = 10.0
 
 @pytest.mark.parametrize('speed,margin', [(1.5, 0.5), (0.2, 0.5), (1.5, 0.0)])
 def test_alongside_abort_closed_form_and_ahead_law(speed, margin):
-    p = ot.OpponentParams(abort_speed_margin=margin)
+    p = ot.OpponentParams(abort_speed_margin=margin, follow_floor=0.0)
     layer = ot.OpponentAwareness(p, WHEELBASE, LASER_X, 0.0, CAR_LENGTH)
     track = ot.Track(FRONT, 0.7, vx=speed, moving=True)
     layer.tracker.tracks = [track]
@@ -46,6 +46,74 @@ def test_alongside_abort_closed_form_and_ahead_law(speed, margin):
     assert layer.follow_cap(False) == math.inf
     layer.tracker.tracks = []
     assert layer.follow_cap(False) == math.inf
+
+
+def _moving_layer(x, y, steering=0.0, **params):
+    """A layer with one moving track whose nearest point is at (x, y) in base_link."""
+    layer = ot.OpponentAwareness(ot.OpponentParams(**params), WHEELBASE, LASER_X, 0.0, CAR_LENGTH)
+    layer.tracker.tracks = [ot.Track(x, y, vx=1.0, moving=True)]
+    layer.steer.reset(steering)
+    return layer
+
+
+# Recorded scene, run 20261030-175728 at 38.1 s: rack hard left, a wall fragment
+# 1.02 m ahead and 0.61 m to the right, taken for a moving car, 0.55 m past the
+# bumper. Its follow cap read 0.05 m/s and parked the car with a clear path.
+FRAGMENT_X, FRAGMENT_Y, FRAGMENT_STEER = 1.02, -0.61, 0.35
+
+
+def test_a_wall_fragment_off_the_arc_slows_the_car_but_cannot_stop_it():
+    layer = _moving_layer(FRAGMENT_X, FRAGMENT_Y, FRAGMENT_STEER)
+    law = (FRAGMENT_X - layer.front_x - layer.params.follow_min_gap) / layer.params.follow_time_gap
+    assert 0.0 < law < layer.params.follow_floor  # the floor is what is being tested
+    # oracle: spec, opponent_tracking._follow_over -- the floor, and only off the arc.
+    assert layer.follow_cap(False) == pytest.approx(layer.params.follow_floor, abs=1e-12)  # m/s
+
+
+def test_the_same_fragment_with_the_floor_off_is_the_old_law():
+    layer = _moving_layer(FRAGMENT_X, FRAGMENT_Y, FRAGMENT_STEER, follow_floor=0.0)
+    # oracle: closed form, follow_speed_cap's (gap - min_gap) / time_gap.
+    assert layer.follow_cap(False) == pytest.approx(
+        (FRAGMENT_X - layer.front_x - layer.params.follow_min_gap) / layer.params.follow_time_gap,
+        abs=1e-12)  # m/s roundoff
+
+
+def test_a_car_on_the_arc_gets_the_full_law_down_to_zero():
+    # Dead ahead and inside the minimum gap: this must not be floored.
+    layer = _moving_layer(0.9, 0.0)
+    assert layer.front_x + layer.params.follow_min_gap > 0.9
+    assert layer.follow_cap(False) == 0.0
+
+
+def test_a_car_round_the_bend_ahead_is_on_the_arc():
+    # Rack left, car 0.9 m ahead and over 0.45 m left: past follow_lateral from the
+    # centreline but right on the arc, so it gets the law, not the floor.
+    steering = 0.34
+    radius = WHEELBASE / math.tan(steering)
+    x = 0.9
+    y = radius - math.sqrt(radius ** 2 - x ** 2)   # oracle: closed form, on the arc itself
+    assert y > 0.45
+    layer = _moving_layer(x, y, steering, follow_min_gap=x - (WHEELBASE + CAR_LENGTH) / 2.0)
+    assert layer.follow_cap(False) == 0.0
+
+
+@pytest.mark.parametrize('offset,on', [(0.45, True), (0.46, False)])
+def test_the_arc_band_edge_is_follow_lateral_with_a_straight_rack(offset, on):
+    layer = _moving_layer(2.0, offset)
+    assert layer._on_my_arc(2.0, offset) is on
+
+
+def test_an_off_arc_fragment_is_not_held_after_it_goes():
+    # The ceiling comes through alongside_cap, which the node adds after
+    # FollowCapMemory: nothing of a fragment outlives the scans that see it.
+    layer = _moving_layer(FRAGMENT_X, FRAGMENT_Y, FRAGMENT_STEER)
+    assert layer.follow_law_cap(False) == math.inf
+    assert layer.alongside_cap(False) == pytest.approx(layer.params.follow_floor, abs=1e-12)  # m/s
+
+
+def test_a_negative_follow_floor_is_refused():
+    with pytest.raises(ValueError, match='opponent_follow_floor'):
+        ot.OpponentParams(follow_floor=-0.1).validate()
 
 
 CENTRE = WHEELBASE / 2.0   # 0.18 m, body centre in base_link

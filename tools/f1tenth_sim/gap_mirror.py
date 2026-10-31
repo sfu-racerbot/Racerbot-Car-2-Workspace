@@ -121,6 +121,8 @@ REQUIRED_PARAMS = frozenset((
     "enable_swept_clearance",
     "enable_ttc",
     "escape_creep_speed",
+    "aim_depth_bias",
+    "aim_depth_bias_fallback",
     "fallback_min_gap_distance",
     "forward_fov_deg",
     "forward_stop_clearance",
@@ -169,6 +171,7 @@ REQUIRED_PARAMS = frozenset((
     "opponent_beta",
     "opponent_min_hits",
     "opponent_max_misses",
+    "opponent_follow_floor",
     "opponent_moving_speed",
     "opponent_stopped_release_sec",
     "opponent_radius",
@@ -217,6 +220,8 @@ LEGACY_VALUES = {
     "braking_latency_sec": 0.0,
     "speed_hold_sec": 0.0,
     "steering_gain_speed_ref": 0.0,
+    "aim_depth_bias": 0.0,
+    "aim_depth_bias_fallback": 0.0,
     "narrow_corridor_speed": 1e9,  # off
     "narrow_corridor_clearance": 0.05,
     "open_corridor_clearance": 0.15,
@@ -531,7 +536,8 @@ class GapController:
                 follow_cap, step * CONTROL_DT)
             follow_cap = min(follow_cap, alongside_cap)
             if held:
-                self.opponent_mode = "follow_memory"
+                self.opponent_mode = ("follow_memory" if alongside_cap == math.inf
+                                      else "follow")
                 tel["follow_cap"] = follow_cap
 
         if gap_start is None:
@@ -543,7 +549,8 @@ class GapController:
                                   else "ttc_escape")
 
         target_in_window = gap_logic.aim_within_gap(
-            processed, gap_start, gap_end, beam_angles)
+            processed, gap_start, gap_end, beam_angles,
+            p["aim_depth_bias_fallback"] if used_fallback else p["aim_depth_bias"])
         self.previous_target_idx = target_in_window
         target_angle = float(beam_angles[target_in_window])
         target_distance = float(processed[target_in_window])

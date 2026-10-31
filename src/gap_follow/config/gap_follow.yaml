@@ -78,6 +78,14 @@ gap_follow_node:
     # If no 2m-deep gap exists at a blind/tight corner, accept a nearer
     # post-inflation corridor and crawl through it instead of deadlocking.
     fallback_min_gap_distance: 0.8
+    # Where in the chosen gap to aim: 0 is its midpoint, 1 its deepest beam
+    # (gap_logic.aim_within_gap). The midpoint is the robust choice with other
+    # cars around. time_trial:=true sets 1.0 for one car against the clock:
+    # docs/gap-follow.md#speed-on-the-real-course-2026-10-30.
+    aim_depth_bias: 0.0
+    # The same for a fallback gap, which is wide and shallow: its midpoint can
+    # point at the outer wall of a bend. Simulator only.
+    aim_depth_bias_fallback: 1.0
     # How much better a new candidate gap must score than the one
     # containing the previous tick's aim before the car re-aims at it --
     # see gap_logic.find_best_gap. Added after a real-hallway report of the
@@ -457,7 +465,9 @@ gap_follow_node:
     # purpose: the 0.20m forward_stop_clearance reserve is the longitudinal
     # margin, and the TTC brake has its own corridor (ttc_path_margin).
     swept_clearance_margin: 0.05
-    swept_clearance_max_length: 3.0   # m -- beyond this the path counts as clear
+    # 5.0 on 2026-10-30 (was 3.0): the model needs 5.4 m to stop from 5 m/s, and at
+    # 3.0 the car ran into square corners off long straights in the simulator.
+    swept_clearance_max_length: 5.0   # m -- beyond this the path counts as clear
 
     # --- Arc guard (docs/gap-follow.md#arc-guard) ---
     # If the steering the gap logic asks for would sweep the body into
@@ -570,6 +580,7 @@ gap_follow_node:
     opponent_passing_margin: 0.15    # m, extra room demanded beside a moving car
     opponent_prediction_horizon: 0.8 # s of predicted path treated as blocked
     opponent_prediction_step: 0.1    # s
+    opponent_follow_floor: 0.5       # m/s, the follow law never asks for less (0: off); see opponent_tracking._follow_over
     opponent_follow_min_gap: 0.5     # m, bumper gap at which the follow cap reaches 0
     opponent_follow_time_gap: 1.0    # s: 0.6 stalled 6 of 8 two-car runs on the 1.2 m loop, 1.0 none
     # m/s below an alongside car's ground speed when a pass is refused; drop behind it.

@@ -21,6 +21,16 @@ circular_obs:
   width_median_m: 1.17
   width_min_m: 0.63
   width_p10_m: 0.74
+course_2026_10_30:
+  import_command: 'python3 tools/f1tenth_sim/track_import.py /home/racerbotcar-2/racerbot-ws/data/racerbot_auto/20261030-185036-fixed/map.yaml
+    --name course_2026_10_30 --source ''car 2 course, 2026-10-30: rebuilt map data/racerbot_auto/20261030-185036-fixed
+    from run 20261030-185036'''
+  lap_length_m: 51.29
+  source: 'car 2 course, 2026-10-30: rebuilt map data/racerbot_auto/20261030-185036-fixed
+    from run 20261030-185036'
+  width_median_m: 1.42
+  width_min_m: 0.78
+  width_p10_m: 1.06
 levine_blocked:
   import_command: python3 tools/f1tenth_sim/track_import.py tools/f1tenth_sim/maps/sources/levine_blocked.yaml
     --name levine_blocked --source 'sfu-racerbot/racerbot_a src/maps/levine_blocked.yaml

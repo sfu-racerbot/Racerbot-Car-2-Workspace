@@ -60,3 +60,20 @@ def test_the_safety_values_the_race_defaults_left_alone():
     assert P['forward_stop_clearance'] == pytest.approx(0.20, abs=1e-9)  # m
     # Car 2's limit (docs/car1-vs-car2.md, from its 2026-10-16 circles; car 1: 0.33).
     assert P['max_steering_angle'] == pytest.approx(0.349, abs=1e-9)  # rad
+
+
+def test_the_course_defaults_of_2026_10_30():
+    # oracle: spec -- docs/gap-follow.md#speed-on-the-real-course-2026-10-30.
+    assert P['aim_depth_bias'] == pytest.approx(0.0, abs=1e-9)
+    assert P['aim_depth_bias_fallback'] == pytest.approx(1.0, abs=1e-9)
+    assert P['max_lateral_accel'] == pytest.approx(2.5, abs=1e-9)  # m/s^2
+    assert P['swept_clearance_max_length'] == pytest.approx(5.0, abs=1e-9)  # m
+    assert P['opponent_follow_floor'] == pytest.approx(0.5, abs=1e-9)  # m/s
+
+
+def test_the_braking_lookahead_covers_a_measured_stop_from_top_speed():
+    # oracle: recorded measurement, run 20261030-175124: LB released at 5.41 m/s on
+    # a straight, 3.39 m by the wall ahead to 0.29 m/s. A shorter lookahead than the
+    # real stop means the braking ceiling cannot act in time at top speed.
+    assert P['max_speed'] <= 5.41
+    assert P['swept_clearance_max_length'] >= 3.39 + P['forward_stop_clearance']

@@ -105,6 +105,10 @@ def test_ttc_margin_covers_just_outside_the_body(node):
     (['-p', 'braking_latency_sec:=-0.1'], 'braking_latency_sec'),
     (['-p', 'braking_latency_sec:=1.5'], 'braking_latency_sec'),
     (['-p', 'steering_gain_speed_ref:=-1.0'], 'steering_gain_speed_ref'),
+    (['-p', 'aim_depth_bias:=-0.1'], 'aim_depth_bias'),
+    (['-p', 'aim_depth_bias:=1.1'], 'aim_depth_bias'),
+    (['-p', 'aim_depth_bias_fallback:=-0.1'], 'aim_depth_bias_fallback'),
+    (['-p', 'aim_depth_bias_fallback:=1.1'], 'aim_depth_bias_fallback'),
     (['-p', 'speed_hold_sec:=2.5'], 'speed_hold_sec'),
 ])
 def test_refuses_out_of_range_speed_shaping(params, match):
@@ -237,6 +241,57 @@ def test_steering_gain_falls_with_speed_above_the_reference(node):
     fast = _drive(node, scan, 3.0).steering_angle
     assert slow == pytest.approx(node.steering_gain * math.radians(8.0), abs=0.01)  # rad
     assert fast == pytest.approx(slow * 1.8 / 3.0, abs=0.005)  # rad
+
+
+def test_the_node_steers_at_the_deepest_beam_when_asked(node):
+    """Asserts the published command: a gap whose deepest beam is well off its
+    midpoint. The bias moves the wheels to the deep beam, not just an attribute."""
+    node.enable_centering = False
+    node.enable_corner_setup = False
+    node.enable_arc_guard = False
+    node.steering_gain_speed_ref = 0.0
+    msg = _raycast([])
+    angles = [msg.angle_min + i * msg.angle_increment for i in range(len(msg.ranges))]
+    node.max_steering_rate = 1e5   # the aim itself, not how far the rack got this tick
+    # A gap from -14 to +34 deg, midpoint +10, deep around +22: wide enough to
+    # survive disparity extension, which eats about 5 deg of it each side at 4 m.
+    msg.ranges = [9.0 if abs(math.degrees(a) - 22.0) <= 10.0
+                  else 4.0 if -14.0 <= math.degrees(a) <= 34.0 else 1.6
+                  for a in angles]
+    node.aim_depth_bias = 1.0
+    bias_one = _drive(node, msg, 1.0).steering_angle
+    node.previous_target_idx = None
+    node.steering_basis = 0.0
+    node.aim_depth_bias = 0.0
+    midpoint = _drive(node, msg, 1.0).steering_angle
+    assert bias_one > midpoint + 0.05  # rad: the wheels really moved toward the deep beam
+
+
+def test_a_fallback_gap_takes_its_own_aim_bias(node):
+    """Nothing is 2 m deep, so only the fallback gap exists: walls at 0.7 m, a gap
+    from -45 to +75 deg (about -20 to +50 once its edges are extended, midpoint
+    +15), deepest from +25 to +45. The fallback bias moves the published command,
+    and the normal bias does not."""
+    node.enable_centering = False
+    node.enable_corner_setup = False
+    node.enable_arc_guard = False
+    node.steering_gain_speed_ref = 0.0
+    msg = _raycast([])
+    angles = [msg.angle_min + i * msg.angle_increment for i in range(len(msg.ranges))]
+    node.max_steering_rate = 1e5   # the aim itself, not how far the rack got this tick
+    msg.ranges = [1.85 if 25.0 <= math.degrees(a) <= 45.0
+                  else 1.5 if -45.0 <= math.degrees(a) <= 75.0 else 0.7
+                  for a in angles]
+
+    def steer(normal, fallback):
+        node.aim_depth_bias, node.aim_depth_bias_fallback = normal, fallback
+        node.previous_target_idx = None
+        node.steering_basis = 0.0
+        return _drive(node, msg, 0.5).steering_angle
+
+    midpoint = steer(0.0, 0.0)
+    assert steer(1.0, 0.0) == pytest.approx(midpoint, abs=1e-9)  # rad: the normal bias is not read
+    assert steer(0.0, 1.0) > midpoint + 0.05  # rad: toward the deep part of the gap
 
 
 def test_arc_guard_blocked_fallback_reaches_the_guard(node):

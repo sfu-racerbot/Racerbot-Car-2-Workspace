@@ -832,8 +832,15 @@ def find_gap_with_fallback(window: np.ndarray, preferred_distance: float,
     return start, end, start is not None
 
 
-def aim_within_gap(window, gap_start, gap_end, beam_angles):
+def aim_within_gap(window, gap_start, gap_end, beam_angles, depth_bias: float = 0.0):
     """Pick the beam to steer at inside a chosen gap.
+
+    ``depth_bias`` slides the aim from the gap's midpoint (0, the classic
+    answer) to its deepest beam (1), for gaps with both edges real. The deepest
+    beam is where the corridor continues, so the car cuts the inside of a bend
+    (a shorter, straighter line) and a wide shallow fallback gap no longer aims
+    it at the outer wall. ``window`` already has every edge extended by half a
+    car width plus margin, so the deepest beam stays that far off the corner.
 
     The midpoint is the classic follow-the-gap answer, and it is the right
     one when both edges are real obstacles -- it centres the car between
@@ -864,7 +871,8 @@ def aim_within_gap(window, gap_start, gap_end, beam_angles):
     """
     if gap_start is None:
         return None
-    if gap_start != 0 and gap_end != len(window) - 1:
+    clipped = gap_start == 0 or gap_end == len(window) - 1
+    if not clipped and depth_bias <= 0.0:
         return (gap_start + gap_end) // 2
 
     depths = window[gap_start:gap_end + 1]
@@ -872,7 +880,11 @@ def aim_within_gap(window, gap_start, gap_end, beam_angles):
     near_deepest = np.nonzero(
         depths >= deepest - max(1e-6, 0.05 * deepest))[0]
     angles = beam_angles[gap_start:gap_end + 1][near_deepest]
-    return gap_start + int(near_deepest[int(np.argmin(np.abs(angles)))])
+    deepest_idx = gap_start + int(near_deepest[int(np.argmin(np.abs(angles)))])
+    if clipped:
+        return deepest_idx
+    midpoint = (gap_start + gap_end) // 2
+    return midpoint + int(round(min(depth_bias, 1.0) * (deepest_idx - midpoint)))
 
 
 def near_gap_bearing(window, gap_start, gap_end, beam_angles, near_depth: float):

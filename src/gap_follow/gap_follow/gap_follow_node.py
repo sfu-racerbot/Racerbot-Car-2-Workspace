@@ -92,6 +92,12 @@ class GapFollowNode(Node):
         self.declare_parameter('forward_fov_deg', 180.0)
         self.declare_parameter('min_gap_distance', 1.0)
         self.declare_parameter('fallback_min_gap_distance', 0.8)
+        # Aim from the gap's midpoint (0) toward its deepest beam (1):
+        # gap_logic.aim_within_gap. 0 is the classic midpoint.
+        self.declare_parameter('aim_depth_bias', 0.0)
+        # The same, for a fallback gap: wide and shallow, so its midpoint can
+        # point at the outer wall of a bend.
+        self.declare_parameter('aim_depth_bias_fallback', 0.0)
         # Gap-selection hysteresis: how much better a new candidate must
         # score than the one containing the previous tick's aim before the
         # car re-aims at it. 1.0 disables this (plain best score, every
@@ -411,6 +417,9 @@ class GapFollowNode(Node):
             self.get_parameter('min_gap_distance').value)
         self.fallback_min_gap_distance = float(
             self.get_parameter('fallback_min_gap_distance').value)
+        self.aim_depth_bias = float(self.get_parameter('aim_depth_bias').value)
+        self.aim_depth_bias_fallback = float(
+            self.get_parameter('aim_depth_bias_fallback').value)
         self.gap_switch_margin = float(
             self.get_parameter('gap_switch_margin').value)
         self.corner_speed = float(
@@ -1652,7 +1661,8 @@ class GapFollowNode(Node):
             follow_cap, held = self.opponents.follow_memory.update(
                 follow_cap, self.opponent_last_stamp)
             if held:
-                self.opponent_mode = 'follow_memory'
+                self.opponent_mode = ('follow_memory' if alongside_cap == math.inf
+                                      else 'follow')
             follow_cap = min(follow_cap, alongside_cap)
 
         if gap_start is None:
@@ -2198,6 +2208,10 @@ class GapFollowNode(Node):
         if not (math.isfinite(self.steering_gain_speed_ref)
                 and self.steering_gain_speed_ref >= 0.0):
             raise ValueError('steering_gain_speed_ref must be finite and non-negative')
+        for name in ('aim_depth_bias', 'aim_depth_bias_fallback'):
+            value = getattr(self, name)
+            if not (math.isfinite(value) and 0.0 <= value <= 1.0):
+                raise ValueError(f'{name} must be within [0, 1]')
         if not (math.isfinite(self.speed_hold_sec) and 0.0 <= self.speed_hold_sec <= 2.0):
             raise ValueError('speed_hold_sec must be within [0, 2] s')
         if not (math.isfinite(self.narrow_corridor_speed)
@@ -2502,7 +2516,8 @@ class GapFollowNode(Node):
             switch_margin=self.gap_switch_margin,
         )
         target = gap_logic.aim_within_gap(
-            processed, gap_start, gap_end, beam_angles)
+            processed, gap_start, gap_end, beam_angles,
+            self.aim_depth_bias_fallback if used_fallback else self.aim_depth_bias)
         near_bearing = gap_logic.near_gap_bearing(
             processed, gap_start, gap_end, beam_angles, self.anticipation_near_depth)
         return (processed, closest_dist, gap_start, gap_end, used_fallback, target,
