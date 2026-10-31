@@ -54,6 +54,19 @@ Everything else in `imu_bridge` is the same code as car 1's, apart from car 2's 
 
 Car 1's `gap_follow` fused-speed gate was ported without car 1's `vehicle_state`. It reads car 2's `/odom/fused`. It trusts it only while `/imu/status` is `ok` and `/imu/data` is fresh, and falls back to `/odom` otherwise.
 
+### gap_follow course settings
+
+Car 2's `gap_follow` has settings from its 2026-10-30 course that car 1 does not have yet. A port from car 1 must not drop them. The check is in `racerbot_launch/test/test_car2_hardware_config.py`.
+
+| Setting | Car 2 | Where |
+|---|---|---|
+| `swept_clearance_max_length` | `5.0` | `gap_follow/config/gap_follow.yaml` |
+| `aim_depth_bias` / `aim_depth_bias_fallback` | `0.0` / `1.0` | `gap_follow/config/gap_follow.yaml` |
+| `opponent_follow_floor` | `0.5` | `gap_follow/config/gap_follow.yaml` |
+| `time_trial:=` | `false` | `gap_follow/launch/gap_follow_launch.py` |
+
+Details: [gap-follow.md](gap-follow.md#speed-on-the-real-course-2026-10-30).
+
 ### IMU feature thresholds
 
 Car 1's Part B-2/3 came with numbers **measured on car 1**. They are in car 2's files as placeholders, labelled as car 1's, and every feature that uses them ships **off**.

@@ -33,6 +33,7 @@ They were first driven on the car on 2026-10-19. That run had no contact, but th
 20. [Traction control (IMU)](#traction-control-imu)
 21. [Impact stop (IMU)](#impact-stop-imu)
 22. [Launch boost](#launch-boost) — full speed off the start line, once per race
+23. [Speed on the real course (2026-10-30)](#speed-on-the-real-course-2026-10-30) — why it stopped mid-lap, the fix, and `time_trial:=true`
 
 ## Highlights
 
@@ -47,6 +48,7 @@ They were first driven on the car on 2026-10-19. That run had no contact, but th
 - **No more false hard stops in corridors (2026-10-20).** On the 2026-10-19 run, all 97 stop ticks were the TTC brake reacting to the inside wall of a bend 0.12–0.18 m *beside* the car. Replayed through the final config, the same scans produce none.
 - **Other cars: on by default since 2026-10-28.** Two simulated cars on the shipped settings passed 32 of 32 runs, with no contact and no stalls. With the layer off, 24 of 32 passed, with 3 contacts and 5 stalls. It follows slower cars and rarely passes them. Off switch: `opponent_awareness:=false`. It has never run on the floor. See [Several cars at once](#several-cars-at-once).
 - **Launch boost: full speed off the start line (ported from car 1, 2026-10-30).** The first LB press goes straight to `max_speed` and ignores other cars until the straight ends. Simulated on car 2's room map it is about 0.25 m ahead after 1 s, and it costs 0.86 s over the solo lap there. With two cars on that map, 8 of 8 runs finish with it off and 5 to 6 of 8 with it on, with no contact. Never run on the floor. Off: `launch_boost:=false`, see [Launch boost](#launch-boost).
+- **No more parking for pieces of wall (2026-10-30).** Replaying that day's single-car recordings, time with the follow limit near zero falls from 45.8 s to 2.1 s of 410 s. A new `time_trial:=true` runs one car on the course in about 19 s in the simulator. Never driven on the floor. See [Speed on the real course](#speed-on-the-real-course-2026-10-30).
 - **More of every track completes (2026-10-20).** Across 11 simulated tracks, 6 seeds each, both directions, 108 of 132 runs pass, against 96 for the 2026-10-19 config. The hall loop `levine_blocked` laps in 23.6 s instead of 34.7 s.
 
 **Limits:** these numbers come from the simulator only. `max_lateral_accel` was raised from 1.0 to 2.0 m/s² for this work, then to 2.5 m/s² on 2026-10-26.
@@ -1518,3 +1520,100 @@ Car 2's real braking from 5 m/s has never been measured, which is why step 2 com
 - [simulator.md](simulator.md) — the no-ROS simulator these numbers come from.
 - [gap-follow-improvement-plan.md](gap-follow-improvement-plan.md) — the original diagnosis that led here.
 - [steering-laws.md](steering-laws.md) — the other October 2026 change, to the map-based `pure_pursuit` controller.
+
+## Speed on the real course (2026-10-30)
+
+> **Who this is for:** anyone racing `gap_follow` on the 50 m course of 2026-10-30, or wondering why it used to stop mid-lap.
+> **Read first:** [Validation](#validation). This changes how the car steers and how fast it goes, so the same bring-up order applies.
+> **You'll be able to:** pick the right setup for one car or several, say what was wrong, and judge the evidence.
+> **Time:** 10 minutes.
+
+**None of this has been driven on the floor.** The numbers below come from replaying that day's recordings and from the simulator. The 15 s lap the team wanted has not been reached: the best simulated lap is about 19 s.
+
+### Which setup to use
+
+| You are running | Command | Simulated lap on this course |
+|---|---|---|
+| Other cars on the track | `ros2 launch gap_follow gap_follow_launch.py` | 21.3-22.1 s |
+| One car, against the clock | `ros2 launch gap_follow gap_follow_launch.py time_trial:=true` | 18.8-19.3 s |
+
+**Never use `time_trial:=true` with another car on the track.** It turns [opponent awareness](#several-cars-at-once) off, and its aim did much worse with two cars in the simulator: 0 of 12 runs finished on `room_2026_07_27`, with wall contacts.
+
+### What was wrong
+
+**The car stopped mid-lap because it took pieces of wall for other cars.** With one car on the track, the tracker reported 94 "moving cars" in 410 s of driving, and the ones checked against the map sat on or near a mapped wall. The follow limit then asked for 0 m/s, and held that for 1 s after the piece of wall went out of view.
+
+Pressing LB again did not fix it. Most stops ended by themselves after about 1 s, and the stop usually ended while the driver was reaching for the button.
+
+**The new rule:** something off the car's own steering arc can slow it to 0.5 m/s (`opponent_follow_floor`) but cannot stop it, and is not remembered once it is gone. A car really ahead is on the arc, so it still gets the full follow law, down to zero. Whatever the car would actually hit still stops it, through the braking limit, the time-to-collision brake and the clearance stops, because those read the laser scan directly.
+
+**The braking check looked too short a distance ahead.** It treated any path clear for 3 m as fully clear, at any speed. The model says the car needs about 5.6 m to stop from 5 m/s, and the real car took 3.4 m from 5.41 m/s (run `20261030-175124`). `swept_clearance_max_length` is now 5 m.
+
+**Fallback gaps aimed at the wall.** At a blind bend no gap is 2 m deep, so the car takes a wider, shallower fallback gap. Its midpoint can point at the outer wall, which wedged the simulated car against the wall at this course's bottom-right bend. The real car flickered between the two kinds of gap at the same bend. `aim_depth_bias_fallback: 1.0` aims a fallback gap at its deepest beam instead.
+
+### Results
+
+Solo: 10 tracks, 12 seeds, both directions, at two grip levels, so 480 runs per row. Friction 0.42 is the pessimistic grip level.
+
+| Setup | Finish | Runs with wall contact | This course: finish, lap |
+|---|---|---|---|
+| Shipped before 2026-10-30 | 369 | 54 | 30 of 48, 20.4-22.6 s |
+| **New default** | 459 | 1 | 48 of 48, 21.3-22.1 s |
+| **`time_trial:=true`** | 453 | 0 | 48 of 48, 18.8-19.3 s |
+
+Most of the runs that do not finish, in every row, are on `room_2026_07_27`, where they stop without contact.
+
+Two cars on the new default: 12 seeds at each of three speed mixes (equal, 3.0 and 3.5 m/s, 2.5 and 3.5 m/s). No wall contact and no car-to-car contact in any of the 180 runs.
+
+| Track | New default, finished of 36 | Shipped, finished of 36 |
+|---|---|---|
+| `course_2026_10_30` | 36 | not measured: the old code has no copy of this track |
+| `car1_course_2026_10_26` | 36 | 36 |
+| `indoor_wide` | 36 | 36 |
+| `narrow_1p2` | 36 | 35 |
+| `room_2026_07_27` | 32 | 32 |
+
+Replaying the six single-car `gap_follow` recordings of that day (410 s), where every "moving car" is false:
+
+| Measure | Shipped | New |
+|---|---|---|
+| Time with the follow limit under 0.4 m/s | 45.8 s | 2.1 s |
+| Episodes of 0.3 s or more | 33 | 2 (longest 1.1 s) |
+| Time under any follow limit | 83 s | 39 s |
+
+### What this evidence does not show
+
+- **It has never been driven.** Follow the [Validation](#validation) order.
+- **The false "cars" are reduced, not gone.** They still slow the car, about 39 s of those 410 s. That is why one car against the clock should use `time_trial:=true`.
+- **No recording has two cars in it**, so recognising a real car has only been measured in the simulator.
+- **The simulator is not the floor.** It gives 5.4 m/s² of grip at its normal setting. The real car follows the request up to about 2.5 m/s², then rolls off: asking 3 gets 2.6, asking 5.5 gets 3.4, asking 10 gets about 4.2.
+- **Team A's speed costs wall margin.** Its `disparity_extender` at max 3.0 m/s spent 9.2 of 85 s within 5 cm of a mapped wall. Its best pace was about 17.6 s per lap.
+
+<details>
+<summary>How the real numbers were measured, and what was tried and rejected (safe to skip)</summary>
+
+Every run of the day was located against the rebuilt map `data/racerbot_auto/20261030-185036-fixed` by matching each scan to it. That gives true position and speed, independent of the wheels. The course line is 50.74 m.
+
+| Driver | Real lap or pace |
+|---|---|
+| `gap_follow`, mapping at the 3.5 m/s cap | 20.6-20.9 s |
+| `gap_follow`, 5 m/s, opponent awareness on | 21.5-26 s |
+| Team A `disparity_extender`, max 3.0 | 19.2-20.5 s |
+| Team A `disparity_extender`, max 5.5-6.0 | about 17.6-17.8 s |
+| Team A `ftg` | 18.6-19.8 s |
+
+**Where the time goes.** A perfect speed profile on the path `gap_follow` really drove would run about 16.9 s at 3 m/s² of grip, against 20.6 s actual, so speed planning loses more than the line does. On the center of the course, 15 s needs about 4 m/s² of grip. A line that cuts corners with 32 cm of margin is 47 m long and needs about 2.5-3 m/s².
+
+**Rejected, each with a measurement behind it:**
+
+- A motion proof from free space: a car must enter space a laser ray passed through, or leave space that is now clear. It removed 93 of 94 false cars in replay, but the follower then wedged behind a real leader (1 of 8 on this course).
+- The same proof as a tier, with unproven movers limited to the car's own path. It kept 30.5 s of the near-zero time in replay.
+- Using the gyro for the tracker's heading: about the same stalls. Narrowing the tracker's association gate: no better.
+- `max_braking_decel` above 3.0. Every recorded stop fits 4.0, but laps got slower because arriving faster made the path worse.
+- A time filter on the corner speed limit: at most 0.3 s gained, and failures at low grip.
+- `steering_gain` 0.7 or a lower `steering_gain_speed_ref`: faster on short tracks, and `levine_blocked` fell to 1 of 6 and 0 of 6.
+- Sweeps with 3 seeds: one made `steering_gain` 0.7 look like a clear winner, and 6 seeds overturned it.
+
+**`pure_pursuit` on this map** was also simulated: 28.6-30.5 s on the map's line, and 21.9-23.8 s on the cut line, where several runs failed. Its safety net caps it at 1 m/s on "avoid" ticks. It is not a shortcut to 15 s without more work, and that harness may differ from the real node.
+
+</details>

@@ -89,6 +89,8 @@ It follows a slower car instead of squeezing past it, and passes only on a strai
 
 **Do not run two cars with opponent awareness turned off.** With it off, only 24 of 32 simulated two-car runs passed, with 3 contacts and 5 stalls ([gap-follow.md](gap-follow.md#several-cars-at-once)).
 
+**One car, against the clock:** add `time_trial:=true`. It aims at the deepest point of each gap and raises `max_lateral_accel` to 3.0. It turns opponent awareness off, so **never use it with another car on the track**. Simulator-validated only: [gap-follow.md](gap-follow.md#speed-on-the-real-course-2026-10-30).
+
 **Slower or faster for one run:** add `max_speed:=1.0` (any speed in m/s up to 5.0; `gap_follow.yaml`'s own `max_speed` is 5.0 since car 1's race defaults of 2026-10-27, ported to car 2 on 2026-10-29, and was 3.5). Lower than the YAML's, it also lowers `min_speed`, `corner_speed` and `corner_speed_wide` if they are above it. Higher, it raises only the top speed on straights: corners are still held to `corner_speed`, `corner_speed_wide` and `max_lateral_accel`. Above 5.0, or anything that isn't a positive number, is refused and nothing starts. **Car 2 has never driven at the 5.0 default:** first runs go wheels off the ground, then `max_speed:=1.0` in open space.
 
 ### Car 1 and car 2 together: first run
